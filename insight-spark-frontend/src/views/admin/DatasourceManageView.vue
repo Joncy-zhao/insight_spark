@@ -3,7 +3,7 @@
           <div class="panel">
             <div class="panel-header">
               <div>
-                <h2>新增官方 MySQL 数据源</h2>
+                <h2>新增官方数据源</h2>
                 <p>管理员配置企业官方库，测试连接后解析 Schema，后续可授权给普通用户。</p>
               </div>
             </div>
@@ -137,7 +137,7 @@
                 </el-select>
               </el-form-item>
               <el-form-item label="授权对象">
-                <el-input v-model="datasourcePermissionForm.principalId" placeholder="demo-user / analyst-role" />
+                <el-input v-model="datasourcePermissionForm.principalId" placeholder="user / analyst-role" />
               </el-form-item>
             </el-form>
             <div class="datasource-actions">

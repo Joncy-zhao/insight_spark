@@ -44,7 +44,7 @@ public class DiagnosisService {
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS `is_diagnosis_report` (
                   `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
-                  `user_id` VARCHAR(64) NOT NULL DEFAULT 'demo-user',
+                  `user_id` VARCHAR(64) NOT NULL DEFAULT '',
                   `table_name` VARCHAR(128) NOT NULL,
                   `metric_field` VARCHAR(128) NOT NULL,
                   `dimension_fields` VARCHAR(512) NULL,
@@ -226,10 +226,11 @@ public class DiagnosisService {
                             String timeField, Map<String, Object> aiResult) {
         String resultJson = toJson(aiResult);
         jdbcTemplate.update("""
-                INSERT INTO is_diagnosis_report(table_name, metric_field, dimension_fields, time_field,
+                INSERT INTO is_diagnosis_report(user_id, table_name, metric_field, dimension_fields, time_field,
                                                 title, summary, report_markdown, result_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, CAST(? AS JSON))
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS JSON))
                 """,
+                com.insightspark.core.auth.AuthContext.userId(),
                 tableName,
                 metricField,
                 String.join(",", dimensionFields),
@@ -385,20 +386,20 @@ public class DiagnosisService {
     }
 
     private byte[] buildPdf(String content) {
-        String ascii = content.replaceAll("[^\\x20-\\x7E\\r\\n]", "?");
-        List<String> lines = ascii.lines().limit(42).toList();
+        List<String> lines = content.lines().limit(42).toList();
         StringBuilder stream = new StringBuilder("BT /F1 11 Tf 50 780 Td 14 TL ");
         for (String line : lines) {
-            stream.append("(").append(escapePdf(line.length() > 92 ? line.substring(0, 92) : line)).append(") Tj T* ");
+            stream.append("<").append(toUtf16Hex(line.length() > 92 ? line.substring(0, 92) : line)).append("> Tj T* ");
         }
         stream.append("ET");
         String s = stream.toString();
         String obj1 = "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n";
         String obj2 = "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n";
         String obj3 = "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj\n";
-        String obj4 = "4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n";
+        String obj4 = "4 0 obj << /Type /Font /Subtype /Type0 /BaseFont /STSong-Light /Encoding /UniGB-UCS2-H /DescendantFonts [6 0 R] >> endobj\n";
         String obj5 = "5 0 obj << /Length " + s.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1).length + " >> stream\n" + s + "\nendstream endobj\n";
-        String[] objects = {obj1, obj2, obj3, obj4, obj5};
+        String obj6 = "6 0 obj << /Type /Font /Subtype /CIDFontType0 /BaseFont /STSong-Light /CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 2 >> >> endobj\n";
+        String[] objects = {obj1, obj2, obj3, obj4, obj5, obj6};
         StringBuilder pdf = new StringBuilder("%PDF-1.4\n");
         List<Integer> offsets = new ArrayList<>();
         for (String object : objects) {
@@ -406,11 +407,11 @@ public class DiagnosisService {
             pdf.append(object);
         }
         int xref = pdf.length();
-        pdf.append("xref\n0 6\n0000000000 65535 f \n");
+        pdf.append("xref\n0 7\n0000000000 65535 f \n");
         for (Integer offset : offsets) {
             pdf.append(String.format("%010d 00000 n \n", offset));
         }
-        pdf.append("trailer << /Size 6 /Root 1 0 R >>\nstartxref\n").append(xref).append("\n%%EOF");
+        pdf.append("trailer << /Size 7 /Root 1 0 R >>\nstartxref\n").append(xref).append("\n%%EOF");
         return pdf.toString().getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
     }
 
@@ -424,8 +425,13 @@ public class DiagnosisService {
                 .replace("\"", "&quot;");
     }
 
-    private String escapePdf(String value) {
-        return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)");
+    private String toUtf16Hex(String value) {
+        byte[] bytes = value.getBytes(java.nio.charset.StandardCharsets.UTF_16BE);
+        StringBuilder hex = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            hex.append(String.format("%02X", b));
+        }
+        return hex.toString();
     }
 
     public record ExportFile(String filename, String contentType, byte[] content) {

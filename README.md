@@ -37,7 +37,7 @@ spring:
   datasource:
     url: jdbc:mysql://localhost:3306/insight_spark?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai
     username: root
-    password: nisibusisa250
+    password: ${MYSQL_PASSWORD:root}
 ```
 
 ## 2. 启动 Python AI 服务

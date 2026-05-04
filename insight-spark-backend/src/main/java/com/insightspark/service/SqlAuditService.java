@@ -3,6 +3,7 @@ package com.insightspark.service;
 import com.insightspark.core.auth.AuthContext;
 import jakarta.annotation.PostConstruct;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
+import net.sf.jsqlparser.statement.Statements;
 import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.select.Select;
 import net.sf.jsqlparser.util.TablesNamesFinder;
@@ -28,7 +29,7 @@ public class SqlAuditService {
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS `is_sql_audit_log` (
                   `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
-                  `user_id` VARCHAR(64) NOT NULL DEFAULT 'demo-user',
+                  `user_id` VARCHAR(64) NOT NULL DEFAULT '',
                   `question` VARCHAR(1000) NOT NULL,
                   `table_name` VARCHAR(128) NULL,
                   `engine` VARCHAR(64) NULL,
@@ -88,7 +89,11 @@ public class SqlAuditService {
 
         Statement statement;
         try {
-            statement = CCJSqlParserUtil.parse(sql);
+            Statements statements = CCJSqlParserUtil.parseStatements(sql);
+            if (statements.getStatements().size() != 1) {
+                return AuditResult.blocked("仅允许提交一条 SQL", List.of("MULTI_STATEMENT"), List.of());
+            }
+            statement = statements.getStatements().get(0);
         } catch (Exception e) {
             return AuditResult.blocked("SQL 语法解析失败，已拦截：" + e.getMessage(), List.of("AST_PARSE"), List.of());
         }
@@ -127,14 +132,6 @@ public class SqlAuditService {
         if (isRuleEnabled("MULTI_STATEMENT") && normalized.contains(";") && normalized.indexOf(';') < normalized.length() - 1) {
             reasons.add("疑似多语句 SQL");
             matchedRules.add("MULTI_STATEMENT");
-        }
-
-        if (isRuleEnabled("TABLE_SCOPE") && expectedTableName != null && !expectedTableName.isBlank()) {
-            String tableToken = "`" + expectedTableName.toLowerCase(Locale.ROOT) + "`";
-            if (!normalized.contains(tableToken)) {
-                reasons.add("SQL 访问的数据表与当前授权表不一致");
-                matchedRules.add("TABLE_SCOPE");
-            }
         }
 
         if (!reasons.isEmpty()) {
@@ -434,7 +431,9 @@ public class SqlAuditService {
         for (Map<String, Object> field : fields) {
             String columnName = Objects.toString(field.get("columnName"), "");
             String displayName = Objects.toString(field.get("displayName"), columnName);
-            if (!columnName.isBlank() && normalizedSql.contains("`" + columnName.toLowerCase(Locale.ROOT) + "`")) {
+            if (!columnName.isBlank()
+                    && (normalizedSql.contains("`" + columnName.toLowerCase(Locale.ROOT) + "`")
+                    || normalizedSql.matches("(?s).*\\b" + java.util.regex.Pattern.quote(columnName.toLowerCase(Locale.ROOT)) + "\\b.*"))) {
                 matched.add(displayName + "(" + columnName + ")");
             }
         }

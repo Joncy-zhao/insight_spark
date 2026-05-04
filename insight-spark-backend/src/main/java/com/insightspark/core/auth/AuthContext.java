@@ -13,7 +13,10 @@ public final class AuthContext {
 
     public static UserPrincipal get() {
         UserPrincipal principal = CURRENT.get();
-        return principal == null ? guest() : principal;
+        if (principal == null) {
+            throw new IllegalStateException("Unauthorized");
+        }
+        return principal;
     }
 
     public static String userId() {
@@ -30,10 +33,6 @@ public final class AuthContext {
 
     public static void clear() {
         CURRENT.remove();
-    }
-
-    private static UserPrincipal guest() {
-        return new UserPrincipal(1L, "demo-user", "demo-user", "普通用户", "USER");
     }
 
     public record UserPrincipal(Long id, String userId, String username, String nickname, String role) {

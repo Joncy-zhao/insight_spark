@@ -93,6 +93,7 @@ const selectedTemplateId = ref('')
 const templateRequirement = ref('')
 const uploading = ref(false)
 const uploadResult = ref(null)
+const uploadTask = ref(null)
 const previewRows = ref([])
 const previewPage = ref(1)
 const previewPageSize = ref(10)
@@ -131,7 +132,7 @@ const datasourceForm = ref({
   poolTimeoutMs: 30000
 })
 const datasourcePermissions = ref([])
-const datasourcePermissionForm = ref({ principalType: 'USER', principalId: 'demo-user', permissionType: 'READ' })
+const datasourcePermissionForm = ref({ principalType: 'USER', principalId: 'user', permissionType: 'READ' })
 const federalRelations = ref([])
 const federalForm = ref({ leftTable: '', leftField: '', rightSourceType: 'UPLOAD', rightTable: '', rightField: '', relationType: 'LEFT_JOIN' })
 const officialDatasources = ref([])
@@ -552,6 +553,7 @@ const onFileRemove = (file, fileList = []) => {
 const submitUpload = async () => {
   if (!uploadFile.value && !uploadFiles.value.length) return
   uploading.value = true
+  uploadTask.value = { status: 'UPLOADING', progress: 20, message: '文件上传中' }
   const formData = new FormData()
   const batchMode = uploadFiles.value.length > 1 || Boolean(modelRequirement.value.trim())
   if (batchMode) {
@@ -563,16 +565,41 @@ const submitUpload = async () => {
     formData.append('file', uploadFile.value)
   }
   try {
-    const data = unwrap(await axios.post(`${API_BASE}/api/data/${batchMode ? 'upload-batch' : 'upload'}`, formData))
-    uploadResult.value = data
-    selectedTableName.value = data.tableName
-    await Promise.all([loadTables(), loadBusinessModels()])
+    const task = unwrap(await axios.post(`${API_BASE}/api/data/${batchMode ? 'upload-batch-async' : 'upload-async'}`, formData))
+    uploadTask.value = task
+    await pollUploadTask(task.taskId)
     ElMessage.success('文件已解析入库')
   } catch (error) {
     ElMessage.error(error.message || '上传失败')
   } finally {
     uploading.value = false
   }
+}
+
+const refreshUploadTask = async (taskId) => {
+  try {
+    uploadTask.value = unwrap(await axios.get(`${API_BASE}/api/data/upload-task/${taskId}`))
+  } catch (error) {
+    ElMessage.error(error.message || '上传进度查询失败')
+  }
+}
+
+const pollUploadTask = async (taskId) => {
+  for (let i = 0; i < 120; i++) {
+    await new Promise(resolve => setTimeout(resolve, 1000))
+    await refreshUploadTask(taskId)
+    if (uploadTask.value?.status === 'SUCCESS') {
+      const result = uploadTask.value.resultJson ? JSON.parse(uploadTask.value.resultJson) : {}
+      uploadResult.value = result
+      selectedTableName.value = result.tableName || selectedTableName.value
+      await Promise.all([loadTables(), loadBusinessModels()])
+      return
+    }
+    if (uploadTask.value?.status === 'FAILED') {
+      throw new Error(uploadTask.value.message || '上传处理失败')
+    }
+  }
+  throw new Error('上传处理超时，请稍后刷新任务状态')
 }
 
 const loadBusinessModels = async () => {
@@ -847,6 +874,7 @@ provide('workbench', {
   templateRequirement,
   uploading,
   uploadResult,
+  uploadTask,
   previewRows,
   previewPage,
   previewPageSize,
@@ -1180,6 +1208,16 @@ provide('workbench', {
 
 .result-alert {
   margin-top: 14px;
+}
+
+.upload-progress {
+  margin-top: 14px;
+}
+
+.upload-progress-text {
+  margin-top: 6px;
+  color: #667085;
+  font-size: 13px;
 }
 
 .chat-layout {

@@ -162,7 +162,8 @@ public class KnowledgeDocumentService {
     }
 
     private String extractKeywords(String text) {
-        return String.join(",", extractSearchTerms(text)).substring(0, Math.min(1000, String.join(",", extractSearchTerms(text)).length()));
+        String keywords = String.join(",", extractSearchTerms(text));
+        return keywords.length() <= 1000 ? keywords : keywords.substring(0, 1000);
     }
 
     private String removeExtension(String filename) {

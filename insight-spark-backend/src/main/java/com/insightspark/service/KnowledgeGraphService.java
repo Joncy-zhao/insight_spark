@@ -3,6 +3,7 @@ package com.insightspark.service;
 import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -78,7 +79,11 @@ public class KnowledgeGraphService {
         addColumnIfMissing("is_kg_node", "created_at", "`created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP");
         addColumnIfMissing("is_kg_node", "updated_at", "`updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP");
         makeColumnNullableIfExists("is_kg_node", "name", "`name` VARCHAR(255) NULL");
-        jdbcTemplate.update("UPDATE is_kg_node SET label = COALESCE(NULLIF(label, ''), name, node_key) WHERE label IS NULL OR label = ''");
+        try {
+            jdbcTemplate.update("UPDATE is_kg_node SET label = COALESCE(NULLIF(label, ''), name, node_key) WHERE label IS NULL OR label = ''");
+        } catch (DataAccessException ignored) {
+            jdbcTemplate.update("UPDATE is_kg_node SET label = COALESCE(NULLIF(label, ''), node_key) WHERE label IS NULL OR label = ''");
+        }
         addColumnIfMissing("is_kg_edge", "relation_type", "`relation_type` VARCHAR(64) NOT NULL DEFAULT 'RELATED'");
         addColumnIfMissing("is_kg_edge", "weight", "`weight` DECIMAL(10,2) NOT NULL DEFAULT 1.00");
     }
@@ -426,7 +431,11 @@ public class KnowledgeGraphService {
                 WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?
                 """, Integer.class, tableName, columnName);
         if (count == null || count == 0) {
-            jdbcTemplate.execute("ALTER TABLE `" + tableName + "` ADD COLUMN " + definition);
+            try {
+                jdbcTemplate.execute("ALTER TABLE `" + tableName + "` ADD COLUMN " + definition);
+            } catch (DataAccessException ignored) {
+                // Test databases can report information_schema differently; duplicate-column ALTER is safe to ignore here.
+            }
         }
     }
 

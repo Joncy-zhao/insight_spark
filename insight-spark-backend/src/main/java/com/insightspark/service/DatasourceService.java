@@ -14,9 +14,11 @@ import java.sql.ResultSetMetaData;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 @Service
 public class DatasourceService {
@@ -111,12 +113,12 @@ public class DatasourceService {
 
     public Map<String, Object> createDatasource(Map<String, Object> request) {
         String name = requiredString(request, "name");
+        String dbType = normalizeDbType(Objects.toString(request.getOrDefault("dbType", "MYSQL")));
         String host = requiredString(request, "host");
-        int port = parseInt(request.get("port"), 3306);
+        int port = parseInt(request.get("port"), "POSTGRESQL".equals(dbType) ? 5432 : 3306);
         String databaseName = requiredString(request, "databaseName");
         String username = requiredString(request, "username");
-        String password = requiredString(request, "password");
-        String dbType = requiredString(request, "dbType").toUpperCase();
+        String password = DatasourcePasswordEncryptor.encrypt(requiredString(request, "password"));
         String jdbcUrl = buildJdbcUrl(dbType, host, port, databaseName);
         jdbcTemplate.update("""
                 INSERT INTO is_official_datasource(name, db_type, host, port, database_name, username, password, jdbc_url,
@@ -129,13 +131,16 @@ public class DatasourceService {
 
     public Map<String, Object> updateDatasource(Long datasourceId, Map<String, Object> request) {
         Map<String, Object> current = findDatasource(datasourceId);
+        String dbType = normalizeDbType(textOr(request.get("dbType"), current.get("db_type")));
         String name = textOr(request.get("name"), current.get("name"));
         String host = textOr(request.get("host"), current.get("host"));
         int port = parseInt(request.get("port"), ((Number) current.get("port")).intValue());
         String databaseName = textOr(request.get("databaseName"), current.get("database_name"));
         String username = textOr(request.get("username"), current.get("username"));
         String password = textOr(request.get("password"), current.get("password"));
-        String dbType = textOr(request.get("dbType"), current.get("db_type")).toUpperCase();
+        if (!password.startsWith("ENC:")) {
+            password = DatasourcePasswordEncryptor.encrypt(password);
+        }
         String jdbcUrl = buildJdbcUrl(dbType, host, port, databaseName);
         jdbcTemplate.update("""
                 UPDATE is_official_datasource
@@ -208,6 +213,7 @@ public class DatasourceService {
 
         try (Connection connection = openConnection(datasource);
              Statement statement = connection.createStatement()) {
+            statement.setQueryTimeout(5);
             try (ResultSet tables = statement.executeQuery(buildTableMetaSql(dbType, databaseName))) {
                 while (tables.next()) {
                     jdbcTemplate.update("""
@@ -328,6 +334,64 @@ public class DatasourceService {
                 "relationType", relationType);
     }
 
+    public List<Map<String, Object>> executeFederalJoin(String uploadTableName, int limit) {
+        List<Map<String, Object>> relations = jdbcTemplate.queryForList("""
+                SELECT datasource_id AS datasourceId, left_table AS leftTable, left_field AS leftField,
+                       right_table AS rightTable, right_field AS rightField
+                FROM is_federal_relation
+                WHERE right_table = ? OR left_table = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """, uploadTableName, uploadTableName);
+        if (relations.isEmpty()) {
+            throw new IllegalArgumentException("未找到当前上传表的联邦关联配置");
+        }
+        Map<String, Object> relation = relations.get(0);
+        Long datasourceId = ((Number) relation.get("datasourceId")).longValue();
+        String officialTable = Objects.toString(relation.get("leftTable"));
+        String officialField = Objects.toString(relation.get("leftField"));
+        String uploadField = resolveUploadColumn(uploadTableName, Objects.toString(relation.get("rightField")));
+        int safeLimit = Math.max(1, Math.min(limit, 200));
+
+        List<Map<String, Object>> uploadRows = jdbcTemplate.queryForList(
+                "SELECT * FROM `" + uploadTableName + "` LIMIT " + safeLimit
+        );
+        Set<String> keys = new LinkedHashSet<>();
+        for (Map<String, Object> row : uploadRows) {
+            String key = Objects.toString(row.get(uploadField), "").trim();
+            if (!key.isBlank()) {
+                keys.add(key);
+            }
+        }
+        if (keys.isEmpty()) {
+            return uploadRows;
+        }
+
+        Map<String, Object> datasource = findDatasource(datasourceId);
+        String quote = "POSTGRESQL".equalsIgnoreCase(Objects.toString(datasource.get("db_type"))) ? "\"" : "`";
+        String inValues = keys.stream().map(this::sqlString).reduce((a, b) -> a + "," + b).orElse("''");
+        String officialSql = "SELECT * FROM " + quote + officialTable + quote
+                + " WHERE " + quote + officialField + quote + " IN (" + inValues + ") LIMIT " + safeLimit;
+        List<Map<String, Object>> officialRows = executeQuery("official:" + datasourceId + ":" + officialTable, officialSql);
+        Map<String, Map<String, Object>> officialByKey = new LinkedHashMap<>();
+        for (Map<String, Object> row : officialRows) {
+            officialByKey.put(Objects.toString(row.get(officialField), ""), row);
+        }
+
+        List<Map<String, Object>> joined = new ArrayList<>();
+        for (Map<String, Object> uploadRow : uploadRows) {
+            Map<String, Object> row = new LinkedHashMap<>(uploadRow);
+            Map<String, Object> officialRow = officialByKey.get(Objects.toString(uploadRow.get(uploadField), ""));
+            if (officialRow != null) {
+                for (Map.Entry<String, Object> entry : officialRow.entrySet()) {
+                    row.put("official_" + entry.getKey(), entry.getValue());
+                }
+            }
+            joined.add(row);
+        }
+        return joined;
+    }
+
     public List<Map<String, Object>> listEnabledQueryTables() {
         return jdbcTemplate.queryForList("""
                 SELECT CONCAT('official:', d.id, ':', t.table_name) AS tableName,
@@ -391,7 +455,7 @@ public class DatasourceService {
         Map<String, Object> datasource = findDatasource(source.datasourceId());
         try (Connection connection = openConnection(datasource);
              Statement statement = connection.createStatement();
-             ResultSet resultSet = statement.executeQuery(sql)) {
+             ResultSet resultSet = executeWithTimeout(statement, sql)) {
             ResultSetMetaData metaData = resultSet.getMetaData();
             int columnCount = metaData.getColumnCount();
             List<Map<String, Object>> rows = new ArrayList<>();
@@ -579,6 +643,22 @@ public class DatasourceService {
                 """;
     }
 
+    private String normalizeDbType(String dbType) {
+        String normalized = dbType == null ? "MYSQL" : dbType.trim().toUpperCase();
+        if ("POSTGRES".equals(normalized)) {
+            normalized = "POSTGRESQL";
+        }
+        if (!"MYSQL".equals(normalized) && !"POSTGRESQL".equals(normalized)) {
+            throw new IllegalArgumentException("数据库类型仅支持 MYSQL / POSTGRESQL");
+        }
+        return normalized;
+    }
+
+    private ResultSet executeWithTimeout(Statement statement, String sql) throws Exception {
+        statement.setQueryTimeout(5);
+        return statement.executeQuery(sql);
+    }
+
     private String requiredString(Map<String, Object> request, String key) {
         String value = Objects.toString(request.get(key), "").trim();
         if (value.isBlank()) {
@@ -615,6 +695,24 @@ public class DatasourceService {
 
     private String escapeSql(String value) {
         return value.replace("'", "''");
+    }
+
+    private String sqlString(String value) {
+        return "'" + escapeSql(value) + "'";
+    }
+
+    private String resolveUploadColumn(String tableName, String fieldName) {
+        List<String> columns = jdbcTemplate.queryForList("""
+                SELECT column_name
+                FROM is_data_field
+                WHERE table_name = ?
+                  AND (column_name = ? OR source_field_name = ? OR display_name = ?)
+                LIMIT 1
+                """, String.class, tableName, fieldName, fieldName, fieldName);
+        if (columns.isEmpty()) {
+            throw new IllegalArgumentException("上传表关联字段不存在：" + fieldName);
+        }
+        return columns.get(0);
     }
 
     private OfficialSource parseSourceKey(String sourceKey) {

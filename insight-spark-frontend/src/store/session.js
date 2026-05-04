@@ -12,6 +12,7 @@ export const setSession = ({ token, user }) => {
   authToken.value = token
   currentUser.value = user
   localStorage.setItem('insight_auth', JSON.stringify({ token, user }))
+  localStorage.setItem('token', token)
   axios.defaults.headers.common.Authorization = `Bearer ${token}`
 }
 
@@ -19,6 +20,7 @@ export const clearSession = () => {
   authToken.value = ''
   currentUser.value = null
   localStorage.removeItem('insight_auth')
+  localStorage.removeItem('token')
   delete axios.defaults.headers.common.Authorization
 }
 

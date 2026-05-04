@@ -1,0 +1,53 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-root}
+      MYSQL_DATABASE: insight_spark
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_general_ci"]
+
+  neo4j:
+    image: neo4j:5
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-neo4j}
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j-data:/data
+
+  ai-service:
+    build: ./insight-spark-ai-service
+    ports:
+      - "8000:8000"
+
+  backend:
+    build: ./insight-spark-backend
+    depends_on:
+      - mysql
+      - neo4j
+      - ai-service
+    environment:
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-root}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-neo4j}
+      DATASOURCE_AES_KEY: ${DATASOURCE_AES_KEY:-insight-spark-compose-key}
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/insight_spark?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai
+      INSIGHT_AI_SERVICE_URL: http://ai-service:8000
+      INSIGHT_NEO4J_HTTP_URL: http://neo4j:7474/db/neo4j/tx/commit
+    ports:
+      - "8080:8080"
+
+  frontend:
+    build: ./insight-spark-frontend
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+
+volumes:
+  mysql-data:
+  neo4j-data:

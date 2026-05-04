@@ -16,9 +16,7 @@ public class AuthInterceptor implements HandlerInterceptor {
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
         String uri = request.getRequestURI();
-        if (uri.startsWith("/api/auth/login")
-                || uri.startsWith("/api/auth/register")
-                || uri.startsWith("/api/auth/captcha")) {
+        if (isPublicAuthEndpoint(uri)) {
             return true;
         }
 
@@ -36,22 +34,13 @@ public class AuthInterceptor implements HandlerInterceptor {
 
         AuthContext.UserPrincipal principal = authService.authenticate(request.getHeader("Authorization"));
         if (principal == null) {
-            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-            response.setContentType("application/json;charset=UTF-8");
-            response.getWriter().write("{\"code\":401,\"message\":\"请先登录\"}");
+            writeJson(response, HttpServletResponse.SC_UNAUTHORIZED, "请先登录");
             return false;
         }
 
-        if (uri.startsWith("/api/datasource")
-                || uri.startsWith("/api/datasources")
-                || uri.startsWith("/api/audit")
-                || uri.startsWith("/api/knowledge")) {
-            if (!"ADMIN".equalsIgnoreCase(principal.role())) {
-                response.setStatus(HttpServletResponse.SC_FORBIDDEN);
-                response.setContentType("application/json;charset=UTF-8");
-                response.getWriter().write("{\"code\":403,\"message\":\"仅管理员可访问\"}");
-                return false;
-            }
+        if (isAdminEndpoint(uri) && !"ADMIN".equalsIgnoreCase(principal.role())) {
+            writeJson(response, HttpServletResponse.SC_FORBIDDEN, "仅管理员可访问");
+            return false;
         }
 
         AuthContext.set(principal);
@@ -61,5 +50,27 @@ public class AuthInterceptor implements HandlerInterceptor {
     @Override
     public void afterCompletion(HttpServletRequest request, HttpServletResponse response, Object handler, Exception ex) {
         AuthContext.clear();
+    }
+
+    private boolean isPublicAuthEndpoint(String uri) {
+        return uri.startsWith("/api/auth/login")
+                || uri.startsWith("/api/auth/register")
+                || uri.startsWith("/api/auth/captcha");
+    }
+
+    private boolean isAdminEndpoint(String uri) {
+        return uri.startsWith("/api/datasource")
+                || uri.startsWith("/api/datasources")
+                || uri.startsWith("/api/audit")
+                || uri.startsWith("/api/knowledge")
+                || uri.startsWith("/api/diagnosis")
+                || uri.startsWith("/api/permission/admin");
+    }
+
+    private void writeJson(HttpServletResponse response, int status, String message) throws Exception {
+        response.setStatus(status);
+        response.setCharacterEncoding("UTF-8");
+        response.setContentType("application/json;charset=UTF-8");
+        response.getWriter().write("{\"code\":" + status + ",\"message\":\"" + message + "\"}");
     }
 }

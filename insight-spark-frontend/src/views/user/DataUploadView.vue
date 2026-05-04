@@ -50,6 +50,14 @@
               <el-button @click="loadTables">刷新数据表</el-button>
             </div>
 
+            <div v-if="uploadTask" class="upload-progress">
+              <el-progress
+                  :percentage="Number(uploadTask.progress || 0)"
+                  :status="uploadTask.status === 'FAILED' ? 'exception' : uploadTask.status === 'SUCCESS' ? 'success' : undefined"
+              />
+              <div class="upload-progress-text">{{ uploadTask.message || uploadTask.status }}</div>
+            </div>
+
             <el-alert
                 v-if="uploadResult"
                 class="result-alert"
@@ -318,6 +326,7 @@ const {
   selectedTemplateId,
   templateRequirement,
   uploadResult,
+  uploadTask,
   uploading,
   onBatchFileChange,
   loadBusinessModels,

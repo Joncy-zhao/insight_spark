@@ -1,6 +1,7 @@
 package com.insightspark.service;
 
 import com.alibaba.excel.EasyExcel;
+import com.insightspark.core.auth.AuthContext;
 import com.insightspark.core.excel.DynamicDataListener;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
@@ -11,7 +12,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -22,6 +25,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.regex.Pattern;
 
 @Service
@@ -40,6 +46,8 @@ public class DataUploadService {
     @Autowired
     private DatasourceService datasourceService;
 
+    private final ExecutorService uploadExecutor = Executors.newCachedThreadPool();
+
     @PostConstruct
     public void initCatalogTables() {
         jdbcTemplate.execute("""
@@ -48,7 +56,7 @@ public class DataUploadService {
                   `source_name` VARCHAR(255) NOT NULL,
                   `display_name` VARCHAR(255) NOT NULL,
                   `table_name` VARCHAR(128) NOT NULL UNIQUE,
-                  `owner_id` VARCHAR(64) NOT NULL DEFAULT 'demo-user',
+                  `owner_id` VARCHAR(64) NOT NULL DEFAULT '',
                   `row_count` INT NOT NULL DEFAULT 0,
                   `field_count` INT NOT NULL DEFAULT 0,
                   `status` VARCHAR(32) NOT NULL DEFAULT 'ACTIVE',
@@ -77,7 +85,7 @@ public class DataUploadService {
                   `model_name` VARCHAR(255) NOT NULL,
                   `model_requirement` VARCHAR(2000) NULL,
                   `table_name` VARCHAR(128) NOT NULL,
-                  `owner_id` VARCHAR(64) NOT NULL DEFAULT 'demo-user',
+                  `owner_id` VARCHAR(64) NOT NULL DEFAULT '',
                   `model_json` JSON NOT NULL,
                   `published` TINYINT(1) NOT NULL DEFAULT 0,
                   `status` VARCHAR(32) NOT NULL DEFAULT 'ACTIVE',
@@ -99,6 +107,139 @@ public class DataUploadService {
                   `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='业务分析模板';
                 """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS `is_file_process_task` (
+                  `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+                  `task_id` VARCHAR(64) NOT NULL UNIQUE,
+                  `status` VARCHAR(32) NOT NULL,
+                  `progress` INT NOT NULL DEFAULT 0,
+                  `message` VARCHAR(1000) NULL,
+                  `result_json` JSON NULL,
+                  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+                  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                  INDEX `idx_file_process_task_id` (`task_id`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文件上传解析进度任务';
+                """);
+    }
+
+    public Map<String, Object> processFileWithTask(MultipartFile file) throws IOException {
+        String taskId = createTask("WAITING", 0, "上传任务已创建");
+        try {
+            updateTask(taskId, "UPLOADING", 20, "文件已接收，准备解析", null);
+            updateTask(taskId, "PARSING", 50, "正在解析 Excel/CSV 文件", null);
+            Map<String, Object> result = processFile(file);
+            updateTask(taskId, "BUILDING", 80, "正在建表并写入数据", null);
+            updateTask(taskId, "SUCCESS", 100, "文件处理完成", result);
+            Map<String, Object> wrapped = new LinkedHashMap<>(result);
+            wrapped.put("taskId", taskId);
+            wrapped.put("task", getUploadTask(taskId));
+            return wrapped;
+        } catch (Exception e) {
+            updateTask(taskId, "FAILED", 100, e.getMessage(), null);
+            throw e;
+        }
+    }
+
+    public Map<String, Object> processFilesWithTask(List<MultipartFile> files, String mergeMode, String joinKey,
+                                                    String modelRequirement) throws IOException {
+        String taskId = createTask("WAITING", 0, "批量上传任务已创建");
+        try {
+            updateTask(taskId, "UPLOADING", 20, "文件已接收，准备解析", null);
+            updateTask(taskId, "PARSING", 50, "正在解析并校验多个文件", null);
+            Map<String, Object> result = processFiles(files, mergeMode, joinKey, modelRequirement);
+            updateTask(taskId, "BUILDING", 80, "正在合并、建表并生成模型", null);
+            updateTask(taskId, "SUCCESS", 100, "批量文件处理完成", result);
+            Map<String, Object> wrapped = new LinkedHashMap<>(result);
+            wrapped.put("taskId", taskId);
+            wrapped.put("task", getUploadTask(taskId));
+            return wrapped;
+        } catch (Exception e) {
+            updateTask(taskId, "FAILED", 100, e.getMessage(), null);
+            throw e;
+        }
+    }
+
+    public Map<String, Object> startAsyncProcessFile(MultipartFile file) throws IOException {
+        String taskId = createTask("WAITING", 0, "上传任务已创建");
+        AuthContext.UserPrincipal principal = AuthContext.get();
+        StoredMultipartFile storedFile = StoredMultipartFile.from(file);
+        uploadExecutor.submit(() -> runWithAuth(principal, () -> {
+            try {
+                updateTask(taskId, "UPLOADING", 20, "文件已接收，准备解析", null);
+                updateTask(taskId, "PARSING", 50, "正在解析 Excel/CSV 文件", null);
+                Map<String, Object> result = processFile(storedFile);
+                updateTask(taskId, "BUILDING", 80, "正在建表并写入数据", null);
+                updateTask(taskId, "SUCCESS", 100, "文件处理完成", result);
+            } catch (Exception e) {
+                updateTask(taskId, "FAILED", 100, e.getMessage(), null);
+            }
+        }));
+        return getUploadTask(taskId);
+    }
+
+    public Map<String, Object> startAsyncProcessFiles(List<MultipartFile> files, String mergeMode, String joinKey,
+                                                      String modelRequirement) throws IOException {
+        String taskId = createTask("WAITING", 0, "批量上传任务已创建");
+        AuthContext.UserPrincipal principal = AuthContext.get();
+        List<MultipartFile> storedFiles = files.stream().map(file -> {
+            try {
+                return StoredMultipartFile.from(file);
+            } catch (IOException e) {
+                throw new IllegalArgumentException("文件暂存失败：" + e.getMessage(), e);
+            }
+        }).map(item -> (MultipartFile) item).toList();
+        uploadExecutor.submit(() -> runWithAuth(principal, () -> {
+            try {
+                updateTask(taskId, "UPLOADING", 20, "文件已接收，准备解析", null);
+                updateTask(taskId, "PARSING", 50, "正在解析并校验多个文件", null);
+                Map<String, Object> result = processFiles(storedFiles, mergeMode, joinKey, modelRequirement);
+                updateTask(taskId, "BUILDING", 80, "正在合并、建表并生成模型", null);
+                updateTask(taskId, "SUCCESS", 100, "批量文件处理完成", result);
+            } catch (Exception e) {
+                updateTask(taskId, "FAILED", 100, e.getMessage(), null);
+            }
+        }));
+        return getUploadTask(taskId);
+    }
+
+    private void runWithAuth(AuthContext.UserPrincipal principal, Runnable action) {
+        try {
+            AuthContext.set(principal);
+            action.run();
+        } finally {
+            AuthContext.clear();
+        }
+    }
+
+    public Map<String, Object> getUploadTask(String taskId) {
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT task_id AS taskId, status, progress, message, result_json AS resultJson,
+                       created_at AS createdAt, updated_at AS updatedAt
+                FROM is_file_process_task
+                WHERE task_id = ?
+                """, taskId);
+        if (rows.isEmpty()) {
+            throw new IllegalArgumentException("上传任务不存在：" + taskId);
+        }
+        return rows.get(0);
+    }
+
+    private String createTask(String status, int progress, String message) {
+        String taskId = UUID.randomUUID().toString().replace("-", "");
+        jdbcTemplate.update("""
+                INSERT INTO is_file_process_task(task_id, status, progress, message)
+                VALUES (?, ?, ?, ?)
+                """, taskId, status, progress, message);
+        return taskId;
+    }
+
+    private void updateTask(String taskId, String status, int progress, String message, Map<String, Object> result) {
+        String resultJson = result == null ? null : toJson(result);
+        jdbcTemplate.update("""
+                UPDATE is_file_process_task
+                SET status = ?, progress = ?, message = ?, result_json = CASE WHEN ? IS NULL THEN result_json ELSE CAST(? AS JSON) END
+                WHERE task_id = ?
+                """, status, Math.max(0, Math.min(progress, 100)), message, resultJson, resultJson, taskId);
     }
 
     public Map<String, Object> processFile(MultipartFile file) throws IOException {
@@ -838,6 +979,52 @@ public class DataUploadService {
             map.put("displayName", displayName);
             map.put("sortOrder", sortOrder);
             return map;
+        }
+    }
+
+    private record StoredMultipartFile(String name, String originalFilename, String contentType, byte[] bytes) implements MultipartFile {
+        static StoredMultipartFile from(MultipartFile file) throws IOException {
+            return new StoredMultipartFile(file.getName(), file.getOriginalFilename(), file.getContentType(), file.getBytes());
+        }
+
+        @Override
+        public String getName() {
+            return name;
+        }
+
+        @Override
+        public String getOriginalFilename() {
+            return originalFilename;
+        }
+
+        @Override
+        public String getContentType() {
+            return contentType;
+        }
+
+        @Override
+        public boolean isEmpty() {
+            return bytes.length == 0;
+        }
+
+        @Override
+        public long getSize() {
+            return bytes.length;
+        }
+
+        @Override
+        public byte[] getBytes() {
+            return bytes;
+        }
+
+        @Override
+        public InputStream getInputStream() {
+            return new ByteArrayInputStream(bytes);
+        }
+
+        @Override
+        public void transferTo(java.io.File dest) throws IOException {
+            java.nio.file.Files.write(dest.toPath(), bytes);
         }
     }
 }

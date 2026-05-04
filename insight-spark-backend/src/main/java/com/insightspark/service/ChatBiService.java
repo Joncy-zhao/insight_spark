@@ -43,6 +43,23 @@ public class ChatBiService {
         String queryTableName = officialSource ? datasourceService.physicalTableName(activeTable) : activeTable;
         dataUploadService.assertKnownTable(activeTable);
 
+        if (!officialSource && question.contains("关联官方")) {
+            List<Map<String, Object>> joinedRows = datasourceService.executeFederalJoin(activeTable, 200);
+            Map<String, Object> response = new HashMap<>();
+            response.put("tableName", activeTable);
+            response.put("physicalTableName", queryTableName);
+            response.put("sourceType", "FEDERAL_JOIN");
+            response.put("sql", "FEDERAL_IN_MEMORY_JOIN(" + activeTable + ")");
+            response.put("data", joinedRows);
+            response.put("chartType", "bar");
+            response.put("fieldMapping", Map.of("join", "Excel 与官方库关联"));
+            response.put("engine", "java-federal-join");
+            response.put("riskLevel", "SAFE");
+            response.put("riskReason", "已按联邦关联配置执行只读分步查询并在 Java 内存中合并");
+            response.put("message", "已根据联邦关联配置合并上传表与官方库信息。");
+            return response;
+        }
+
         List<Map<String, Object>> fields = dataUploadService.listFields(activeTable);
         if (fields == null || fields.isEmpty()) {
             throw new IllegalArgumentException("当前数据表没有字段元信息，请在“数据上传”页面重新上传文件，或选择字段数大于 0 的数据表。");
@@ -89,7 +106,7 @@ public class ChatBiService {
             jdbcTemplate.setQueryTimeout(5);
             queryResult = officialSource
                     ? datasourceService.executeQuery(activeTable, generatedSql)
-                    : jdbcTemplate.queryForList(generatedSql);
+                    : queryUploadTable(generatedSql);
             queryResult = sqlAuditService.maskRows(activeTable, queryResult);
             long durationMs = System.currentTimeMillis() - startedAt;
             sqlAuditService.record(question, activeTable, engine, generatedSql, auditResult,
@@ -180,6 +197,11 @@ public class ChatBiService {
 
     private String chartName(String chartType) {
         return chartType.equals("bar") ? "柱状图" : chartType.equals("pie") ? "饼图" : "折线图";
+    }
+
+    private List<Map<String, Object>> queryUploadTable(String sql) {
+        jdbcTemplate.setQueryTimeout(5);
+        return jdbcTemplate.queryForList(sql);
     }
 
     private record FieldChoice(String dimensionColumn, String dimensionDisplayName, String dimensionType,
