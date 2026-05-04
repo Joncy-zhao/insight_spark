@@ -115,12 +115,13 @@ public class DatasourceService {
         String databaseName = requiredString(request, "databaseName");
         String username = requiredString(request, "username");
         String password = requiredString(request, "password");
-        String jdbcUrl = buildJdbcUrl(host, port, databaseName);
+        String dbType = requiredString(request, "dbType").toUpperCase();
+        String jdbcUrl = buildJdbcUrl(dbType, host, port, databaseName);
         jdbcTemplate.update("""
                 INSERT INTO is_official_datasource(name, db_type, host, port, database_name, username, password, jdbc_url,
                                                    status, pool_max_size, pool_timeout_ms, readonly_enforced)
-                VALUES (?, 'MYSQL', ?, ?, ?, ?, ?, ?, 'DISABLED', ?, ?, 1)
-                """, name, host, port, databaseName, username, password, jdbcUrl,
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'DISABLED', ?, ?, 1)
+                """, name, dbType, host, port, databaseName, username, password, jdbcUrl,
                 parseInt(request.get("poolMaxSize"), 10), parseInt(request.get("poolTimeoutMs"), 30000));
         return latestDatasource();
     }
@@ -133,13 +134,14 @@ public class DatasourceService {
         String databaseName = textOr(request.get("databaseName"), current.get("database_name"));
         String username = textOr(request.get("username"), current.get("username"));
         String password = textOr(request.get("password"), current.get("password"));
-        String jdbcUrl = buildJdbcUrl(host, port, databaseName);
+        String dbType = textOr(request.get("dbType"), current.get("db_type")).toUpperCase();
+        String jdbcUrl = buildJdbcUrl(dbType, host, port, databaseName);
         jdbcTemplate.update("""
                 UPDATE is_official_datasource
-                SET name = ?, host = ?, port = ?, database_name = ?, username = ?, password = ?, jdbc_url = ?,
+                SET name = ?, db_type = ?, host = ?, port = ?, database_name = ?, username = ?, password = ?, jdbc_url = ?,
                     pool_max_size = ?, pool_timeout_ms = ?
                 WHERE id = ?
-                """, name, host, port, databaseName, username, password, jdbcUrl,
+                """, name, dbType, host, port, databaseName, username, password, jdbcUrl,
                 parseInt(request.get("poolMaxSize"), 10), parseInt(request.get("poolTimeoutMs"), 30000), datasourceId);
         return findDatasourcePublic(datasourceId);
     }
@@ -197,6 +199,7 @@ public class DatasourceService {
     public Map<String, Object> syncSchema(Long datasourceId) {
         Map<String, Object> datasource = findDatasource(datasourceId);
         String databaseName = String.valueOf(datasource.get("database_name"));
+        String dbType = Objects.toString(datasource.get("db_type"), "MYSQL").toUpperCase();
         int tableCount = 0;
         int fieldCount = 0;
         jdbcTemplate.update("DELETE FROM is_official_schema_field WHERE datasource_id = ?", datasourceId);
@@ -204,10 +207,7 @@ public class DatasourceService {
 
         try (Connection connection = openConnection(datasource);
              Statement statement = connection.createStatement()) {
-            try (ResultSet tables = statement.executeQuery("""
-                    SELECT table_name, table_comment, table_rows
-                    FROM information_schema.tables
-                    WHERE table_schema = '""" + escapeSql(databaseName) + "' AND table_type = 'BASE TABLE' ORDER BY table_name")) {
+            try (ResultSet tables = statement.executeQuery(buildTableMetaSql(dbType, databaseName))) {
                 while (tables.next()) {
                     jdbcTemplate.update("""
                             INSERT INTO is_official_schema_table(datasource_id, table_name, table_comment, table_rows)
@@ -217,10 +217,7 @@ public class DatasourceService {
                     tableCount++;
                 }
             }
-            try (ResultSet columns = statement.executeQuery("""
-                    SELECT table_name, column_name, data_type, column_comment, is_nullable, column_key, ordinal_position
-                    FROM information_schema.columns
-                    WHERE table_schema = '""" + escapeSql(databaseName) + "' ORDER BY table_name, ordinal_position")) {
+            try (ResultSet columns = statement.executeQuery(buildColumnMetaSql(dbType, databaseName))) {
                 while (columns.next()) {
                     String columnName = columns.getString("column_name");
                     jdbcTemplate.update("""
@@ -462,9 +459,60 @@ public class DatasourceService {
         );
     }
 
-    private String buildJdbcUrl(String host, int port, String databaseName) {
-        return "jdbc:mysql://" + host + ":" + port + "/" + databaseName
-                + "?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai";
+    private String buildJdbcUrl(String dbType, String host, int port, String databaseName) {
+        if ("MYSQL".equalsIgnoreCase(dbType)) {
+            return "jdbc:mysql://" + host + ":" + port + "/" + databaseName
+                    + "?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai";
+        }
+        if ("POSTGRESQL".equalsIgnoreCase(dbType) || "POSTGRES".equalsIgnoreCase(dbType)) {
+            return "jdbc:postgresql://" + host + ":" + port + "/" + databaseName;
+        }
+        throw new IllegalArgumentException("不支持的数据源类型：" + dbType);
+    }
+
+
+    private String buildTableMetaSql(String dbType, String databaseName) {
+        if ("POSTGRESQL".equalsIgnoreCase(dbType) || "POSTGRES".equalsIgnoreCase(dbType)) {
+            return """
+                    SELECT t.table_name, COALESCE(obj_description((quote_ident(t.table_schema) || '.' || quote_ident(t.table_name))::regclass), '') AS table_comment,
+                           0 AS table_rows
+                    FROM information_schema.tables t
+                    WHERE t.table_catalog = '""" + escapeSql(databaseName) + "' AND t.table_schema = 'public' AND t.table_type = 'BASE TABLE'
+                    ORDER BY t.table_name
+                    """;
+        }
+        return """
+                SELECT table_name, table_comment, table_rows
+                FROM information_schema.tables
+                WHERE table_schema = '""" + escapeSql(databaseName) + "' AND table_type = 'BASE TABLE' ORDER BY table_name
+                """;
+    }
+
+    private String buildColumnMetaSql(String dbType, String databaseName) {
+        if ("POSTGRESQL".equalsIgnoreCase(dbType) || "POSTGRES".equalsIgnoreCase(dbType)) {
+            return """
+                    SELECT c.table_name, c.column_name, c.data_type,
+                           COALESCE(col_description((quote_ident(c.table_schema) || '.' || quote_ident(c.table_name))::regclass, c.ordinal_position), '') AS column_comment,
+                           c.is_nullable,
+                           CASE WHEN tc.constraint_type = 'PRIMARY KEY' THEN 'PRI' ELSE '' END AS column_key,
+                           c.ordinal_position
+                    FROM information_schema.columns c
+                    LEFT JOIN information_schema.key_column_usage kcu
+                      ON c.table_catalog = kcu.table_catalog AND c.table_schema = kcu.table_schema
+                     AND c.table_name = kcu.table_name AND c.column_name = kcu.column_name
+                    LEFT JOIN information_schema.table_constraints tc
+                      ON kcu.constraint_catalog = tc.constraint_catalog
+                     AND kcu.constraint_schema = tc.constraint_schema
+                     AND kcu.constraint_name = tc.constraint_name
+                    WHERE c.table_catalog = '""" + escapeSql(databaseName) + "' AND c.table_schema = 'public'
+                    ORDER BY c.table_name, c.ordinal_position
+                    """;
+        }
+        return """
+                SELECT table_name, column_name, data_type, column_comment, is_nullable, column_key, ordinal_position
+                FROM information_schema.columns
+                WHERE table_schema = '""" + escapeSql(databaseName) + "' ORDER BY table_name, ordinal_position
+                """;
     }
 
     private String requiredString(Map<String, Object> request, String key) {
