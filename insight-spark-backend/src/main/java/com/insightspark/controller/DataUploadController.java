@@ -99,10 +99,33 @@ public class DataUploadController {
         return ApiResponse.success(dataUploadService.listBusinessModels(enterpriseOnly));
     }
 
+    @PostMapping("/templates/upload")
+    public ApiResponse<Map<String, Object>> uploadTemplate(@RequestParam("file") MultipartFile file) {
+        try {
+            return ApiResponse.success("分析模板上传成功", dataUploadService.uploadTemplate(file));
+        } catch (Exception e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    @GetMapping("/templates")
+    public ApiResponse<List<Map<String, Object>>> templates() {
+        return ApiResponse.success(dataUploadService.listTemplates());
+    }
+
     @PostMapping("/business-models")
     public ApiResponse<Map<String, Object>> createBusinessModel(@RequestBody Map<String, Object> request) {
         try {
             return ApiResponse.success(dataUploadService.createBusinessModel(request));
+        } catch (Exception e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    @PostMapping("/business-model/from-template")
+    public ApiResponse<Map<String, Object>> createBusinessModelFromTemplate(@RequestBody Map<String, Object> request) {
+        try {
+            return ApiResponse.success(dataUploadService.createBusinessModelFromTemplate(request));
         } catch (Exception e) {
             return ApiResponse.badRequest(e.getMessage());
         }

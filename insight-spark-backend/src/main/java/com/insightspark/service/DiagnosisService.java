@@ -34,6 +34,9 @@ public class DiagnosisService {
     @Autowired
     private KnowledgeGraphService knowledgeGraphService;
 
+    @Autowired
+    private KnowledgeDocumentService knowledgeDocumentService;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @PostConstruct
@@ -90,12 +93,16 @@ public class DiagnosisService {
                 + " FROM `" + tableName + "` LIMIT 1000";
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(selectSql);
 
-        Map<String, Object> aiResult = pythonAiService.diagnose(tableName, metricField, dimensionFields, timeField, rows);
-        aiResult.put("relatedKnowledge", knowledgeGraphService.retrieveMultiHopContext(
-                tableName + " " + metricField + " " + String.join(" ", dimensionFields),
-                tableName
-        ));
+        String question = Objects.toString(request.getOrDefault("question",
+                tableName + " " + metricField + " " + String.join(" ", dimensionFields)));
+        List<Map<String, Object>> graphContext = knowledgeGraphService.retrieveMultiHopContext(question, tableName);
+        List<Map<String, Object>> docChunks = knowledgeDocumentService.search(question, 10);
+        Map<String, Object> aiResult = pythonAiService.graphRagDiagnose(question, tableName, metricField, rows, graphContext, docChunks)
+                .orElseGet(() -> pythonAiService.diagnose(tableName, metricField, dimensionFields, timeField, rows));
+        aiResult.put("relatedKnowledge", graphContext);
+        aiResult.put("docEvidence", docChunks);
         aiResult.put("graphReasoningPath", buildGraphReasoningPath((List<Map<String, Object>>) aiResult.get("relatedKnowledge")));
+        aiResult.put("evidenceSources", buildEvidenceSources(docChunks, graphContext));
         Long reportId = saveReport(tableName, metricField, dimensionFields, timeField, aiResult);
 
         Map<String, Object> result = new LinkedHashMap<>(aiResult);
@@ -184,6 +191,22 @@ public class DiagnosisService {
                         + Objects.toString(item.get("label"), "") + "」")
                 .reduce((a, b) -> a + " -> " + b)
                 .orElse("");
+    }
+
+    private List<String> buildEvidenceSources(List<Map<String, Object>> docChunks, List<Map<String, Object>> graphContext) {
+        List<String> sources = new ArrayList<>();
+        for (Map<String, Object> chunk : docChunks) {
+            sources.add(Objects.toString(chunk.get("source"), "知识文档") + "：" + previewText(chunk.get("chunkText")));
+        }
+        if (!graphContext.isEmpty()) {
+            sources.add("知识图谱路径：" + buildGraphReasoningPath(graphContext));
+        }
+        return sources;
+    }
+
+    private String previewText(Object value) {
+        String text = Objects.toString(value, "").replaceAll("\\s+", " ").trim();
+        return text.length() <= 80 ? text : text.substring(0, 80) + "...";
     }
 
     private String extractGraphPath(Map<String, Object> report) {

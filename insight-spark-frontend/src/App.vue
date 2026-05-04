@@ -87,6 +87,10 @@ const uploadJoinKey = ref('')
 const modelRequirement = ref('')
 const businessModels = ref([])
 const enterpriseModels = ref([])
+const analysisTemplates = ref([])
+const templateFile = ref(null)
+const selectedTemplateId = ref('')
+const templateRequirement = ref('')
 const uploading = ref(false)
 const uploadResult = ref(null)
 const previewRows = ref([])
@@ -100,6 +104,8 @@ const graphOverview = ref({ nodeTypes: [], edgeTypes: [] })
 const graphSearchKeyword = ref('')
 const graphSearchResult = ref({ nodes: [], edges: [], ragContext: [] })
 const graphLoading = ref(false)
+const knowledgeDocFile = ref(null)
+const knowledgeDocs = ref([])
 const auditRiskLevel = ref('')
 const auditExecuteStatus = ref('')
 const manualAuditSql = ref('')
@@ -180,7 +186,7 @@ onMounted(async () => {
     chartInstance = echarts.init(container)
   }
   window.addEventListener('resize', () => chartInstance?.resize())
-  await Promise.all([loadTables(), loadBusinessModels()])
+  await Promise.all([loadTables(), loadBusinessModels(), loadAnalysisTemplates()])
 })
 
 const normalizeActiveModule = () => {
@@ -193,7 +199,7 @@ const normalizeActiveModule = () => {
 
 const handleAuthenticated = async () => {
   normalizeActiveModule()
-  await Promise.all([loadTables(), loadBusinessModels()])
+  await Promise.all([loadTables(), loadBusinessModels(), loadAnalysisTemplates()])
 }
 
 const handleLogout = async () => {
@@ -239,7 +245,7 @@ watch(activeModule, async (moduleName) => {
     ])
   }
   if (moduleName === 'knowledgeGraph') {
-    await Promise.all([loadGraphOverview(), searchGraph()])
+    await Promise.all([loadGraphOverview(), searchGraph(), loadKnowledgeDocs()])
   }
 })
 
@@ -572,6 +578,40 @@ const loadBusinessModels = async () => {
   enterpriseModels.value = unwrap(await axios.get(`${API_BASE}/api/data/business-models`, { params: { enterpriseOnly: true } }))
 }
 
+const onTemplateFileChange = (file) => {
+  templateFile.value = file.raw
+}
+
+const loadAnalysisTemplates = async () => {
+  analysisTemplates.value = unwrap(await axios.get(`${API_BASE}/api/data/templates`))
+  if (!selectedTemplateId.value && analysisTemplates.value.length) {
+    selectedTemplateId.value = analysisTemplates.value[0].id
+  }
+}
+
+const uploadAnalysisTemplate = async () => {
+  if (!templateFile.value) return ElMessage.warning('请选择 .txt 或 .md 分析模板')
+  const formData = new FormData()
+  formData.append('file', templateFile.value)
+  await axios.post(`${API_BASE}/api/data/templates/upload`, formData).then(unwrap)
+  ElMessage.success('分析模板已上传')
+  templateFile.value = null
+  await loadAnalysisTemplates()
+}
+
+const createBusinessModelFromTemplate = async () => {
+  if (!selectedTableName.value) return ElMessage.warning('请先选择数据表')
+  if (!selectedTemplateId.value) return ElMessage.warning('请先选择分析模板')
+  if (!templateRequirement.value.trim()) return ElMessage.warning('请填写一句话建模需求')
+  await axios.post(`${API_BASE}/api/data/business-model/from-template`, {
+    tableName: selectedTableName.value,
+    templateId: selectedTemplateId.value,
+    requirement: templateRequirement.value
+  }).then(unwrap)
+  ElMessage.success('模板业务模型已生成')
+  await loadBusinessModels()
+}
+
 const createBusinessModel = async () => {
   if (!selectedTableName.value || !modelRequirement.value.trim()) return ElMessage.warning('请选择数据表并填写建模需求')
   await axios.post(`${API_BASE}/api/data/business-models`, {
@@ -727,6 +767,30 @@ const searchGraph = async () => {
   }
 }
 
+const onKnowledgeDocChange = (file) => {
+  knowledgeDocFile.value = file.raw
+}
+
+const loadKnowledgeDocs = async () => {
+  knowledgeDocs.value = unwrap(await axios.get(`${API_BASE}/api/knowledge/docs`))
+}
+
+const uploadKnowledgeDoc = async () => {
+  if (!knowledgeDocFile.value) return ElMessage.warning('请选择 .txt 或 .md 知识文档')
+  const formData = new FormData()
+  formData.append('file', knowledgeDocFile.value)
+  await axios.post(`${API_BASE}/api/knowledge/docs/upload`, formData).then(unwrap)
+  ElMessage.success('知识文档已上传并切片')
+  knowledgeDocFile.value = null
+  await loadKnowledgeDocs()
+}
+
+const indexKnowledgeDoc = async (doc) => {
+  await axios.post(`${API_BASE}/api/knowledge/docs/${doc.id}/index`).then(unwrap)
+  ElMessage.success('知识文档索引已刷新')
+  await loadKnowledgeDocs()
+}
+
 const riskTagType = (riskLevel) => {
   if (riskLevel === 'SAFE') return 'success'
   if (riskLevel === 'WARN') return 'warning'
@@ -775,6 +839,10 @@ provide('workbench', {
   modelRequirement,
   businessModels,
   enterpriseModels,
+  analysisTemplates,
+  templateFile,
+  selectedTemplateId,
+  templateRequirement,
   uploading,
   uploadResult,
   previewRows,
@@ -788,6 +856,8 @@ provide('workbench', {
   graphSearchKeyword,
   graphSearchResult,
   graphLoading,
+  knowledgeDocFile,
+  knowledgeDocs,
   auditRiskLevel,
   auditExecuteStatus,
   manualAuditSql,
@@ -868,6 +938,10 @@ provide('workbench', {
   onFileRemove,
   submitUpload,
   loadBusinessModels,
+  loadAnalysisTemplates,
+  onTemplateFileChange,
+  uploadAnalysisTemplate,
+  createBusinessModelFromTemplate,
   createBusinessModel,
   publishBusinessModel,
   applyBusinessModel,
@@ -883,6 +957,10 @@ provide('workbench', {
   loadGraphOverview,
   rebuildGraph,
   searchGraph,
+  onKnowledgeDocChange,
+  loadKnowledgeDocs,
+  uploadKnowledgeDoc,
+  indexKnowledgeDoc,
   riskTagType,
   statusTagType,
   renderChart

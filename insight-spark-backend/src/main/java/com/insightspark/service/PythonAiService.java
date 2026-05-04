@@ -72,4 +72,29 @@ public class PythonAiService {
             throw new IllegalArgumentException("Python AI 诊断服务不可用，请确认 8000 端口服务已启动");
         }
     }
+
+    public Optional<Map<String, Object>> graphRagDiagnose(String question, String tableName, String metricField,
+                                                         List<Map<String, Object>> rows,
+                                                         List<Map<String, Object>> graphContext,
+                                                         List<Map<String, Object>> docChunks) {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("question", question);
+        request.put("tableName", tableName);
+        request.put("metricField", metricField);
+        request.put("rows", rows);
+        request.put("graphContext", graphContext);
+        request.put("docChunks", docChunks);
+
+        try {
+            Map<String, Object> response = restTemplate.postForObject(
+                    aiServiceUrl + "/ai/graphrag/diagnose",
+                    request,
+                    Map.class
+            );
+            return response == null ? Optional.empty() : Optional.of(response);
+        } catch (RestClientException e) {
+            log.warn("Python GraphRAG 璇婃柇鏈嶅姟涓嶅彲鐢紝浣跨敤甯歌璇婃柇锛歿}", e.getMessage());
+            return Optional.empty();
+        }
+    }
 }

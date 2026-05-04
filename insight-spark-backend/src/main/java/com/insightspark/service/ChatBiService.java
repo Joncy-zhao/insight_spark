@@ -81,6 +81,7 @@ public class ChatBiService {
             throw new IllegalArgumentException("SQL 安全审计未通过：" + auditResult.riskReason());
         }
 
+        generatedSql = sqlAuditService.ensureLimit(generatedSql, 200);
         long startedAt = System.currentTimeMillis();
         List<Map<String, Object>> queryResult;
         try {

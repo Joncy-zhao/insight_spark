@@ -86,6 +86,38 @@
             </el-table>
           </div>
 
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>模板建模</h2>
+                <p>上传业务分析模板，选择数据表后用一句话生成指标、维度、公式和图表建议。</p>
+              </div>
+              <el-button @click="loadAnalysisTemplates">刷新模板</el-button>
+            </div>
+            <el-upload :auto-upload="false" :show-file-list="true" accept=".txt,.md" :limit="1" :on-change="onTemplateFileChange">
+              <el-button>选择模板文件</el-button>
+              <template #tip>
+                <div class="el-upload__tip">支持 .txt / .md，例如电商生命周期分析模板。</div>
+              </template>
+            </el-upload>
+            <div class="upload-actions">
+              <el-button type="primary" :disabled="!templateFile" @click="uploadAnalysisTemplate">上传模板</el-button>
+            </div>
+            <el-form label-position="top" class="merge-form">
+              <el-form-item label="选择模板">
+                <el-select v-model="selectedTemplateId" placeholder="请选择模板">
+                  <el-option v-for="template in analysisTemplates" :key="template.id" :label="template.templateName" :value="template.id" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="一句话需求">
+                <el-input v-model="templateRequirement" type="textarea" :rows="3" placeholder="我想分析电商用户生命周期，包含获客、激活、留存、转化、复购" />
+              </el-form-item>
+            </el-form>
+            <el-button type="success" :disabled="!selectedTableName || !selectedTemplateId || !templateRequirement" @click="createBusinessModelFromTemplate">
+              生成业务模型
+            </el-button>
+          </div>
+
           <div class="panel preview-panel">
             <div class="panel-header">
               <div>
@@ -281,10 +313,18 @@ const {
   modelRequirement,
   businessModels,
   enterpriseModels,
+  analysisTemplates,
+  templateFile,
+  selectedTemplateId,
+  templateRequirement,
   uploadResult,
   uploading,
   onBatchFileChange,
   loadBusinessModels,
+  loadAnalysisTemplates,
+  onTemplateFileChange,
+  uploadAnalysisTemplate,
+  createBusinessModelFromTemplate,
   createBusinessModel,
   publishBusinessModel,
   applyBusinessModel,

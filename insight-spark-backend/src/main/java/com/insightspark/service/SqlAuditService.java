@@ -1,6 +1,11 @@
 package com.insightspark.service;
 
+import com.insightspark.core.auth.AuthContext;
 import jakarta.annotation.PostConstruct;
+import net.sf.jsqlparser.parser.CCJSqlParserUtil;
+import net.sf.jsqlparser.statement.Statement;
+import net.sf.jsqlparser.statement.select.Select;
+import net.sf.jsqlparser.util.TablesNamesFinder;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -80,6 +85,25 @@ public class SqlAuditService {
         String normalized = sql.trim().toLowerCase(Locale.ROOT);
         List<String> reasons = new ArrayList<>();
         List<String> matchedRules = new ArrayList<>();
+
+        Statement statement;
+        try {
+            statement = CCJSqlParserUtil.parse(sql);
+        } catch (Exception e) {
+            return AuditResult.blocked("SQL 语法解析失败，已拦截：" + e.getMessage(), List.of("AST_PARSE"), List.of());
+        }
+        if (!(statement instanceof Select)) {
+            return AuditResult.blocked("仅允许 SELECT 查询", List.of("ONLY_SELECT"), List.of());
+        }
+        if (expectedTableName != null && !expectedTableName.isBlank()) {
+            List<String> tables = new TablesNamesFinder().getTableList(statement);
+            String expected = normalizeTableName(expectedTableName);
+            for (String table : tables) {
+                if (!expected.equals(normalizeTableName(table))) {
+                    return AuditResult.blocked("访问未授权表：" + table, List.of("TABLE_SCOPE"), List.of());
+                }
+            }
+        }
 
         if (isRuleEnabled("ONLY_SELECT") && !normalized.startsWith("select")) {
             reasons.add("仅允许 SELECT 查询");
@@ -164,8 +188,9 @@ public class SqlAuditService {
                 INSERT INTO is_sql_audit_log(user_id, question, table_name, engine, generated_sql, risk_level,
                                              risk_reason, matched_rules, sensitive_fields, slow_query,
                                              execute_status, duration_ms, error_message)
-                VALUES ('demo-user', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
+                AuthContext.userId(),
                 safeText(question, 1000),
                 tableName,
                 engine,
@@ -414,6 +439,23 @@ public class SqlAuditService {
             }
         }
         return matched;
+    }
+
+    public String ensureLimit(String sql, int limit) {
+        String normalized = sql == null ? "" : sql.trim().toLowerCase(Locale.ROOT);
+        if (normalized.contains(" limit ")) {
+            return sql;
+        }
+        return sql.trim().replaceAll(";+$", "") + " LIMIT " + Math.max(1, Math.min(limit, 1000));
+    }
+
+    private String normalizeTableName(String tableName) {
+        String normalized = tableName == null ? "" : tableName.trim();
+        if (normalized.startsWith("official:")) {
+            String[] parts = normalized.split(":", 3);
+            normalized = parts.length == 3 ? parts[2] : normalized;
+        }
+        return normalized.replace("`", "").replace("\"", "").toLowerCase(Locale.ROOT);
     }
 
     private void addColumnIfMissing(String tableName, String columnName, String definition) {

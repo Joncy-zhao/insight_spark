@@ -32,6 +32,33 @@
     <div class="panel">
       <div class="panel-header">
         <div>
+          <h2>知识文档</h2>
+          <p>上传销售复盘、运营说明等 .txt / .md 文档，系统会切片并作为诊断报告的 GraphRAG 证据。</p>
+        </div>
+        <el-button @click="loadKnowledgeDocs">刷新文档</el-button>
+      </div>
+      <el-upload :auto-upload="false" :show-file-list="true" accept=".txt,.md" :limit="1" :on-change="onKnowledgeDocChange">
+        <el-button>选择知识文档</el-button>
+      </el-upload>
+      <div class="upload-actions">
+        <el-button type="primary" :disabled="!knowledgeDocFile" @click="uploadKnowledgeDoc">上传并切片</el-button>
+      </div>
+      <el-table :data="knowledgeDocs" height="260" empty-text="暂无知识文档">
+        <el-table-column prop="title" label="文档标题" min-width="180" />
+        <el-table-column prop="fileName" label="文件名" min-width="180" />
+        <el-table-column prop="chunkCount" label="切片数" width="90" />
+        <el-table-column prop="createdAt" label="上传时间" min-width="180" />
+        <el-table-column label="操作" width="120">
+          <template #default="{ row }">
+            <el-button size="small" @click="indexKnowledgeDoc(row)">重建索引</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <div>
           <h2>GraphRAG 检索结果</h2>
           <p>对话分析会携带相关节点，帮助解释字段、敏感信息与历史诊断上下文。</p>
         </div>
@@ -86,8 +113,14 @@ const {
   graphSearchKeyword,
   graphSearchResult,
   graphLoading,
+  knowledgeDocFile,
+  knowledgeDocs,
   loadGraphOverview,
   rebuildGraph,
-  searchGraph
+  searchGraph,
+  onKnowledgeDocChange,
+  loadKnowledgeDocs,
+  uploadKnowledgeDoc,
+  indexKnowledgeDoc
 } = inject('workbench')
 </script>

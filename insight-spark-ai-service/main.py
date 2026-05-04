@@ -38,6 +38,15 @@ class DiagnoseRequest(BaseModel):
     rows: list[dict[str, Any]] = []
 
 
+class GraphRagDiagnoseRequest(BaseModel):
+    question: str
+    tableName: str
+    metricField: str
+    rows: list[dict[str, Any]] = []
+    graphContext: list[dict[str, Any]] = []
+    docChunks: list[dict[str, Any]] = []
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -190,6 +199,42 @@ def diagnose(payload: DiagnoseRequest) -> dict[str, Any]:
         "suggestions": suggestions,
         "reportMarkdown": report_markdown,
     }
+
+
+@app.post("/ai/graphrag/diagnose")
+def graphrag_diagnose(payload: GraphRagDiagnoseRequest) -> dict[str, Any]:
+    base = diagnose(DiagnoseRequest(
+        tableName=payload.tableName,
+        metricField=payload.metricField,
+        rows=payload.rows,
+    ))
+    doc_evidence = []
+    for chunk in payload.docChunks[:5]:
+        doc_evidence.append({
+            "source": chunk.get("source") or f"文档 {chunk.get('docId', '')} 第 {chunk.get('chunkIndex', '')} 段",
+            "text": str(chunk.get("chunkText", ""))[:220],
+        })
+    graph_path = [
+        {
+            "nodeType": item.get("nodeType"),
+            "label": item.get("label"),
+            "sourceId": item.get("sourceId"),
+        }
+        for item in payload.graphContext[:8]
+    ]
+    evidence_lines = [f"- {item['source']}：{item['text']}" for item in doc_evidence]
+    if graph_path:
+        evidence_lines.append("- 知识图谱路径：" + " -> ".join(str(item.get("label") or item.get("sourceId") or item.get("nodeType")) for item in graph_path))
+
+    base["summary"] = f"{base.get('summary', '')} 已结合 {len(doc_evidence)} 条文档证据和 {len(graph_path)} 个图谱节点进行 GraphRAG 推理。"
+    base["evidence"] = doc_evidence
+    base["reasoningPath"] = graph_path
+    base["reportMarkdown"] = (
+        f"{base.get('reportMarkdown', '')}\n\n"
+        "## 关联证据\n\n"
+        + ("\n".join(evidence_lines) if evidence_lines else "- 暂未检索到外部证据，建议先上传知识文档并同步知识图谱。")
+    )
+    return base
 
 
 def to_float(value: Any) -> float | None:

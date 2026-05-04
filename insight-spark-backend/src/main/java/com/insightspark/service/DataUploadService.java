@@ -87,6 +87,18 @@ public class DataUploadService {
                   INDEX `idx_business_model_published` (`published`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='零代码业务模型与企业模型库';
                 """);
+
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS `is_analysis_template` (
+                  `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+                  `template_name` VARCHAR(255) NOT NULL,
+                  `file_name` VARCHAR(255) NULL,
+                  `template_type` VARCHAR(50) NULL,
+                  `template_content` LONGTEXT NULL,
+                  `created_by` VARCHAR(64) NULL,
+                  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='业务分析模板';
+                """);
     }
 
     public Map<String, Object> processFile(MultipartFile file) throws IOException {
@@ -134,7 +146,7 @@ public class DataUploadService {
                     "模型_" + result.get("displayName"),
                     modelRequirement,
                     Objects.toString(result.get("tableName")),
-                    buildModelJson(modelRequirement, Objects.toString(result.get("tableName")), merged.headers(), merged.rows())
+                    buildAcceptanceModelJson(modelRequirement, Objects.toString(result.get("tableName")), merged.headers(), merged.rows())
             ));
         }
         result.put("mergeMode", normalizedMode);
@@ -296,8 +308,56 @@ public class DataUploadService {
         List<String> headers = listFields(tableName).stream()
                 .map(item -> Objects.toString(item.get("displayName"), Objects.toString(item.get("columnName"))))
                 .toList();
-        Map<String, Object> modelJson = buildModelJson(requirement, tableName, headers, List.of());
+        Map<String, Object> modelJson = buildAcceptanceModelJson(requirement, tableName, headers, List.of());
         return saveBusinessModel(modelName, requirement, tableName, modelJson);
+    }
+
+    public Map<String, Object> uploadTemplate(MultipartFile file) throws IOException {
+        String originalFilename = Objects.requireNonNullElse(file.getOriginalFilename(), "analysis-template.txt");
+        String lowerName = originalFilename.toLowerCase();
+        if (!lowerName.endsWith(".txt") && !lowerName.endsWith(".md")) {
+            throw new IllegalArgumentException("分析模板当前仅支持 .txt / .md 文件");
+        }
+        String content = new String(file.getBytes(), StandardCharsets.UTF_8);
+        String templateName = removeExtension(originalFilename);
+        String templateType = lowerName.endsWith(".md") ? "MARKDOWN" : "TEXT";
+        jdbcTemplate.update("""
+                INSERT INTO is_analysis_template(template_name, file_name, template_type, template_content, created_by)
+                VALUES (?, ?, ?, ?, ?)
+                """, templateName, originalFilename, templateType, content, permissionService.currentUserId());
+        Long id = jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
+        return Map.of("id", id, "templateName", templateName, "fileName", originalFilename, "templateType", templateType);
+    }
+
+    public List<Map<String, Object>> listTemplates() {
+        return jdbcTemplate.queryForList("""
+                SELECT id, template_name AS templateName, file_name AS fileName,
+                       template_type AS templateType, created_by AS createdBy, created_at AS createdAt
+                FROM is_analysis_template
+                WHERE created_by = ? OR ? = 'ADMIN'
+                ORDER BY created_at DESC
+                LIMIT 100
+                """, permissionService.currentUserId(), permissionService.currentRole());
+    }
+
+    public Map<String, Object> createBusinessModelFromTemplate(Map<String, Object> request) {
+        String tableName = Objects.toString(request.get("tableName"), "");
+        Long templateId = Long.parseLong(Objects.toString(request.get("templateId"), "0"));
+        String requirement = Objects.toString(request.getOrDefault("requirement", ""));
+        assertKnownTable(tableName);
+        List<Map<String, Object>> templates = jdbcTemplate.queryForList("""
+                SELECT template_name AS templateName, template_content AS templateContent
+                FROM is_analysis_template
+                WHERE id = ?
+                """, templateId);
+        if (templates.isEmpty()) {
+            throw new IllegalArgumentException("分析模板不存在：" + templateId);
+        }
+        Map<String, Object> template = templates.get(0);
+        String templateName = Objects.toString(template.get("templateName"), "分析模板");
+        String templateContent = Objects.toString(template.get("templateContent"), "");
+        Map<String, Object> modelJson = buildTemplateModelJson(requirement, tableName, templateContent, listFields(tableName));
+        return saveBusinessModel(templateName + "_生成模型", requirement, tableName, modelJson);
     }
 
     public void publishBusinessModel(Long modelId, boolean published) {
@@ -319,7 +379,7 @@ public class DataUploadService {
                 Objects.toString(row.get("modelName")) + "_套用",
                 Objects.toString(row.get("modelRequirement")),
                 tableName,
-                buildModelJson(Objects.toString(row.get("modelRequirement")), tableName,
+                buildAcceptanceModelJson(Objects.toString(row.get("modelRequirement")), tableName,
                         listFields(tableName).stream().map(item -> Objects.toString(item.get("displayName"))).toList(),
                         List.of())
         );
@@ -626,6 +686,80 @@ public class DataUploadService {
         ));
         model.put("reusableParameters", Map.of("timeWindow", "可配置", "topN", 10, "compareMode", "环比/同比"));
         return model;
+    }
+
+    private Map<String, Object> buildTemplateModelJson(String requirement, String tableName, String templateContent,
+                                                       List<Map<String, Object>> fields) {
+        List<String> headers = fields.stream()
+                .map(item -> Objects.toString(item.getOrDefault("displayName", item.get("columnName"))))
+                .toList();
+        Map<String, Object> model = buildAcceptanceModelJson(requirement + "\n" + templateContent, tableName, headers, List.of());
+        model.put("requirement", requirement);
+        return model;
+    }
+
+    private Map<String, Object> buildAcceptanceModelJson(String requirement, String tableName, List<String> headers,
+                                                         List<List<String>> rows) {
+        List<String> metricFields = new ArrayList<>();
+        List<String> dimensionFields = new ArrayList<>();
+        for (int i = 0; i < headers.size(); i++) {
+            String header = headers.get(i);
+            String haystack = (requirement + " " + header).toLowerCase();
+            boolean looksMetric = (!rows.isEmpty() && "NUMBER".equals(inferType(rows, i)))
+                    || haystack.contains("销售") || haystack.contains("金额") || haystack.contains("数量")
+                    || haystack.contains("客单价") || haystack.contains("amount") || haystack.contains("sales");
+            if (looksMetric) {
+                metricFields.add(header);
+            } else {
+                dimensionFields.add(header);
+            }
+        }
+        if (metricFields.isEmpty()) {
+            metricFields.add("记录数");
+        }
+        if (dimensionFields.isEmpty()) {
+            dimensionFields.add("业务分类");
+        }
+
+        Map<String, Object> model = new LinkedHashMap<>();
+        model.put("modelName", inferModelName(requirement));
+        model.put("tableName", tableName);
+        model.put("requirement", requirement);
+        model.put("metricDefinitions", metricFields.stream().limit(6).map(name -> Map.of(
+                "name", name,
+                "field", name,
+                "aggregation", "记录数".equals(name) ? "COUNT" : "SUM",
+                "formula", "记录数".equals(name) ? "COUNT(1)" : "SUM(" + name + ")"
+        )).toList());
+        model.put("dimensionSystem", dimensionFields.stream().limit(8).map(name -> Map.of(
+                "name", name,
+                "field", name
+        )).toList());
+        model.put("analysisLogic", List.of(
+                "按核心维度拆解指标贡献",
+                "按时间或批次观察趋势变化",
+                "识别异常波动并生成诊断报告",
+                "沉淀为个人模型或发布到企业模型库复用"
+        ));
+        model.put("chartSuggestions", metricFields.stream().limit(4).map(name -> Map.of(
+                "title", "各维度" + name + "分析",
+                "chartType", "bar"
+        )).toList());
+        return model;
+    }
+
+    private String inferModelName(String requirement) {
+        String text = requirement == null ? "" : requirement.trim();
+        if (text.contains("生命周期")) {
+            return "电商用户生命周期分析模型";
+        }
+        if (text.contains("销售")) {
+            return "销售经营分析模型";
+        }
+        if (text.length() > 18) {
+            return text.substring(0, 18) + "分析模型";
+        }
+        return text.isBlank() ? "零代码业务分析模型" : text + "分析模型";
     }
 
     private String toJson(Object value) {
