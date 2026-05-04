@@ -22,6 +22,18 @@ public class AuthInterceptor implements HandlerInterceptor {
             return true;
         }
 
+        boolean loginRequired = uri.startsWith("/api/data")
+                || uri.startsWith("/api/permission")
+                || uri.startsWith("/api/datasource")
+                || uri.startsWith("/api/datasources")
+                || uri.startsWith("/api/audit")
+                || uri.startsWith("/api/diagnosis")
+                || uri.startsWith("/api/knowledge");
+
+        if (!loginRequired) {
+            return true;
+        }
+
         AuthContext.UserPrincipal principal = authService.authenticate(request.getHeader("Authorization"));
         if (principal == null) {
             response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
@@ -30,11 +42,10 @@ public class AuthInterceptor implements HandlerInterceptor {
             return false;
         }
 
-        if (uri.startsWith("/api/datasources")
+        if (uri.startsWith("/api/datasource")
+                || uri.startsWith("/api/datasources")
                 || uri.startsWith("/api/audit")
-                || uri.startsWith("/api/knowledge")
-                || uri.startsWith("/api/diagnosis")
-                || uri.startsWith("/api/permission/admin")) {
+                || uri.startsWith("/api/knowledge")) {
             if (!"ADMIN".equalsIgnoreCase(principal.role())) {
                 response.setStatus(HttpServletResponse.SC_FORBIDDEN);
                 response.setContentType("application/json;charset=UTF-8");
