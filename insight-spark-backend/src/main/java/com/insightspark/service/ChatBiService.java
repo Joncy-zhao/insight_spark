@@ -36,7 +36,7 @@ public class ChatBiService {
     private KnowledgeGraphService knowledgeGraphService;
 
     public Map<String, Object> executeChat(String question, String tableName) {
-        log.info("🤖 收到用户自然语言提问: {}", question);
+        log.info("Received chat question: {}", question);
 
         String activeTable = (tableName == null || tableName.isBlank()) ? dataUploadService.latestTableName() : tableName;
         boolean officialSource = datasourceService.isOfficialSource(activeTable);
@@ -89,7 +89,7 @@ public class ChatBiService {
             engine = "java-fallback";
         }
 
-        log.info("🧠 AI 生成 SQL: {}", generatedSql);
+        log.info("Generated SQL: {}", generatedSql);
 
         SqlAuditService.AuditResult auditResult = sqlAuditService.inspect(generatedSql, queryTableName);
         if (auditResult.blocked()) {

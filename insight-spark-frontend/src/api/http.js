@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { clearSession } from '../store/session'
 
 export const API_BASE = 'http://localhost:8080'
 
@@ -6,6 +7,8 @@ export const http = axios.create({
   baseURL: API_BASE,
   timeout: 30000
 })
+
+let sessionExpiredHandled = false
 
 const readToken = () => {
   const directToken = localStorage.getItem('token')
@@ -36,3 +39,22 @@ export const unwrap = (response) => {
   }
   return body.data ?? body
 }
+
+const normalizeError = (error) => {
+  if (error?.response?.status === 401) {
+    if (!sessionExpiredHandled) {
+      sessionExpiredHandled = true
+      clearSession()
+      setTimeout(() => {
+        sessionExpiredHandled = false
+      }, 1000)
+    }
+    return Promise.reject(new Error('登录已失效，请重新登录'))
+  }
+
+  const message = error?.response?.data?.message || error?.message || '请求失败'
+  return Promise.reject(new Error(message))
+}
+
+http.interceptors.response.use(response => response, normalizeError)
+axios.interceptors.response.use(response => response, normalizeError)

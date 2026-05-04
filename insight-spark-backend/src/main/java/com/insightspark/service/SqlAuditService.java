@@ -235,9 +235,9 @@ public class SqlAuditService {
                     : List.of();
         } else {
             sensitiveColumns = jdbcTemplate.queryForList("""
-                    SELECT column_name
+                    SELECT `column_name`
                     FROM is_data_field
-                    WHERE table_name = ? AND sensitive = 1
+                    WHERE table_name = ? AND `sensitive` = 1
                     """, String.class, tableName);
         }
         if (sensitiveColumns.isEmpty()) {

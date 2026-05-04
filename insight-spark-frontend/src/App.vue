@@ -165,6 +165,8 @@ const visibleMenuGroups = computed(() => {
 })
 const isPermissionModule = computed(() => activeModule.value === 'permission' || activeModule.value === 'permissionAdmin')
 const isAdminModule = computed(() => ['datasource', 'permissionAdmin', 'diagnosis', 'knowledgeGraph', 'audit'].includes(activeModule.value))
+const isAdminUser = computed(() => currentUser.value?.role === 'ADMIN')
+const portalLabel = computed(() => isAdminUser.value ? '管理员门户' : '用户门户')
 const placeholderStep = computed(() => activeModule.value === 'audit' ? 1 : 0)
 const previewColumns = computed(() => previewRows.value.length ? Object.keys(previewRows.value[0]) : [])
 const chartTypeLabel = computed(() => {
@@ -177,19 +179,53 @@ const numericFields = computed(() => fields.value.filter(field => field.fieldTyp
 const dateFields = computed(() => fields.value.filter(field => field.fieldType === 'DATE'))
 const dimensionCandidateFields = computed(() => fields.value.filter(field => field.fieldType !== 'NUMBER'))
 
+const ensureSessionAlive = async () => {
+  try {
+    await axios.get(`${API_BASE}/api/auth/me`).then(unwrap)
+    return true
+  } catch (error) {
+    clearSession()
+    return false
+  }
+}
+
 onMounted(async () => {
   restoreSessionHeader()
   if (!isAuthenticated.value) {
     return
   }
+  await bootstrapPersistedSession()
+})
+
+const bootstrapPersistedSession = async () => {
+  const alive = await ensureSessionAlive()
+  if (!alive) {
+    ElMessage.warning('登录状态已过期，请重新登录')
+    return
+  }
+
+  await bootstrapWorkbench()
+}
+
+const bootstrapWorkbench = async () => {
+
   normalizeActiveModule()
   const container = document.getElementById('echarts-container')
   if (container) {
     chartInstance = echarts.init(container)
   }
   window.addEventListener('resize', () => chartInstance?.resize())
-  await Promise.all([loadTables(), loadBusinessModels(), loadAnalysisTemplates()])
-})
+  try {
+    await Promise.all([loadTables(), loadBusinessModels(), loadAnalysisTemplates()])
+  } catch (error) {
+    if ((error.message || '').includes('登录已失效') || (error.message || '').includes('请先登录')) {
+      ElMessage.warning('登录状态已过期，请重新登录')
+      clearSession()
+      return
+    }
+    ElMessage.error(error.message || '初始化数据加载失败')
+  }
+}
 
 const normalizeActiveModule = () => {
   const firstModule = visibleMenuGroups.value[0]?.modules[0]?.key || 'upload'
@@ -200,8 +236,7 @@ const normalizeActiveModule = () => {
 }
 
 const handleAuthenticated = async () => {
-  normalizeActiveModule()
-  await Promise.all([loadTables(), loadBusinessModels(), loadAnalysisTemplates()])
+  await bootstrapWorkbench()
 }
 
 const handleLogout = async () => {
@@ -482,7 +517,63 @@ const runDiagnosis = async () => {
     diagnosisLoading.value = false
   }
 }
+const diagnoseFromLastAnalysis = async () => {
+  if (!lastAnalysis.value) {
+    ElMessage.warning('请先完成一次对话查询，再生成诊断报告')
+    return
+  }
 
+  if (!selectedTableName.value) {
+    ElMessage.warning('请先选择数据表')
+    return
+  }
+
+  if (!fields.value.length) {
+    await loadFields(selectedTableName.value)
+  }
+
+  const metricDisplayName = lastAnalysis.value.fieldMapping?.metric
+  const dimensionDisplayName = lastAnalysis.value.fieldMapping?.dimension
+
+  const metricField =
+      fields.value.find(item => item.displayName === metricDisplayName && item.fieldType === 'NUMBER')
+      || fields.value.find(item => item.fieldType === 'NUMBER')
+
+  const dimensionField =
+      fields.value.find(item => item.displayName === dimensionDisplayName)
+      || fields.value.find(item => item.fieldType !== 'NUMBER')
+
+  const timeField = fields.value.find(item => item.fieldType === 'DATE')
+
+  if (!metricField) {
+    ElMessage.warning('当前数据表没有可用于诊断的数值字段，请先在字段语义中把指标字段设置为 NUMBER')
+    return
+  }
+
+  diagnosisLoading.value = true
+
+  try {
+    currentDiagnosis.value = unwrap(await axios.post(`${API_BASE}/api/diagnosis/run`, {
+      tableName: selectedTableName.value,
+      metricField: metricField.columnName,
+      dimensionFields: dimensionField ? [dimensionField.columnName] : [],
+      timeField: timeField ? timeField.columnName : null,
+      question: lastAnalysis.value.message || '基于当前对话查询结果生成智能诊断报告'
+    }))
+
+    ElMessage.success('已根据当前图表生成智能诊断报告')
+    if (isAdminUser.value) {
+      await loadDiagnosisReports()
+      activeModule.value = 'diagnosis'
+    } else {
+      ElMessage.success('报告已生成，管理员可在诊断中心查看完整报告')
+    }
+  } catch (error) {
+    ElMessage.error(error.message || '诊断报告生成失败')
+  } finally {
+    diagnosisLoading.value = false
+  }
+}
 const loadDiagnosisReports = async () => {
   diagnosisReports.value = unwrap(await axios.get(`${API_BASE}/api/diagnosis/reports`))
 }
@@ -709,16 +800,24 @@ const sendQuestion = async () => {
       chartInstance?.clear()
       ElMessage.warning('查询成功，但没有符合条件的数据')
     }
-    await loadAuditLogs()
+    if (isAdminUser.value) {
+      await loadAuditLogs()
+    }
   } catch (error) {
     messages.value.push({ role: 'system', content: `分析失败：${error.message}` })
-    await loadAuditLogs()
+    if (isAdminUser.value) {
+      await loadAuditLogs()
+    }
   } finally {
     loading.value = false
   }
 }
 
 const loadAuditLogs = async () => {
+  if (!isAdminUser.value) {
+    auditLogs.value = []
+    return
+  }
   const data = unwrap(await axios.get(`${API_BASE}/api/audit/sql-logs`, {
     params: {
       riskLevel: auditRiskLevel.value || undefined,
@@ -859,6 +958,7 @@ const renderChart = (data, type) => {
 
 provide('workbench', {
   activeModule,
+  diagnoseFromLastAnalysis,
   tables,
   selectedTableName,
   uploadFile,
@@ -923,6 +1023,7 @@ provide('workbench', {
   moduleSubtitle,
   isPermissionModule,
   isAdminModule,
+  isAdminUser,
   placeholderStep,
   previewColumns,
   chartTypeLabel,

@@ -78,6 +78,13 @@ public class DataUploadService {
                   INDEX `idx_is_data_field_table` (`table_name`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='上传数据字段元信息';
                 """);
+                addColumnIfMissing("is_data_field", "source_field_name", "`source_field_name` VARCHAR(255) NOT NULL DEFAULT ''");
+                addColumnIfMissing("is_data_field", "column_name", "`column_name` VARCHAR(128) NOT NULL DEFAULT ''");
+                addColumnIfMissing("is_data_field", "field_type", "`field_type` VARCHAR(32) NOT NULL DEFAULT 'TEXT'");
+                addColumnIfMissing("is_data_field", "display_name", "`display_name` VARCHAR(255) NOT NULL DEFAULT ''");
+                addColumnIfMissing("is_data_field", "field_comment", "`field_comment` VARCHAR(512) NULL");
+                addColumnIfMissing("is_data_field", "sensitive", "`sensitive` TINYINT(1) NOT NULL DEFAULT 0");
+                addColumnIfMissing("is_data_field", "sort_order", "`sort_order` INT NOT NULL DEFAULT 0");
 
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS `is_business_model` (
@@ -987,6 +994,16 @@ public class DataUploadService {
             return "未命名字段" + (index + 1);
         }
         return header.trim();
+    }
+
+    private void addColumnIfMissing(String tableName, String columnName, String definition) {
+        Integer count = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM information_schema.columns
+                WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?
+                """, Integer.class, tableName, columnName);
+        if (count == null || count == 0) {
+            jdbcTemplate.execute("ALTER TABLE `" + tableName + "` ADD COLUMN " + definition);
+        }
     }
 
     private String removeExtension(String filename) {

@@ -27,4 +27,17 @@ public class ChatController {
             return ApiResponse.error("分析失败：" + e.getMessage());
         }
     }
+
+    @GetMapping("/ask")
+    public ApiResponse<Map<String, Object>> askQuestionByGet(@RequestParam(required = false) String question,
+                                                              @RequestParam(required = false) String tableName) {
+        if (question == null || question.isBlank()) {
+            return ApiResponse.badRequest("问题不能为空");
+        }
+        try {
+            return ApiResponse.success(chatBiService.executeChat(question, tableName));
+        } catch (Exception e) {
+            return ApiResponse.error("分析失败：" + e.getMessage());
+        }
+    }
 }

@@ -120,14 +120,14 @@ public class KnowledgeDocumentService {
         Map<String, Map<String, Object>> dedup = new LinkedHashMap<>();
         for (String term : terms) {
             String like = "%" + term + "%";
-            List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
-                    SELECT c.doc_id AS docId, d.title, c.chunk_index AS chunkIndex, c.chunk_text AS chunkText,
-                           CONCAT('《', d.title, '》 第 ', c.chunk_index, ' 段') AS source
-                    FROM is_knowledge_chunk c
-                    JOIN is_knowledge_doc d ON d.id = c.doc_id
-                    WHERE c.chunk_text LIKE ? OR c.keywords LIKE ?
-                    ORDER BY c.created_at DESC
-                    LIMIT """ + safeLimit, like, like);
+            String sql = "SELECT c.doc_id AS docId, d.title, c.chunk_index AS chunkIndex, c.chunk_text AS chunkText,\n" +
+                    "       CONCAT('《', d.title, '》 第 ', c.chunk_index, ' 段') AS source\n" +
+                    "FROM is_knowledge_chunk c\n" +
+                    "JOIN is_knowledge_doc d ON d.id = c.doc_id\n" +
+                    "WHERE c.chunk_text LIKE ? OR c.keywords LIKE ?\n" +
+                    "ORDER BY c.created_at DESC\n" +
+                    "LIMIT " + safeLimit;
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, like, like);
             for (Map<String, Object> row : rows) {
                 dedup.putIfAbsent(row.get("docId") + ":" + row.get("chunkIndex"), row);
             }

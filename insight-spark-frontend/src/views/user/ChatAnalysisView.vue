@@ -44,7 +44,20 @@
                 <h2>📊 智能可视化呈现</h2>
                 <p>AI 将理解您的意图并推荐最合适的 ECharts 图表类型</p>
               </div>
-              <el-tag v-if="currentChartType" type="success" effect="dark" round>{{ chartTypeLabel }}效果</el-tag>
+              <div class="chart-actions">
+                <el-tag v-if="currentChartType" type="success" effect="dark" round>
+                  {{ chartTypeLabel }}效果
+                </el-tag>
+
+                <el-button
+                    type="warning"
+                    :disabled="!lastAnalysis"
+                    :loading="diagnosisLoading"
+                    @click="diagnoseFromLastAnalysis"
+                >
+                  一键生成诊断报告
+                </el-button>
+              </div>
             </div>
 
             <div id="echarts-container" class="chart-canvas"></div>
@@ -61,6 +74,22 @@
               </el-descriptions-item>
               <el-descriptions-item label="审计说明">{{ lastAnalysis.riskReason }}</el-descriptions-item>
             </el-descriptions>
+
+            <!-- 诊断报告预览卡片，仅普通用户显示 -->
+            <el-card v-if="currentDiagnosis && !isAdminUser" class="diagnosis-preview-card" shadow="hover" style="margin: 18px 0 0 0;">
+              <template #header>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <el-icon><i class="el-icon-document"></i></el-icon>
+                  <span>最新诊断报告预览</span>
+                </div>
+              </template>
+              <div>
+                <div style="font-weight: bold; font-size: 16px; margin-bottom: 4px;">{{ currentDiagnosis.title || '智能诊断报告' }}</div>
+                <div style="color: #888; font-size: 13px; margin-bottom: 8px;">生成时间：{{ currentDiagnosis.createdAt ? currentDiagnosis.createdAt.slice(0, 19).replace('T', ' ') : '' }}</div>
+                <div style="margin-bottom: 8px;">摘要：{{ currentDiagnosis.summary || '暂无摘要' }}</div>
+                <el-button size="small" type="primary" @click="() => $message.info('如需查看完整报告，请联系管理员')">查看完整报告</el-button>
+              </div>
+            </el-card>
 
             <div v-if="lastAnalysis?.graphContext?.length" class="graph-context">
               <h3>GraphRAG 上下文</h3>
@@ -100,12 +129,14 @@ const {
   diagnosisLoading,
   diagnosisReports,
   dimensionCandidateFields,
+  diagnoseFromLastAnalysis,
   field,
   fieldLabel,
   fields,
   fillCurrentDatasource,
   formData,
   isAdminModule,
+  isAdminUser,
   isPermissionModule,
   lastAnalysis,
   loadAdminPermissionRequests,
@@ -168,3 +199,10 @@ const {
   xAxisData
 } = inject('workbench')
 </script>
+<style scoped>
+.chart-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+</style>

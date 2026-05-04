@@ -5,6 +5,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.springframework.http.HttpMethod;
 import org.springframework.web.servlet.HandlerInterceptor;
 
 @Component
@@ -15,12 +16,19 @@ public class AuthInterceptor implements HandlerInterceptor {
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
+        // Let browser CORS preflight pass through, otherwise frontend sees Network Error.
+        if (HttpMethod.OPTIONS.matches(request.getMethod())) {
+            return true;
+        }
+
         String uri = request.getRequestURI();
         if (isPublicAuthEndpoint(uri)) {
             return true;
         }
 
         boolean loginRequired = uri.startsWith("/api/data")
+            || uri.startsWith("/api/auth/me")
+            || uri.startsWith("/api/chat")
                 || uri.startsWith("/api/permission")
                 || uri.startsWith("/api/datasource")
                 || uri.startsWith("/api/datasources")
@@ -59,11 +67,11 @@ public class AuthInterceptor implements HandlerInterceptor {
     }
 
     private boolean isAdminEndpoint(String uri) {
-        return uri.startsWith("/api/datasource")
+        return (uri.startsWith("/api/diagnosis") && !uri.startsWith("/api/diagnosis/run"))
+            || uri.startsWith("/api/datasource")
                 || uri.startsWith("/api/datasources")
                 || uri.startsWith("/api/audit")
                 || uri.startsWith("/api/knowledge")
-                || uri.startsWith("/api/diagnosis")
                 || uri.startsWith("/api/permission/admin");
     }
 

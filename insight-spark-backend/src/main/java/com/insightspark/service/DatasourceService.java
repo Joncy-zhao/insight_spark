@@ -601,46 +601,38 @@ public class DatasourceService {
 
     private String buildTableMetaSql(String dbType, String databaseName) {
         if ("POSTGRESQL".equalsIgnoreCase(dbType) || "POSTGRES".equalsIgnoreCase(dbType)) {
-            return """
-                    SELECT t.table_name, COALESCE(obj_description((quote_ident(t.table_schema) || '.' || quote_ident(t.table_name))::regclass), '') AS table_comment,
-                           0 AS table_rows
-                    FROM information_schema.tables t
-                    WHERE t.table_catalog = '""" + escapeSql(databaseName) + "' AND t.table_schema = 'public' AND t.table_type = 'BASE TABLE'
-                    ORDER BY t.table_name
-                    """;
+            return "SELECT t.table_name, COALESCE(obj_description((quote_ident(t.table_schema) || '.' || quote_ident(t.table_name))::regclass), '') AS table_comment,\n" +
+                   "       0 AS table_rows\n" +
+                   "FROM information_schema.tables t\n" +
+                   "WHERE t.table_catalog = '" + escapeSql(databaseName) + "' AND t.table_schema = 'public' AND t.table_type = 'BASE TABLE'\n" +
+                   "ORDER BY t.table_name";
         }
-        return """
-                SELECT table_name, table_comment, table_rows
-                FROM information_schema.tables
-                WHERE table_schema = '""" + escapeSql(databaseName) + "' AND table_type = 'BASE TABLE' ORDER BY table_name
-                """;
+        return "SELECT table_name, table_comment, table_rows\n" +
+               "FROM information_schema.tables\n" +
+               "WHERE table_schema = '" + escapeSql(databaseName) + "' AND table_type = 'BASE TABLE' ORDER BY table_name";
     }
 
     private String buildColumnMetaSql(String dbType, String databaseName) {
         if ("POSTGRESQL".equalsIgnoreCase(dbType) || "POSTGRES".equalsIgnoreCase(dbType)) {
-            return """
-                    SELECT c.table_name, c.column_name, c.data_type,
-                           COALESCE(col_description((quote_ident(c.table_schema) || '.' || quote_ident(c.table_name))::regclass, c.ordinal_position), '') AS column_comment,
-                           c.is_nullable,
-                           CASE WHEN tc.constraint_type = 'PRIMARY KEY' THEN 'PRI' ELSE '' END AS column_key,
-                           c.ordinal_position
-                    FROM information_schema.columns c
-                    LEFT JOIN information_schema.key_column_usage kcu
-                      ON c.table_catalog = kcu.table_catalog AND c.table_schema = kcu.table_schema
-                     AND c.table_name = kcu.table_name AND c.column_name = kcu.column_name
-                    LEFT JOIN information_schema.table_constraints tc
-                      ON kcu.constraint_catalog = tc.constraint_catalog
-                     AND kcu.constraint_schema = tc.constraint_schema
-                     AND kcu.constraint_name = tc.constraint_name
-                    WHERE c.table_catalog = '""" + escapeSql(databaseName) + "' AND c.table_schema = 'public'
-                    ORDER BY c.table_name, c.ordinal_position
-                    """;
+            return "SELECT c.table_name, c.column_name, c.data_type,\n" +
+                   "       COALESCE(col_description((quote_ident(c.table_schema) || '.' || quote_ident(c.table_name))::regclass, c.ordinal_position), '') AS column_comment,\n" +
+                   "       c.is_nullable,\n" +
+                   "       CASE WHEN tc.constraint_type = 'PRIMARY KEY' THEN 'PRI' ELSE '' END AS column_key,\n" +
+                   "       c.ordinal_position\n" +
+                   "FROM information_schema.columns c\n" +
+                   "LEFT JOIN information_schema.key_column_usage kcu\n" +
+                   "  ON c.table_catalog = kcu.table_catalog AND c.table_schema = kcu.table_schema\n" +
+                   " AND c.table_name = kcu.table_name AND c.column_name = kcu.column_name\n" +
+                   "LEFT JOIN information_schema.table_constraints tc\n" +
+                   "  ON kcu.constraint_catalog = tc.constraint_catalog\n" +
+                   " AND kcu.constraint_schema = tc.constraint_schema\n" +
+                   " AND kcu.constraint_name = tc.constraint_name\n" +
+                   "WHERE c.table_catalog = '" + escapeSql(databaseName) + "' AND c.table_schema = 'public'\n" +
+                   "ORDER BY c.table_name, c.ordinal_position";
         }
-        return """
-                SELECT table_name, column_name, data_type, column_comment, is_nullable, column_key, ordinal_position
-                FROM information_schema.columns
-                WHERE table_schema = '""" + escapeSql(databaseName) + "' ORDER BY table_name, ordinal_position
-                """;
+        return "SELECT table_name, column_name, data_type, column_comment, is_nullable, column_key, ordinal_position\n" +
+               "FROM information_schema.columns\n" +
+               "WHERE table_schema = '" + escapeSql(databaseName) + "' ORDER BY table_name, ordinal_position";
     }
 
     private String normalizeDbType(String dbType) {
