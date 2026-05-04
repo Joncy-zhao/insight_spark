@@ -162,14 +162,36 @@
               </div>
             </div>
             <el-table :data="fields" height="360" empty-text="请选择数据表">
-              <el-table-column prop="displayName" label="业务字段" min-width="140" />
-              <el-table-column prop="columnName" label="物理字段" width="110" />
-              <el-table-column prop="fieldType" label="类型" width="90" />
-              <el-table-column prop="sensitive" label="敏感" width="80">
+              <el-table-column label="业务字段" min-width="150">
                 <template #default="{ row }">
-                  <el-tag :type="row.sensitive ? 'warning' : 'info'" size="small">
-                    {{ row.sensitive ? '是' : '否' }}
-                  </el-tag>
+                  <el-input v-model="row.displayName" size="small" placeholder="字段中文名" />
+                </template>
+              </el-table-column>
+              <el-table-column prop="columnName" label="物理字段" width="110" />
+              <el-table-column label="类型" width="120">
+                <template #default="{ row }">
+                  <el-select v-model="row.fieldType" size="small">
+                    <el-option label="文本" value="TEXT" />
+                    <el-option label="数值" value="NUMBER" />
+                    <el-option label="日期" value="DATE" />
+                  </el-select>
+                </template>
+              </el-table-column>
+              <el-table-column label="字段说明" min-width="180">
+                <template #default="{ row }">
+                  <el-input v-model="row.fieldComment" size="small" placeholder="例如：订单金额、销售日期、客户地区" />
+                </template>
+              </el-table-column>
+              <el-table-column label="敏感" width="90">
+                <template #default="{ row }">
+                  <el-switch v-model="row.sensitive" />
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="90" fixed="right">
+                <template #default="{ row }">
+                  <el-button size="small" type="primary" @click="updateUploadField(row)">
+                    保存
+                  </el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -314,6 +336,7 @@ const {
   toggleDatasource,
   unwrap,
   updateSchemaField,
+  updateUploadField,
   uploadFile,
   uploadFiles,
   uploadMergeMode,

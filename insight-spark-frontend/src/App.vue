@@ -613,6 +613,20 @@ const loadFields = async (tableName) => {
   fields.value = unwrap(await axios.get(`${API_BASE}/api/data/tables/${tableName}/fields`))
 }
 
+const updateUploadField = async (row) => {
+  try {
+    await axios.post(`${API_BASE}/api/data/tables/${selectedTableName.value}/fields/${row.columnName}`, {
+      displayName: row.displayName,
+      fieldType: row.fieldType,
+      fieldComment: row.fieldComment,
+      sensitive: Boolean(row.sensitive)
+    }).then(unwrap)
+    ElMessage.success('字段配置已更新')
+  } catch (error) {
+    ElMessage.error(error.message || '字段配置保存失败')
+  }
+}
+
 const selectTable = (row) => {
   previewPage.value = 1
   selectedTableName.value = row.tableName
@@ -1063,6 +1077,7 @@ provide('workbench', {
   handlePreviewPageChange,
   handlePreviewSizeChange,
   loadFields,
+  updateUploadField,
   selectTable,
   onFileChange,
   onBatchFileChange,
