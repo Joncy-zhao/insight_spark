@@ -37,6 +37,17 @@ public class KnowledgeDocumentController {
         return ApiResponse.success(knowledgeDocumentService.listDocs());
     }
 
+    @GetMapping("/{id}/chunks")
+    public ApiResponse<List<Map<String, Object>>> chunks(@PathVariable Long id) {
+        return ApiResponse.success(knowledgeDocumentService.listChunks(id));
+    }
+
+    @GetMapping("/search")
+    public ApiResponse<List<Map<String, Object>>> search(@RequestParam String keyword,
+                                                         @RequestParam(defaultValue = "10") int limit) {
+        return ApiResponse.success(knowledgeDocumentService.search(keyword, limit));
+    }
+
     @PostMapping("/{id}/index")
     public ApiResponse<Map<String, Object>> index(@PathVariable Long id) {
         return ApiResponse.success(knowledgeDocumentService.index(id));

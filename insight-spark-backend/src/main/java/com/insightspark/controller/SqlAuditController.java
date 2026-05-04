@@ -38,6 +38,11 @@ public class SqlAuditController {
         return ApiResponse.success(sqlAuditService.listRules());
     }
 
+    @GetMapping("/stats")
+    public ApiResponse<Map<String, Object>> stats() {
+        return ApiResponse.success(sqlAuditService.stats());
+    }
+
     @PostMapping("/rules/{ruleCode}/status")
     public ApiResponse<Void> updateRuleStatus(@PathVariable String ruleCode, @RequestBody Map<String, Object> request) {
         boolean enabled = Boolean.parseBoolean(String.valueOf(request.getOrDefault("enabled", "true")));

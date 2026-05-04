@@ -294,6 +294,33 @@ public class SqlAuditService {
                 """);
     }
 
+    public Map<String, Object> stats() {
+        Map<String, Object> totals = jdbcTemplate.queryForMap("""
+                SELECT COUNT(*) AS total,
+                       SUM(CASE WHEN risk_level = 'BLOCKED' THEN 1 ELSE 0 END) AS blockedCount,
+                       SUM(CASE WHEN risk_level = 'WARN' THEN 1 ELSE 0 END) AS warnCount,
+                       SUM(CASE WHEN sensitive_fields IS NOT NULL AND sensitive_fields <> '' THEN 1 ELSE 0 END) AS sensitiveCount,
+                       SUM(CASE WHEN slow_query = 1 THEN 1 ELSE 0 END) AS slowCount,
+                       ROUND(AVG(CASE WHEN duration_ms IS NULL THEN 0 ELSE duration_ms END), 0) AS avgDurationMs
+                FROM is_sql_audit_log
+                """);
+        Map<String, Object> rules = jdbcTemplate.queryForMap("""
+                SELECT COUNT(*) AS ruleCount,
+                       SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) AS enabledRuleCount
+                FROM is_sql_audit_rule
+                """);
+        return Map.of(
+                "total", number(totals.get("total")),
+                "blockedCount", number(totals.get("blockedCount")),
+                "warnCount", number(totals.get("warnCount")),
+                "sensitiveCount", number(totals.get("sensitiveCount")),
+                "slowCount", number(totals.get("slowCount")),
+                "avgDurationMs", number(totals.get("avgDurationMs")),
+                "ruleCount", number(rules.get("ruleCount")),
+                "enabledRuleCount", number(rules.get("enabledRuleCount"))
+        );
+    }
+
     public void updateRuleStatus(String ruleCode, boolean enabled) {
         jdbcTemplate.update("UPDATE is_sql_audit_rule SET enabled = ? WHERE rule_code = ?", enabled, ruleCode);
     }
@@ -328,6 +355,17 @@ public class SqlAuditService {
                     .append(csvCell(Objects.toString(log.get("riskReason"), ""))).append('\n');
         }
         return csv.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    private long number(Object value) {
+        if (value == null) {
+            return 0L;
+        }
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        String text = Objects.toString(value, "0");
+        return text.isBlank() ? 0L : Math.round(Double.parseDouble(text));
     }
 
     private void seedRules() {

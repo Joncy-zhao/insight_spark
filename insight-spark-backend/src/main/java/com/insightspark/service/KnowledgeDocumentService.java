@@ -81,6 +81,18 @@ public class KnowledgeDocumentService {
                 """);
     }
 
+    public List<Map<String, Object>> listChunks(Long docId) {
+        return jdbcTemplate.queryForList("""
+                SELECT c.id, c.doc_id AS docId, d.title, c.chunk_index AS chunkIndex,
+                       c.chunk_text AS chunkText, c.keywords, c.created_at AS createdAt
+                FROM is_knowledge_chunk c
+                JOIN is_knowledge_doc d ON d.id = c.doc_id
+                WHERE c.doc_id = ?
+                ORDER BY c.chunk_index ASC
+                LIMIT 100
+                """, docId);
+    }
+
     public Map<String, Object> index(Long docId) {
         List<Map<String, Object>> docs = jdbcTemplate.queryForList("""
                 SELECT id, title, content

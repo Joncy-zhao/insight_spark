@@ -92,6 +92,17 @@ public class DataUploadController {
         }
     }
 
+    @PostMapping("/tables/{tableName}/fields/{columnName}")
+    public ApiResponse<Map<String, Object>> updateField(@PathVariable String tableName,
+                                                        @PathVariable String columnName,
+                                                        @RequestBody Map<String, Object> request) {
+        try {
+            return ApiResponse.success(dataUploadService.updateFieldMeta(tableName, columnName, request));
+        } catch (Exception e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
     @GetMapping("/tables/{tableName}/preview")
     public ApiResponse<List<Map<String, Object>>> preview(@PathVariable String tableName,
                                                           @RequestParam(defaultValue = "10") int limit) {

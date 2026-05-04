@@ -377,6 +377,44 @@ public class DataUploadService {
                 """, tableName);
     }
 
+    public Map<String, Object> updateFieldMeta(String tableName, String columnName, Map<String, Object> request) {
+        assertKnownTable(tableName);
+        List<Map<String, Object>> fields = jdbcTemplate.queryForList("""
+                SELECT id, field_type AS fieldType, display_name AS displayName,
+                       field_comment AS fieldComment, `sensitive`
+                FROM is_data_field
+                WHERE table_name = ? AND column_name = ?
+                LIMIT 1
+                """, tableName, columnName);
+        if (fields.isEmpty()) {
+            throw new IllegalArgumentException("字段不存在：" + columnName);
+        }
+        Map<String, Object> current = fields.get(0);
+        String displayName = Objects.toString(request.getOrDefault("displayName", current.get("displayName")), "").trim();
+        String fieldType = Objects.toString(request.getOrDefault("fieldType", current.get("fieldType")), "TEXT").trim().toUpperCase();
+        String fieldComment = Objects.toString(request.getOrDefault("fieldComment", current.get("fieldComment")), "").trim();
+        boolean sensitive = Boolean.parseBoolean(Objects.toString(request.getOrDefault("sensitive", current.get("sensitive")), "false"));
+        if (displayName.isBlank()) {
+            throw new IllegalArgumentException("字段中文名不能为空");
+        }
+        if (!List.of("TEXT", "NUMBER", "DATE").contains(fieldType)) {
+            throw new IllegalArgumentException("字段类型仅支持 TEXT / NUMBER / DATE");
+        }
+        jdbcTemplate.update("""
+                UPDATE is_data_field
+                SET display_name = ?, field_type = ?, field_comment = ?, `sensitive` = ?
+                WHERE table_name = ? AND column_name = ?
+                """, displayName, fieldType, fieldComment, sensitive, tableName, columnName);
+        return Map.of(
+                "tableName", tableName,
+                "columnName", columnName,
+                "displayName", displayName,
+                "fieldType", fieldType,
+                "fieldComment", fieldComment,
+                "sensitive", sensitive
+        );
+    }
+
     public List<Map<String, Object>> preview(String tableName, int limit) {
         return preview(tableName, 1, limit);
     }
