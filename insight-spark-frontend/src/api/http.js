@@ -21,10 +21,8 @@ const readToken = () => {
 
 export const attachAuthHeader = (config) => {
   const token = readToken()
-  if (token) {
-    config.headers = config.headers || {}
-    config.headers.Authorization = `Bearer ${token}`
-  }
+  config.headers = config.headers || {}
+  config.headers.Authorization = `Bearer ${token}`
   return config
 }
 

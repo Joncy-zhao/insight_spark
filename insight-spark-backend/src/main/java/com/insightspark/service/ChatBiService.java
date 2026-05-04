@@ -84,7 +84,9 @@ public class ChatBiService {
         generatedSql = sqlAuditService.ensureLimit(generatedSql, 200);
         long startedAt = System.currentTimeMillis();
         List<Map<String, Object>> queryResult;
+        Integer previousTimeout = jdbcTemplate.getQueryTimeout();
         try {
+            jdbcTemplate.setQueryTimeout(5);
             queryResult = officialSource
                     ? datasourceService.executeQuery(activeTable, generatedSql)
                     : jdbcTemplate.queryForList(generatedSql);
@@ -97,6 +99,8 @@ public class ChatBiService {
             sqlAuditService.record(question, activeTable, engine, generatedSql, auditResult,
                     "FAILED", durationMs, e.getMessage());
             throw e;
+        } finally {
+            jdbcTemplate.setQueryTimeout(previousTimeout);
         }
 
         Map<String, Object> response = new HashMap<>();
