@@ -87,14 +87,9 @@ public class ChatBiService {
         Integer previousTimeout = jdbcTemplate.getQueryTimeout();
         try {
             jdbcTemplate.setQueryTimeout(5);
-            if (!officialSource && question.contains("关联官方")) {
-                queryResult = datasourceService.federatedAggregateJoin(activeTable, question);
-                generatedSql = "FEDERATED_JOIN(" + activeTable + ")";
-            } else {
-                queryResult = officialSource
-                        ? datasourceService.executeQuery(activeTable, generatedSql)
-                        : jdbcTemplate.queryForList(generatedSql);
-            }
+            queryResult = officialSource
+                    ? datasourceService.executeQuery(activeTable, generatedSql)
+                    : jdbcTemplate.queryForList(generatedSql);
             queryResult = sqlAuditService.maskRows(activeTable, queryResult);
             long durationMs = System.currentTimeMillis() - startedAt;
             sqlAuditService.record(question, activeTable, engine, generatedSql, auditResult,

@@ -116,14 +116,13 @@ public class DatasourceService {
         String databaseName = requiredString(request, "databaseName");
         String username = requiredString(request, "username");
         String password = requiredString(request, "password");
-        String encryptedPassword = DatasourcePasswordEncryptor.encrypt(password);
         String dbType = requiredString(request, "dbType").toUpperCase();
         String jdbcUrl = buildJdbcUrl(dbType, host, port, databaseName);
         jdbcTemplate.update("""
                 INSERT INTO is_official_datasource(name, db_type, host, port, database_name, username, password, jdbc_url,
                                                    status, pool_max_size, pool_timeout_ms, readonly_enforced)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'DISABLED', ?, ?, 1)
-                """, name, dbType, host, port, databaseName, username, encryptedPassword, jdbcUrl,
+                """, name, dbType, host, port, databaseName, username, password, jdbcUrl,
                 parseInt(request.get("poolMaxSize"), 10), parseInt(request.get("poolTimeoutMs"), 30000));
         return latestDatasource();
     }
@@ -135,8 +134,7 @@ public class DatasourceService {
         int port = parseInt(request.get("port"), ((Number) current.get("port")).intValue());
         String databaseName = textOr(request.get("databaseName"), current.get("database_name"));
         String username = textOr(request.get("username"), current.get("username"));
-        String password = textOr(request.get("password"), DatasourcePasswordEncryptor.decrypt(Objects.toString(current.get("password"), "")));
-        String encryptedPassword = DatasourcePasswordEncryptor.encrypt(password);
+        String password = textOr(request.get("password"), current.get("password"));
         String dbType = textOr(request.get("dbType"), current.get("db_type")).toUpperCase();
         String jdbcUrl = buildJdbcUrl(dbType, host, port, databaseName);
         jdbcTemplate.update("""
@@ -144,7 +142,7 @@ public class DatasourceService {
                 SET name = ?, db_type = ?, host = ?, port = ?, database_name = ?, username = ?, password = ?, jdbc_url = ?,
                     pool_max_size = ?, pool_timeout_ms = ?
                 WHERE id = ?
-                """, name, dbType, host, port, databaseName, username, encryptedPassword, jdbcUrl,
+                """, name, dbType, host, port, databaseName, username, password, jdbcUrl,
                 parseInt(request.get("poolMaxSize"), 10), parseInt(request.get("poolTimeoutMs"), 30000), datasourceId);
         return findDatasourcePublic(datasourceId);
     }
