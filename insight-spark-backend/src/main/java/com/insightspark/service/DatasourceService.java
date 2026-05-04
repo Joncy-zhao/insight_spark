@@ -410,6 +410,69 @@ public class DatasourceService {
         }
     }
 
+
+    public List<Map<String, Object>> federatedAggregateJoin(String uploadTableName, String question) {
+        List<Map<String, Object>> relations = jdbcTemplate.queryForList("""
+                SELECT datasource_id AS datasourceId, left_table AS leftTable, left_field AS leftField,
+                       right_table AS rightTable, right_field AS rightField
+                FROM is_federal_relation
+                WHERE right_source_type = 'UPLOAD' AND right_table = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """, uploadTableName);
+        if (relations.isEmpty()) {
+            throw new IllegalArgumentException("未找到该上传表的联邦关联配置：" + uploadTableName);
+        }
+        Map<String, Object> relation = relations.get(0);
+        long datasourceId = Long.parseLong(String.valueOf(relation.get("datasourceId")));
+        String officialTable = String.valueOf(relation.get("leftTable"));
+        String officialField = String.valueOf(relation.get("leftField"));
+        String uploadField = String.valueOf(relation.get("rightField"));
+
+        String aggSql = "SELECT `" + uploadField + "` AS join_id, SUM(CAST(NULLIF(`amount`, '') AS DECIMAL(18,2))) AS total_amount " +
+                "FROM `" + uploadTableName + "` GROUP BY `" + uploadField + "` LIMIT 200";
+        List<Map<String, Object>> uploadRows = jdbcTemplate.queryForList(aggSql);
+        if (uploadRows.isEmpty()) {
+            return List.of();
+        }
+        List<String> joinIds = uploadRows.stream()
+                .map(row -> Objects.toString(row.get("join_id"), "").trim())
+                .filter(v -> !v.isBlank())
+                .distinct()
+                .limit(200)
+                .toList();
+        if (joinIds.isEmpty()) {
+            return List.of();
+        }
+
+        String sourceKey = "official:" + datasourceId + ":" + officialTable;
+        String inClause = joinIds.stream().map(id -> "'" + escapeSql(id) + "'").reduce((a,b)->a+","+b).orElse("''");
+        List<Map<String, Object>> officialRows = executeQuery(sourceKey,
+                "SELECT `" + officialField + "` AS join_id, * FROM `" + officialTable + "` WHERE `" + officialField + "` IN (" + inClause + ") LIMIT 500");
+
+        Map<String, Map<String, Object>> officialIndex = new LinkedHashMap<>();
+        for (Map<String, Object> row : officialRows) {
+            officialIndex.put(Objects.toString(row.get("join_id"), ""), row);
+        }
+        List<Map<String, Object>> merged = new ArrayList<>();
+        for (Map<String, Object> row : uploadRows) {
+            String id = Objects.toString(row.get("join_id"), "");
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("join_id", id);
+            out.put("total_amount", row.get("total_amount"));
+            Map<String, Object> official = officialIndex.get(id);
+            if (official != null) {
+                for (Map.Entry<String, Object> entry : official.entrySet()) {
+                    if (!"join_id".equals(entry.getKey())) {
+                        out.put(entry.getKey(), entry.getValue());
+                    }
+                }
+            }
+            merged.add(out);
+        }
+        return merged;
+    }
+
     public String physicalTableName(String sourceKey) {
         return parseSourceKey(sourceKey).tableName();
     }
