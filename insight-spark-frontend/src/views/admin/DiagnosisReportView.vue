@@ -111,6 +111,13 @@
                 <el-table-column prop="content" label="说明" min-width="260" show-overflow-tooltip />
               </el-table>
 
+
+              <h3>关联证据来源</h3>
+              <el-empty v-if="!(currentDiagnosis.evidenceSources && currentDiagnosis.evidenceSources.length)" description="暂无证据来源" />
+              <ol v-else class="evidence-list">
+                <li v-for="(item, index) in currentDiagnosis.evidenceSources" :key="`${index}-${item}`">{{ item }}</li>
+              </ol>
+
               <h3>根因假设</h3>
               <el-table :data="currentDiagnosis.rootCauses || []" height="180" empty-text="暂无根因假设">
                 <el-table-column prop="level" label="等级" width="90" />
@@ -247,3 +254,13 @@ const {
   xAxisData
 } = inject('workbench')
 </script>
+
+<style scoped>
+.evidence-list {
+  margin: 8px 0 16px;
+  padding-left: 20px;
+  color: #334155;
+  line-height: 1.7;
+}
+
+</style>

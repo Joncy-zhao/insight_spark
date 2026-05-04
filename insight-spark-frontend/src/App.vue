@@ -121,6 +121,7 @@ const adminRequestStatus = ref('PENDING')
 const permissionForm = ref({ tableName: '', reason: '' })
 const datasourceForm = ref({
   name: '',
+  dbType: 'MYSQL',
   host: 'localhost',
   port: 3306,
   databaseName: '',
@@ -332,11 +333,12 @@ const permissionStatusText = (status) => {
 const fillCurrentDatasource = () => {
   datasourceForm.value = {
     name: '当前项目库',
+    dbType: 'MYSQL',
     host: 'localhost',
     port: 3306,
     databaseName: 'insight_spark',
     username: 'root',
-    password: 'nisibusisa250',
+    password: '',
     poolMaxSize: 10,
     poolTimeoutMs: 30000
   }
