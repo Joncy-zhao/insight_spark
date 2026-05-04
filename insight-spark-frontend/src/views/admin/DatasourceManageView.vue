@@ -11,6 +11,12 @@
               <el-form-item label="数据源名称">
                 <el-input v-model="datasourceForm.name" placeholder="例如：企业销售库" />
               </el-form-item>
+              <el-form-item label="数据库类型">
+                <el-select v-model="datasourceForm.dbType" class="full-width">
+                  <el-option label="MySQL" value="MYSQL" />
+                  <el-option label="PostgreSQL" value="POSTGRESQL" />
+                </el-select>
+              </el-form-item>
               <el-form-item label="主机">
                 <el-input v-model="datasourceForm.host" placeholder="localhost" />
               </el-form-item>
