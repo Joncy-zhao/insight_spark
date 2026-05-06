@@ -5,10 +5,14 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.text.PDFTextStripper;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -53,12 +57,12 @@ public class KnowledgeDocumentService {
     public Map<String, Object> upload(MultipartFile file) throws IOException {
         String fileName = Objects.requireNonNullElse(file.getOriginalFilename(), "knowledge.txt");
         String lowerName = fileName.toLowerCase();
-        if (!lowerName.endsWith(".txt") && !lowerName.endsWith(".md")) {
-            throw new IllegalArgumentException("知识文档当前仅支持 .txt / .md 文件");
+        if (!lowerName.endsWith(".txt") && !lowerName.endsWith(".md") && !lowerName.endsWith(".pdf")) {
+            throw new IllegalArgumentException("知识文档当前支持 .txt / .md / .pdf 文件，DOCX 文本抽取后续扩展");
         }
-        String content = new String(file.getBytes(), StandardCharsets.UTF_8);
+        String content = extractText(file, lowerName);
         String title = removeExtension(fileName);
-        String docType = lowerName.endsWith(".md") ? "MARKDOWN" : "TEXT";
+        String docType = lowerName.endsWith(".pdf") ? "PDF" : lowerName.endsWith(".md") ? "MARKDOWN" : "TEXT";
         jdbcTemplate.update("""
                 INSERT INTO is_knowledge_doc(title, file_name, doc_type, content, created_by)
                 VALUES (?, ?, ?, ?, ?)
@@ -117,6 +121,28 @@ public class KnowledgeDocumentService {
     public List<Map<String, Object>> search(String question, int limit) {
         List<String> terms = extractSearchTerms(question);
         int safeLimit = Math.max(1, Math.min(limit, 20));
+        if (!terms.isEmpty()) {
+            List<Map<String, Object>> candidates = jdbcTemplate.queryForList("""
+                    SELECT c.doc_id AS docId, d.title, d.file_name AS fileName, d.doc_type AS docType,
+                           c.chunk_index AS chunkIndex, c.chunk_text AS chunkText, c.keywords,
+                           CONCAT('《', d.title, '》第', c.chunk_index, '段') AS source
+                    FROM is_knowledge_chunk c
+                    JOIN is_knowledge_doc d ON d.id = c.doc_id
+                    ORDER BY c.created_at DESC
+                    LIMIT 500
+                    """);
+            for (Map<String, Object> row : candidates) {
+                double score = scoreChunk(row, terms);
+                row.put("score", Math.round(score * 100.0) / 100.0);
+                row.put("matchedKeywords", matchedKeywords(row, terms));
+            }
+            return candidates.stream()
+                    .filter(row -> Double.parseDouble(Objects.toString(row.get("score"), "0")) > 0)
+                    .sorted(Comparator.comparingDouble((Map<String, Object> row) ->
+                            Double.parseDouble(Objects.toString(row.get("score"), "0"))).reversed())
+                    .limit(safeLimit)
+                    .toList();
+        }
         Map<String, Map<String, Object>> dedup = new LinkedHashMap<>();
         for (String term : terms) {
             String like = "%" + term + "%";
@@ -154,6 +180,53 @@ public class KnowledgeDocumentService {
             start = Math.max(0, end - overlap);
         }
         return chunks;
+    }
+
+    private String extractText(MultipartFile file, String lowerName) throws IOException {
+        if (lowerName.endsWith(".pdf")) {
+            try (PDDocument document = PDDocument.load(new ByteArrayInputStream(file.getBytes()))) {
+                return new PDFTextStripper().getText(document);
+            }
+        }
+        return new String(file.getBytes(), StandardCharsets.UTF_8);
+    }
+
+    private double scoreChunk(Map<String, Object> row, List<String> terms) {
+        String text = Objects.toString(row.get("chunkText"), "").toLowerCase();
+        String keywords = Objects.toString(row.get("keywords"), "").toLowerCase();
+        double score = 0;
+        for (String term : terms) {
+            String normalized = term.toLowerCase();
+            if (keywords.contains(normalized)) {
+                score += 3.0;
+            }
+            int count = occurrenceCount(text, normalized);
+            score += count >= 2 ? 2.0 + count * 0.25 : count;
+        }
+        return score;
+    }
+
+    private List<String> matchedKeywords(Map<String, Object> row, List<String> terms) {
+        String haystack = (Objects.toString(row.get("chunkText"), "") + " "
+                + Objects.toString(row.get("keywords"), "")).toLowerCase();
+        return terms.stream()
+                .filter(term -> haystack.contains(term.toLowerCase()))
+                .distinct()
+                .limit(12)
+                .toList();
+    }
+
+    private int occurrenceCount(String text, String term) {
+        if (term.isBlank()) {
+            return 0;
+        }
+        int count = 0;
+        int index = text.indexOf(term);
+        while (index >= 0) {
+            count++;
+            index = text.indexOf(term, index + term.length());
+        }
+        return count;
     }
 
     private List<String> extractSearchTerms(String question) {

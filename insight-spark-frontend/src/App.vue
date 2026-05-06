@@ -77,6 +77,7 @@ import { logout } from './api/auth'
 
 const API_BASE = 'http://localhost:8080'
 
+const datasourceHealthMap = ref({})
 const activeModule = ref('upload')
 const tables = ref([])
 const selectedTableName = ref('')
@@ -140,6 +141,8 @@ const selectedDatasourceId = ref(null)
 const schemaTables = ref([])
 const schemaFields = ref([])
 const diagnosisForm = ref({ metricField: '', dimensionFields: [], timeField: '' })
+const diagnosisPickerVisible = ref(false)
+const diagnosisPickerForm = ref({ metricField: '', dimensionFields: [], timeField: '' })
 const diagnosisLoading = ref(false)
 const currentDiagnosis = ref(null)
 const diagnosisReports = ref([])
@@ -178,7 +181,13 @@ const chartTypeLabel = computed(() => {
 const numericFields = computed(() => fields.value.filter(field => field.fieldType === 'NUMBER'))
 const dateFields = computed(() => fields.value.filter(field => field.fieldType === 'DATE'))
 const dimensionCandidateFields = computed(() => fields.value.filter(field => field.fieldType !== 'NUMBER'))
-
+const canDiagnoseLastAnalysis = computed(() => Boolean(lastAnalysis.value && numericFields.value.length))
+const loadDatasourceHealth = async (datasourceId) => {
+  if (!datasourceId) return
+  datasourceHealthMap.value[datasourceId] = unwrap(
+      await axios.get(`${API_BASE}/api/datasources/${datasourceId}/health`)
+  )
+}
 const ensureSessionAlive = async () => {
   try {
     await axios.get(`${API_BASE}/api/auth/me`).then(unwrap)
@@ -382,6 +391,14 @@ const fillCurrentDatasource = () => {
 
 const loadDatasources = async () => {
   officialDatasources.value = unwrap(await axios.get(`${API_BASE}/api/datasources`))
+
+  for (const ds of officialDatasources.value) {
+    try {
+      await loadDatasourceHealth(ds.id)
+    } catch (e) {
+      datasourceHealthMap.value[ds.id] = { status: 'UNKNOWN', message: e.message }
+    }
+  }
 }
 
 const createDatasource = async () => {
@@ -556,15 +573,31 @@ const diagnoseFromLastAnalysis = async () => {
   const metricDisplayName = lastAnalysis.value.fieldMapping?.metric
   const dimensionDisplayName = lastAnalysis.value.fieldMapping?.dimension
 
-  const metricField =
-      fields.value.find(item => item.displayName === metricDisplayName && item.fieldType === 'NUMBER')
-      || fields.value.find(item => item.fieldType === 'NUMBER')
+  const metricField = findAnalysisField(metricDisplayName, 'NUMBER')
 
-  const dimensionField =
-      fields.value.find(item => item.displayName === dimensionDisplayName)
-      || fields.value.find(item => item.fieldType !== 'NUMBER')
+  const dimensionField = findAnalysisField(dimensionDisplayName, null)
 
   const timeField = fields.value.find(item => item.fieldType === 'DATE')
+
+  if (metricField && !dimensionField && dimensionCandidateFields.value.length) {
+    diagnosisPickerForm.value = {
+      metricField: metricField.columnName,
+      dimensionFields: [],
+      timeField: timeField ? timeField.columnName : ''
+    }
+    diagnosisPickerVisible.value = true
+    return
+  }
+
+  if (!metricField && numericFields.value.length) {
+    diagnosisPickerForm.value = {
+      metricField: numericFields.value[0]?.columnName || '',
+      dimensionFields: dimensionField ? [dimensionField.columnName] : [],
+      timeField: timeField ? timeField.columnName : ''
+    }
+    diagnosisPickerVisible.value = true
+    return
+  }
 
   if (!metricField) {
     ElMessage.warning('当前数据表没有可用于诊断的数值字段，请先在字段语义中把指标字段设置为 NUMBER')
@@ -579,6 +612,15 @@ const diagnoseFromLastAnalysis = async () => {
       metricField: metricField.columnName,
       dimensionFields: dimensionField ? [dimensionField.columnName] : [],
       timeField: timeField ? timeField.columnName : null,
+      sourceQuestion: lastAnalysis.value.sourceQuestion || '',
+      sourceSql: lastAnalysis.value.sql || lastAnalysis.value.sourceSql || '',
+      chartType: lastAnalysis.value.chartType,
+      chartSnapshot: {
+        chartType: lastAnalysis.value.chartType,
+        fieldMapping: lastAnalysis.value.fieldMapping || {},
+        data: lastAnalysis.value.data || [],
+        generatedSql: lastAnalysis.value.sql || ''
+      },
       question: lastAnalysis.value.message || '基于当前对话查询结果生成智能诊断报告'
     }))
 
@@ -589,12 +631,62 @@ const diagnoseFromLastAnalysis = async () => {
     } else {
       ElMessage.success('报告已生成，管理员可在诊断中心查看完整报告')
     }
+    await loadDiagnosisReports()
+    activeModule.value = 'diagnosis'
   } catch (error) {
     ElMessage.error(error.message || '诊断报告生成失败')
   } finally {
     diagnosisLoading.value = false
   }
 }
+const confirmDiagnosisPicker = async () => {
+  if (!diagnosisPickerForm.value.metricField) {
+    ElMessage.warning('请选择指标字段')
+    return
+  }
+  diagnosisPickerVisible.value = false
+  const metricField = fields.value.find(item => item.columnName === diagnosisPickerForm.value.metricField)
+  const timeField = fields.value.find(item => item.columnName === diagnosisPickerForm.value.timeField)
+  diagnosisLoading.value = true
+  try {
+    currentDiagnosis.value = unwrap(await axios.post(`${API_BASE}/api/diagnosis/run`, {
+      tableName: selectedTableName.value,
+      metricField: diagnosisPickerForm.value.metricField,
+      dimensionFields: diagnosisPickerForm.value.dimensionFields,
+      timeField: diagnosisPickerForm.value.timeField || null,
+      question: lastAnalysis.value?.sourceQuestion || lastAnalysis.value?.message || '基于当前对话查询结果生成智能诊断报告',
+      sourceQuestion: lastAnalysis.value?.sourceQuestion || '',
+      sourceSql: lastAnalysis.value?.sql || lastAnalysis.value?.sourceSql || '',
+      chartType: lastAnalysis.value?.chartType,
+      chartSnapshot: {
+        chartType: lastAnalysis.value?.chartType,
+        fieldMapping: {
+          metric: metricField?.displayName || diagnosisPickerForm.value.metricField,
+          dimension: diagnosisPickerForm.value.dimensionFields.map(column => fieldLabel(column)).join('、')
+        },
+        data: lastAnalysis.value?.data || [],
+        generatedSql: lastAnalysis.value?.sql || ''
+      }
+    }))
+    ElMessage.success('诊断报告已生成')
+    await loadDiagnosisReports()
+    activeModule.value = 'diagnosis'
+  } catch (error) {
+    ElMessage.error(error.message || '诊断报告生成失败')
+  } finally {
+    diagnosisLoading.value = false
+  }
+}
+
+const findAnalysisField = (displayName, fieldType) => {
+  const sql = (lastAnalysis.value?.sql || '').toLowerCase()
+  return fields.value.find(item => {
+    if (fieldType && item.fieldType !== fieldType) return false
+    const names = [item.displayName, item.sourceFieldName, item.columnName].filter(Boolean)
+    return names.some(name => name === displayName) || sql.includes(`\`${item.columnName.toLowerCase()}\``)
+  }) || null
+}
+
 const loadDiagnosisReports = async () => {
   diagnosisReports.value = unwrap(await axios.get(`${API_BASE}/api/diagnosis/reports`))
 }
@@ -806,7 +898,11 @@ const sendQuestion = async () => {
       question: userQuestion,
       tableName: selectedTableName.value
     }))
-    lastAnalysis.value = data
+    lastAnalysis.value = {
+      ...data,
+      sourceQuestion: userQuestion,
+      sourceSql: data.sql
+    }
     currentChartType.value = data.chartType
     messages.value.push({ role: 'system', content: data.message, sql: data.sql })
 
@@ -978,6 +1074,8 @@ const renderChart = (data, type) => {
 }
 
 provide('workbench', {
+  datasourceHealthMap,
+  loadDatasourceHealth,
   activeModule,
   diagnoseFromLastAnalysis,
   tables,
@@ -1032,6 +1130,8 @@ provide('workbench', {
   schemaTables,
   schemaFields,
   diagnosisForm,
+  diagnosisPickerVisible,
+  diagnosisPickerForm,
   diagnosisLoading,
   currentDiagnosis,
   diagnosisReports,
@@ -1051,6 +1151,7 @@ provide('workbench', {
   numericFields,
   dateFields,
   dimensionCandidateFields,
+  canDiagnoseLastAnalysis,
   loadTables,
   loadPermissionCenter,
   loadAdminPermissionRequests,
@@ -1077,6 +1178,7 @@ provide('workbench', {
   updateSchemaField,
   updateUploadField,
   runDiagnosis,
+  confirmDiagnosisPicker,
   loadDiagnosisReports,
   loadDiagnosisReportDetail,
   exportDiagnosisReport,

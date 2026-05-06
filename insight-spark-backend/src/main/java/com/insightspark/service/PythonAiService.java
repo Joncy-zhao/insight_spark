@@ -74,16 +74,23 @@ public class PythonAiService {
     }
 
     public Optional<Map<String, Object>> graphRagDiagnose(String question, String tableName, String metricField,
-                                                         List<Map<String, Object>> rows,
-                                                         List<Map<String, Object>> graphContext,
-                                                         List<Map<String, Object>> docChunks) {
+                                                         List<String> dimensionFields,
+                                                         String timeField,
+                                                         Map<String, Object> graphPath,
+                                                         List<Map<String, Object>> docEvidence,
+                                                         List<Map<String, Object>> queryRows) {
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("question", question);
         request.put("tableName", tableName);
         request.put("metricField", metricField);
-        request.put("rows", rows);
-        request.put("graphContext", graphContext);
-        request.put("docChunks", docChunks);
+        request.put("dimensionFields", dimensionFields);
+        request.put("timeField", timeField);
+        request.put("queryRows", queryRows);
+        request.put("rows", queryRows);
+        request.put("graphPath", graphPath);
+        request.put("graphContext", graphPath.getOrDefault("nodes", List.of()));
+        request.put("docEvidence", docEvidence);
+        request.put("docChunks", docEvidence);
 
         try {
             Map<String, Object> response = restTemplate.postForObject(

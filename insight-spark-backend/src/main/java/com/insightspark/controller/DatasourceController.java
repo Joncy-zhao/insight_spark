@@ -75,6 +75,11 @@ public class DatasourceController {
         }
     }
 
+    @GetMapping("/{datasourceId}/health")
+    public ApiResponse<Map<String, Object>> health(@PathVariable Long datasourceId) {
+        return ApiResponse.success(datasourceService.health(datasourceId));
+    }
+
     @GetMapping("/{datasourceId}/schema/tables")
     public ApiResponse<List<Map<String, Object>>> schemaTables(@PathVariable Long datasourceId) {
         return ApiResponse.success(datasourceService.listSchemaTables(datasourceId));
