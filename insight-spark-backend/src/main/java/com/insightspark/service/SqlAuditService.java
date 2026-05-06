@@ -2,6 +2,7 @@ package com.insightspark.service;
 
 import com.insightspark.core.auth.AuthContext;
 import jakarta.annotation.PostConstruct;
+import lombok.extern.slf4j.Slf4j;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.statement.Statements;
 import net.sf.jsqlparser.statement.Statement;
@@ -18,6 +19,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 
+@Slf4j
 @Service
 public class SqlAuditService {
 
@@ -148,6 +150,7 @@ public class SqlAuditService {
             matchedRules.add("NO_SELECT_STAR");
         }
         List<String> sensitiveFields = findSensitiveFields(expectedTableName, normalized);
+        log.debug("敏感字段检测结果 - 表名: {}, SQL: {}, 敏感字段: {}", expectedTableName, normalized, sensitiveFields);
         if (isRuleEnabled("SENSITIVE_FIELD") && !sensitiveFields.isEmpty()) {
             warningReasons.add("访问敏感字段：" + String.join("、", sensitiveFields));
             matchedRules.add("SENSITIVE_FIELD");
@@ -285,13 +288,20 @@ public class SqlAuditService {
     }
 
     public List<Map<String, Object>> listRules() {
-        return jdbcTemplate.queryForList("""
+        List<Map<String, Object>> rules = jdbcTemplate.queryForList("""
                 SELECT id, rule_code AS ruleCode, rule_name AS ruleName, risk_level AS riskLevel,
                        enabled, rule_desc AS ruleDesc, threshold_value AS thresholdValue,
                        updated_at AS updatedAt
                 FROM is_sql_audit_rule
                 ORDER BY id ASC
                 """);
+        // 将 enabled 字段转换为布尔值，保持前后端数据类型一致
+        for (Map<String, Object> rule : rules) {
+            if (rule.get("enabled") instanceof Number) {
+                rule.put("enabled", ((Number) rule.get("enabled")).intValue() == 1);
+            }
+        }
+        return rules;
     }
 
     public Map<String, Object> stats() {
@@ -465,13 +475,68 @@ public class SqlAuditService {
                     WHERE table_name = ? AND `sensitive` = 1
                     """, tableName);
         }
+        
+        if (fields.isEmpty()) {
+            return List.of();
+        }
+        
+        // 如果是 SELECT *，返回所有敏感字段
+        if (normalizedSql.contains("select *") || normalizedSql.matches("(?s).*select\\s+\\*.*")) {
+            List<String> allSensitive = new ArrayList<>();
+            for (Map<String, Object> field : fields) {
+                String columnName = Objects.toString(field.get("columnName"), "");
+                String displayName = Objects.toString(field.get("displayName"), columnName);
+                if (!columnName.isBlank()) {
+                    allSensitive.add(displayName + "(" + columnName + ")");
+                }
+            }
+            return allSensitive;
+        }
+        
         List<String> matched = new ArrayList<>();
         for (Map<String, Object> field : fields) {
             String columnName = Objects.toString(field.get("columnName"), "");
             String displayName = Objects.toString(field.get("displayName"), columnName);
-            if (!columnName.isBlank()
-                    && (normalizedSql.contains("`" + columnName.toLowerCase(Locale.ROOT) + "`")
-                    || normalizedSql.matches("(?s).*\\b" + java.util.regex.Pattern.quote(columnName.toLowerCase(Locale.ROOT)) + "\\b.*"))) {
+            
+            if (columnName.isBlank()) {
+                continue;
+            }
+            
+            String lowerColumnName = columnName.toLowerCase(Locale.ROOT);
+            boolean found = false;
+            
+            // 检查方式1：带反引号的字段名 `columnName`
+            if (normalizedSql.contains("`" + lowerColumnName + "`")) {
+                found = true;
+            }
+            
+            // 检查方式2：不带反引号的字段名（单词边界匹配）
+            if (!found && normalizedSql.matches("(?s).*\\b" + java.util.regex.Pattern.quote(lowerColumnName) + "\\b.*")) {
+                found = true;
+            }
+            
+            // 检查方式3：在聚合函数中的字段，如 SUM(columnName), AVG(columnName) 等
+            if (!found) {
+                String[] aggFunctions = {"sum", "avg", "count", "max", "min"};
+                for (String func : aggFunctions) {
+                    if (normalizedSql.contains(func + "(" + lowerColumnName + ")") ||
+                        normalizedSql.contains(func + "(`" + lowerColumnName + "`)")) {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            
+            // 检查方式4：字段名作为别名或在中文字段名下
+            if (!found && !displayName.equals(columnName)) {
+                String lowerDisplayName = displayName.toLowerCase(Locale.ROOT);
+                if (normalizedSql.contains(lowerDisplayName) || 
+                    normalizedSql.matches("(?s).*\\b" + java.util.regex.Pattern.quote(lowerDisplayName) + "\\b.*")) {
+                    found = true;
+                }
+            }
+            
+            if (found) {
                 matched.add(displayName + "(" + columnName + ")");
             }
         }

@@ -491,6 +491,27 @@ const updateSchemaField = async (row) => {
   }
 }
 
+const updateUploadField = async (row) => {
+  console.log('updateUploadField called, selectedTableName:', selectedTableName.value)
+  if (!selectedTableName.value) {
+    ElMessage.warning('请先在"我的数据表"中选择要编辑的数据表')
+    return
+  }
+  try {
+    await axios.post(`${API_BASE}/api/data/tables/${selectedTableName.value}/fields/${row.columnName}`, {
+      displayName: row.displayName,
+      fieldType: row.fieldType,
+      fieldComment: row.fieldComment,
+      sensitive: Boolean(row.sensitive)
+    }).then(unwrap)
+    ElMessage.success('字段信息已更新')
+    await loadFields(selectedTableName.value)
+  } catch (error) {
+    console.error('updateUploadField error:', error)
+    ElMessage.error(error.response?.data?.message || error.message || '字段信息保存失败')
+  }
+}
+
 const runDiagnosis = async () => {
   if (!selectedTableName.value) {
     ElMessage.warning('请先选择诊断数据表')
@@ -611,20 +632,6 @@ const loadPreview = async (tableName) => {
 
 const loadFields = async (tableName) => {
   fields.value = unwrap(await axios.get(`${API_BASE}/api/data/tables/${tableName}/fields`))
-}
-
-const updateUploadField = async (row) => {
-  try {
-    await axios.post(`${API_BASE}/api/data/tables/${selectedTableName.value}/fields/${row.columnName}`, {
-      displayName: row.displayName,
-      fieldType: row.fieldType,
-      fieldComment: row.fieldComment,
-      sensitive: Boolean(row.sensitive)
-    }).then(unwrap)
-    ElMessage.success('字段配置已更新')
-  } catch (error) {
-    ElMessage.error(error.message || '字段配置保存失败')
-  }
 }
 
 const selectTable = (row) => {
@@ -1068,6 +1075,7 @@ provide('workbench', {
   loadSchemaTables,
   selectSchemaTable,
   updateSchemaField,
+  updateUploadField,
   runDiagnosis,
   loadDiagnosisReports,
   loadDiagnosisReportDetail,
@@ -1077,7 +1085,6 @@ provide('workbench', {
   handlePreviewPageChange,
   handlePreviewSizeChange,
   loadFields,
-  updateUploadField,
   selectTable,
   onFileChange,
   onBatchFileChange,

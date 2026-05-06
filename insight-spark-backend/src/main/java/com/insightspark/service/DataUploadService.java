@@ -400,7 +400,7 @@ public class DataUploadService {
         String displayName = Objects.toString(request.getOrDefault("displayName", current.get("displayName")), "").trim();
         String fieldType = Objects.toString(request.getOrDefault("fieldType", current.get("fieldType")), "TEXT").trim().toUpperCase();
         String fieldComment = Objects.toString(request.getOrDefault("fieldComment", current.get("fieldComment")), "").trim();
-        boolean sensitive = Boolean.parseBoolean(Objects.toString(request.getOrDefault("sensitive", current.get("sensitive")), "false"));
+        boolean sensitive = parseBooleanFlag(request.getOrDefault("sensitive", current.get("sensitive")));
         if (displayName.isBlank()) {
             throw new IllegalArgumentException("字段中文名不能为空");
         }
@@ -411,7 +411,7 @@ public class DataUploadService {
                 UPDATE is_data_field
                 SET display_name = ?, field_type = ?, field_comment = ?, `sensitive` = ?
                 WHERE table_name = ? AND column_name = ?
-                """, displayName, fieldType, fieldComment, sensitive, tableName, columnName);
+                """, displayName, fieldType, fieldComment, sensitive ? 1 : 0, tableName, columnName);
         return Map.of(
                 "tableName", tableName,
                 "columnName", columnName,
@@ -983,6 +983,18 @@ public class DataUploadService {
         String lower = fieldName.toLowerCase();
         return lower.contains("phone") || lower.contains("mobile") || lower.contains("idcard")
                 || fieldName.contains("手机号") || fieldName.contains("身份证");
+    }
+
+    private boolean parseBooleanFlag(Object value) {
+        if (value instanceof Boolean bool) {
+            return bool;
+        }
+        if (value instanceof Number number) {
+            return number.intValue() != 0;
+        }
+        String text = Objects.toString(value, "").trim();
+        return "1".equals(text) || "true".equalsIgnoreCase(text)
+                || "yes".equalsIgnoreCase(text) || "on".equalsIgnoreCase(text);
     }
 
     private boolean isSafeBizTableName(String tableName) {

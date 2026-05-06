@@ -276,7 +276,19 @@ public class DatasourceService {
                 SET business_name = ?, `sensitive` = ?
                 WHERE id = ?
                 """, Objects.toString(request.getOrDefault("businessName", "")),
-                Boolean.parseBoolean(Objects.toString(request.getOrDefault("sensitive", "false"))), fieldId);
+                parseBooleanFlag(request.getOrDefault("sensitive", false)), fieldId);
+    }
+
+    private boolean parseBooleanFlag(Object value) {
+        if (value instanceof Boolean bool) {
+            return bool;
+        }
+        if (value instanceof Number number) {
+            return number.intValue() != 0;
+        }
+        String text = Objects.toString(value, "").trim();
+        return "1".equals(text) || "true".equalsIgnoreCase(text)
+                || "yes".equalsIgnoreCase(text) || "on".equalsIgnoreCase(text);
     }
 
     public List<Map<String, Object>> listPermissions(Long datasourceId) {

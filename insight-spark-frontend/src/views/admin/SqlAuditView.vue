@@ -24,7 +24,7 @@
               </el-table-column>
               <el-table-column label="启用" width="90">
                 <template #default="{ row }">
-                  <el-switch v-model="row.enabled" :active-value="1" :inactive-value="0" @change="updateAuditRuleStatus(row)" />
+                  <el-switch v-model="row.enabled" @change="updateAuditRuleStatus(row)" />
                 </template>
               </el-table-column>
             </el-table>

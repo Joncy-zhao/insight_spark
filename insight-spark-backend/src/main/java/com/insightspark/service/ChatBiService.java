@@ -91,7 +91,7 @@ public class ChatBiService {
 
         log.info("Generated SQL: {}", generatedSql);
 
-        SqlAuditService.AuditResult auditResult = sqlAuditService.inspect(generatedSql, queryTableName);
+        SqlAuditService.AuditResult auditResult = sqlAuditService.inspect(generatedSql, activeTable);
         if (auditResult.blocked()) {
             sqlAuditService.record(question, activeTable, engine, generatedSql, auditResult,
                     "BLOCKED", 0L, auditResult.riskReason());
