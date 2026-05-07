@@ -48,10 +48,25 @@ public class DiagnosisController {
         }
     }
 
-    @GetMapping("/reports/{reportId}/export")
     public ResponseEntity<byte[]> exportReport(@PathVariable Long reportId,
                                                @org.springframework.web.bind.annotation.RequestParam(defaultValue = "markdown") String format) {
-        DiagnosisService.ExportFile exportFile = diagnosisService.exportReport(reportId, format);
+        return buildExportResponse(diagnosisService.exportReport(reportId, format));
+    }
+
+    @GetMapping("/reports/{reportId}/export")
+    public ResponseEntity<byte[]> exportReport(@PathVariable Long reportId,
+                                               @org.springframework.web.bind.annotation.RequestParam(defaultValue = "markdown") String format,
+                                               @org.springframework.web.bind.annotation.RequestParam(defaultValue = "true") boolean includeSnapshots,
+                                               @org.springframework.web.bind.annotation.RequestParam(defaultValue = "true") boolean includeReasoningLogs,
+                                               @org.springframework.web.bind.annotation.RequestParam(defaultValue = "false") boolean enablePdfEncryption) {
+        return buildExportResponse(diagnosisService.exportReport(reportId, format, Map.of(
+                "includeSnapshots", includeSnapshots,
+                "includeReasoningLogs", includeReasoningLogs,
+                "enablePdfEncryption", enablePdfEncryption
+        )));
+    }
+
+    private ResponseEntity<byte[]> buildExportResponse(DiagnosisService.ExportFile exportFile) {
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.attachment()
                         .filename(exportFile.filename(), java.nio.charset.StandardCharsets.UTF_8)

@@ -22,6 +22,13 @@ export const menuGroups = [
         index: '6',
         title: '数据权限中心',
         subtitle: '个人权限展示、可访问数据源、敏感字段权限说明、权限申请与审批进度。'
+      },
+      {
+        key: 'diagnosis',
+        role: 'USER',
+        index: '7',
+        title: '智能诊断报告',
+        subtitle: '异常数据一键生成诊断报告、GraphRAG 多跳根因链路、报告历史和 DOCX/PDF 导出。'
       }
     ]
   },
@@ -41,20 +48,6 @@ export const menuGroups = [
         index: '6',
         title: '数据权限审批',
         subtitle: '管理员集中审核普通用户对上传表和官方库的数据访问申请，写入授权关系。'
-      },
-      {
-        key: 'diagnosis',
-        role: 'ADMIN',
-        index: '7',
-        title: '智能诊断报告',
-        subtitle: '异常数据一键生成诊断报告、GraphRAG 多跳根因链路、报告历史和 DOCX/PDF 导出。'
-      },
-      {
-        key: 'knowledgeGraph',
-        role: 'ADMIN',
-        index: '7',
-        title: '知识图谱与GraphRAG支撑',
-        subtitle: '沉淀数据表、字段、敏感标签和诊断报告，作为智能诊断报告的多跳检索支撑。'
       },
       {
         key: 'audit',

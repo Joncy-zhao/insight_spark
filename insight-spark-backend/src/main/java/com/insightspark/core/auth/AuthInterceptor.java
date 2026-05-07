@@ -67,8 +67,7 @@ public class AuthInterceptor implements HandlerInterceptor {
     }
 
     private boolean isAdminEndpoint(String uri) {
-        return (uri.startsWith("/api/diagnosis") && !uri.startsWith("/api/diagnosis/run"))
-            || uri.startsWith("/api/datasource")
+        return uri.startsWith("/api/datasource")
                 || uri.startsWith("/api/datasources")
                 || uri.startsWith("/api/audit")
                 || uri.startsWith("/api/knowledge")

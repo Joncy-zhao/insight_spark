@@ -1,6 +1,7 @@
 package com.insightspark.service;
 
 import jakarta.annotation.PostConstruct;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
@@ -38,6 +39,7 @@ public class KnowledgeGraphService {
     private String neo4jPassword;
 
     private final HttpClient httpClient = HttpClient.newHttpClient();
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     @PostConstruct
     public void initKnowledgeGraphTables() {
@@ -55,7 +57,7 @@ public class KnowledgeGraphService {
                   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                   INDEX `idx_kg_node_type` (`node_type`),
                   INDEX `idx_kg_node_label` (`label`)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='轻量知识图谱节点';
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='杞婚噺鐭ヨ瘑鍥捐氨鑺傜偣';
                 """);
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS `is_kg_edge` (
@@ -68,7 +70,7 @@ public class KnowledgeGraphService {
                   UNIQUE KEY `uk_kg_edge` (`from_key`, `to_key`, `relation_type`),
                   INDEX `idx_kg_edge_from` (`from_key`),
                   INDEX `idx_kg_edge_to` (`to_key`)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='轻量知识图谱关系';
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='杞婚噺鐭ヨ瘑鍥捐氨鍏崇郴';
                 """);
         addColumnIfMissing("is_kg_node", "node_type", "`node_type` VARCHAR(64) NOT NULL DEFAULT 'UNKNOWN'");
         addColumnIfMissing("is_kg_node", "label", "`label` VARCHAR(255) NOT NULL DEFAULT ''");
@@ -103,7 +105,7 @@ public class KnowledgeGraphService {
             String tableName = Objects.toString(table.get("tableName"), "");
             String tableKey = "upload_table:" + tableName;
             nodeCount += upsertNode(tableKey, "UPLOAD_TABLE", Objects.toString(table.get("displayName"), tableName),
-                    "UPLOAD", tableName, "用户上传数据表，行数：" + table.get("rowCount") + "，字段数：" + table.get("fieldCount"), 2.0);
+                    "UPLOAD", tableName, "上传数据表，行数：" + table.get("rowCount") + "，字段数：" + table.get("fieldCount"), 2.0);
             List<Map<String, Object>> fields = jdbcTemplate.queryForList("""
                     SELECT column_name AS columnName, display_name AS displayName, field_type AS fieldType,
                            field_comment AS fieldComment, `sensitive`
@@ -140,7 +142,7 @@ public class KnowledgeGraphService {
             nodeCount += upsertNode(dsKey, "DATASOURCE", Objects.toString(table.get("datasourceName"), datasourceId),
                     "OFFICIAL", datasourceId, "企业官方数据源", 2.0);
             nodeCount += upsertNode(tableKey, "OFFICIAL_TABLE", tableName, "OFFICIAL", datasourceId + "." + tableName,
-                    "官方表：" + Objects.toString(table.get("tableComment"), "") + "；估算行数：" + table.get("tableRows"), 2.0);
+                    "瀹樻柟琛細" + Objects.toString(table.get("tableComment"), "") + "锛涗及绠楄鏁帮細" + table.get("tableRows"), 2.0);
             edgeCount += upsertEdge(dsKey, tableKey, "HAS_TABLE", 1.0);
             List<Map<String, Object>> fields = jdbcTemplate.queryForList("""
                     SELECT column_name AS columnName, data_type AS dataType, column_comment AS columnComment,
@@ -166,20 +168,6 @@ public class KnowledgeGraphService {
                     edgeCount += upsertEdge(fieldKey, sensitiveKey, "MARKED_AS", 2.0);
                 }
             }
-        }
-
-        List<Map<String, Object>> reports = jdbcTemplate.queryForList("""
-                SELECT id, table_name AS tableName, title, summary, metric_field AS metricField
-                FROM is_diagnosis_report
-                ORDER BY created_at DESC
-                LIMIT 100
-                """);
-        for (Map<String, Object> report : reports) {
-            String reportKey = "diagnosis_report:" + report.get("id");
-            String tableName = Objects.toString(report.get("tableName"), "");
-            nodeCount += upsertNode(reportKey, "DIAGNOSIS_REPORT", Objects.toString(report.get("title"), "智能诊断报告"),
-                    "DIAGNOSIS", Objects.toString(report.get("id"), ""), Objects.toString(report.get("summary"), ""), 2.5);
-            edgeCount += upsertEdge(reportKey, "upload_table:" + tableName, "ANALYZES", 1.5);
         }
 
         return Map.of("nodeUpsertCount", nodeCount, "edgeUpsertCount", edgeCount);
@@ -265,6 +253,14 @@ public class KnowledgeGraphService {
     }
 
     public Map<String, Object> multiHopSearch(String keyword, String tableName, int depth, int limit) {
+        if (neo4jEnabled) {
+            try {
+                return neo4jMultiHopSearch(keyword, tableName, depth, limit);
+            } catch (Exception ignored) {
+                // Neo4j is the primary GraphRAG store. Local metadata remains a resilience fallback
+                // so report generation can still explain the missing graph dependency.
+            }
+        }
         List<Map<String, Object>> seeds = new ArrayList<>();
         if (tableName != null && !tableName.isBlank()) {
             seeds.addAll(search(tableName, limit));
@@ -327,7 +323,7 @@ public class KnowledgeGraphService {
             context.addAll(search(tableName, 8));
         }
         if (question != null && !question.isBlank()) {
-            for (String token : question.split("[\\s,，。；;：:]+")) {
+            for (String token : question.split("[\\s,锛屻€傦紱;锛?]+")) {
                 if (token.length() >= 2) {
                     context.addAll(search(token, 5));
                 }
@@ -353,6 +349,117 @@ public class KnowledgeGraphService {
                 "depth", bundle.getOrDefault("depth", 3),
                 "neo4jEnabled", bundle.getOrDefault("neo4jEnabled", neo4jEnabled)
         );
+    }
+
+    private Map<String, Object> neo4jMultiHopSearch(String keyword, String tableName, int depth, int limit) throws Exception {
+        String term = Objects.toString(keyword, "").trim();
+        String table = Objects.toString(tableName, "").trim();
+        int safeDepth = Math.max(1, Math.min(depth, 4));
+        int safeLimit = Math.max(5, Math.min(limit, 80));
+        String cypher = """
+                MATCH (seed:InsightNode)
+                WHERE ($tableName <> '' AND (
+                         seed.nodeKey CONTAINS $tableName
+                      OR seed.sourceId CONTAINS $tableName
+                      OR seed.label CONTAINS $tableName
+                    ))
+                   OR ($keyword <> '' AND (
+                         seed.nodeKey CONTAINS $keyword
+                      OR seed.sourceId CONTAINS $keyword
+                      OR seed.label CONTAINS $keyword
+                      OR seed.content CONTAINS $keyword
+                    ))
+                WITH collect(DISTINCT seed)[0..$limit] AS seeds
+                UNWIND seeds AS seed
+                MATCH path = (seed)-[*0..3]-(n:InsightNode)
+                WITH collect(DISTINCT n)[0..$limit] AS nodes, collect(path)[0..$pathLimit] AS paths
+                UNWIND nodes AS node
+                WITH collect(DISTINCT {
+                  nodeKey: node.nodeKey,
+                  nodeType: node.nodeType,
+                  label: node.label,
+                  sourceType: node.sourceType,
+                  sourceId: node.sourceId,
+                  content: node.content,
+                  weight: node.weight
+                }) AS nodeRows, paths
+                UNWIND paths AS path
+                UNWIND relationships(path) AS rel
+                WITH nodeRows, collect(DISTINCT {
+                  fromKey: startNode(rel).nodeKey,
+                  toKey: endNode(rel).nodeKey,
+                  relationType: coalesce(rel.relationType, type(rel)),
+                  weight: rel.weight
+                })[0..$edgeLimit] AS edgeRows
+                RETURN {nodes: nodeRows, edges: edgeRows} AS row
+                """;
+        List<Map<String, Object>> rows = neo4jQueryRows(cypher, Map.of(
+                "keyword", term,
+                "tableName", table,
+                "limit", safeLimit,
+                "pathLimit", safeLimit * 2,
+                "edgeLimit", safeLimit * 3
+        ));
+        Map<String, Object> row = rows.isEmpty() ? Map.of("nodes", List.of(), "edges", List.of()) : rows.get(0);
+        List<Map<String, Object>> nodes = castMapList(row.getOrDefault("nodes", List.of()));
+        List<Map<String, Object>> edges = castMapList(row.getOrDefault("edges", List.of()));
+        return Map.of("nodes", nodes, "edges", edges, "ragContext", nodes,
+                "pathText", buildPathText(nodes, edges),
+                "depth", safeDepth, "neo4jEnabled", true);
+    }
+
+    private List<Map<String, Object>> neo4jQueryRows(String cypher, Map<String, Object> params) throws Exception {
+        String payload = objectMapper.writeValueAsString(Map.of(
+                "statements", List.of(Map.of("statement", cypher, "parameters", params))
+        ));
+        String token = Base64.getEncoder().encodeToString((neo4jUsername + ":" + neo4jPassword).getBytes(StandardCharsets.UTF_8));
+        HttpRequest request = HttpRequest.newBuilder(URI.create(neo4jHttpUrl))
+                .header("Content-Type", "application/json")
+                .header("Authorization", "Basic " + token)
+                .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
+                .build();
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        if (response.statusCode() < 200 || response.statusCode() >= 300) {
+            throw new IllegalStateException("Neo4j request failed: " + response.statusCode());
+        }
+        Map<String, Object> body = objectMapper.readValue(response.body(), Map.class);
+        if (!castMapList(body.get("errors")).isEmpty()) {
+            throw new IllegalStateException("Neo4j query failed");
+        }
+        List<Map<String, Object>> results = castMapList(body.get("results"));
+        if (results.isEmpty()) {
+            return List.of();
+        }
+        List<Map<String, Object>> data = castMapList(results.get(0).get("data"));
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Map<String, Object> item : data) {
+            Object rowObj = item.get("row");
+            if (rowObj instanceof List<?> rowList && !rowList.isEmpty() && rowList.get(0) instanceof Map<?, ?> map) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                for (Map.Entry<?, ?> entry : map.entrySet()) {
+                    row.put(Objects.toString(entry.getKey()), entry.getValue());
+                }
+                rows.add(row);
+            }
+        }
+        return rows;
+    }
+
+    private List<Map<String, Object>> castMapList(Object value) {
+        if (value instanceof List<?> list) {
+            List<Map<String, Object>> result = new ArrayList<>();
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> map) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    for (Map.Entry<?, ?> entry : map.entrySet()) {
+                        row.put(Objects.toString(entry.getKey()), entry.getValue());
+                    }
+                    result.add(row);
+                }
+            }
+            return result;
+        }
+        return List.of();
     }
 
     private String buildPathText(List<Map<String, Object>> nodes, List<Map<String, Object>> edges) {
@@ -457,7 +564,7 @@ public class KnowledgeGraphService {
                     .build();
             httpClient.send(request, HttpResponse.BodyHandlers.discarding());
         } catch (Exception ignored) {
-            // Neo4j 是增强链路；同步失败不影响本地 MySQL 图谱与主业务演示。
+            // Neo4j 鏄寮洪摼璺紱鍚屾澶辫触涓嶅奖鍝嶆湰鍦?MySQL 鍥捐氨涓庝富涓氬姟婕旂ず銆?
         }
     }
 
@@ -495,3 +602,4 @@ public class KnowledgeGraphService {
         }
     }
 }
+
