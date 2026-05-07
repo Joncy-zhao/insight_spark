@@ -25,6 +25,10 @@ dependency-reduced-pom.xml
 logs/
 *.log
 
+# Python
+__pycache__/
+*.pyc
+
 # IDE / OS
 .idea/
 .vscode/
@@ -32,3 +36,6 @@ logs/
 Thumbs.db
 *.swp
 *.swo
+
+# Local docs
+当前阶段总结报告.md
