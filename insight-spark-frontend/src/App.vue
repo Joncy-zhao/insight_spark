@@ -153,6 +153,7 @@ const messages = ref([
   { role: 'system', content: '👋 你好！我是你的析数灵犀 AI 数据助手。请在左侧选择数据表，然后用自然语言向我提问吧！' }
 ])
 const currentChartType = ref('')
+const chartSortMode = ref('desc')
 const lastAnalysis = ref(null)
 let chartInstance = null
 
@@ -1007,17 +1008,33 @@ const sendQuestion = async () => {
   loading.value = true
 
   try {
-    const data = unwrap(await axios.post(`${API_BASE}/api/chat/ask`, {
-      question: userQuestion,
-      tableName: selectedTableName.value
-    }))
+    let data
+    try {
+      data = unwrap(await axios.post(`${API_BASE}/api/chat/ask-enhanced`, {
+        question: userQuestion,
+        tableName: selectedTableName.value
+      }))
+    } catch (enhancedError) {
+      if (enhancedError?.response?.status !== 404) {
+        throw enhancedError
+      }
+      data = unwrap(await axios.post(`${API_BASE}/api/chat/ask`, {
+        question: userQuestion,
+        tableName: selectedTableName.value
+      }))
+      data.fallbackUsed = data.engine === 'java-fallback'
+    }
     lastAnalysis.value = {
       ...data,
       sourceQuestion: userQuestion,
       sourceSql: data.sql
     }
     currentChartType.value = data.chartType
-    messages.value.push({ role: 'system', content: data.message, sql: data.sql })
+    messages.value.push({
+      role: 'system',
+      content: `${data.message}${data.fallbackUsed ? '（规则兜底）' : ''}`,
+      sql: data.sql
+    })
 
     nextTick(() => {
       const chatDom = document.getElementById('chatHistory')
@@ -1163,23 +1180,216 @@ const statusTagType = (status) => {
   return 'info'
 }
 
+const toNumber = (value) => {
+  if (value === null || value === undefined) return Number.NaN
+  if (typeof value === 'number') return value
+  const text = String(value).replace(/,/g, '').trim()
+  if (!text) return Number.NaN
+  const num = Number(text)
+  return Number.isFinite(num) ? num : Number.NaN
+}
+
+const parseDateValue = (value) => {
+  const text = String(value ?? '').trim()
+  if (!text) return null
+  const cleaned = text.replace('T', ' ').split(' ')[0]
+  const normalized = cleaned.replace(/年|月/g, '-').replace(/日/g, '').replace(/\//g, '-')
+  let match = normalized.match(/^(\d{4})-(\d{1,2})(?:-(\d{1,2}))?$/)
+  if (!match && /^\d{6,8}$/.test(normalized)) {
+    const year = normalized.slice(0, 4)
+    const month = normalized.slice(4, 6)
+    const day = normalized.length >= 8 ? normalized.slice(6, 8) : '01'
+    match = [normalized, year, month, day]
+  }
+  if (!match) return null
+  const year = Number(match[1])
+  const month = Number(match[2] || 1)
+  const day = Number(match[3] || 1)
+  if (!year || month < 1 || month > 12 || day < 1 || day > 31) return null
+  const date = new Date(year, month - 1, day)
+  const time = date.getTime()
+  return Number.isNaN(time) ? null : time
+}
+
+const compareByName = (a, b) => {
+  const aName = String(a.name ?? '')
+  const bName = String(b.name ?? '')
+  const aDate = parseDateValue(aName)
+  const bDate = parseDateValue(bName)
+  if (aDate !== null && bDate !== null && aDate !== bDate) return aDate - bDate
+  const aNum = toNumber(aName)
+  const bNum = toNumber(bName)
+  if (!Number.isNaN(aNum) && !Number.isNaN(bNum) && aNum !== bNum) return aNum - bNum
+  return aName.localeCompare(bName, 'zh-Hans-CN', { numeric: true, sensitivity: 'base' })
+}
+
+const compareByValue = (a, b, mode) => {
+  const aNum = toNumber(a.value)
+  const bNum = toNumber(b.value)
+  if (Number.isNaN(aNum) && Number.isNaN(bNum)) return 0
+  if (Number.isNaN(aNum)) return 1
+  if (Number.isNaN(bNum)) return -1
+  if (aNum === bNum) return 0
+  return mode === 'asc' ? aNum - bNum : bNum - aNum
+}
+
+const normalizeChartItem = (item) => {
+  if (!item || typeof item !== 'object') {
+    return { name: String(item ?? ''), value: 0 }
+  }
+  const keys = Object.keys(item)
+  const nameKey = keys.find(key => ['name', 'label', 'province', 'city', 'category', 'dimension', 'dim_name'].includes(key)) || keys[0]
+  const valueKey = keys.find(key => ['value', 'count', 'amount', 'total', 'sales', 'metric', 'metric_value'].includes(key)) || keys[1] || keys[0]
+  const nameValue = item.name ?? item.label ?? item.dim_name ?? item[nameKey] ?? ''
+  const rawValue = item.value ?? item.metric_value ?? item[valueKey] ?? 0
+  const numericValue = toNumber(rawValue)
+  return {
+    name: String(nameValue ?? ''),
+    value: Number.isNaN(numericValue) ? 0 : numericValue
+  }
+}
+
+const getSortedChartData = (data) => {
+  const normalizedData = Array.isArray(data) ? data.map(normalizeChartItem) : []
+  const indexed = normalizedData.map((item, index) => ({ item, index }))
+  if (chartSortMode.value === 'asc' || chartSortMode.value === 'desc') {
+    indexed.sort((a, b) => {
+      const byValue = compareByValue(a.item, b.item, chartSortMode.value)
+      if (byValue !== 0) return byValue
+      const byName = compareByName(a.item, b.item)
+      return byName !== 0 ? byName : a.index - b.index
+    })
+  } else if (chartSortMode.value === 'name') {
+    indexed.sort((a, b) => {
+      const byName = compareByName(a.item, b.item)
+      return byName !== 0 ? byName : a.index - b.index
+    })
+  }
+  return indexed.map(entry => entry.item)
+}
+
+const sanitizeFilename = (value) => String(value || 'chart')
+  .replace(/[\\/:*?"<>|]/g, '_')
+  .replace(/\s+/g, '_')
+  .slice(0, 80)
+  .replace(/^_+|_+$/g, '') || 'chart'
+
+const buildChartFilename = () => {
+  const table = lastAnalysis.value?.tableName || ''
+  const dimension = lastAnalysis.value?.fieldMapping?.dimension || ''
+  const metric = lastAnalysis.value?.fieldMapping?.metric || ''
+  const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19)
+  const label = [table, dimension, metric].filter(Boolean).join('_')
+  return `${sanitizeFilename(label)}_${stamp}.png`
+}
+
+const dataUrlToBlob = (dataUrl) => {
+  const [header, data] = dataUrl.split(',')
+  if (!header || !data) throw new Error('invalid data url')
+  const mime = header.match(/data:(.*?);base64/)?.[1] || 'image/png'
+  const binary = atob(data)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i)
+  }
+  return new Blob([bytes], { type: mime })
+}
+
+const exportChartAsImage = () => {
+  if (!chartInstance || !lastAnalysis.value?.data?.length) {
+    ElMessage.warning('暂无可导出的图表')
+    return
+  }
+  chartInstance.resize()
+  const url = chartInstance.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#fff' })
+  if (!url) {
+    ElMessage.error('导出失败，请稍后重试')
+    return
+  }
+  const filename = buildChartFilename()
+  try {
+    const blob = dataUrlToBlob(url)
+    if (window.navigator?.msSaveOrOpenBlob) {
+      window.navigator.msSaveOrOpenBlob(blob, filename)
+      return
+    }
+    const link = document.createElement('a')
+    const objectUrl = URL.createObjectURL(blob)
+    link.href = objectUrl
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(objectUrl)
+  } catch (error) {
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  }
+}
+
 const renderChart = (data, type) => {
-  const xAxisData = data.map(item => item.name)
-  const seriesData = data.map(item => Number(item.value ?? 0))
+  const normalizedData = getSortedChartData(data)
+  const xAxisData = normalizedData.map(item => item.name)
+  const seriesData = normalizedData.map(item => Number(item.value ?? 0))
   let option = {}
 
   if (type === 'bar' || type === 'line') {
+    const shouldUseZoom = normalizedData.length > 12
     option = {
-      tooltip: { trigger: 'axis' },
-      grid: { left: 48, right: 24, top: 32, bottom: 72 },
-      xAxis: { type: 'category', data: xAxisData, axisLabel: { interval: 0, rotate: 28 } },
-      yAxis: { type: 'value' },
-      series: [{ data: seriesData, type, smooth: type === 'line', itemStyle: { borderRadius: [4, 4, 0, 0] } }]
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'shadow' }
+      },
+      grid: { left: 72, right: 24, top: 32, bottom: shouldUseZoom ? 110 : 92 },
+      xAxis: {
+        type: 'category',
+        data: xAxisData,
+        axisLabel: {
+          interval: 0,
+          rotate: xAxisData.length > 8 ? 35 : 20,
+          hideOverlap: true,
+          formatter: (value) => {
+            const text = String(value ?? '')
+            return text.length > 10 ? `${text.slice(0, 10)}…` : text
+          }
+        }
+      },
+      yAxis: {
+        type: 'value',
+        axisLabel: {
+          formatter: (value) => {
+            const num = Number(value)
+            if (Number.isNaN(num)) return value
+            if (Math.abs(num) >= 100000000) return `${(num / 100000000).toFixed(1)}亿`
+            if (Math.abs(num) >= 10000) return `${(num / 10000).toFixed(1)}万`
+            return `${num}`
+          }
+        },
+        splitLine: { lineStyle: { color: '#eef2f7' } }
+      },
+      dataZoom: shouldUseZoom
+        ? [
+            { type: 'slider', height: 18, bottom: 26, start: 0, end: 60 },
+            { type: 'inside', start: 0, end: 60 }
+          ]
+        : [],
+      series: [{
+        data: seriesData,
+        type,
+        smooth: type === 'line',
+        barMaxWidth: 28,
+        itemStyle: { borderRadius: [4, 4, 0, 0] }
+      }]
     }
   } else {
     option = {
       tooltip: { trigger: 'item' },
-      series: [{ type: 'pie', radius: ['42%', '68%'], data: data.map(item => ({ name: item.name, value: item.value })) }]
+      legend: { bottom: 4 },
+      series: [{ type: 'pie', radius: ['42%', '68%'], data: normalizedData }]
     }
   }
 
@@ -1253,6 +1463,7 @@ provide('workbench', {
   loading,
   messages,
   currentChartType,
+  chartSortMode,
   lastAnalysis,
   moduleTitle,
   moduleSubtitle,
@@ -1333,7 +1544,8 @@ provide('workbench', {
   indexKnowledgeDoc,
   riskTagType,
   statusTagType,
-  renderChart
+  renderChart,
+  exportChartAsImage
 })
 </script>
 
