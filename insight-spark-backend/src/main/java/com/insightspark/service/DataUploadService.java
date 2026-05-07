@@ -133,11 +133,15 @@ public class DataUploadService {
     }
 
     public Map<String, Object> processFileWithTask(MultipartFile file) throws IOException {
+        return processFileWithTask(file, null);
+    }
+
+    public Map<String, Object> processFileWithTask(MultipartFile file, String displayName) throws IOException {
         String taskId = createTask("WAITING", 0, "上传任务已创建");
         try {
             updateTask(taskId, "UPLOADING", 20, "文件已接收，准备解析", null);
             updateTask(taskId, "PARSING", 50, "正在解析 Excel/CSV 文件", null);
-            Map<String, Object> result = processFile(file);
+            Map<String, Object> result = processFile(file, displayName);
             updateTask(taskId, "BUILDING", 80, "正在建表并写入数据", null);
             updateTask(taskId, "SUCCESS", 100, "文件处理完成", result);
             Map<String, Object> wrapped = new LinkedHashMap<>(result);
@@ -152,11 +156,16 @@ public class DataUploadService {
 
     public Map<String, Object> processFilesWithTask(List<MultipartFile> files, String mergeMode, String joinKey,
                                                     String modelRequirement) throws IOException {
+        return processFilesWithTask(files, mergeMode, joinKey, modelRequirement, null);
+    }
+
+    public Map<String, Object> processFilesWithTask(List<MultipartFile> files, String mergeMode, String joinKey,
+                                                    String modelRequirement, String displayName) throws IOException {
         String taskId = createTask("WAITING", 0, "批量上传任务已创建");
         try {
             updateTask(taskId, "UPLOADING", 20, "文件已接收，准备解析", null);
             updateTask(taskId, "PARSING", 50, "正在解析并校验多个文件", null);
-            Map<String, Object> result = processFiles(files, mergeMode, joinKey, modelRequirement);
+            Map<String, Object> result = processFiles(files, mergeMode, joinKey, modelRequirement, displayName);
             updateTask(taskId, "BUILDING", 80, "正在合并、建表并生成模型", null);
             updateTask(taskId, "SUCCESS", 100, "批量文件处理完成", result);
             Map<String, Object> wrapped = new LinkedHashMap<>(result);
@@ -170,6 +179,10 @@ public class DataUploadService {
     }
 
     public Map<String, Object> startAsyncProcessFile(MultipartFile file) throws IOException {
+        return startAsyncProcessFile(file, null);
+    }
+
+    public Map<String, Object> startAsyncProcessFile(MultipartFile file, String displayName) throws IOException {
         String taskId = createTask("WAITING", 0, "上传任务已创建");
         AuthContext.UserPrincipal principal = AuthContext.get();
         StoredMultipartFile storedFile = StoredMultipartFile.from(file);
@@ -177,7 +190,7 @@ public class DataUploadService {
             try {
                 updateTask(taskId, "UPLOADING", 20, "文件已接收，准备解析", null);
                 updateTask(taskId, "PARSING", 50, "正在解析 Excel/CSV 文件", null);
-                Map<String, Object> result = processFile(storedFile);
+                Map<String, Object> result = processFile(storedFile, displayName);
                 updateTask(taskId, "BUILDING", 80, "正在建表并写入数据", null);
                 updateTask(taskId, "SUCCESS", 100, "文件处理完成", result);
             } catch (Exception e) {
@@ -189,6 +202,11 @@ public class DataUploadService {
 
     public Map<String, Object> startAsyncProcessFiles(List<MultipartFile> files, String mergeMode, String joinKey,
                                                       String modelRequirement) throws IOException {
+        return startAsyncProcessFiles(files, mergeMode, joinKey, modelRequirement, null);
+    }
+
+    public Map<String, Object> startAsyncProcessFiles(List<MultipartFile> files, String mergeMode, String joinKey,
+                                                      String modelRequirement, String displayName) throws IOException {
         String taskId = createTask("WAITING", 0, "批量上传任务已创建");
         AuthContext.UserPrincipal principal = AuthContext.get();
         List<MultipartFile> storedFiles = files.stream().map(file -> {
@@ -202,7 +220,7 @@ public class DataUploadService {
             try {
                 updateTask(taskId, "UPLOADING", 20, "文件已接收，准备解析", null);
                 updateTask(taskId, "PARSING", 50, "正在解析并校验多个文件", null);
-                Map<String, Object> result = processFiles(storedFiles, mergeMode, joinKey, modelRequirement);
+                Map<String, Object> result = processFiles(storedFiles, mergeMode, joinKey, modelRequirement, displayName);
                 updateTask(taskId, "BUILDING", 80, "正在合并、建表并生成模型", null);
                 updateTask(taskId, "SUCCESS", 100, "批量文件处理完成", result);
             } catch (Exception e) {
@@ -253,6 +271,10 @@ public class DataUploadService {
     }
 
     public Map<String, Object> processFile(MultipartFile file) throws IOException {
+        return processFile(file, null);
+    }
+
+    public Map<String, Object> processFile(MultipartFile file, String displayName) throws IOException {
         String originalFilename = Objects.requireNonNullElse(file.getOriginalFilename(), "未命名文件");
         ParsedFile parsedFile = parseFile(file, originalFilename);
 
@@ -260,11 +282,16 @@ public class DataUploadService {
             throw new IllegalArgumentException("解析失败：未找到表头或有效数据");
         }
 
-        return persistParsedFile(originalFilename, parsedFile, null);
+        return persistParsedFile(originalFilename, parsedFile, displayName);
     }
 
     public Map<String, Object> processFiles(List<MultipartFile> files, String mergeMode, String joinKey,
                                             String modelRequirement) throws IOException {
+        return processFiles(files, mergeMode, joinKey, modelRequirement, null);
+    }
+
+    public Map<String, Object> processFiles(List<MultipartFile> files, String mergeMode, String joinKey,
+                                            String modelRequirement, String displayNameOverride) throws IOException {
         if (files == null || files.isEmpty()) {
             throw new IllegalArgumentException("请至少选择一个 Excel/CSV 文件");
         }
@@ -288,7 +315,9 @@ public class DataUploadService {
         ParsedFile merged = "KEY_JOIN".equals(normalizedMode)
                 ? joinByKey(parsedFiles, sourceNames, joinKey)
                 : mergeSameHeader(parsedFiles);
-        String displayName = files.size() == 1
+        String displayName = displayNameOverride != null && !displayNameOverride.isBlank()
+                ? displayNameOverride.trim()
+                : files.size() == 1
                 ? removeExtension(sourceNames.get(0))
                 : "多文件合并_" + System.currentTimeMillis();
         Map<String, Object> result = persistParsedFile(String.join(" + ", sourceNames), merged, displayName);
@@ -456,6 +485,37 @@ public class DataUploadService {
         );
     }
 
+    public byte[] exportTableCsv(String tableName) {
+        assertKnownTable(tableName);
+        List<Map<String, Object>> fields = listFields(tableName);
+        if (fields.isEmpty()) {
+            throw new IllegalArgumentException("数据表没有可导出的字段: " + tableName);
+        }
+
+        List<String> columns = fields.stream()
+                .map(field -> Objects.toString(field.get("columnName"), ""))
+                .filter(column -> !column.isBlank())
+                .toList();
+        List<String> headers = fields.stream()
+                .map(field -> Objects.toString(field.getOrDefault("displayName", field.get("columnName")), ""))
+                .toList();
+
+        List<Map<String, Object>> rows;
+        if (datasourceService.isOfficialSource(tableName)) {
+            rows = preview(tableName, 1, 50_000);
+        } else {
+            String columnSql = String.join(", ", columns.stream().map(this::quoteColumn).toList());
+            rows = jdbcTemplate.queryForList("SELECT " + columnSql + " FROM `" + tableName + "` LIMIT 50000");
+        }
+
+        StringBuilder csv = new StringBuilder("\uFEFF");
+        appendCsvLine(csv, headers);
+        for (Map<String, Object> row : rows) {
+            appendCsvLine(csv, columns.stream().map(column -> Objects.toString(row.get(column), "")).toList());
+        }
+        return csv.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
     public long countRows(String tableName) {
         if (datasourceService.isOfficialSource(tableName)) {
             return datasourceService.countQueryTable(tableName);
@@ -618,6 +678,29 @@ public class DataUploadService {
             throw new IllegalArgumentException("数据表不存在或无访问权限：" + tableName);
         }
         permissionService.assertCanAccessTable(tableName);
+    }
+
+    private void assertFieldExists(String tableName, String columnName) {
+        if (columnName == null || columnName.isBlank()) {
+            throw new IllegalArgumentException("字段名不能为空");
+        }
+        if (datasourceService.isOfficialSource(tableName)) {
+            boolean exists = datasourceService.listQueryFields(tableName).stream()
+                    .anyMatch(field -> columnName.equals(Objects.toString(field.get("columnName"), "")));
+            if (!exists) {
+                throw new IllegalArgumentException("字段不存在或无访问权限: " + columnName);
+            }
+            return;
+        }
+
+        Integer count = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*)
+                FROM is_data_field
+                WHERE table_name = ? AND column_name = ?
+                """, Integer.class, tableName, columnName);
+        if (count == null || count == 0) {
+            throw new IllegalArgumentException("字段不存在或无访问权限: " + columnName);
+        }
     }
 
     private ParsedFile parseFile(MultipartFile file, String originalFilename) throws IOException {
@@ -1042,6 +1125,31 @@ public class DataUploadService {
         return comment.replace("'", "''");
     }
 
+    private String quoteColumn(String columnName) {
+        if (columnName == null || !columnName.matches("[A-Za-z0-9_]+")) {
+            throw new IllegalArgumentException("非法字段名: " + columnName);
+        }
+        return "`" + columnName + "`";
+    }
+
+    private void appendCsvLine(StringBuilder csv, List<String> values) {
+        for (int i = 0; i < values.size(); i++) {
+            if (i > 0) {
+                csv.append(',');
+            }
+            csv.append(escapeCsv(values.get(i)));
+        }
+        csv.append('\n');
+    }
+
+    private String escapeCsv(String value) {
+        String safeValue = value == null ? "" : value;
+        if (safeValue.contains("\"") || safeValue.contains(",") || safeValue.contains("\n") || safeValue.contains("\r")) {
+            return "\"" + safeValue.replace("\"", "\"\"") + "\"";
+        }
+        return safeValue;
+    }
+
     private record ParsedFile(List<String> headers, List<List<String>> rows) {
     }
 
@@ -1054,6 +1162,507 @@ public class DataUploadService {
             map.put("displayName", displayName);
             map.put("sortOrder", sortOrder);
             return map;
+        }
+    }
+
+    public Map<String, Object> getDataQuality(String tableName) {
+        assertKnownTable(tableName);
+        List<Map<String, Object>> fields = listFields(tableName);
+        long totalRows = countRows(tableName);
+        
+        int totalFields = fields.size();
+        int emptyFieldCount = 0;
+        int anomalyFieldCount = 0;
+        double totalNullRate = 0;
+        
+        for (Map<String, Object> field : fields) {
+            String columnName = Objects.toString(field.get("columnName"));
+            Map<String, Object> stats = getFieldStatistics(tableName, columnName);
+            
+            long nullCount = ((Number) stats.getOrDefault("nullCount", 0)).longValue();
+            double nullRate = totalRows > 0 ? (double) nullCount / totalRows : 0;
+            totalNullRate += nullRate;
+            
+            if (nullRate > 0.5) {
+                emptyFieldCount++;
+            }
+            
+            List<Map<String, Object>> anomalies = (List<Map<String, Object>>) stats.getOrDefault("anomalies", List.of());
+            if (!anomalies.isEmpty()) {
+                anomalyFieldCount++;
+            }
+        }
+        
+        double avgNullRate = totalFields > 0 ? totalNullRate / totalFields : 0;
+        int qualityScore = calculateQualityScore(avgNullRate, emptyFieldCount, anomalyFieldCount, totalFields);
+        
+        Map<String, Object> quality = new LinkedHashMap<>();
+        quality.put("tableName", tableName);
+        quality.put("totalRows", totalRows);
+        quality.put("totalFields", totalFields);
+        quality.put("qualityScore", qualityScore);
+        quality.put("avgNullRate", Math.round(avgNullRate * 10000) / 100.0);
+        quality.put("emptyFieldCount", emptyFieldCount);
+        quality.put("anomalyFieldCount", anomalyFieldCount);
+        quality.put("qualityLevel", getQualityLevel(qualityScore));
+        quality.put("suggestions", generateQualitySuggestions(avgNullRate, emptyFieldCount, anomalyFieldCount));
+        
+        return quality;
+    }
+    
+    public Map<String, Object> getFieldStatistics(String tableName, String columnName) {
+        assertKnownTable(tableName);
+        assertFieldExists(tableName, columnName);
+        
+        String quotedColumn = quoteColumn(columnName);
+        long totalCount = countRows(tableName);
+        
+        Long nullCount = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM `" + tableName + "` WHERE " + quotedColumn + " IS NULL OR " + quotedColumn + " = ''",
+            Long.class
+        );
+        
+        Long distinctCount = jdbcTemplate.queryForObject(
+            "SELECT COUNT(DISTINCT " + quotedColumn + ") FROM `" + tableName + "` WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != ''",
+            Long.class
+        );
+        
+        nullCount = nullCount == null ? 0 : nullCount;
+        distinctCount = distinctCount == null ? 0 : distinctCount;
+        long nonNullCount = totalCount - nullCount;
+        
+        Map<String, Object> stats = new LinkedHashMap<>();
+        stats.put("columnName", columnName);
+        stats.put("totalCount", totalCount);
+        stats.put("nonNullCount", nonNullCount);
+        stats.put("nullCount", nullCount);
+        stats.put("nullRate", totalCount > 0 ? Math.round((double) nullCount / totalCount * 10000) / 100.0 : 0);
+        stats.put("distinctCount", distinctCount);
+        stats.put("duplicateRate", nonNullCount > 0 ? Math.round((1 - (double) distinctCount / nonNullCount) * 10000) / 100.0 : 0);
+        
+        List<Map<String, Object>> fieldMeta = jdbcTemplate.queryForList(
+            "SELECT field_type AS fieldType FROM is_data_field WHERE table_name = ? AND column_name = ?",
+            tableName, columnName
+        );
+        
+        if (!fieldMeta.isEmpty()) {
+            String fieldType = Objects.toString(fieldMeta.get(0).get("fieldType"), "TEXT");
+            
+            if ("NUMBER".equals(fieldType)) {
+                addNumericStatistics(stats, tableName, quotedColumn);
+            } else if ("DATE".equals(fieldType)) {
+                addDateStatistics(stats, tableName, quotedColumn);
+            }
+        }
+        
+        stats.put("anomalies", detectAnomalies(tableName, columnName));
+        
+        return stats;
+    }
+    
+    public List<Map<String, Object>> detectAnomalies(String tableName, String columnName) {
+        assertKnownTable(tableName);
+        assertFieldExists(tableName, columnName);
+        
+        List<Map<String, Object>> fieldMeta = jdbcTemplate.queryForList(
+            "SELECT field_type AS fieldType FROM is_data_field WHERE table_name = ? AND column_name = ?",
+            tableName, columnName
+        );
+        
+        if (fieldMeta.isEmpty()) {
+            return List.of();
+        }
+        
+        String fieldType = Objects.toString(fieldMeta.get(0).get("fieldType"), "TEXT");
+        
+        if (!"NUMBER".equals(fieldType)) {
+            return List.of();
+        }
+        
+        String quotedColumn = quoteColumn(columnName);
+        Map<String, Object> stats = new LinkedHashMap<>();
+        addNumericStatistics(stats, tableName, quotedColumn);
+        
+        Double avg = (Double) stats.get("avg");
+        Double stdDev = (Double) stats.get("stdDev");
+        
+        if (avg == null || stdDev == null || stdDev == 0) {
+            return List.of();
+        }
+        
+        double lowerBound = avg - 3 * stdDev;
+        double upperBound = avg + 3 * stdDev;
+        
+        List<Map<String, Object>> anomalies = jdbcTemplate.queryForList(
+            "SELECT sys_id, " + quotedColumn + " AS value FROM `" + tableName + 
+            "` WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != '' " +
+            "AND (CAST(" + quotedColumn + " AS DECIMAL(20,4)) < ? OR CAST(" + quotedColumn + " AS DECIMAL(20,4)) > ?) " +
+            "LIMIT 100",
+            lowerBound, upperBound
+        );
+        
+        return anomalies.stream().map(row -> {
+            Map<String, Object> anomaly = new LinkedHashMap<>();
+            anomaly.put("rowId", row.get("sys_id"));
+            anomaly.put("value", row.get("value"));
+            anomaly.put("type", "OUTLIER");
+            anomaly.put("reason", "数值超出 3σ 范围 [" + String.format("%.2f", lowerBound) + ", " + String.format("%.2f", upperBound) + "]");
+            return anomaly;
+        }).toList();
+    }
+    
+    public Map<String, Object> getFieldDistribution(String tableName, String columnName) {
+        assertKnownTable(tableName);
+        assertFieldExists(tableName, columnName);
+        
+        String quotedColumn = quoteColumn(columnName);
+        
+        List<Map<String, Object>> fieldMeta = jdbcTemplate.queryForList(
+            "SELECT field_type AS fieldType FROM is_data_field WHERE table_name = ? AND column_name = ?",
+            tableName, columnName
+        );
+        
+        if (fieldMeta.isEmpty()) {
+            return Map.of("columnName", columnName, "distribution", List.of());
+        }
+        
+        String fieldType = Objects.toString(fieldMeta.get(0).get("fieldType"), "TEXT");
+        
+        if ("NUMBER".equals(fieldType)) {
+            return getNumericDistribution(tableName, quotedColumn, columnName);
+        } else {
+            return getCategoricalDistribution(tableName, quotedColumn, columnName);
+        }
+    }
+    
+    public Map<String, Object> batchReplace(String tableName, String columnName, String oldValue, String newValue) {
+        assertKnownTable(tableName);
+        assertFieldExists(tableName, columnName);
+        
+        String quotedColumn = quoteColumn(columnName);
+        
+        int affected = jdbcTemplate.update(
+            "UPDATE `" + tableName + "` SET " + quotedColumn + " = ? WHERE " + quotedColumn + " = ?",
+            newValue, oldValue
+        );
+        
+        return Map.of(
+            "tableName", tableName,
+            "columnName", columnName,
+            "oldValue", oldValue,
+            "newValue", newValue,
+            "affectedRows", affected
+        );
+    }
+    
+    public Map<String, Object> deleteRows(String tableName, List<Long> rowIds) {
+        assertKnownTable(tableName);
+        
+        if (rowIds == null || rowIds.isEmpty()) {
+            throw new IllegalArgumentException("请选择要删除的行");
+        }
+        
+        if (rowIds.size() > 1000) {
+            throw new IllegalArgumentException("单次最多删除 1000 行");
+        }
+        
+        String placeholders = String.join(",", Collections.nCopies(rowIds.size(), "?"));
+        int affected = jdbcTemplate.update(
+            "DELETE FROM `" + tableName + "` WHERE sys_id IN (" + placeholders + ")",
+            rowIds.toArray()
+        );
+        
+        jdbcTemplate.update(
+            "UPDATE is_data_table SET row_count = (SELECT COUNT(*) FROM `" + tableName + "`) WHERE table_name = ?",
+            tableName
+        );
+        
+        return Map.of(
+            "tableName", tableName,
+            "deletedRows", affected
+        );
+    }
+    
+    public Map<String, Object> deleteColumn(String tableName, String columnName) {
+        assertKnownTable(tableName);
+        assertFieldExists(tableName, columnName);
+        
+        String quotedColumn = quoteColumn(columnName);
+        
+        jdbcTemplate.execute("ALTER TABLE `" + tableName + "` DROP COLUMN " + quotedColumn);
+        
+        jdbcTemplate.update(
+            "DELETE FROM is_data_field WHERE table_name = ? AND column_name = ?",
+            tableName, columnName
+        );
+        
+        jdbcTemplate.update(
+            "UPDATE is_data_table SET field_count = (SELECT COUNT(*) FROM is_data_field WHERE table_name = ?) WHERE table_name = ?",
+            tableName, tableName
+        );
+        
+        return Map.of(
+            "tableName", tableName,
+            "columnName", columnName,
+            "deleted", true
+        );
+    }
+    
+    public Map<String, Object> transformData(String tableName, String columnName, String transformType, Map<String, Object> options) {
+        assertKnownTable(tableName);
+        assertFieldExists(tableName, columnName);
+        
+        String quotedColumn = quoteColumn(columnName);
+        String updateSql = null;
+        
+        switch (transformType.toUpperCase()) {
+            case "TRIM":
+                updateSql = "UPDATE `" + tableName + "` SET " + quotedColumn + " = TRIM(" + quotedColumn + ")";
+                break;
+            case "UPPER":
+                updateSql = "UPDATE `" + tableName + "` SET " + quotedColumn + " = UPPER(" + quotedColumn + ")";
+                break;
+            case "LOWER":
+                updateSql = "UPDATE `" + tableName + "` SET " + quotedColumn + " = LOWER(" + quotedColumn + ")";
+                break;
+            case "DATE_FORMAT":
+                String format = Objects.toString(options.getOrDefault("format", "%Y-%m-%d"), "%Y-%m-%d");
+                updateSql = "UPDATE `" + tableName + "` SET " + quotedColumn + 
+                    " = DATE_FORMAT(STR_TO_DATE(" + quotedColumn + ", '%Y-%m-%d'), '" + format + "') " +
+                    "WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != ''";
+                break;
+            case "MULTIPLY":
+                double factor = Double.parseDouble(Objects.toString(options.getOrDefault("factor", "1"), "1"));
+                updateSql = "UPDATE `" + tableName + "` SET " + quotedColumn + 
+                    " = CAST(" + quotedColumn + " AS DECIMAL(20,4)) * " + factor +
+                    " WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != ''";
+                break;
+            case "FILL_NULL":
+                String fillValue = Objects.toString(options.getOrDefault("value", ""), "");
+                updateSql = "UPDATE `" + tableName + "` SET " + quotedColumn + " = ? WHERE " + quotedColumn + " IS NULL OR " + quotedColumn + " = ''";
+                break;
+            default:
+                throw new IllegalArgumentException("不支持的转换类型：" + transformType);
+        }
+        
+        int affected;
+        if ("FILL_NULL".equals(transformType.toUpperCase())) {
+            String fillValue = Objects.toString(options.getOrDefault("value", ""), "");
+            affected = jdbcTemplate.update(updateSql, fillValue);
+        } else {
+            affected = jdbcTemplate.update(updateSql);
+        }
+        
+        return Map.of(
+            "tableName", tableName,
+            "columnName", columnName,
+            "transformType", transformType,
+            "affectedRows", affected
+        );
+    }
+    
+    public Map<String, Object> validateFile(MultipartFile file) throws IOException {
+        String originalFilename = Objects.requireNonNullElse(file.getOriginalFilename(), "未命名文件");
+        long fileSize = file.getSize();
+        
+        Map<String, Object> validation = new LinkedHashMap<>();
+        validation.put("fileName", originalFilename);
+        validation.put("fileSize", fileSize);
+        validation.put("fileSizeMB", Math.round(fileSize / 1024.0 / 1024.0 * 100) / 100.0);
+        
+        List<String> errors = new ArrayList<>();
+        List<String> warnings = new ArrayList<>();
+        
+        if (fileSize > 100 * 1024 * 1024) {
+            errors.add("文件大小超过 100MB 限制");
+        }
+        
+        String lowerName = originalFilename.toLowerCase();
+        if (!lowerName.endsWith(".xlsx") && !lowerName.endsWith(".xls") && !lowerName.endsWith(".csv")) {
+            errors.add("仅支持 .xlsx、.xls、.csv 格式");
+        }
+        
+        if (fileSize < 100) {
+            warnings.add("文件过小，可能为空文件");
+        }
+        
+        String md5 = calculateMD5(file.getBytes());
+        validation.put("md5", md5);
+        
+        boolean isDuplicate = checkDuplicateByMD5(md5);
+        if (isDuplicate) {
+            warnings.add("检测到重复文件（MD5 已存在）");
+        }
+        
+        validation.put("valid", errors.isEmpty());
+        validation.put("errors", errors);
+        validation.put("warnings", warnings);
+        validation.put("isDuplicate", isDuplicate);
+        
+        return validation;
+    }
+    
+    private int calculateQualityScore(double avgNullRate, int emptyFieldCount, int anomalyFieldCount, int totalFields) {
+        int score = 100;
+        
+        score -= (int) (avgNullRate * 50);
+        
+        if (totalFields > 0) {
+            score -= (emptyFieldCount * 100 / totalFields) / 2;
+            score -= (anomalyFieldCount * 100 / totalFields) / 4;
+        }
+        
+        return Math.max(0, Math.min(100, score));
+    }
+    
+    private String getQualityLevel(int score) {
+        if (score >= 90) return "优秀";
+        if (score >= 75) return "良好";
+        if (score >= 60) return "中等";
+        if (score >= 40) return "较差";
+        return "差";
+    }
+    
+    private List<String> generateQualitySuggestions(double avgNullRate, int emptyFieldCount, int anomalyFieldCount) {
+        List<String> suggestions = new ArrayList<>();
+        
+        if (avgNullRate > 0.3) {
+            suggestions.add("数据空值率较高（" + Math.round(avgNullRate * 100) + "%），建议填充默认值或删除空值行");
+        }
+        
+        if (emptyFieldCount > 0) {
+            suggestions.add("存在 " + emptyFieldCount + " 个空值率超过 50% 的字段，建议删除或补充数据");
+        }
+        
+        if (anomalyFieldCount > 0) {
+            suggestions.add("检测到 " + anomalyFieldCount + " 个字段存在异常值，建议查看异常值详情并处理");
+        }
+        
+        if (suggestions.isEmpty()) {
+            suggestions.add("数据质量良好，可直接用于分析");
+        }
+        
+        return suggestions;
+    }
+    
+    private void addNumericStatistics(Map<String, Object> stats, String tableName, String quotedColumn) {
+        try {
+            Map<String, Object> numStats = jdbcTemplate.queryForMap(
+                "SELECT " +
+                "  MIN(CAST(" + quotedColumn + " AS DECIMAL(20,4))) AS minValue, " +
+                "  MAX(CAST(" + quotedColumn + " AS DECIMAL(20,4))) AS maxValue, " +
+                "  AVG(CAST(" + quotedColumn + " AS DECIMAL(20,4))) AS avgValue, " +
+                "  STDDEV(CAST(" + quotedColumn + " AS DECIMAL(20,4))) AS stdDev " +
+                "FROM `" + tableName + "` " +
+                "WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != ''"
+            );
+            
+            stats.put("min", numStats.get("minValue"));
+            stats.put("max", numStats.get("maxValue"));
+            stats.put("avg", numStats.get("avgValue"));
+            stats.put("stdDev", numStats.get("stdDev"));
+        } catch (Exception e) {
+            log.warn("计算数值统计信息失败：{}", e.getMessage());
+        }
+    }
+    
+    private void addDateStatistics(Map<String, Object> stats, String tableName, String quotedColumn) {
+        try {
+            Map<String, Object> dateStats = jdbcTemplate.queryForMap(
+                "SELECT " +
+                "  MIN(" + quotedColumn + ") AS minDate, " +
+                "  MAX(" + quotedColumn + ") AS maxDate " +
+                "FROM `" + tableName + "` " +
+                "WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != ''"
+            );
+            
+            stats.put("minDate", dateStats.get("minDate"));
+            stats.put("maxDate", dateStats.get("maxDate"));
+        } catch (Exception e) {
+            log.warn("计算日期统计信息失败：{}", e.getMessage());
+        }
+    }
+    
+    private Map<String, Object> getNumericDistribution(String tableName, String quotedColumn, String columnName) {
+        List<Map<String, Object>> distribution = jdbcTemplate.queryForList(
+            "SELECT " +
+            "  FLOOR(CAST(" + quotedColumn + " AS DECIMAL(20,4)) / " +
+            "    (SELECT (MAX(CAST(" + quotedColumn + " AS DECIMAL(20,4))) - MIN(CAST(" + quotedColumn + " AS DECIMAL(20,4)))) / 10 " +
+            "     FROM `" + tableName + "` WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != '')) AS bucket, " +
+            "  COUNT(*) AS count " +
+            "FROM `" + tableName + "` " +
+            "WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != '' " +
+            "GROUP BY bucket " +
+            "ORDER BY bucket " +
+            "LIMIT 20"
+        );
+        
+        return Map.of(
+            "columnName", columnName,
+            "type", "NUMERIC",
+            "distribution", distribution
+        );
+    }
+    
+    private Map<String, Object> getCategoricalDistribution(String tableName, String quotedColumn, String columnName) {
+        List<Map<String, Object>> distribution = jdbcTemplate.queryForList(
+            "SELECT " + quotedColumn + " AS category, COUNT(*) AS count " +
+            "FROM `" + tableName + "` " +
+            "WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != '' " +
+            "GROUP BY " + quotedColumn + " " +
+            "ORDER BY count DESC " +
+            "LIMIT 20"
+        );
+        
+        return Map.of(
+            "columnName", columnName,
+            "type", "CATEGORICAL",
+            "distribution", distribution
+        );
+    }
+    
+    private String calculateMD5(byte[] bytes) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(bytes);
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+    
+    private boolean checkDuplicateByMD5(String md5) {
+        if (md5 == null || md5.isBlank()) {
+            return false;
+        }
+        
+        try {
+            jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS `is_file_upload_history` (
+                  `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+                  `file_md5` VARCHAR(64) NOT NULL,
+                  `file_name` VARCHAR(255) NOT NULL,
+                  `table_name` VARCHAR(128) NULL,
+                  `uploaded_by` VARCHAR(64) NOT NULL,
+                  `uploaded_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+                  INDEX `idx_file_md5` (`file_md5`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文件上传历史记录';
+                """);
+            
+            Integer count = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM is_file_upload_history WHERE file_md5 = ?",
+                Integer.class,
+                md5
+            );
+            
+            return count != null && count > 0;
+        } catch (Exception e) {
+            log.warn("检查文件重复失败：{}", e.getMessage());
+            return false;
         }
     }
 

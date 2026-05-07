@@ -85,6 +85,7 @@ const uploadFile = ref(null)
 const uploadFiles = ref([])
 const uploadMergeMode = ref('SAME_HEADER')
 const uploadJoinKey = ref('')
+const uploadDisplayName = ref('')
 const modelRequirement = ref('')
 const businessModels = ref([])
 const enterpriseModels = ref([])
@@ -879,8 +880,10 @@ const submitUpload = async () => {
     formData.append('mergeMode', uploadMergeMode.value)
     formData.append('joinKey', uploadJoinKey.value)
     formData.append('modelRequirement', modelRequirement.value)
+    formData.append('displayName', uploadDisplayName.value)
   } else {
     formData.append('file', uploadFile.value)
+    formData.append('displayName', uploadDisplayName.value)
   }
   try {
     const task = unwrap(await axios.post(`${API_BASE}/api/data/${batchMode ? 'upload-batch-async' : 'upload-async'}`, formData))
@@ -909,6 +912,7 @@ const pollUploadTask = async (taskId) => {
     if (uploadTask.value?.status === 'SUCCESS') {
       const result = uploadTask.value.resultJson ? JSON.parse(uploadTask.value.resultJson) : {}
       uploadResult.value = result
+      uploadDisplayName.value = ''
       selectedTableName.value = result.tableName || selectedTableName.value
       await Promise.all([loadTables(), loadBusinessModels()])
       return
@@ -1407,6 +1411,7 @@ provide('workbench', {
   uploadFiles,
   uploadMergeMode,
   uploadJoinKey,
+  uploadDisplayName,
   modelRequirement,
   businessModels,
   enterpriseModels,
