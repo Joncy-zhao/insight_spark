@@ -446,3 +446,111 @@ ON DUPLICATE KEY UPDATE mask_type = VALUES(mask_type);
 INSERT INTO is_sensitive_field_rule(field_keyword, mask_type, enabled)
 VALUES ('金额', 'MIDDLE', 1)
 ON DUPLICATE KEY UPDATE mask_type = VALUES(mask_type);
+
+
+-- ==========================================================
+--                     全栈b数据库表设计（开始）
+-- ==========================================================
+
+-- ==========================================================
+-- 9. 智能对话与分析引擎核心模块 (全栈B功能合并)
+-- ==========================================================
+
+-- --------------------------------------------------------
+-- 9.1 对话查询与历史总表 (is_chat_query_history)
+-- --------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `is_chat_query_history` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT '物理主键ID',
+  `user_id` VARCHAR(64) NOT NULL COMMENT '用户逻辑ID，关联 is_user.user_id 实现权限隔离',
+  `data_source_id` BIGINT NOT NULL COMMENT '数据源选择器ID，关联 is_official_datasource.id',
+  `query_text` TEXT NOT NULL COMMENT '自然语言输入（文字/语音转写），支持一句话长指令搭建模型',
+  
+  -- AI 与 SQL 生成模块
+  `generated_sql` TEXT COMMENT '调用大模型生成的执行SQL',
+  `reasoning_process` JSON COMMENT '知识图谱匹配与大模型推理步骤日志',
+  `llm_model_used` VARCHAR(50) DEFAULT 'GPT-4' COMMENT '大模型切换器记录（用于管理员全局测试）',
+  
+  -- 图表与渲染模块
+  `chart_type` VARCHAR(50) COMMENT '推荐的图表类型（折线图、柱状图等）',
+  `chart_snapshot` JSON COMMENT 'ECharts图表快照与渲染配置（应用层仅保存配置，不保存海量明细数据）',
+  
+  -- 审计与性能模块 (支撑管理员端全量审计)
+  `execution_status` TINYINT(1) DEFAULT 1 COMMENT '执行状态: 1-成功, 0-失败',
+  `risk_level` VARCHAR(20) DEFAULT 'SAFE' COMMENT '安全检测结果/风险等级 (SAFE/WARN/BLOCK)',
+  `audit_info` TEXT COMMENT '安全审计详细信息（拦截原因、慢查询标记等）',
+  `execution_time_ms` INT COMMENT '查询性能统计（执行耗时）',
+  `is_hit_cache` TINYINT(1) DEFAULT 0 COMMENT '是否优先命中Redis语义缓存，用于性能调优',
+  
+  -- 通用控制字段
+  `is_deleted` TINYINT(1) DEFAULT 0 COMMENT '逻辑删除标志：0-未删除，1-已删除（支撑批量清理功能）',
+  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '查询创建时间',
+  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  
+  INDEX `idx_chat_history_user_time` (`user_id`, `created_at`),
+  INDEX `idx_chat_history_risk_level` (`risk_level`),
+  INDEX `idx_chat_history_data_source` (`data_source_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='对话查询与全量历史审计表';
+
+
+-- --------------------------------------------------------
+-- 9.2 预测与情景模拟配置表 (is_prediction_scenario_config)
+-- --------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `is_prediction_scenario_config` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT '物理主键ID',
+  `user_id` VARCHAR(64) NOT NULL COMMENT '配置所属用户逻辑ID，关联 is_user.user_id',
+  `data_source_id` BIGINT NOT NULL COMMENT '关联的数据源ID（Agent轮询时必须知道对哪份数据操作）',
+  `task_name` VARCHAR(100) NOT NULL COMMENT '预测/模拟任务名称',
+  
+  -- 算法与业务配置
+  `algorithm_type` VARCHAR(50) NOT NULL COMMENT '算法选择 (Prophet/Holt-Winters/What-if拟合)',
+  `prediction_cycle` INT COMMENT '预测周期（如未来N天/月）',
+  `what_if_variables` JSON COMMENT 'What-if变量配置表单数据',
+  
+  -- 预警配置
+  `alert_threshold` JSON COMMENT '预警阈值设置界面数据',
+  `notification_method` VARCHAR(50) COMMENT '预警消息推送方式 (如 邮件/钉钉)',
+  
+  -- 离线Agent调度与状态 (纯批处理离线架构)
+  `is_agent_enabled` TINYINT(1) DEFAULT 0 COMMENT '是否开启离线批处理Agent定时轮询: 1-开启, 0-关闭',
+  `task_status` VARCHAR(20) DEFAULT 'STOPPED' COMMENT '任务当前状态 (RUNNING/STOPPED/FAILED/COMPLETED)',
+  `last_execution_time` DATETIME COMMENT 'Agent上次执行预测/巡检的时间',
+  `next_execution_time` DATETIME COMMENT 'Agent下次预期执行时间',
+  
+  -- 通用控制字段
+  `is_deleted` TINYINT(1) DEFAULT 0 COMMENT '逻辑删除标志：0-未删除，1-已删除',
+  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  
+  INDEX `idx_prediction_user_id` (`user_id`),
+  INDEX `idx_prediction_agent_schedule` (`is_agent_enabled`, `next_execution_time`) COMMENT '专为Cron任务轮询优化，快速抓取待执行任务'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='预测与情景模拟配置及离线调度表';
+
+
+-- --------------------------------------------------------
+-- 9.3 AI图表推荐规则表 (is_chart_recommend_rule)
+-- --------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `is_chart_recommend_rule` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT '物理主键ID',
+  `rule_type` VARCHAR(50) NOT NULL COMMENT '规则列表分类 (时序/分组/占比/明细)',
+  `rule_name` VARCHAR(100) NOT NULL COMMENT '规则名称（如：财务类时序默认规则、电商大促对比规则）',
+  `priority` INT DEFAULT 0 COMMENT '规则优先级，数字越大优先级越高（解决同类型多规则冲突时的路由问题）',
+  
+  -- 规则状态与逻辑
+  `is_enabled` TINYINT(1) DEFAULT 1 COMMENT '启用/禁用开关：1-启用, 0-禁用',
+  `custom_rule_logic` TEXT COMMENT '自定义规则判断脚本或AST表达式（当内置逻辑无法满足时使用）',
+  
+  -- 渲染配置
+  `style_parameters` JSON COMMENT '图表样式参数配置（直接喂给前端ECharts动态渲染引擎使用）',
+  
+  -- 审计与控制字段
+  `created_by` VARCHAR(64) NOT NULL COMMENT '创建该规则的管理员逻辑ID，关联 is_user.user_id',
+  `is_deleted` TINYINT(1) DEFAULT 0 COMMENT '逻辑删除标志：0-未删除，1-已删除',
+  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  
+  INDEX `idx_chart_rule_type_enabled_priority` (`rule_type`, `is_enabled`, `priority`) 
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI图表动态推荐与渲染规则表';
+
+-- ==========================================================
+--                     全栈b数据库表设计（结束）
+-- ==========================================================

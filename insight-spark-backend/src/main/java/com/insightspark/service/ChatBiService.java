@@ -35,10 +35,14 @@ public class ChatBiService {
     @Autowired
     private KnowledgeGraphService knowledgeGraphService;
 
+    @Autowired
+    private RuleBasedNl2SqlStrategy ruleBasedNl2SqlStrategy;
+
     public Map<String, Object> executeChat(String question, String tableName) {
         log.info("Received chat question: {}", question);
 
-        String activeTable = (tableName == null || tableName.isBlank()) ? dataUploadService.latestTableName() : tableName;
+        String activeTable = (tableName == null || tableName.isBlank()) ? dataUploadService.latestTableName()
+                : tableName;
         boolean officialSource = datasourceService.isOfficialSource(activeTable);
         String queryTableName = officialSource ? datasourceService.physicalTableName(activeTable) : activeTable;
         dataUploadService.assertKnownTable(activeTable);
@@ -65,7 +69,9 @@ public class ChatBiService {
             throw new IllegalArgumentException("当前数据表没有字段元信息，请在“数据上传”页面重新上传文件，或选择字段数大于 0 的数据表。");
         }
         List<Map<String, Object>> graphContext = knowledgeGraphService.retrieveContext(question, activeTable);
-        Optional<Map<String, Object>> aiResult = pythonAiService.textToSql(question, queryTableName, fields);
+        List<Map<String, Object>> previewRows = dataUploadService.preview(activeTable, 1, 8);
+        Optional<Map<String, Object>> aiResult = pythonAiService.textToSql(question, queryTableName, fields,
+                previewRows);
 
         String generatedSql;
         String chartType;
@@ -79,13 +85,14 @@ public class ChatBiService {
             fieldMapping = (Map<String, Object>) ai.getOrDefault("fieldMapping", Map.of());
             engine = "python-ai-service";
         } else {
-            FieldChoice fieldChoice = chooseFields(question, fields);
-            chartType = chooseChartType(question, fieldChoice.dimensionType());
-            generatedSql = buildSql(queryTableName, fieldChoice, chartType);
+            RuleBasedNl2SqlStrategy.FieldChoice fieldChoice = ruleBasedNl2SqlStrategy.chooseFields(question, fields);
+            chartType = ruleBasedNl2SqlStrategy.chooseChartType(question, fieldChoice.dimensionType());
+            generatedSql = ruleBasedNl2SqlStrategy.buildSql(queryTableName, fieldChoice, chartType);
             fieldMapping = Map.of(
                     "dimension", fieldChoice.dimensionDisplayName(),
-                    "metric", fieldChoice.metricDisplayName() == null ? "记录数" : fieldChoice.metricDisplayName()
-            );
+                    "metric", fieldChoice.metricDisplayName() == null ? "记录数" : fieldChoice.metricDisplayName(),
+                    "dimensionKey", fieldChoice.dimensionColumn(),
+                    "metricKey", fieldChoice.metricColumn() == null ? "value" : fieldChoice.metricColumn());
             engine = "java-fallback";
         }
 
@@ -108,6 +115,17 @@ public class ChatBiService {
                     ? datasourceService.executeQueryWithoutAudit(activeTable, generatedSql)
                     : queryUploadTable(generatedSql);
             queryResult = sqlAuditService.maskRows(activeTable, queryResult);
+            if (isAllNullChartRows(queryResult)) {
+                Map<String, Object> recovery = rebuildQueryFromTableProfile(activeTable, queryTableName, question,
+                        fields, chartType);
+                if (recovery != null) {
+                    generatedSql = Objects.toString(recovery.getOrDefault("sql", generatedSql));
+                    chartType = Objects.toString(recovery.getOrDefault("chartType", chartType));
+                    fieldMapping = (Map<String, Object>) recovery.getOrDefault("fieldMapping", fieldMapping);
+                    queryResult = (List<Map<String, Object>>) recovery.getOrDefault("data", queryResult);
+                }
+            }
+            queryResult = normalizeChartRows(queryResult, chartType, fieldMapping);
             long durationMs = System.currentTimeMillis() - startedAt;
             sqlAuditService.record(question, activeTable, engine, generatedSql, auditResult,
                     "SUCCESS", durationMs, null);
@@ -139,104 +157,204 @@ public class ChatBiService {
         return response;
     }
 
-    private FieldChoice chooseFields(String question, List<Map<String, Object>> fields) {
-        Map<String, Object> dimension = findBestField(question, fields, "TEXT");
-        if (question.contains("趋势") || question.contains("每日") || question.contains("日期") || question.contains("时间")) {
-            Map<String, Object> dateField = findBestField(question, fields, "DATE");
-            if (dateField != null) {
-                dimension = dateField;
+    private boolean isAllNullChartRows(List<Map<String, Object>> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return false;
+        }
+        return rows.stream().allMatch(row -> isEmptyChartValue(row, "name", "dim_name", "dimension")
+                && isEmptyChartValue(row, "value", "metric_value", "metric"));
+    }
+
+    private boolean isEmptyChartValue(Map<String, Object> row, String... keys) {
+        Object value = null;
+        for (String key : keys) {
+            if (row.containsKey(key)) {
+                value = row.get(key);
+                break;
             }
         }
-        if (dimension == null) {
-            dimension = fields.stream().findFirst().orElseThrow(() -> new IllegalArgumentException("当前数据表没有可查询字段"));
+        if (value == null) {
+            return true;
         }
-
-        Map<String, Object> metric = findBestField(question, fields, "NUMBER");
-        String dimensionType = Objects.toString(dimension.get("fieldType"), "TEXT");
-        return new FieldChoice(
-                Objects.toString(dimension.get("columnName")),
-                Objects.toString(dimension.get("displayName")),
-                dimensionType,
-                metric == null ? null : Objects.toString(metric.get("columnName")),
-                metric == null ? null : Objects.toString(metric.get("displayName"))
-        );
+        if (value instanceof String text) {
+            return text.trim().isEmpty();
+        }
+        return false;
     }
 
-    private Map<String, Object> findBestField(String question, List<Map<String, Object>> fields, String preferredType) {
-        Map<String, Object> semanticMatch = findSemanticField(question, fields, preferredType);
-        if (semanticMatch != null) {
-            return semanticMatch;
-        }
-        return fields.stream()
-                .filter(field -> preferredType.equals(Objects.toString(field.get("fieldType"))))
-                .filter(field -> question.contains(Objects.toString(field.get("displayName")))
-                        || question.contains(Objects.toString(field.get("sourceFieldName"))))
-                .findFirst()
-                .orElseGet(() -> fields.stream()
-                        .filter(field -> preferredType.equals(Objects.toString(field.get("fieldType"))))
-                        .findFirst()
-                        .orElse(null));
-    }
-
-    private Map<String, Object> findSemanticField(String question, List<Map<String, Object>> fields, String preferredType) {
-        List<String> terms = new java.util.ArrayList<>();
-        if (question.contains("省份") || question.contains("省市") || question.contains("地区") || question.contains("省")) {
-            terms.addAll(List.of("province", "prov", "state"));
-        }
-        if (question.contains("城市") || question.contains("市")) {
-            terms.add("city");
-        }
-        if (question.contains("区域") || question.contains("大区")) {
-            terms.addAll(List.of("region", "area"));
-        }
-        if (question.contains("销售额") || question.contains("销售") || question.contains("金额")
-                || question.contains("营收") || question.contains("收入")) {
-            terms.addAll(List.of("sales", "sale", "amount", "amt", "revenue", "gmv"));
-        }
-        if (question.contains("利润") || question.contains("盈利") || question.contains("毛利")) {
-            terms.addAll(List.of("profit", "margin"));
-        }
-        if (question.contains("数量") || question.contains("销量") || question.contains("件数")) {
-            terms.addAll(List.of("qty", "quantity", "count", "volume"));
-        }
-        if (question.contains("折扣") || question.contains("折让")) {
-            terms.add("discount");
-        }
-        if (terms.isEmpty()) {
+    private Map<String, Object> rebuildQueryFromTableProfile(String activeTable, String queryTableName, String question,
+            List<Map<String, Object>> fields, String chartType) {
+        List<Map<String, Object>> previewRows = queryTablePreview(queryTableName, 20);
+        if (previewRows.isEmpty()) {
             return null;
         }
-        return fields.stream()
-                .filter(field -> preferredType.equals(Objects.toString(field.get("fieldType"))))
-                .filter(field -> {
-                    String haystack = (Objects.toString(field.get("columnName"), "") + " "
-                            + Objects.toString(field.get("displayName"), "") + " "
-                            + Objects.toString(field.get("sourceFieldName"), "") + " "
-                            + Objects.toString(field.get("fieldComment"), "")).toLowerCase();
-                    return terms.stream().anyMatch(haystack::contains);
-                })
-                .findFirst()
-                .orElse(null);
+        Map<String, Object> best = inferBestColumnsFromPreview(question, fields, previewRows);
+        String dimensionKey = Objects.toString(best.getOrDefault("dimensionKey", ""));
+        String metricKey = Objects.toString(best.getOrDefault("metricKey", ""));
+        if (dimensionKey.isBlank() || metricKey.isBlank()) {
+            return null;
+        }
+        String sql = "SELECT `" + dimensionKey + "` AS dim_name, SUM(CAST(NULLIF(`" + metricKey
+                + "`, '') AS DECIMAL(18,2))) AS metric_value "
+                + "FROM `" + queryTableName + "` WHERE `" + dimensionKey + "` IS NOT NULL AND `" + dimensionKey
+                + "` <> '' "
+                + "GROUP BY `" + dimensionKey + "` ORDER BY metric_value DESC LIMIT 30";
+        List<Map<String, Object>> data = jdbcTemplate.queryForList(sql);
+        data = sqlAuditService.maskRows(activeTable, data);
+        return Map.of(
+                "sql", sql,
+                "chartType", chartType,
+                "fieldMapping", Map.of(
+                        "dimension", best.getOrDefault("dimension", dimensionKey),
+                        "metric", best.getOrDefault("metric", metricKey),
+                        "dimensionKey", dimensionKey,
+                        "metricKey", metricKey),
+                "data", data);
     }
 
-    private String chooseChartType(String question, String dimensionType) {
-        if (question.contains("占比") || question.contains("比例") || question.contains("分类")) {
-            return "pie";
-        }
-        if ("DATE".equals(dimensionType) || question.contains("趋势") || question.contains("变化")) {
-            return "line";
-        }
-        return "bar";
+    private List<Map<String, Object>> queryTablePreview(String tableName, int limit) {
+        return jdbcTemplate.queryForList("SELECT * FROM `" + tableName + "` LIMIT " + Math.max(1, Math.min(limit, 20)));
     }
 
-    private String buildSql(String tableName, FieldChoice fieldChoice, String chartType) {
-        String valueExpr = fieldChoice.metricColumn() == null
-                ? "COUNT(1)"
-                : "SUM(CAST(NULLIF(`" + fieldChoice.metricColumn() + "`, '') AS DECIMAL(18,2)))";
-        String orderExpr = "line".equals(chartType) ? "name ASC" : "value DESC";
-        return "SELECT `" + fieldChoice.dimensionColumn() + "` AS name, " + valueExpr + " AS value FROM `"
-                + tableName + "` WHERE `" + fieldChoice.dimensionColumn() + "` IS NOT NULL AND `"
-                + fieldChoice.dimensionColumn() + "` <> '' GROUP BY `" + fieldChoice.dimensionColumn()
-                + "` ORDER BY " + orderExpr + " LIMIT 30";
+    private Map<String, Object> inferBestColumnsFromPreview(String question, List<Map<String, Object>> fields,
+            List<Map<String, Object>> previewRows) {
+        Map<String, Object> result = new HashMap<>();
+        if (fields == null || fields.isEmpty() || previewRows.isEmpty()) {
+            return result;
+        }
+        List<String> orderedColumns = new java.util.ArrayList<>(previewRows.get(0).keySet());
+        String dimensionKey = null;
+        String metricKey = null;
+        for (Map<String, Object> field : fields) {
+            String columnName = Objects.toString(field.get("columnName"), "");
+            if (dimensionKey == null && isQuestionLikelyDimension(question, field)) {
+                dimensionKey = columnName;
+            }
+            if (metricKey == null && isQuestionLikelyMetric(question, field)) {
+                metricKey = columnName;
+            }
+        }
+        if (dimensionKey == null) {
+            dimensionKey = orderedColumns.stream().filter(col -> isMostlyText(previewRows, col)).findFirst()
+                    .orElse(orderedColumns.get(0));
+        }
+        String finalDimensionKey = dimensionKey;
+        if (metricKey == null) {
+            metricKey = orderedColumns.stream()
+                    .filter(col -> isMostlyNumeric(previewRows, col) && !col.equals(finalDimensionKey))
+                    .findFirst()
+                    .orElseGet(() -> orderedColumns.stream()
+                            .filter(col -> !col.equals(finalDimensionKey))
+                            .findFirst()
+                            .orElse(finalDimensionKey));
+        }
+        result.put("dimensionKey", dimensionKey);
+        result.put("metricKey", metricKey);
+        result.put("dimension", dimensionKey);
+        result.put("metric", metricKey);
+        return result;
+    }
+
+    private boolean isQuestionLikelyDimension(String question, Map<String, Object> field) {
+        String display = Objects.toString(field.get("displayName"), "");
+        String comment = Objects.toString(field.get("fieldComment"), "");
+        String column = Objects.toString(field.get("columnName"), "");
+        String type = Objects.toString(field.get("fieldType"), "TEXT");
+        if ("NUMBER".equals(type)) {
+            return false;
+        }
+        return question.contains(display) || question.contains(column) || question.contains(comment)
+                || display.contains("省") || display.contains("地区") || display.contains("分类") || display.contains("品类")
+                || display.contains("城市")
+                || column.matches(".*(province|region|city|category|type|name|kind|class).*?");
+    }
+
+    private boolean isQuestionLikelyMetric(String question, Map<String, Object> field) {
+        String display = Objects.toString(field.get("displayName"), "");
+        String comment = Objects.toString(field.get("fieldComment"), "");
+        String column = Objects.toString(field.get("columnName"), "");
+        String type = Objects.toString(field.get("fieldType"), "TEXT");
+        if (!"NUMBER".equals(type)) {
+            return false;
+        }
+        return question.contains(display) || question.contains(column) || question.contains(comment)
+                || display.contains("销售") || display.contains("金额") || display.contains("数量") || display.contains("总额")
+                || column.matches(".*(sales|amount|amt|total|count|qty|price|profit|revenue).*?");
+    }
+
+    private boolean isMostlyText(List<Map<String, Object>> rows, String column) {
+        int sample = Math.min(rows.size(), 10);
+        if (sample == 0)
+            return false;
+        int textCount = 0;
+        for (int i = 0; i < sample; i++) {
+            Object value = rows.get(i).get(column);
+            if (value != null && !isNumericValue(value)) {
+                textCount++;
+            }
+        }
+        return textCount >= Math.max(1, sample / 2);
+    }
+
+    private boolean isMostlyNumeric(List<Map<String, Object>> rows, String column) {
+        int sample = Math.min(rows.size(), 10);
+        if (sample == 0)
+            return false;
+        int numericCount = 0;
+        for (int i = 0; i < sample; i++) {
+            if (isNumericValue(rows.get(i).get(column))) {
+                numericCount++;
+            }
+        }
+        return numericCount >= Math.max(1, sample / 2);
+    }
+
+    private boolean isNumericValue(Object value) {
+        if (value == null)
+            return false;
+        if (value instanceof Number)
+            return true;
+        try {
+            Double.parseDouble(Objects.toString(value).replace(",", "").trim());
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private List<Map<String, Object>> normalizeChartRows(List<Map<String, Object>> rows, String chartType,
+            Map<String, Object> fieldMapping) {
+        if (rows == null || rows.isEmpty()) {
+            return rows;
+        }
+        if (rows.stream().allMatch(row -> row.containsKey("name") && row.containsKey("value"))) {
+            return rows;
+        }
+        String dimensionKey = Objects.toString(fieldMapping.getOrDefault("dimensionKey", ""));
+        String metricKey = Objects.toString(fieldMapping.getOrDefault("metricKey", ""));
+        if (dimensionKey.isBlank() || metricKey.isBlank()) {
+            Map<String, Object> firstRow = rows.get(0);
+            if (dimensionKey.isBlank()) {
+                dimensionKey = firstRow.keySet().stream().findFirst().orElse("name");
+            }
+            if (metricKey.isBlank()) {
+                metricKey = firstRow.keySet().stream().skip(1).findFirst().orElse("value");
+            }
+        }
+        String finalDimensionKey = dimensionKey;
+        String finalMetricKey = metricKey;
+        return rows.stream().map(row -> {
+            Map<String, Object> normalized = new HashMap<>();
+            Object dimensionValue = row.containsKey(finalDimensionKey) ? row.get(finalDimensionKey)
+                    : row.getOrDefault("dim_name",
+                            row.getOrDefault("name", row.getOrDefault("dimension", row.get(finalDimensionKey))));
+            Object metricValue = row.containsKey(finalMetricKey) ? row.get(finalMetricKey)
+                    : row.getOrDefault("metric_value",
+                            row.getOrDefault("value", row.getOrDefault("metric", row.get(finalMetricKey))));
+            normalized.put("name", dimensionValue);
+            normalized.put("value", metricValue);
+            return normalized;
+        }).toList();
     }
 
     private String chartName(String chartType) {
@@ -246,9 +364,5 @@ public class ChatBiService {
     private List<Map<String, Object>> queryUploadTable(String sql) {
         jdbcTemplate.setQueryTimeout(5);
         return jdbcTemplate.queryForList(sql);
-    }
-
-    private record FieldChoice(String dimensionColumn, String dimensionDisplayName, String dimensionType,
-                               String metricColumn, String metricDisplayName) {
     }
 }

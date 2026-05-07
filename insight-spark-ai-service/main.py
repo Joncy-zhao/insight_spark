@@ -1,12 +1,38 @@
 from collections import defaultdict
 from math import sqrt
 from typing import Any
+import json
+import os
+from urllib import error, request
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 
 app = FastAPI(title="Insight Spark AI Service", version="0.1.0")
+
+
+def load_local_env_file(path: str = ".env") -> None:
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as env_file:
+            for raw_line in env_file:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                os.environ.setdefault(key, value)
+    except OSError:
+        pass
+
+
+load_local_env_file()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "qwen-plus").strip()
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1").rstrip("/")
 
 
 class FieldMeta(BaseModel):
@@ -23,6 +49,7 @@ class TextToSqlRequest(BaseModel):
     question: str
     tableName: str
     fields: list[FieldMeta]
+    previewRows: list[dict[str, Any]] = []
 
 
 class ChartRecommendRequest(BaseModel):
@@ -78,6 +105,11 @@ def text_to_sql(payload: TextToSqlRequest) -> dict[str, Any]:
     if not payload.fields:
         raise HTTPException(status_code=400, detail="当前数据表没有字段元信息，请先重新上传文件或选择有效数据表。")
 
+    if OPENAI_API_KEY:
+        ai_result = call_openai_text_to_sql(payload)
+        if ai_result:
+            return ai_result
+
     dimension = choose_dimension(payload.question, payload.fields)
     metric = choose_metric(payload.question, payload.fields)
     chart_type = choose_chart_type(payload.question, dimension)
@@ -85,16 +117,19 @@ def text_to_sql(payload: TextToSqlRequest) -> dict[str, Any]:
     if metric:
         value_expr = f"SUM(CAST(NULLIF(`{metric.columnName}`, '') AS DECIMAL(18,2)))"
         metric_name = metric.displayName
+        metric_key = metric.columnName
     else:
         value_expr = "COUNT(1)"
         metric_name = "记录数"
+        metric_key = "value"
 
-    order_expr = "name ASC" if chart_type == "line" else "value DESC"
+    dimension_expr = build_dimension_expression(payload.question, dimension)
+    order_expr = "dim_name ASC" if chart_type == "line" else "metric_value DESC"
     sql = (
-        f"SELECT `{dimension.columnName}` AS name, {value_expr} AS value "
+        f"SELECT {dimension_expr} AS dim_name, {value_expr} AS metric_value "
         f"FROM `{payload.tableName}` "
-        f"WHERE `{dimension.columnName}` IS NOT NULL AND `{dimension.columnName}` <> '' "
-        f"GROUP BY `{dimension.columnName}` "
+        f"WHERE {build_dimension_filter(payload.question, dimension)} "
+        f"GROUP BY {dimension_expr} "
         f"ORDER BY {order_expr} LIMIT 30"
     )
 
@@ -104,13 +139,53 @@ def text_to_sql(payload: TextToSqlRequest) -> dict[str, Any]:
         "fieldMapping": {
             "dimension": dimension.displayName,
             "metric": metric_name,
+            "dimensionKey": dimension.columnName,
+            "metricKey": metric_key,
+            "dimensionExpr": dimension_expr,
         },
         "reasoning": [
             f"识别维度字段：{dimension.displayName}",
             f"识别指标字段：{metric_name}",
             f"推荐图表类型：{chart_type}",
         ],
+        "model": "rule-based-fallback",
     }
+
+
+def build_dimension_expression(question: str, dimension: FieldMeta) -> str:
+    column = f"`{dimension.columnName}`"
+    if dimension.fieldType == "DATE":
+        return date_expression(column, question)
+    if any(token in question for token in ["按月", "月份", "月度"]):
+        return f"DATE_FORMAT({column}, '%Y-%m')"
+    if any(token in question for token in ["按年", "年度"]):
+        return f"DATE_FORMAT({column}, '%Y')"
+    if any(token in question for token in ["按周", "周"]):
+        return f"DATE_FORMAT({column}, '%x-%v')"
+    if any(token in question for token in ["按天", "每日", "天"]):
+        return f"DATE_FORMAT({column}, '%Y-%m-%d')"
+    return column
+
+
+def build_dimension_filter(question: str, dimension: FieldMeta) -> str:
+    column = f"`{dimension.columnName}`"
+    if dimension.fieldType == "DATE":
+        if any(token in question for token in ["按月", "月份", "月度"]):
+            return f"{column} IS NOT NULL"
+        return f"{column} IS NOT NULL"
+    return f"{column} IS NOT NULL AND {column} <> ''"
+
+
+def date_expression(column: str, question: str) -> str:
+    if any(token in question for token in ["按月", "月份", "月度"]):
+        return f"DATE_FORMAT({column}, '%Y-%m')"
+    if any(token in question for token in ["按年", "年度"]):
+        return f"DATE_FORMAT({column}, '%Y')"
+    if any(token in question for token in ["按周", "周"]):
+        return f"DATE_FORMAT({column}, '%x-%v')"
+    if any(token in question for token in ["按天", "每日", "天"]):
+        return f"DATE_FORMAT({column}, '%Y-%m-%d')"
+    return column
 
 
 @app.post("/ai/chart-recommend")
@@ -610,31 +685,135 @@ def build_report_markdown(
     return "\n".join(lines)
 
 
+def call_openai_text_to_sql(payload: TextToSqlRequest) -> dict[str, Any] | None:
+    prompt = build_text_to_sql_prompt(payload)
+    body = json.dumps({
+        "model": OPENAI_MODEL,
+        "messages": [
+            {"role": "system", "content": (
+                "你是企业级 Text-to-SQL 专家。\n"
+                "目标：根据用户问题、字段元信息和数据类型生成安全、可执行、跨表结构适应性强的 SQL。\n"
+                "必须遵守：\n"
+                "1. 只输出严格 JSON，不要输出解释性文本。\n"
+                "2. SQL 必须只读，禁止 INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE。\n"
+                "3. 所有列名必须使用反引号包裹。\n"
+                "4. 禁止使用容易冲突的别名，如 date、time、count、value 直接作为最终别名。\n"
+                "5. 如果维度字段是日期/时间字符串，优先输出可兼容 MySQL 的日期桶表达式，且别名使用 dim_name。\n"
+                "6. 如果无法确定高置信度字段，应优先选择字段类型与语义最接近的列，并在 reasoning 中说明。"
+            )},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.1,
+    }).encode("utf-8")
+
+    req = request.Request(
+        f"{OPENAI_BASE_URL}/chat/completions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=25) as resp:
+            payload_json = json.loads(resp.read().decode("utf-8"))
+        content = payload_json["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+        if not isinstance(parsed, dict) or not parsed.get("sql"):
+            return None
+        parsed = normalize_ai_sql_result(parsed, payload)
+        parsed.setdefault("model", OPENAI_MODEL)
+        parsed.setdefault("reasoning", ["由大模型生成"])
+        return parsed
+    except (error.URLError, error.HTTPError, KeyError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def build_text_to_sql_prompt(payload: TextToSqlRequest) -> str:
+    fields_text = "\n".join(
+        f"- columnName={field.columnName}, displayName={field.displayName}, fieldType={field.fieldType}, fieldComment={field.fieldComment or ''}"
+        for field in payload.fields
+    )
+    preview_text = "\n".join(
+        f"- {json.dumps(row, ensure_ascii=False)}" for row in payload.previewRows[:5]
+    ) or "暂无预览样本"
+    examples = get_prompt_examples(payload.fields)
+    return (
+        f"用户问题：{payload.question}\n"
+        f"目标表：{payload.tableName}\n"
+        f"字段信息：\n{fields_text}\n\n"
+        f"预览样本：\n{preview_text}\n\n"
+        f"历史高质量示例：\n{examples}\n\n"
+        "请输出严格 JSON，格式如下：\n"
+        "{\n"
+        '  "sql": "SELECT ...",\n'
+        '  "chartType": "bar|line|pie",\n'
+        '  "fieldMapping": {"dimension": "", "metric": "", "dimensionKey": "", "metricKey": ""},\n'
+        '  "reasoning": ["", ""],\n'
+        '  "confidence": 0.0\n'
+        "}\n"
+        "要求：只输出 JSON，不要输出多余文本；SQL 必须只读；优先使用用户语义最匹配的维度和指标；"
+        "如果用户问题里出现‘按省份/地区/城市/分类/品类/产品名/订单日期/月份’等模式，请尽量选择语义对应字段。"
+        "如果预览样本中字段值明显像地区、省份、日期或金额，请优先结合样本值判断，而不是只看列名。"
+        "如果是时间维度字符串，优先使用 DATE_FORMAT / STR_TO_DATE / CAST 等兼容 MySQL 的方式，并避免使用 DATE(...) 直接包裹非日期列。"
+    )
+
+
+def get_prompt_examples(fields: list[FieldMeta]) -> str:
+    examples = []
+    if fields:
+        first_text = first_by_type(fields, "TEXT") or fields[0]
+        first_number = first_by_type(fields, "NUMBER")
+        first_date = first_by_type(fields, "DATE")
+        if first_text:
+            examples.append(
+                f"1) 问题：按{first_text.displayName}分组统计\n"
+                f"   SQL：SELECT `{first_text.columnName}` AS dim_name, COUNT(1) AS metric_value FROM `table` GROUP BY `{first_text.columnName}` ORDER BY metric_value DESC LIMIT 30"
+            )
+        if first_number:
+            examples.append(
+                f"2) 问题：统计{first_number.displayName}总和\n"
+                f"   SQL：SELECT `{first_text.columnName if first_text else first_number.columnName}` AS dim_name, SUM(`{first_number.columnName}`) AS metric_value FROM `table` GROUP BY `{first_text.columnName if first_text else first_number.columnName}` LIMIT 30"
+            )
+        if first_date:
+            examples.append(
+                f"3) 问题：按{first_date.displayName}看趋势\n"
+                f"   SQL：SELECT DATE_FORMAT(`{first_date.columnName}`, '%Y-%m') AS dim_name, COUNT(1) AS metric_value FROM `table` GROUP BY DATE_FORMAT(`{first_date.columnName}`, '%Y-%m') ORDER BY dim_name LIMIT 30"
+            )
+    return "\n".join(examples) if examples else "暂无示例"
+
+
 def choose_dimension(question: str, fields: list[FieldMeta]) -> FieldMeta:
-    if any(word in question for word in ["趋势", "日期", "时间", "每日", "变化"]):
-        date_field = first_by_type(fields, "DATE")
-        if date_field:
-            return date_field
-
-    synonym_match = first_semantic_match(question, fields, "TEXT")
-    if synonym_match:
-        return synonym_match
-
-    matched_text = first_matched(question, fields, "TEXT")
-    if matched_text:
-        return matched_text
-
+    ranked = rank_fields(question, fields, preferred_type="TEXT")
+    if ranked:
+        return ranked[0]
     return first_by_type(fields, "TEXT") or fields[0]
 
 
 def choose_metric(question: str, fields: list[FieldMeta]) -> FieldMeta | None:
-    return first_semantic_match(question, fields, "NUMBER") or first_matched(question, fields, "NUMBER") or first_by_type(fields, "NUMBER")
+    ranked = rank_fields(question, fields, preferred_type="NUMBER")
+    if ranked:
+        return ranked[0]
+    return first_by_type(fields, "NUMBER")
+
+
+def first_date_like_field(fields: list[FieldMeta]) -> FieldMeta | None:
+    for field in fields:
+        blob = " ".join([
+            field.columnName or "",
+            field.displayName or "",
+            field.fieldComment or "",
+        ]).lower()
+        if any(token in blob for token in ["date", "time", "day", "month", "year", "日期", "时间", "创建", "下单", "订单"]):
+            return field
+    return None
 
 
 def choose_chart_type(question: str, dimension: FieldMeta) -> str:
-    if any(word in question for word in ["占比", "比例", "分类", "结构"]):
+    if any(word in question for word in ["占比", "比例", "分类", "结构", "分布"]):
         return "pie"
-    if dimension.fieldType == "DATE" or any(word in question for word in ["趋势", "变化", "每日"]):
+    if dimension.fieldType == "DATE" or any(word in question for word in ["趋势", "变化", "每日", "月度", "年度", "季度"]):
         return "line"
     return "bar"
 
@@ -649,37 +828,121 @@ def first_matched(question: str, fields: list[FieldMeta], field_type: str) -> Fi
     return None
 
 
-def first_semantic_match(question: str, fields: list[FieldMeta], field_type: str) -> FieldMeta | None:
-    synonym_groups = [
-        (["省份", "省", "省市", "地区"], ["province", "prov", "state"]),
-        (["城市", "市"], ["city"]),
-        (["区域", "地区", "大区"], ["region", "area"]),
-        (["销售额", "销售", "金额", "营收", "收入"], ["sales", "sale", "amount", "amt", "revenue", "gmv"]),
-        (["利润", "盈利", "毛利"], ["profit", "margin"]),
-        (["数量", "销量", "件数"], ["qty", "quantity", "count", "volume"]),
-        (["折扣", "折让"], ["discount"]),
-        (["日期", "时间", "下单"], ["date", "time"]),
-    ]
-    wanted_terms: list[str] = []
-    for question_terms, field_terms in synonym_groups:
-        if any(term in question for term in question_terms):
-            wanted_terms.extend(field_terms)
-    if not wanted_terms:
-        return None
-
+def rank_fields(question: str, fields: list[FieldMeta], preferred_type: str | None = None) -> list[FieldMeta]:
+    scored: list[tuple[int, FieldMeta]] = []
     for field in fields:
-        if field.fieldType != field_type:
-            continue
-        haystack = " ".join([
-            field.columnName or "",
-            field.displayName or "",
-            field.sourceFieldName or "",
-            field.fieldComment or "",
-        ]).lower()
-        if any(term in haystack for term in wanted_terms):
-            return field
-    return None
+        score = score_field(question, field)
+        if preferred_type and field.fieldType == preferred_type:
+            score += 25
+        elif preferred_type and preferred_type == "TEXT" and field.fieldType == "DATE":
+            score += 10
+        elif preferred_type and preferred_type == "NUMBER" and field.fieldType == "DATE":
+            score -= 10
+        scored.append((score, field))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [field for score, field in scored if score > 0]
+
+
+def score_field(question: str, field: FieldMeta) -> int:
+    score = 0
+    text = " ".join([
+        field.columnName or "",
+        field.displayName or "",
+        field.sourceFieldName or "",
+        field.fieldComment or "",
+    ]).lower()
+    q = question.lower()
+
+    if field.fieldType == "DATE":
+        score += 30 if any(term in q for term in ["趋势", "日期", "时间", "每日", "按月", "按年", "按周", "月份", "月度", "季度", "年度"]) else 0
+    if field.fieldType == "NUMBER":
+        score += 20 if any(term in q for term in ["销售", "金额", "收入", "营收", "利润", "数量", "销量", "总额", "成交", "订单数", "笔数"]) else 0
+    if field.fieldType == "TEXT":
+        score += 10 if any(term in q for term in ["省", "地区", "城市", "分类", "品类", "产品", "名称", "客户", "门店", "渠道"]) else 0
+
+    semantic_pairs = [
+        (["省份", "省", "省市", "地区"], ["province", "prov", "state", "region"]),
+        (["城市", "市"], ["city"]),
+        (["区域", "大区"], ["region", "area"]),
+        (["销售额", "销售", "金额", "营收", "收入", "流水", "成交额", "总额"], ["sales", "sale", "amount", "amt", "revenue", "gmv", "total", "sum", "money"]),
+        (["利润", "盈利", "毛利"], ["profit", "margin"]),
+        (["数量", "销量", "件数", "订单数", "笔数"], ["qty", "quantity", "count", "volume", "order", "num"]),
+        (["日期", "时间", "下单", "月份", "月度", "年度", "季度", "周", "天"], ["date", "time", "day", "month", "year", "quarter", "week"]),
+        (["分类", "品类", "类型"], ["category", "type", "kind"]),
+    ]
+    for question_terms, keywords in semantic_pairs:
+        if any(term in q for term in question_terms) and any(term in text for term in keywords):
+            score += 40
+
+    if field.displayName and field.displayName.lower() in q:
+        score += 35
+    if field.sourceFieldName and field.sourceFieldName.lower() in q:
+        score += 30
+    if field.columnName and field.columnName.lower() in q:
+        score += 15
+    if field.fieldComment and any(word in field.fieldComment.lower() for word in q.split() if word):
+        score += 10
+
+    if field.fieldType == "NUMBER" and any(term in text for term in ["count", "qty", "amount", "sales", "revenue", "profit", "price", "total"]):
+        score += 10
+    if field.fieldType == "TEXT" and any(term in text for term in ["province", "city", "region", "category", "name", "type"]):
+        score += 10
+    return score
 
 
 def first_by_type(fields: list[FieldMeta], field_type: str) -> FieldMeta | None:
     return next((field for field in fields if field.fieldType == field_type), None)
+
+
+def normalize_ai_sql_result(parsed: dict[str, Any], payload: TextToSqlRequest) -> dict[str, Any]:
+    field_mapping = parsed.get("fieldMapping") if isinstance(parsed.get("fieldMapping"), dict) else {}
+    sql = str(parsed.get("sql", ""))
+    chart_type = str(parsed.get("chartType", "bar"))
+    reasoning = parsed.get("reasoning") if isinstance(parsed.get("reasoning"), list) else []
+
+    dimension_key = str(field_mapping.get("dimensionKey") or field_mapping.get("dimension") or "")
+    metric_key = str(field_mapping.get("metricKey") or field_mapping.get("metric") or "")
+
+    field_by_column = {field.columnName: field for field in payload.fields}
+    dimension_field = field_by_column.get(dimension_key) or choose_dimension(payload.question, payload.fields)
+    metric_field = field_by_column.get(metric_key) or choose_metric(payload.question, payload.fields)
+
+    if dimension_field:
+        dimension_key = dimension_field.columnName
+    if metric_field:
+        metric_key = metric_field.columnName
+
+    if not dimension_key:
+        dimension_key = choose_dimension(payload.question, payload.fields).columnName
+    if not metric_key:
+        metric_key = choose_metric(payload.question, payload.fields).columnName if choose_metric(payload.question, payload.fields) else "value"
+
+    if " AS dim_name" not in sql and dimension_key:
+        sql = rewrite_sql_alias(sql, dimension_key, metric_key)
+
+    return {
+        **parsed,
+        "sql": sql,
+        "chartType": chart_type,
+        "fieldMapping": {
+            "dimension": field_by_column.get(dimension_key).displayName if dimension_key in field_by_column else field_mapping.get("dimension", dimension_key),
+            "metric": field_by_column.get(metric_key).displayName if metric_key in field_by_column else field_mapping.get("metric", metric_key),
+            "dimensionKey": dimension_key,
+            "metricKey": metric_key,
+            "dimensionExpr": field_mapping.get("dimensionExpr", dimension_key),
+        },
+        "reasoning": reasoning,
+    }
+
+
+def rewrite_sql_alias(sql: str, dimension_key: str, metric_key: str) -> str:
+    if not sql:
+        return sql
+    rewritten = sql
+    rewritten = rewritten.replace(" AS name", " AS dim_name")
+    rewritten = rewritten.replace(" AS value", " AS metric_value")
+    rewritten = rewritten.replace(f" AS `{dimension_key}`", " AS dim_name")
+    rewritten = rewritten.replace(f" AS `{metric_key}`", " AS metric_value")
+    rewritten = rewritten.replace(" AS province", " AS dim_name")
+    rewritten = rewritten.replace(" AS sales_amt", " AS metric_value")
+    return rewritten

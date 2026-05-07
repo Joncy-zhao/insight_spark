@@ -23,11 +23,13 @@ public class PythonAiService {
     @Value("${insight.ai-service-url:http://localhost:8000}")
     private String aiServiceUrl;
 
-    public Optional<Map<String, Object>> textToSql(String question, String tableName, List<Map<String, Object>> fields) {
+    public Optional<Map<String, Object>> textToSql(String question, String tableName, List<Map<String, Object>> fields,
+                                                   List<Map<String, Object>> previewRows) {
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("question", question);
         request.put("tableName", tableName);
         request.put("fields", fields);
+        request.put("previewRows", previewRows);
 
         try {
             Map<String, Object> response = restTemplate.postForObject(

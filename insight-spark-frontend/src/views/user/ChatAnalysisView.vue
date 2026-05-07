@@ -48,7 +48,12 @@
                 <el-tag v-if="currentChartType" type="success" effect="dark" round>
                   {{ chartTypeLabel }}效果
                 </el-tag>
-
+                <el-select v-model="chartSortMode" size="small" style="width: 150px;" @change="() => lastAnalysis?.data?.length && renderChart(lastAnalysis.data, currentChartType)">
+                  <el-option label="按数值降序" value="desc" />
+                  <el-option label="按数值升序" value="asc" />
+                  <el-option label="按名称排序" value="name" />
+                </el-select>
+                <el-button v-if="lastAnalysis?.data?.length" size="small" @click="exportChartAsImage">导出图片</el-button>
                 <el-button
                     v-if="canDiagnoseLastAnalysis"
                     type="warning"
@@ -140,6 +145,7 @@ const {
   auditRiskLevel,
   body,
   chartTypeLabel,
+  chartSortMode,
   chatDom,
   createDatasource,
   currentChartType,
@@ -160,6 +166,7 @@ const {
   field,
   fieldLabel,
   fields,
+  exportChartAsImage,
   fillCurrentDatasource,
   formData,
   isAdminModule,
