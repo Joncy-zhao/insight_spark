@@ -63,6 +63,7 @@ class DiagnoseRequest(BaseModel):
     dimensionFields: list[str] = []
     timeField: str | None = None
     rows: list[dict[str, Any]] = []
+    detailLevel: str = "detailed"
 
 
 class GraphRagDiagnoseRequest(BaseModel):
@@ -77,6 +78,8 @@ class GraphRagDiagnoseRequest(BaseModel):
     graphContext: list[dict[str, Any]] = []
     docEvidence: list[dict[str, Any]] = []
     docChunks: list[dict[str, Any]] = []
+    detailLevel: str = "detailed"
+    anomalyType: str = "fluctuation"
 
 
 @app.get("/health")
@@ -241,6 +244,9 @@ def diagnose(payload: DiagnoseRequest) -> dict[str, Any]:
         f"均值 {avg:.2f}，最大值 {max_value:.2f}，最小值 {min_value:.2f}。"
         f"系统识别出 {len(anomalies)} 个明显异常点。"
     )
+    reasoning_logs = build_base_reasoning_logs(
+        len(values), anomalies, dimension_contributions, trend_insights, payload.metricField
+    )
     report_markdown = build_report_markdown(
         payload,
         summary,
@@ -258,6 +264,7 @@ def diagnose(payload: DiagnoseRequest) -> dict[str, Any]:
         root_causes,
         factor_chart_blocks,
         suggestions,
+        reasoning_logs,
     )
 
     return {
@@ -277,6 +284,7 @@ def diagnose(payload: DiagnoseRequest) -> dict[str, Any]:
         "rootCauses": root_causes,
         "factorChartBlocks": factor_chart_blocks,
         "suggestions": suggestions,
+        "reasoningLogs": reasoning_logs,
         "reportMarkdown": report_markdown,
     }
 
@@ -290,6 +298,7 @@ def graphrag_diagnose(payload: GraphRagDiagnoseRequest) -> dict[str, Any]:
         dimensionFields=payload.dimensionFields,
         timeField=payload.timeField,
         rows=query_rows,
+        detailLevel=payload.detailLevel,
     ))
     graph_nodes = payload.graphPath.get("nodes") or payload.graphContext
     graph_edges = payload.graphPath.get("edges") or []
@@ -316,16 +325,22 @@ def graphrag_diagnose(payload: GraphRagDiagnoseRequest) -> dict[str, Any]:
     base["graphPath"] = {"nodes": graph_nodes[:16], "edges": graph_edges[:32], "pathText": path_text}
     base["graphReasoningPath"] = path_text or " -> ".join(str(item.get("label") or item.get("sourceId") or item.get("nodeType")) for item in graph_path)
     base["confidence"] = round(max((cause.get("confidence", 0) for cause in base["rootCauses"]), default=0), 2)
+    base["reasoningLogs"] = build_graphrag_reasoning_logs(
+        base.get("reasoningLogs", []), graph_nodes, graph_edges, doc_evidence, base["rootCauses"], payload.anomalyType
+    )
     evidence_lines = [f"- {item['source']}：{item['text']}" for item in doc_evidence]
     if base["graphReasoningPath"]:
         evidence_lines.append("- 图谱推理路径：" + base["graphReasoningPath"])
-    base["reportMarkdown"] = (
-        f"{base.get('reportMarkdown', '')}\n\n"
-        "## GraphRAG 根因推理\n\n"
-        + build_graphrag_markdown(base["rootCauses"], base["graphReasoningPath"], doc_evidence)
-        + "\n\n## 关联证据\n\n"
-        + ("\n".join(evidence_lines) if evidence_lines else "- 暂未检索到外部证据，建议先上传知识文档并同步知识图谱。")
-    )
+    if payload.detailLevel == "simple":
+        base["reportMarkdown"] = build_simple_graphrag_report(base, payload, doc_evidence)
+    else:
+        base["reportMarkdown"] = (
+            f"{base.get('reportMarkdown', '')}\n\n"
+            "## GraphRAG 根因推理\n\n"
+            + build_graphrag_markdown(base["rootCauses"], base["graphReasoningPath"], doc_evidence, base["reasoningLogs"])
+            + "\n\n## 关联证据\n\n"
+            + ("\n".join(evidence_lines) if evidence_lines else "- 暂未检索到外部证据，建议先上传知识文档并同步知识图谱。")
+        )
     return base
 
 
@@ -404,10 +419,95 @@ def enrich_root_causes(
     return sorted(enriched, key=lambda item: item.get("confidence", 0), reverse=True)[:8]
 
 
+def build_base_reasoning_logs(
+    value_count: int,
+    anomalies: list[dict[str, Any]],
+    contributions: list[dict[str, Any]],
+    trend_insights: list[dict[str, Any]],
+    metric_field: str,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "step": 1,
+            "title": "扫描原始异常数据",
+            "status": "completed",
+            "detail": f"读取 {value_count} 条有效指标记录，围绕 {metric_field} 计算合计、均值、标准差和 Z-Score。",
+        },
+        {
+            "step": 2,
+            "title": "识别异常节点",
+            "status": "completed",
+            "detail": f"识别出 {len(anomalies)} 个明显异常点，并保留最大/最小/波动幅度等关键数值。",
+        },
+        {
+            "step": 3,
+            "title": "拆解维度与趋势",
+            "status": "completed",
+            "detail": f"完成 {len(contributions)} 个维度贡献拆解和 {len(trend_insights)} 条趋势判断。",
+        },
+    ]
+
+
+def build_graphrag_reasoning_logs(
+    base_logs: list[dict[str, Any]],
+    graph_nodes: list[dict[str, Any]],
+    graph_edges: list[dict[str, Any]],
+    doc_evidence: list[dict[str, Any]],
+    root_causes: list[dict[str, Any]],
+    anomaly_type: str,
+) -> list[dict[str, Any]]:
+    logs = list(base_logs or [])
+    logs.extend([
+        {
+            "step": 4,
+            "title": "命中 Neo4j 表/字段/历史报告节点",
+            "status": "completed",
+            "detail": f"围绕异常类型 {anomaly_type} 命中 {len(graph_nodes)} 个图谱节点、{len(graph_edges)} 条关联边。",
+        },
+        {
+            "step": 5,
+            "title": "扩展企业内部文档与行业研报证据",
+            "status": "completed",
+            "detail": f"检索到 {len(doc_evidence)} 条文档/研报证据片段，用于佐证异常因素。",
+        },
+        {
+            "step": 6,
+            "title": "输出根因定位与改进建议",
+            "status": "completed",
+            "detail": f"生成 {len(root_causes)} 条根因假设，按置信度排序输出决策建议。",
+        },
+    ])
+    return logs
+
+
+def build_simple_graphrag_report(base: dict[str, Any], payload: GraphRagDiagnoseRequest, doc_evidence: list[dict[str, Any]]) -> str:
+    root_causes = base.get("rootCauses", [])[:3]
+    suggestions = base.get("suggestions", [])[:3]
+    lines = [
+        f"# {payload.tableName} 智能诊断报告（简易版）",
+        "",
+        "## 诊断摘要",
+        base.get("summary", ""),
+        "",
+        "## 根因结论",
+    ]
+    if root_causes:
+        lines.extend([f"- {item.get('causeType')}：{item.get('evidence')}，置信度 {item.get('confidence')}" for item in root_causes])
+    else:
+        lines.append("- 暂未形成高置信度根因。")
+    lines.extend(["", "## 改进建议"])
+    lines.extend([f"- {item}" for item in suggestions] or ["- 建议补充维度字段和企业文档后重新生成详细报告。"])
+    lines.extend(["", "## GraphRAG 摘要"])
+    lines.append(f"- 图谱路径：{base.get('graphReasoningPath') or '暂无'}")
+    lines.append(f"- 文档证据：{len(doc_evidence)} 条")
+    return "\n".join(lines)
+
+
 def build_graphrag_markdown(
     root_causes: list[dict[str, Any]],
     graph_path_text: str,
     doc_evidence: list[dict[str, Any]],
+    reasoning_logs: list[dict[str, Any]],
 ) -> str:
     lines = []
     lines.append("### 可能根因")
@@ -425,6 +525,10 @@ def build_graphrag_markdown(
             lines.append(f"- {item.get('source')}，评分 {item.get('score', '-')}: {item.get('text')}")
     else:
         lines.append("- 暂无文档证据。")
+    lines.append("")
+    lines.append("### 推理过程日志")
+    for log in reasoning_logs:
+        lines.append(f"- Step {log.get('step')} {log.get('title')}：{log.get('detail')}")
     return "\n".join(lines)
 
 
@@ -632,7 +736,26 @@ def build_report_markdown(
     root_causes: list[dict[str, Any]],
     factor_chart_blocks: list[dict[str, Any]],
     suggestions: list[str],
+    reasoning_logs: list[dict[str, Any]],
 ) -> str:
+    if payload.detailLevel == "simple":
+        lines = [
+            f"# {payload.tableName} 智能诊断报告（简易版）",
+            "",
+            "## 诊断摘要",
+            summary,
+            "",
+            "## 核心数值",
+            f"- 有效记录数：{statistics['count']}",
+            f"- 指标合计：{statistics['total']}，平均值：{statistics['avg']}，标准差：{statistics['std']}",
+            "",
+            "## 根因结论",
+        ]
+        lines.extend([f"- [{cause['level']}] {cause['causeType']}：{cause['evidence']}" for cause in root_causes[:3]])
+        lines.extend(["", "## 改进建议"])
+        lines.extend([f"- {suggestion}" for suggestion in suggestions[:3]])
+        return "\n".join(lines)
+
     lines = [
         f"# {payload.tableName} 智能诊断报告",
         "",
@@ -682,6 +805,8 @@ def build_report_markdown(
 
     lines.extend(["", "## 建议动作"])
     lines.extend([f"- {suggestion}" for suggestion in suggestions])
+    lines.extend(["", "## 推理过程日志"])
+    lines.extend([f"- Step {log['step']} {log['title']}：{log['detail']}" for log in reasoning_logs])
     return "\n".join(lines)
 
 

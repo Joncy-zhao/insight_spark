@@ -46,6 +46,9 @@ public class DataUploadService {
     @Autowired
     private DatasourceService datasourceService;
 
+    @Autowired
+    private KnowledgeGraphService knowledgeGraphService;
+
     private final ExecutorService uploadExecutor = Executors.newCachedThreadPool();
 
     @PostConstruct
@@ -351,6 +354,11 @@ public class DataUploadService {
         jdbcTemplate.batchUpdate(insertSql.toString(), batchArgs);
 
         saveCatalog(originalFilename, displayNameOverride, tableName, fields, parsedFile.rows().size());
+        try {
+            knowledgeGraphService.syncGraph();
+        } catch (Exception e) {
+            log.warn("上传数据已保存，但同步 Neo4j 知识图谱失败：{}", e.getMessage());
+        }
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("sourceName", originalFilename);

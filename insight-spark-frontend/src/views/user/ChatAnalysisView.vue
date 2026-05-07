@@ -80,8 +80,7 @@
               <el-descriptions-item label="审计说明">{{ lastAnalysis.riskReason }}</el-descriptions-item>
             </el-descriptions>
 
-            <!-- 诊断报告预览卡片，仅普通用户显示 -->
-            <el-card v-if="currentDiagnosis && !isAdminUser" class="diagnosis-preview-card" shadow="hover" style="margin: 18px 0 0 0;">
+            <el-card v-if="currentDiagnosis" class="diagnosis-preview-card" shadow="hover" style="margin: 18px 0 0 0;">
               <template #header>
                 <div style="display: flex; align-items: center; gap: 8px;">
                   <el-icon><i class="el-icon-document"></i></el-icon>
@@ -92,7 +91,7 @@
                 <div style="font-weight: bold; font-size: 16px; margin-bottom: 4px;">{{ currentDiagnosis.title || '智能诊断报告' }}</div>
                 <div style="color: #888; font-size: 13px; margin-bottom: 8px;">生成时间：{{ currentDiagnosis.createdAt ? currentDiagnosis.createdAt.slice(0, 19).replace('T', ' ') : '' }}</div>
                 <div style="margin-bottom: 8px;">摘要：{{ currentDiagnosis.summary || '暂无摘要' }}</div>
-                <el-button size="small" type="primary" @click="() => $message.info('如需查看完整报告，请联系管理员')">查看完整报告</el-button>
+                <el-button size="small" type="primary" @click="activeModule = 'diagnosis'">查看完整报告</el-button>
               </div>
             </el-card>
 

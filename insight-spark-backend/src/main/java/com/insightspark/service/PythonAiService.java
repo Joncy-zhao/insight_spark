@@ -80,7 +80,9 @@ public class PythonAiService {
                                                          String timeField,
                                                          Map<String, Object> graphPath,
                                                          List<Map<String, Object>> docEvidence,
-                                                         List<Map<String, Object>> queryRows) {
+                                                         List<Map<String, Object>> queryRows,
+                                                         String detailLevel,
+                                                         String anomalyType) {
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("question", question);
         request.put("tableName", tableName);
@@ -93,6 +95,8 @@ public class PythonAiService {
         request.put("graphContext", graphPath.getOrDefault("nodes", List.of()));
         request.put("docEvidence", docEvidence);
         request.put("docChunks", docEvidence);
+        request.put("detailLevel", detailLevel == null || detailLevel.isBlank() ? "detailed" : detailLevel);
+        request.put("anomalyType", anomalyType == null || anomalyType.isBlank() ? "fluctuation" : anomalyType);
 
         try {
             Map<String, Object> response = restTemplate.postForObject(
