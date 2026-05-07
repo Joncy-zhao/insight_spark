@@ -29,6 +29,12 @@ public class DatasourceService {
     @Autowired(required = false)
     private KnowledgeGraphService knowledgeGraphService;
 
+    @Autowired
+    private OfficialDatasourcePoolManager poolManager;
+
+    @Autowired
+    private SqlAuditService sqlAuditService;
+
     @PostConstruct
     public void initDatasourceTables() {
         jdbcTemplate.execute("""
@@ -149,11 +155,15 @@ public class DatasourceService {
                 WHERE id = ?
                 """, name, dbType, host, port, databaseName, username, password, jdbcUrl,
                 parseInt(request.get("poolMaxSize"), 10), parseInt(request.get("poolTimeoutMs"), 30000), datasourceId);
+        
+        poolManager.rebuild(datasourceId);
+        
         return findDatasourcePublic(datasourceId);
     }
 
     public void deleteDatasource(Long datasourceId) {
         jdbcTemplate.update("UPDATE is_official_datasource SET status = 'DELETED' WHERE id = ?", datasourceId);
+        poolManager.remove(datasourceId);
     }
 
     public void updateStatus(Long datasourceId, String status) {
@@ -162,6 +172,12 @@ public class DatasourceService {
             throw new IllegalArgumentException("状态只能是 ENABLED 或 DISABLED");
         }
         jdbcTemplate.update("UPDATE is_official_datasource SET status = ? WHERE id = ?", nextStatus, datasourceId);
+        
+        if ("DISABLED".equals(nextStatus)) {
+            poolManager.remove(datasourceId);
+        } else {
+            poolManager.rebuild(datasourceId);
+        }
     }
 
     public List<Map<String, Object>> listDatasources() {
@@ -178,26 +194,34 @@ public class DatasourceService {
     }
 
     public Map<String, Object> testConnection(Long datasourceId) {
-        Map<String, Object> datasource = findDatasource(datasourceId);
         long startedAt = System.currentTimeMillis();
-        try (Connection connection = openConnection(datasource);
-             Statement statement = connection.createStatement();
-             ResultSet resultSet = statement.executeQuery("SELECT 1")) {
-            resultSet.next();
-            long durationMs = System.currentTimeMillis() - startedAt;
-            String message = "连接成功，耗时 " + durationMs + " ms";
-            jdbcTemplate.update("""
-                    UPDATE is_official_datasource
-                    SET last_test_status = 'SUCCESS', last_test_message = ?
-                    WHERE id = ?
-                    """, message, datasourceId);
-            return Map.of("status", "SUCCESS", "message", message, "durationMs", durationMs);
+
+        try {
+            poolManager.rebuild(datasourceId);
+
+            try (Connection connection = poolManager.getConnection(datasourceId);
+                 Statement statement = connection.createStatement();
+                 ResultSet resultSet = statement.executeQuery("SELECT 1")) {
+
+                resultSet.next();
+                long durationMs = System.currentTimeMillis() - startedAt;
+                String message = "连接成功，耗时 " + durationMs + " ms";
+
+                jdbcTemplate.update("""
+                        UPDATE is_official_datasource
+                        SET last_test_status = 'SUCCESS', last_test_message = ?
+                        WHERE id = ?
+                        """, message, datasourceId);
+
+                return Map.of("status", "SUCCESS", "message", message, "durationMs", durationMs);
+            }
         } catch (Exception e) {
             jdbcTemplate.update("""
                     UPDATE is_official_datasource
                     SET last_test_status = 'FAILED', last_test_message = ?
                     WHERE id = ?
                     """, e.getMessage(), datasourceId);
+
             return Map.of("status", "FAILED", "message", e.getMessage());
         }
     }
@@ -211,7 +235,7 @@ public class DatasourceService {
         jdbcTemplate.update("DELETE FROM is_official_schema_field WHERE datasource_id = ?", datasourceId);
         jdbcTemplate.update("DELETE FROM is_official_schema_table WHERE datasource_id = ?", datasourceId);
 
-        try (Connection connection = openConnection(datasource);
+        try (Connection connection = openConnection(datasourceId);
              Statement statement = connection.createStatement()) {
             statement.setQueryTimeout(5);
             try (ResultSet tables = statement.executeQuery(buildTableMetaSql(dbType, databaseName))) {
@@ -229,7 +253,7 @@ public class DatasourceService {
                     String columnName = columns.getString("column_name");
                     jdbcTemplate.update("""
                             INSERT INTO is_official_schema_field(datasource_id, table_name, column_name, data_type,
-                                                                 column_comment, is_nullable, column_key, ordinal_position, sensitive)
+                                                                 column_comment, is_nullable, column_key, ordinal_position, `sensitive`)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """, datasourceId, columns.getString("table_name"), columnName,
                             columns.getString("data_type"), columns.getString("column_comment"),
@@ -463,14 +487,36 @@ public class DatasourceService {
     }
 
     public List<Map<String, Object>> executeQuery(String sourceKey, String sql) {
+        return executeQueryInternal(sourceKey, sql, true);
+    }
+
+    public List<Map<String, Object>> executeQueryWithoutAudit(String sourceKey, String sql) {
+        return executeQueryInternal(sourceKey, sql, false);
+    }
+
+    private List<Map<String, Object>> executeQueryInternal(String sourceKey, String sql, boolean needAudit) {
         OfficialSource source = parseSourceKey(sourceKey);
-        Map<String, Object> datasource = findDatasource(source.datasourceId());
-        try (Connection connection = openConnection(datasource);
+
+        SqlAuditService.AuditResult auditResult = sqlAuditService.inspect(sql, sourceKey);
+        if (auditResult.blocked()) {
+            if (needAudit) {
+                sqlAuditService.record("官方数据源查询", sourceKey, "official-datasource", sql,
+                        auditResult, "BLOCKED", 0L, auditResult.riskReason());
+            }
+            throw new IllegalArgumentException("SQL 安全审计未通过：" + auditResult.riskReason());
+        }
+
+        String safeSql = sqlAuditService.ensureLimit(sql, 500);
+        long startedAt = System.currentTimeMillis();
+
+        try (Connection connection = openConnection(source.datasourceId());
              Statement statement = connection.createStatement();
-             ResultSet resultSet = executeWithTimeout(statement, sql)) {
+             ResultSet resultSet = executeWithTimeout(statement, safeSql)) {
+
             ResultSetMetaData metaData = resultSet.getMetaData();
             int columnCount = metaData.getColumnCount();
             List<Map<String, Object>> rows = new ArrayList<>();
+
             while (resultSet.next()) {
                 Map<String, Object> row = new LinkedHashMap<>();
                 for (int i = 1; i <= columnCount; i++) {
@@ -478,8 +524,20 @@ public class DatasourceService {
                 }
                 rows.add(row);
             }
+
+            long durationMs = System.currentTimeMillis() - startedAt;
+            if (needAudit) {
+                sqlAuditService.record("官方数据源查询", sourceKey, "official-datasource", safeSql,
+                        auditResult, "SUCCESS", durationMs, null);
+            }
+
             return rows;
         } catch (Exception e) {
+            long durationMs = System.currentTimeMillis() - startedAt;
+            if (needAudit) {
+                sqlAuditService.record("官方数据源查询", sourceKey, "official-datasource", safeSql,
+                        auditResult, "FAILED", durationMs, e.getMessage());
+            }
             throw new IllegalArgumentException("官方数据源查询失败：" + e.getMessage());
         }
     }
@@ -555,6 +613,10 @@ public class DatasourceService {
         return sourceKey != null && sourceKey.startsWith("official:");
     }
 
+    public Map<String, Object> health(Long datasourceId) {
+        return poolManager.health(datasourceId);
+    }
+
     private Map<String, Object> latestDatasource() {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
                 SELECT id, name, db_type AS dbType, host, port, database_name AS databaseName,
@@ -591,12 +653,10 @@ public class DatasourceService {
         return rows.get(0);
     }
 
-    private Connection openConnection(Map<String, Object> datasource) throws Exception {
-        return DriverManager.getConnection(
-                String.valueOf(datasource.get("jdbc_url")),
-                String.valueOf(datasource.get("username")),
-                DatasourcePasswordEncryptor.decrypt(String.valueOf(datasource.get("password")))
-        );
+    private Connection openConnection(Long datasourceId) throws Exception {
+        Connection connection = poolManager.getConnection(datasourceId);
+        connection.setReadOnly(true);
+        return connection;
     }
 
     private String buildJdbcUrl(String dbType, String host, int port, String databaseName) {

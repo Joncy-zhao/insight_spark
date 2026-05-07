@@ -81,6 +81,30 @@
                   <el-button size="small" type="danger" @click.stop="deleteDatasource(row)">删除</el-button>
                 </template>
               </el-table-column>
+              <el-table-column label="连接池" width="110">
+                <template #default="{ row }">
+                  <el-tag
+                    :type="datasourceHealthMap[row.id]?.poolCreated ? 'success' : 'info'"
+                    size="small"
+                  >
+                    {{ datasourceHealthMap[row.id]?.poolCreated ? '已创建' : '未创建' }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+
+              <el-table-column label="活跃/总连接" width="130">
+                <template #default="{ row }">
+                  {{ datasourceHealthMap[row.id]?.activeConnections ?? 0 }}
+                  /
+                  {{ datasourceHealthMap[row.id]?.totalConnections ?? 0 }}
+                </template>
+              </el-table-column>
+
+              <el-table-column label="最大连接数" width="110">
+                <template #default="{ row }">
+                  {{ datasourceHealthMap[row.id]?.maximumPoolSize ?? row.poolMaxSize ?? '-' }}
+                </template>
+              </el-table-column>
             </el-table>
           </div>
 
@@ -293,6 +317,8 @@ const {
   uploadResult,
   uploading,
   userQuestion,
+  datasourceHealthMap,
+  loadDatasourceHealth,
   xAxisData
 } = inject('workbench')
 </script>

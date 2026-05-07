@@ -86,6 +86,7 @@ public class KnowledgeGraphService {
         }
         addColumnIfMissing("is_kg_edge", "relation_type", "`relation_type` VARCHAR(64) NOT NULL DEFAULT 'RELATED'");
         addColumnIfMissing("is_kg_edge", "weight", "`weight` DECIMAL(10,2) NOT NULL DEFAULT 1.00");
+        makeColumnNullableIfExists("is_kg_edge", "edge_type", "`edge_type` VARCHAR(64) NULL DEFAULT 'RELATED'");
     }
 
     public Map<String, Object> syncGraph() {
@@ -105,7 +106,7 @@ public class KnowledgeGraphService {
                     "UPLOAD", tableName, "用户上传数据表，行数：" + table.get("rowCount") + "，字段数：" + table.get("fieldCount"), 2.0);
             List<Map<String, Object>> fields = jdbcTemplate.queryForList("""
                     SELECT column_name AS columnName, display_name AS displayName, field_type AS fieldType,
-                           field_comment AS fieldComment, sensitive
+                           field_comment AS fieldComment, `sensitive`
                     FROM is_data_field
                     WHERE table_name = ?
                     """, tableName);
@@ -143,7 +144,7 @@ public class KnowledgeGraphService {
             edgeCount += upsertEdge(dsKey, tableKey, "HAS_TABLE", 1.0);
             List<Map<String, Object>> fields = jdbcTemplate.queryForList("""
                     SELECT column_name AS columnName, data_type AS dataType, column_comment AS columnComment,
-                           business_name AS businessName, sensitive
+                           business_name AS businessName, `sensitive`
                     FROM is_official_schema_field
                     WHERE datasource_id = ? AND table_name = ?
                     """, table.get("datasourceId"), tableName);
@@ -316,6 +317,7 @@ public class KnowledgeGraphService {
                 .limit(safeLimit)
                 .toList();
         return Map.of("nodes", context, "edges", allEdges, "ragContext", context,
+                "pathText", buildPathText(context, allEdges),
                 "depth", safeDepth, "neo4jEnabled", neo4jEnabled);
     }
 
@@ -341,8 +343,51 @@ public class KnowledgeGraphService {
         return dedup.values().stream().limit(12).toList();
     }
 
-    public List<Map<String, Object>> retrieveMultiHopContext(String question, String tableName) {
-        return (List<Map<String, Object>>) multiHopSearch(question, tableName, 3, 16).get("ragContext");
+    public Map<String, Object> retrieveMultiHopContext(String question, String tableName) {
+        Map<String, Object> bundle = multiHopSearch(question, tableName, 3, 16);
+        return Map.of(
+                "nodes", bundle.getOrDefault("nodes", List.of()),
+                "edges", bundle.getOrDefault("edges", List.of()),
+                "pathText", bundle.getOrDefault("pathText", ""),
+                "ragContext", bundle.getOrDefault("ragContext", List.of()),
+                "depth", bundle.getOrDefault("depth", 3),
+                "neo4jEnabled", bundle.getOrDefault("neo4jEnabled", neo4jEnabled)
+        );
+    }
+
+    private String buildPathText(List<Map<String, Object>> nodes, List<Map<String, Object>> edges) {
+        if (nodes == null || nodes.isEmpty()) {
+            return "暂无图谱路径，请先同步知识图谱。";
+        }
+        Map<String, Map<String, Object>> nodeMap = new LinkedHashMap<>();
+        for (Map<String, Object> node : nodes) {
+            nodeMap.put(Objects.toString(node.get("nodeKey")), node);
+        }
+        List<String> pathParts = new ArrayList<>();
+        for (Map<String, Object> edge : edges == null ? List.<Map<String, Object>>of() : edges) {
+            Map<String, Object> from = nodeMap.get(Objects.toString(edge.get("fromKey")));
+            Map<String, Object> to = nodeMap.get(Objects.toString(edge.get("toKey")));
+            if (from != null && to != null) {
+                pathParts.add("%s(%s) -[%s]-> %s(%s)".formatted(
+                        Objects.toString(from.get("label"), ""),
+                        Objects.toString(from.get("nodeType"), ""),
+                        Objects.toString(edge.get("relationType"), "RELATED"),
+                        Objects.toString(to.get("label"), ""),
+                        Objects.toString(to.get("nodeType"), "")
+                ));
+            }
+            if (pathParts.size() >= 8) {
+                break;
+            }
+        }
+        if (!pathParts.isEmpty()) {
+            return String.join("；", pathParts);
+        }
+        return nodes.stream()
+                .limit(8)
+                .map(node -> Objects.toString(node.get("label"), "") + "(" + Objects.toString(node.get("nodeType"), "") + ")")
+                .reduce((a, b) -> a + " -> " + b)
+                .orElse("暂无图谱路径，请先同步知识图谱。");
     }
 
     private int upsertNode(String nodeKey, String nodeType, String label, String sourceType, String sourceId, String content, double weight) {

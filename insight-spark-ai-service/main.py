@@ -42,8 +42,13 @@ class GraphRagDiagnoseRequest(BaseModel):
     question: str
     tableName: str
     metricField: str
+    dimensionFields: list[str] = []
+    timeField: str | None = None
     rows: list[dict[str, Any]] = []
+    queryRows: list[dict[str, Any]] = []
+    graphPath: dict[str, Any] = {}
     graphContext: list[dict[str, Any]] = []
+    docEvidence: list[dict[str, Any]] = []
     docChunks: list[dict[str, Any]] = []
 
 
@@ -203,6 +208,54 @@ def diagnose(payload: DiagnoseRequest) -> dict[str, Any]:
 
 @app.post("/ai/graphrag/diagnose")
 def graphrag_diagnose(payload: GraphRagDiagnoseRequest) -> dict[str, Any]:
+    query_rows = payload.queryRows or payload.rows
+    base = diagnose(DiagnoseRequest(
+        tableName=payload.tableName,
+        metricField=payload.metricField,
+        dimensionFields=payload.dimensionFields,
+        timeField=payload.timeField,
+        rows=query_rows,
+    ))
+    graph_nodes = payload.graphPath.get("nodes") or payload.graphContext
+    graph_edges = payload.graphPath.get("edges") or []
+    path_text = payload.graphPath.get("pathText") or ""
+    chunks = payload.docEvidence or payload.docChunks
+    doc_evidence = [
+        {
+            "source": chunk.get("source") or f"文档 {chunk.get('docId', '')} 第 {chunk.get('chunkIndex', '')} 段",
+            "text": str(chunk.get("chunkText", ""))[:220],
+            "score": chunk.get("score"),
+            "matchedKeywords": chunk.get("matchedKeywords", []),
+        }
+        for chunk in chunks[:5]
+    ]
+    graph_path = [
+        {"nodeType": item.get("nodeType"), "label": item.get("label"), "sourceId": item.get("sourceId")}
+        for item in graph_nodes[:8]
+    ]
+    base["rootCauses"] = enrich_root_causes(base.get("rootCauses", []), doc_evidence, graph_nodes, graph_edges, payload.metricField)
+    base["summary"] = f"{base.get('summary', '')} 已结合 {len(doc_evidence)} 条文档证据和 {len(graph_nodes)} 个图谱节点进行 GraphRAG 根因推理。"
+    base["evidence"] = doc_evidence
+    base["docEvidence"] = doc_evidence
+    base["reasoningPath"] = graph_path
+    base["graphPath"] = {"nodes": graph_nodes[:16], "edges": graph_edges[:32], "pathText": path_text}
+    base["graphReasoningPath"] = path_text or " -> ".join(str(item.get("label") or item.get("sourceId") or item.get("nodeType")) for item in graph_path)
+    base["confidence"] = round(max((cause.get("confidence", 0) for cause in base["rootCauses"]), default=0), 2)
+    evidence_lines = [f"- {item['source']}：{item['text']}" for item in doc_evidence]
+    if base["graphReasoningPath"]:
+        evidence_lines.append("- 图谱推理路径：" + base["graphReasoningPath"])
+    base["reportMarkdown"] = (
+        f"{base.get('reportMarkdown', '')}\n\n"
+        "## GraphRAG 根因推理\n\n"
+        + build_graphrag_markdown(base["rootCauses"], base["graphReasoningPath"], doc_evidence)
+        + "\n\n## 关联证据\n\n"
+        + ("\n".join(evidence_lines) if evidence_lines else "- 暂未检索到外部证据，建议先上传知识文档并同步知识图谱。")
+    )
+    return base
+
+
+@app.post("/ai/graphrag/diagnose-legacy")
+def graphrag_diagnose_legacy(payload: GraphRagDiagnoseRequest) -> dict[str, Any]:
     base = diagnose(DiagnoseRequest(
         tableName=payload.tableName,
         metricField=payload.metricField,
@@ -235,6 +288,69 @@ def graphrag_diagnose(payload: GraphRagDiagnoseRequest) -> dict[str, Any]:
         + ("\n".join(evidence_lines) if evidence_lines else "- 暂未检索到外部证据，建议先上传知识文档并同步知识图谱。")
     )
     return base
+
+
+def enrich_root_causes(
+    base_causes: list[dict[str, Any]],
+    doc_evidence: list[dict[str, Any]],
+    graph_nodes: list[dict[str, Any]],
+    graph_edges: list[dict[str, Any]],
+    metric_field: str,
+) -> list[dict[str, Any]]:
+    enriched = list(base_causes or [])
+    graph_confidence = min(0.92, 0.45 + len(graph_nodes) * 0.03 + len(graph_edges) * 0.01)
+    doc_confidence = min(0.9, 0.5 + len(doc_evidence) * 0.07)
+    if graph_nodes:
+        labels = " -> ".join(str(node.get("label") or node.get("sourceId") or node.get("nodeType")) for node in graph_nodes[:5])
+        enriched.append({
+            "level": "MEDIUM" if graph_confidence < 0.75 else "HIGH",
+            "causeType": "图谱路径关联根因",
+            "impactField": metric_field,
+            "evidence": f"图谱路径显示指标与相关表、字段、标签或历史报告存在关联：{labels}",
+            "confidence": round(graph_confidence, 2),
+        })
+    if doc_evidence:
+        top_doc = doc_evidence[0]
+        enriched.append({
+            "level": "MEDIUM" if doc_confidence < 0.75 else "HIGH",
+            "causeType": "文档证据支持根因",
+            "impactField": metric_field,
+            "evidence": f"{top_doc.get('source')} 提到：{top_doc.get('text')}",
+            "confidence": round(doc_confidence, 2),
+        })
+    if not enriched:
+        enriched.append({
+            "level": "LOW",
+            "causeType": "证据不足",
+            "impactField": metric_field,
+            "evidence": "当前未检索到图谱路径或文档片段，根因仅基于指标分布推断。",
+            "confidence": 0.42,
+        })
+    return sorted(enriched, key=lambda item: item.get("confidence", 0), reverse=True)[:8]
+
+
+def build_graphrag_markdown(
+    root_causes: list[dict[str, Any]],
+    graph_path_text: str,
+    doc_evidence: list[dict[str, Any]],
+) -> str:
+    lines = []
+    lines.append("### 可能根因")
+    for cause in root_causes[:5]:
+        lines.append(
+            f"- [{cause.get('level', 'MEDIUM')}] {cause.get('causeType')}，置信度 {cause.get('confidence', 0):.2f}：{cause.get('evidence')}"
+        )
+    lines.append("")
+    lines.append("### 图谱推理路径")
+    lines.append(graph_path_text or "暂无图谱路径。")
+    lines.append("")
+    lines.append("### 文档证据来源")
+    if doc_evidence:
+        for item in doc_evidence:
+            lines.append(f"- {item.get('source')}，评分 {item.get('score', '-')}: {item.get('text')}")
+    else:
+        lines.append("- 暂无文档证据。")
+    return "\n".join(lines)
 
 
 def to_float(value: Any) -> float | None:
@@ -500,6 +616,10 @@ def choose_dimension(question: str, fields: list[FieldMeta]) -> FieldMeta:
         if date_field:
             return date_field
 
+    synonym_match = first_semantic_match(question, fields, "TEXT")
+    if synonym_match:
+        return synonym_match
+
     matched_text = first_matched(question, fields, "TEXT")
     if matched_text:
         return matched_text
@@ -508,7 +628,7 @@ def choose_dimension(question: str, fields: list[FieldMeta]) -> FieldMeta:
 
 
 def choose_metric(question: str, fields: list[FieldMeta]) -> FieldMeta | None:
-    return first_matched(question, fields, "NUMBER") or first_by_type(fields, "NUMBER")
+    return first_semantic_match(question, fields, "NUMBER") or first_matched(question, fields, "NUMBER") or first_by_type(fields, "NUMBER")
 
 
 def choose_chart_type(question: str, dimension: FieldMeta) -> str:
@@ -525,6 +645,38 @@ def first_matched(question: str, fields: list[FieldMeta], field_type: str) -> Fi
             continue
         names = [field.displayName, field.sourceFieldName or "", field.fieldComment or ""]
         if any(name and name in question for name in names):
+            return field
+    return None
+
+
+def first_semantic_match(question: str, fields: list[FieldMeta], field_type: str) -> FieldMeta | None:
+    synonym_groups = [
+        (["省份", "省", "省市", "地区"], ["province", "prov", "state"]),
+        (["城市", "市"], ["city"]),
+        (["区域", "地区", "大区"], ["region", "area"]),
+        (["销售额", "销售", "金额", "营收", "收入"], ["sales", "sale", "amount", "amt", "revenue", "gmv"]),
+        (["利润", "盈利", "毛利"], ["profit", "margin"]),
+        (["数量", "销量", "件数"], ["qty", "quantity", "count", "volume"]),
+        (["折扣", "折让"], ["discount"]),
+        (["日期", "时间", "下单"], ["date", "time"]),
+    ]
+    wanted_terms: list[str] = []
+    for question_terms, field_terms in synonym_groups:
+        if any(term in question for term in question_terms):
+            wanted_terms.extend(field_terms)
+    if not wanted_terms:
+        return None
+
+    for field in fields:
+        if field.fieldType != field_type:
+            continue
+        haystack = " ".join([
+            field.columnName or "",
+            field.displayName or "",
+            field.sourceFieldName or "",
+            field.fieldComment or "",
+        ]).lower()
+        if any(term in haystack for term in wanted_terms):
             return field
     return None
 

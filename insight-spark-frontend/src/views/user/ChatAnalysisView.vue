@@ -50,8 +50,8 @@
                 </el-tag>
 
                 <el-button
+                    v-if="canDiagnoseLastAnalysis"
                     type="warning"
-                    :disabled="!lastAnalysis"
                     :loading="diagnosisLoading"
                     @click="diagnoseFromLastAnalysis"
                 >
@@ -100,6 +100,29 @@
               </ul>
             </div>
           </div>
+          <el-dialog v-model="diagnosisPickerVisible" title="选择诊断字段" width="520px">
+            <el-form label-position="top">
+              <el-form-item label="指标字段">
+                <el-select v-model="diagnosisPickerForm.metricField" class="full-width" placeholder="选择数值指标">
+                  <el-option v-for="field in numericFields" :key="field.columnName" :label="field.displayName" :value="field.columnName" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="维度字段">
+                <el-select v-model="diagnosisPickerForm.dimensionFields" multiple class="full-width" placeholder="选择拆解维度">
+                  <el-option v-for="field in dimensionCandidateFields" :key="field.columnName" :label="field.displayName" :value="field.columnName" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="时间字段">
+                <el-select v-model="diagnosisPickerForm.timeField" clearable class="full-width" placeholder="可选">
+                  <el-option v-for="field in dateFields" :key="field.columnName" :label="field.displayName" :value="field.columnName" />
+                </el-select>
+              </el-form-item>
+            </el-form>
+            <template #footer>
+              <el-button @click="diagnosisPickerVisible = false">取消</el-button>
+              <el-button type="primary" :loading="diagnosisLoading" @click="confirmDiagnosisPicker">生成诊断报告</el-button>
+            </template>
+          </el-dialog>
         </section>
 </template>
 
@@ -126,9 +149,13 @@ const {
   dateFields,
   detail,
   diagnosisForm,
+  diagnosisPickerVisible,
+  diagnosisPickerForm,
   diagnosisLoading,
   diagnosisReports,
   dimensionCandidateFields,
+  canDiagnoseLastAnalysis,
+  confirmDiagnosisPicker,
   diagnoseFromLastAnalysis,
   field,
   fieldLabel,

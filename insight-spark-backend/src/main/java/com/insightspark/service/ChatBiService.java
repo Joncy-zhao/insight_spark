@@ -105,7 +105,7 @@ public class ChatBiService {
         try {
             jdbcTemplate.setQueryTimeout(5);
             queryResult = officialSource
-                    ? datasourceService.executeQuery(activeTable, generatedSql)
+                    ? datasourceService.executeQueryWithoutAudit(activeTable, generatedSql)
                     : queryUploadTable(generatedSql);
             queryResult = sqlAuditService.maskRows(activeTable, queryResult);
             long durationMs = System.currentTimeMillis() - startedAt;
@@ -163,6 +163,10 @@ public class ChatBiService {
     }
 
     private Map<String, Object> findBestField(String question, List<Map<String, Object>> fields, String preferredType) {
+        Map<String, Object> semanticMatch = findSemanticField(question, fields, preferredType);
+        if (semanticMatch != null) {
+            return semanticMatch;
+        }
         return fields.stream()
                 .filter(field -> preferredType.equals(Objects.toString(field.get("fieldType"))))
                 .filter(field -> question.contains(Objects.toString(field.get("displayName")))
@@ -172,6 +176,46 @@ public class ChatBiService {
                         .filter(field -> preferredType.equals(Objects.toString(field.get("fieldType"))))
                         .findFirst()
                         .orElse(null));
+    }
+
+    private Map<String, Object> findSemanticField(String question, List<Map<String, Object>> fields, String preferredType) {
+        List<String> terms = new java.util.ArrayList<>();
+        if (question.contains("省份") || question.contains("省市") || question.contains("地区") || question.contains("省")) {
+            terms.addAll(List.of("province", "prov", "state"));
+        }
+        if (question.contains("城市") || question.contains("市")) {
+            terms.add("city");
+        }
+        if (question.contains("区域") || question.contains("大区")) {
+            terms.addAll(List.of("region", "area"));
+        }
+        if (question.contains("销售额") || question.contains("销售") || question.contains("金额")
+                || question.contains("营收") || question.contains("收入")) {
+            terms.addAll(List.of("sales", "sale", "amount", "amt", "revenue", "gmv"));
+        }
+        if (question.contains("利润") || question.contains("盈利") || question.contains("毛利")) {
+            terms.addAll(List.of("profit", "margin"));
+        }
+        if (question.contains("数量") || question.contains("销量") || question.contains("件数")) {
+            terms.addAll(List.of("qty", "quantity", "count", "volume"));
+        }
+        if (question.contains("折扣") || question.contains("折让")) {
+            terms.add("discount");
+        }
+        if (terms.isEmpty()) {
+            return null;
+        }
+        return fields.stream()
+                .filter(field -> preferredType.equals(Objects.toString(field.get("fieldType"))))
+                .filter(field -> {
+                    String haystack = (Objects.toString(field.get("columnName"), "") + " "
+                            + Objects.toString(field.get("displayName"), "") + " "
+                            + Objects.toString(field.get("sourceFieldName"), "") + " "
+                            + Objects.toString(field.get("fieldComment"), "")).toLowerCase();
+                    return terms.stream().anyMatch(haystack::contains);
+                })
+                .findFirst()
+                .orElse(null);
     }
 
     private String chooseChartType(String question, String dimensionType) {

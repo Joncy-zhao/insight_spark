@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -49,6 +50,9 @@ public class DiagnosisService {
                   `metric_field` VARCHAR(128) NOT NULL,
                   `dimension_fields` VARCHAR(512) NULL,
                   `time_field` VARCHAR(128) NULL,
+                  `source_question` VARCHAR(1000) NULL,
+                  `source_sql` TEXT NULL,
+                  `chart_snapshot` JSON NULL,
                   `title` VARCHAR(255) NOT NULL,
                   `summary` VARCHAR(2000) NOT NULL,
                   `report_markdown` MEDIUMTEXT NULL,
@@ -58,6 +62,9 @@ public class DiagnosisService {
                   INDEX `idx_diagnosis_report_table` (`table_name`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='智能诊断报告';
                 """);
+        addColumnIfMissing("is_diagnosis_report", "source_question", "`source_question` VARCHAR(1000) NULL");
+        addColumnIfMissing("is_diagnosis_report", "source_sql", "`source_sql` TEXT NULL");
+        addColumnIfMissing("is_diagnosis_report", "chart_snapshot", "`chart_snapshot` JSON NULL");
     }
 
     public Map<String, Object> runDiagnosis(Map<String, Object> request) {
@@ -93,16 +100,26 @@ public class DiagnosisService {
                 + " FROM `" + tableName + "` LIMIT 1000";
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(selectSql);
 
-        String question = Objects.toString(request.getOrDefault("question",
+        String sourceQuestion = optionalString(request, "sourceQuestion");
+        String question = sourceQuestion != null ? sourceQuestion : Objects.toString(request.getOrDefault("question",
                 tableName + " " + metricField + " " + String.join(" ", dimensionFields)));
-        List<Map<String, Object>> graphContext = knowledgeGraphService.retrieveMultiHopContext(question, tableName);
-        List<Map<String, Object>> docChunks = knowledgeDocumentService.search(question, 10);
-        Map<String, Object> aiResult = pythonAiService.graphRagDiagnose(question, tableName, metricField, rows, graphContext, docChunks)
+        Map<String, Object> graphPath = knowledgeGraphService.retrieveMultiHopContext(question, tableName);
+        List<Map<String, Object>> graphNodes = (List<Map<String, Object>>) graphPath.getOrDefault("nodes", List.of());
+        List<Map<String, Object>> graphEdges = (List<Map<String, Object>>) graphPath.getOrDefault("edges", List.of());
+        List<Map<String, Object>> docEvidence = knowledgeDocumentService.search(question, 10);
+        Map<String, Object> aiResult = pythonAiService.graphRagDiagnose(question, tableName, metricField,
+                        dimensionFields, timeField, graphPath, docEvidence, rows)
                 .orElseGet(() -> pythonAiService.diagnose(tableName, metricField, dimensionFields, timeField, rows));
-        aiResult.put("relatedKnowledge", graphContext);
-        aiResult.put("docEvidence", docChunks);
-        aiResult.put("graphReasoningPath", buildGraphReasoningPath((List<Map<String, Object>>) aiResult.get("relatedKnowledge")));
-        aiResult.put("evidenceSources", buildEvidenceSources(docChunks, graphContext));
+        aiResult.put("relatedKnowledge", graphNodes);
+        aiResult.put("graphEdges", graphEdges);
+        aiResult.put("graphPath", graphPath);
+        aiResult.put("docEvidence", docEvidence);
+        aiResult.put("queryRows", rows.stream().limit(20).toList());
+        aiResult.put("sourceQuestion", sourceQuestion == null ? question : sourceQuestion);
+        aiResult.put("sourceSql", optionalString(request, "sourceSql"));
+        aiResult.put("chartSnapshot", request.get("chartSnapshot"));
+        aiResult.put("graphReasoningPath", Objects.toString(graphPath.getOrDefault("pathText", buildGraphReasoningPath(graphNodes))));
+        aiResult.put("evidenceSources", buildEvidenceSources(docEvidence, graphNodes));
         Long reportId = saveReport(tableName, metricField, dimensionFields, timeField, aiResult);
 
         Map<String, Object> result = new LinkedHashMap<>(aiResult);
@@ -117,7 +134,9 @@ public class DiagnosisService {
     public List<Map<String, Object>> listReports() {
         return jdbcTemplate.queryForList("""
                 SELECT id, user_id AS userId, table_name AS tableName, metric_field AS metricField,
-                       dimension_fields AS dimensionFields, time_field AS timeField, title, summary,
+                       dimension_fields AS dimensionFields, time_field AS timeField,
+                       source_question AS sourceQuestion, source_sql AS sourceSql,
+                       chart_snapshot AS chartSnapshot, title, summary,
                        created_at AS createdAt
                 FROM is_diagnosis_report
                 ORDER BY created_at DESC
@@ -227,14 +246,18 @@ public class DiagnosisService {
         String resultJson = toJson(aiResult);
         jdbcTemplate.update("""
                 INSERT INTO is_diagnosis_report(user_id, table_name, metric_field, dimension_fields, time_field,
+                                                source_question, source_sql, chart_snapshot,
                                                 title, summary, report_markdown, result_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS JSON))
+                VALUES (?, ?, ?, ?, ?, ?, ?, CAST(? AS JSON), ?, ?, ?, CAST(? AS JSON))
                 """,
                 com.insightspark.core.auth.AuthContext.userId(),
                 tableName,
                 metricField,
                 String.join(",", dimensionFields),
                 timeField,
+                safeText(Objects.toString(aiResult.getOrDefault("sourceQuestion", ""), ""), 1000),
+                Objects.toString(aiResult.getOrDefault("sourceSql", ""), ""),
+                toJson(aiResult.get("chartSnapshot")),
                 Objects.toString(aiResult.getOrDefault("title", "智能诊断报告")),
                 Objects.toString(aiResult.getOrDefault("summary", "")),
                 Objects.toString(aiResult.getOrDefault("reportMarkdown", "")),
@@ -305,6 +328,28 @@ public class DiagnosisService {
     private String safeFilename(String title) {
         String value = title == null || title.isBlank() ? "diagnosis-report" : title;
         return value.replaceAll("[\\\\/:*?\"<>|\\s]+", "_");
+    }
+
+    private String safeText(String text, int maxLength) {
+        if (text == null) {
+            return null;
+        }
+        return text.length() <= maxLength ? text : text.substring(0, maxLength);
+    }
+
+    private void addColumnIfMissing(String tableName, String columnName, String definition) {
+        Integer count = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*)
+                FROM information_schema.columns
+                WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?
+                """, Integer.class, tableName, columnName);
+        if (count == null || count == 0) {
+            try {
+                jdbcTemplate.execute("ALTER TABLE `" + tableName + "` ADD COLUMN " + definition);
+            } catch (DataAccessException ignored) {
+                // Existing deployments may already have the column; keep startup idempotent.
+            }
+        }
     }
 
     private String escapeHtml(String value) {

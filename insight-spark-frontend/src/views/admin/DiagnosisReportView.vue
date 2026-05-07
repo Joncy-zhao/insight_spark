@@ -67,6 +67,12 @@
             <el-empty v-if="!currentDiagnosis" description="尚未生成诊断报告" />
             <template v-else>
               <el-alert type="success" :closable="false" show-icon :title="currentDiagnosis.summary" />
+              <el-descriptions v-if="currentDiagnosis.sourceQuestion || currentDiagnosis.sourceSql" class="diagnosis-stats" :column="1" border>
+                <el-descriptions-item label="原问题">{{ currentDiagnosis.sourceQuestion }}</el-descriptions-item>
+                <el-descriptions-item label="原 SQL">
+                  <pre class="inline-sql">{{ currentDiagnosis.sourceSql }}</pre>
+                </el-descriptions-item>
+              </el-descriptions>
               <el-descriptions class="diagnosis-stats" :column="3" border>
                 <el-descriptions-item label="有效记录">{{ currentDiagnosis.statistics?.count }}</el-descriptions-item>
                 <el-descriptions-item label="指标合计">{{ currentDiagnosis.statistics?.total }}</el-descriptions-item>
@@ -117,6 +123,27 @@
               <ol v-else class="evidence-list">
                 <li v-for="(item, index) in currentDiagnosis.evidenceSources" :key="`${index}-${item}`">{{ item }}</li>
               </ol>
+
+              <h3>证据链</h3>
+              <h3>图谱推理路径</h3>
+              <el-table :data="currentDiagnosis.graphEdges || currentDiagnosis.graphPath?.edges || []" height="180" empty-text="暂无图谱边">
+                <el-table-column prop="fromKey" label="起点" min-width="220" show-overflow-tooltip />
+                <el-table-column prop="relationType" label="关系" width="120" />
+                <el-table-column prop="toKey" label="终点" min-width="220" show-overflow-tooltip />
+                <el-table-column prop="weight" label="权重" width="90" />
+              </el-table>
+
+              <h3>文档证据来源</h3>
+              <el-table :data="currentDiagnosis.docEvidence || currentDiagnosis.evidence || []" height="190" empty-text="暂无文档证据">
+                <el-table-column prop="source" label="来源" min-width="180" show-overflow-tooltip />
+                <el-table-column prop="score" label="评分" width="90" />
+                <el-table-column prop="matchedKeywords" label="关键词" min-width="160" show-overflow-tooltip>
+                  <template #default="{ row }">{{ Array.isArray(row.matchedKeywords) ? row.matchedKeywords.join('、') : row.matchedKeywords }}</template>
+                </el-table-column>
+                <el-table-column prop="chunkText" label="片段" min-width="280" show-overflow-tooltip>
+                  <template #default="{ row }">{{ row.chunkText || row.text }}</template>
+                </el-table-column>
+              </el-table>
 
               <h3>根因假设</h3>
               <el-table :data="currentDiagnosis.rootCauses || []" height="180" empty-text="暂无根因假设">
@@ -261,6 +288,12 @@ const {
   padding-left: 20px;
   color: #334155;
   line-height: 1.7;
+}
+
+.inline-sql {
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: Consolas, Monaco, monospace;
 }
 
 </style>
