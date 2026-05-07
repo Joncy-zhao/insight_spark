@@ -253,7 +253,6 @@ public class ChatBiService {
                         ? "true"
                         : "false";
     }
-
     private Map<String, Object> rebuildQueryFromTableProfile(String activeTable, String queryTableName, String question,
             List<Map<String, Object>> fields, String chartType) {
         List<Map<String, Object>> previewRows = queryTablePreview(queryTableName, 20);
