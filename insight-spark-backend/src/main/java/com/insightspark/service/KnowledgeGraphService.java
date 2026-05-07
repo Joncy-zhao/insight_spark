@@ -79,12 +79,15 @@ public class KnowledgeGraphService {
         addColumnIfMissing("is_kg_node", "content", "`content` TEXT NULL");
         addColumnIfMissing("is_kg_node", "weight", "`weight` DECIMAL(10,2) NOT NULL DEFAULT 1.00");
         addColumnIfMissing("is_kg_node", "created_at", "`created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP");
-        addColumnIfMissing("is_kg_node", "updated_at", "`updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP");
+        addColumnIfMissing("is_kg_node", "updated_at",
+                "`updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP");
         makeColumnNullableIfExists("is_kg_node", "name", "`name` VARCHAR(255) NULL");
         try {
-            jdbcTemplate.update("UPDATE is_kg_node SET label = COALESCE(NULLIF(label, ''), name, node_key) WHERE label IS NULL OR label = ''");
+            jdbcTemplate.update(
+                    "UPDATE is_kg_node SET label = COALESCE(NULLIF(label, ''), name, node_key) WHERE label IS NULL OR label = ''");
         } catch (DataAccessException ignored) {
-            jdbcTemplate.update("UPDATE is_kg_node SET label = COALESCE(NULLIF(label, ''), node_key) WHERE label IS NULL OR label = ''");
+            jdbcTemplate.update(
+                    "UPDATE is_kg_node SET label = COALESCE(NULLIF(label, ''), node_key) WHERE label IS NULL OR label = ''");
         }
         addColumnIfMissing("is_kg_edge", "relation_type", "`relation_type` VARCHAR(64) NOT NULL DEFAULT 'RELATED'");
         addColumnIfMissing("is_kg_edge", "weight", "`weight` DECIMAL(10,2) NOT NULL DEFAULT 1.00");
@@ -117,7 +120,8 @@ public class KnowledgeGraphService {
                 String fieldKey = tableKey + ":field:" + columnName;
                 nodeCount += upsertNode(fieldKey, "FIELD", Objects.toString(field.get("displayName"), columnName),
                         "UPLOAD", tableName + "." + columnName,
-                        "字段类型：" + field.get("fieldType") + "；敏感：" + field.get("sensitive") + "；" + Objects.toString(field.get("fieldComment"), ""),
+                        "字段类型：" + field.get("fieldType") + "；敏感：" + field.get("sensitive") + "；"
+                                + Objects.toString(field.get("fieldComment"), ""),
                         Boolean.TRUE.equals(field.get("sensitive")) ? 2.0 : 1.0);
                 edgeCount += upsertEdge(tableKey, fieldKey, "HAS_FIELD", 1.0);
                 if (isSensitive(field.get("sensitive"))) {
@@ -142,7 +146,8 @@ public class KnowledgeGraphService {
             nodeCount += upsertNode(dsKey, "DATASOURCE", Objects.toString(table.get("datasourceName"), datasourceId),
                     "OFFICIAL", datasourceId, "企业官方数据源", 2.0);
             nodeCount += upsertNode(tableKey, "OFFICIAL_TABLE", tableName, "OFFICIAL", datasourceId + "." + tableName,
-                    "瀹樻柟琛細" + Objects.toString(table.get("tableComment"), "") + "锛涗及绠楄鏁帮細" + table.get("tableRows"), 2.0);
+                    "瀹樻柟琛細" + Objects.toString(table.get("tableComment"), "") + "锛涗及绠楄鏁帮細" + table.get("tableRows"),
+                    2.0);
             edgeCount += upsertEdge(dsKey, tableKey, "HAS_TABLE", 1.0);
             List<Map<String, Object>> fields = jdbcTemplate.queryForList("""
                     SELECT column_name AS columnName, data_type AS dataType, column_comment AS columnComment,
@@ -159,7 +164,8 @@ public class KnowledgeGraphService {
                 String fieldKey = tableKey + ":field:" + columnName;
                 nodeCount += upsertNode(fieldKey, "FIELD", label.isBlank() ? columnName : label,
                         "OFFICIAL", datasourceId + "." + tableName + "." + columnName,
-                        "字段类型：" + field.get("dataType") + "；数据库注释：" + Objects.toString(field.get("columnComment"), "") + "；敏感：" + field.get("sensitive"),
+                        "字段类型：" + field.get("dataType") + "；数据库注释：" + Objects.toString(field.get("columnComment"), "")
+                                + "；敏感：" + field.get("sensitive"),
                         isSensitive(field.get("sensitive")) ? 2.0 : 1.0);
                 edgeCount += upsertEdge(tableKey, fieldKey, "HAS_FIELD", 1.0);
                 if (isSensitive(field.get("sensitive"))) {
@@ -211,8 +217,12 @@ public class KnowledgeGraphService {
                 "nodeCount", nodeCount == null ? 0 : nodeCount,
                 "edgeCount", edgeCount == null ? 0 : edgeCount,
                 "nodeTypes", nodeTypes,
-                "edgeTypes", edgeTypes
-        );
+                "edgeTypes", edgeTypes);
+    }
+
+    public boolean hasGraphData() {
+        Integer count = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM is_kg_node", Integer.class);
+        return count != null && count > 0;
     }
 
     public List<Map<String, Object>> search(String keyword, int limit) {
@@ -248,7 +258,7 @@ public class KnowledgeGraphService {
                         ORDER BY weight DESC
                         LIMIT 80
                         """.formatted(placeholders(nodeKeys.size()), placeholders(nodeKeys.size())),
-                doubledArgs(nodeKeys));
+                        doubledArgs(nodeKeys));
         return Map.of("nodes", nodes, "edges", edges, "ragContext", nodes);
     }
 
@@ -257,7 +267,8 @@ public class KnowledgeGraphService {
             try {
                 return neo4jMultiHopSearch(keyword, tableName, depth, limit);
             } catch (Exception ignored) {
-                // Neo4j is the primary GraphRAG store. Local metadata remains a resilience fallback
+                // Neo4j is the primary GraphRAG store. Local metadata remains a resilience
+                // fallback
                 // so report generation can still explain the missing graph dependency.
             }
         }
@@ -347,11 +358,11 @@ public class KnowledgeGraphService {
                 "pathText", bundle.getOrDefault("pathText", ""),
                 "ragContext", bundle.getOrDefault("ragContext", List.of()),
                 "depth", bundle.getOrDefault("depth", 3),
-                "neo4jEnabled", bundle.getOrDefault("neo4jEnabled", neo4jEnabled)
-        );
+                "neo4jEnabled", bundle.getOrDefault("neo4jEnabled", neo4jEnabled));
     }
 
-    private Map<String, Object> neo4jMultiHopSearch(String keyword, String tableName, int depth, int limit) throws Exception {
+    private Map<String, Object> neo4jMultiHopSearch(String keyword, String tableName, int depth, int limit)
+            throws Exception {
         String term = Objects.toString(keyword, "").trim();
         String table = Objects.toString(tableName, "").trim();
         int safeDepth = Math.max(1, Math.min(depth, 4));
@@ -398,8 +409,7 @@ public class KnowledgeGraphService {
                 "tableName", table,
                 "limit", safeLimit,
                 "pathLimit", safeLimit * 2,
-                "edgeLimit", safeLimit * 3
-        ));
+                "edgeLimit", safeLimit * 3));
         Map<String, Object> row = rows.isEmpty() ? Map.of("nodes", List.of(), "edges", List.of()) : rows.get(0);
         List<Map<String, Object>> nodes = castMapList(row.getOrDefault("nodes", List.of()));
         List<Map<String, Object>> edges = castMapList(row.getOrDefault("edges", List.of()));
@@ -410,15 +420,16 @@ public class KnowledgeGraphService {
 
     private List<Map<String, Object>> neo4jQueryRows(String cypher, Map<String, Object> params) throws Exception {
         String payload = objectMapper.writeValueAsString(Map.of(
-                "statements", List.of(Map.of("statement", cypher, "parameters", params))
-        ));
-        String token = Base64.getEncoder().encodeToString((neo4jUsername + ":" + neo4jPassword).getBytes(StandardCharsets.UTF_8));
+                "statements", List.of(Map.of("statement", cypher, "parameters", params))));
+        String token = Base64.getEncoder()
+                .encodeToString((neo4jUsername + ":" + neo4jPassword).getBytes(StandardCharsets.UTF_8));
         HttpRequest request = HttpRequest.newBuilder(URI.create(neo4jHttpUrl))
                 .header("Content-Type", "application/json")
                 .header("Authorization", "Basic " + token)
                 .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
                 .build();
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        HttpResponse<String> response = httpClient.send(request,
+                HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
             throw new IllegalStateException("Neo4j request failed: " + response.statusCode());
         }
@@ -480,8 +491,7 @@ public class KnowledgeGraphService {
                         Objects.toString(from.get("nodeType"), ""),
                         Objects.toString(edge.get("relationType"), "RELATED"),
                         Objects.toString(to.get("label"), ""),
-                        Objects.toString(to.get("nodeType"), "")
-                ));
+                        Objects.toString(to.get("nodeType"), "")));
             }
             if (pathParts.size() >= 8) {
                 break;
@@ -492,12 +502,14 @@ public class KnowledgeGraphService {
         }
         return nodes.stream()
                 .limit(8)
-                .map(node -> Objects.toString(node.get("label"), "") + "(" + Objects.toString(node.get("nodeType"), "") + ")")
+                .map(node -> Objects.toString(node.get("label"), "") + "(" + Objects.toString(node.get("nodeType"), "")
+                        + ")")
                 .reduce((a, b) -> a + " -> " + b)
                 .orElse("暂无图谱路径，请先同步知识图谱。");
     }
 
-    private int upsertNode(String nodeKey, String nodeType, String label, String sourceType, String sourceId, String content, double weight) {
+    private int upsertNode(String nodeKey, String nodeType, String label, String sourceType, String sourceId,
+            String content, double weight) {
         jdbcTemplate.update("""
                 INSERT INTO is_kg_node(node_key, node_type, label, source_type, source_id, content, weight)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -554,9 +566,9 @@ public class KnowledgeGraphService {
         }
         try {
             String payload = new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(Map.of(
-                    "statements", List.of(Map.of("statement", cypher, "parameters", params))
-            ));
-            String token = Base64.getEncoder().encodeToString((neo4jUsername + ":" + neo4jPassword).getBytes(StandardCharsets.UTF_8));
+                    "statements", List.of(Map.of("statement", cypher, "parameters", params))));
+            String token = Base64.getEncoder()
+                    .encodeToString((neo4jUsername + ":" + neo4jPassword).getBytes(StandardCharsets.UTF_8));
             HttpRequest request = HttpRequest.newBuilder(URI.create(neo4jHttpUrl))
                     .header("Content-Type", "application/json")
                     .header("Authorization", "Basic " + token)
@@ -586,7 +598,8 @@ public class KnowledgeGraphService {
             try {
                 jdbcTemplate.execute("ALTER TABLE `" + tableName + "` ADD COLUMN " + definition);
             } catch (DataAccessException ignored) {
-                // Test databases can report information_schema differently; duplicate-column ALTER is safe to ignore here.
+                // Test databases can report information_schema differently; duplicate-column
+                // ALTER is safe to ignore here.
             }
         }
     }
@@ -602,4 +615,3 @@ public class KnowledgeGraphService {
         }
     }
 }
-

@@ -6,6 +6,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -68,7 +69,19 @@ public class ChatBiService {
         if (fields == null || fields.isEmpty()) {
             throw new IllegalArgumentException("当前数据表没有字段元信息，请在“数据上传”页面重新上传文件，或选择字段数大于 0 的数据表。");
         }
-        List<Map<String, Object>> graphContext = knowledgeGraphService.retrieveContext(question, activeTable);
+        Map<String, Object> graphPath = knowledgeGraphService.retrieveMultiHopContext(question, activeTable);
+        List<Map<String, Object>> graphContext = asMapList(graphPath.get("ragContext"));
+        if (graphContext.isEmpty() && !knowledgeGraphService.hasGraphData()) {
+            knowledgeGraphService.syncGraph();
+            graphPath = knowledgeGraphService.retrieveMultiHopContext(question, activeTable);
+            graphContext = asMapList(graphPath.get("ragContext"));
+        }
+        if (graphContext.isEmpty()) {
+            graphContext = knowledgeGraphService.retrieveContext(question, activeTable);
+        }
+        if (graphContext.isEmpty()) {
+            graphContext = buildLocalFieldContext(activeTable, fields);
+        }
         List<Map<String, Object>> previewRows = dataUploadService.preview(activeTable, 1, 8);
         Optional<Map<String, Object>> aiResult = pythonAiService.textToSql(question, queryTableName, fields,
                 previewRows);
@@ -180,6 +193,65 @@ public class ChatBiService {
             return text.trim().isEmpty();
         }
         return false;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> asMapList(Object value) {
+        if (value instanceof List<?> list) {
+            return (List<Map<String, Object>>) list;
+        }
+        return List.of();
+    }
+
+    private List<Map<String, Object>> buildLocalFieldContext(String tableName, List<Map<String, Object>> fields) {
+        List<Map<String, Object>> context = new ArrayList<>();
+        if (tableName != null && !tableName.isBlank()) {
+            Map<String, Object> tableNode = new HashMap<>();
+            tableNode.put("nodeKey", "local_table:" + tableName);
+            tableNode.put("nodeType", "TABLE");
+            tableNode.put("label", tableName);
+            tableNode.put("sourceType", "LOCAL");
+            tableNode.put("sourceId", tableName);
+            tableNode.put("content", "本地字段元信息");
+            context.add(tableNode);
+        }
+        for (Map<String, Object> field : fields) {
+            String columnName = Objects.toString(field.get("columnName"), "");
+            String displayName = Objects.toString(field.get("displayName"), columnName);
+            String fieldType = Objects.toString(field.get("fieldType"), "TEXT");
+            String fieldComment = Objects.toString(field.get("fieldComment"), "").trim();
+            String sensitive = formatSensitive(field.get("sensitive"));
+            String content = "字段类型：" + fieldType + "；敏感：" + sensitive;
+            if (!fieldComment.isBlank()) {
+                content = content + "；" + fieldComment;
+            }
+            Map<String, Object> fieldNode = new HashMap<>();
+            fieldNode.put("nodeKey", "local_field:" + tableName + ":" + columnName);
+            fieldNode.put("nodeType", "FIELD");
+            fieldNode.put("label", displayName);
+            fieldNode.put("sourceType", "LOCAL");
+            fieldNode.put("sourceId", tableName + "." + columnName);
+            fieldNode.put("content", content);
+            context.add(fieldNode);
+        }
+        return context;
+    }
+
+    private String formatSensitive(Object value) {
+        if (value instanceof Boolean flag) {
+            return flag ? "true" : "false";
+        }
+        if (value instanceof Number number) {
+            return number.intValue() != 0 ? "true" : "false";
+        }
+        String text = Objects.toString(value, "").trim();
+        if (text.isBlank()) {
+            return "false";
+        }
+        return "1".equals(text) || "true".equalsIgnoreCase(text) || "yes".equalsIgnoreCase(text)
+                || "on".equalsIgnoreCase(text)
+                        ? "true"
+                        : "false";
     }
 
     private Map<String, Object> rebuildQueryFromTableProfile(String activeTable, String queryTableName, String question,
