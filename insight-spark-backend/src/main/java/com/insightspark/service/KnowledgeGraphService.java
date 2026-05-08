@@ -215,6 +215,11 @@ public class KnowledgeGraphService {
         );
     }
 
+    public boolean hasGraphData() {
+        Integer count = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM is_kg_node", Integer.class);
+        return count != null && count > 0;
+    }
+
     public List<Map<String, Object>> search(String keyword, int limit) {
         String term = keyword == null ? "" : keyword.trim();
         int safeLimit = Math.max(1, Math.min(limit, 50));
