@@ -139,10 +139,9 @@ public class DataUploadService {
     public Map<String, Object> processFileWithTask(MultipartFile file, String displayName) throws IOException {
         String taskId = createTask("WAITING", 0, "上传任务已创建");
         try {
-            updateTask(taskId, "UPLOADING", 20, "文件已接收，准备解析", null);
-            updateTask(taskId, "PARSING", 50, "正在解析 Excel/CSV 文件", null);
-            Map<String, Object> result = processFile(file, displayName);
-            updateTask(taskId, "BUILDING", 80, "正在建表并写入数据", null);
+            TaskProgressTracker progress = new DatabaseTaskProgressTracker(taskId);
+            progress.received("文件已接收，准备解析");
+            Map<String, Object> result = processFile(file, displayName, progress);
             updateTask(taskId, "SUCCESS", 100, "文件处理完成", result);
             Map<String, Object> wrapped = new LinkedHashMap<>(result);
             wrapped.put("taskId", taskId);
@@ -163,10 +162,9 @@ public class DataUploadService {
                                                     String modelRequirement, String displayName) throws IOException {
         String taskId = createTask("WAITING", 0, "批量上传任务已创建");
         try {
-            updateTask(taskId, "UPLOADING", 20, "文件已接收，准备解析", null);
-            updateTask(taskId, "PARSING", 50, "正在解析并校验多个文件", null);
-            Map<String, Object> result = processFiles(files, mergeMode, joinKey, modelRequirement, displayName);
-            updateTask(taskId, "BUILDING", 80, "正在合并、建表并生成模型", null);
+            TaskProgressTracker progress = new DatabaseTaskProgressTracker(taskId);
+            progress.received("文件已接收，准备解析");
+            Map<String, Object> result = processFiles(files, mergeMode, joinKey, modelRequirement, displayName, progress);
             updateTask(taskId, "SUCCESS", 100, "批量文件处理完成", result);
             Map<String, Object> wrapped = new LinkedHashMap<>(result);
             wrapped.put("taskId", taskId);
@@ -188,10 +186,9 @@ public class DataUploadService {
         StoredMultipartFile storedFile = StoredMultipartFile.from(file);
         uploadExecutor.submit(() -> runWithAuth(principal, () -> {
             try {
-                updateTask(taskId, "UPLOADING", 20, "文件已接收，准备解析", null);
-                updateTask(taskId, "PARSING", 50, "正在解析 Excel/CSV 文件", null);
-                Map<String, Object> result = processFile(storedFile, displayName);
-                updateTask(taskId, "BUILDING", 80, "正在建表并写入数据", null);
+                TaskProgressTracker progress = new DatabaseTaskProgressTracker(taskId);
+                progress.received("文件已接收，准备解析");
+                Map<String, Object> result = processFile(storedFile, displayName, progress);
                 updateTask(taskId, "SUCCESS", 100, "文件处理完成", result);
             } catch (Exception e) {
                 updateTask(taskId, "FAILED", 100, e.getMessage(), null);
@@ -218,10 +215,9 @@ public class DataUploadService {
         }).map(item -> (MultipartFile) item).toList();
         uploadExecutor.submit(() -> runWithAuth(principal, () -> {
             try {
-                updateTask(taskId, "UPLOADING", 20, "文件已接收，准备解析", null);
-                updateTask(taskId, "PARSING", 50, "正在解析并校验多个文件", null);
-                Map<String, Object> result = processFiles(storedFiles, mergeMode, joinKey, modelRequirement, displayName);
-                updateTask(taskId, "BUILDING", 80, "正在合并、建表并生成模型", null);
+                TaskProgressTracker progress = new DatabaseTaskProgressTracker(taskId);
+                progress.received("文件已接收，准备解析");
+                Map<String, Object> result = processFiles(storedFiles, mergeMode, joinKey, modelRequirement, displayName, progress);
                 updateTask(taskId, "SUCCESS", 100, "批量文件处理完成", result);
             } catch (Exception e) {
                 updateTask(taskId, "FAILED", 100, e.getMessage(), null);
@@ -275,14 +271,18 @@ public class DataUploadService {
     }
 
     public Map<String, Object> processFile(MultipartFile file, String displayName) throws IOException {
+        return processFile(file, displayName, TaskProgressTracker.noop());
+    }
+
+    private Map<String, Object> processFile(MultipartFile file, String displayName, TaskProgressTracker progress) throws IOException {
         String originalFilename = Objects.requireNonNullElse(file.getOriginalFilename(), "未命名文件");
-        ParsedFile parsedFile = parseFile(file, originalFilename);
+        ParsedFile parsedFile = parseFile(file, originalFilename, progress);
 
         if (parsedFile.headers().isEmpty() || parsedFile.rows().isEmpty()) {
             throw new IllegalArgumentException("解析失败：未找到表头或有效数据");
         }
 
-        return persistParsedFile(originalFilename, parsedFile, displayName);
+        return persistParsedFile(originalFilename, parsedFile, displayName, progress);
     }
 
     public Map<String, Object> processFiles(List<MultipartFile> files, String mergeMode, String joinKey,
@@ -292,6 +292,12 @@ public class DataUploadService {
 
     public Map<String, Object> processFiles(List<MultipartFile> files, String mergeMode, String joinKey,
                                             String modelRequirement, String displayNameOverride) throws IOException {
+        return processFiles(files, mergeMode, joinKey, modelRequirement, displayNameOverride, TaskProgressTracker.noop());
+    }
+
+    private Map<String, Object> processFiles(List<MultipartFile> files, String mergeMode, String joinKey,
+                                             String modelRequirement, String displayNameOverride,
+                                             TaskProgressTracker progress) throws IOException {
         if (files == null || files.isEmpty()) {
             throw new IllegalArgumentException("请至少选择一个 Excel/CSV 文件");
         }
@@ -303,7 +309,7 @@ public class DataUploadService {
         List<String> sourceNames = new ArrayList<>();
         for (MultipartFile file : files) {
             String originalFilename = Objects.requireNonNullElse(file.getOriginalFilename(), "未命名文件");
-            ParsedFile parsedFile = parseFile(file, originalFilename);
+            ParsedFile parsedFile = parseFile(file, originalFilename, progress);
             if (parsedFile.headers().isEmpty() || parsedFile.rows().isEmpty()) {
                 throw new IllegalArgumentException("文件 " + originalFilename + " 未找到表头或有效数据");
             }
@@ -320,8 +326,10 @@ public class DataUploadService {
                 : files.size() == 1
                 ? removeExtension(sourceNames.get(0))
                 : "多文件合并_" + System.currentTimeMillis();
-        Map<String, Object> result = persistParsedFile(String.join(" + ", sourceNames), merged, displayName);
+        progress.merging(merged.rows().size());
+        Map<String, Object> result = persistParsedFile(String.join(" + ", sourceNames), merged, displayName, progress);
         if (modelRequirement != null && !modelRequirement.isBlank()) {
+            progress.metadata("正在按业务需求生成模型");
             result.put("businessModel", saveBusinessModel(
                     "模型_" + result.get("displayName"),
                     modelRequirement,
@@ -335,12 +343,18 @@ public class DataUploadService {
     }
 
     private Map<String, Object> persistParsedFile(String originalFilename, ParsedFile parsedFile, String displayNameOverride) {
+        return persistParsedFile(originalFilename, parsedFile, displayNameOverride, TaskProgressTracker.noop());
+    }
+
+    private Map<String, Object> persistParsedFile(String originalFilename, ParsedFile parsedFile, String displayNameOverride,
+                                                  TaskProgressTracker progress) {
         if (parsedFile.headers().isEmpty() || parsedFile.rows().isEmpty()) {
             throw new IllegalArgumentException("解析失败：未找到表头或有效数据");
         }
 
         String tableName = nextTableName();
         List<FieldMeta> fields = buildFieldMeta(parsedFile.headers(), parsedFile.rows());
+        progress.buildingTable(parsedFile.rows().size());
 
         log.info("开始动态建表: {}", tableName);
         StringBuilder createSql = new StringBuilder("CREATE TABLE `").append(tableName).append("` (");
@@ -380,10 +394,19 @@ public class DataUploadService {
             }
             batchArgs.add(args);
         }
-        jdbcTemplate.batchUpdate(insertSql.toString(), batchArgs);
+        int insertedRows = 0;
+        int chunkSize = 500;
+        for (int start = 0; start < batchArgs.size(); start += chunkSize) {
+            int end = Math.min(start + chunkSize, batchArgs.size());
+            jdbcTemplate.batchUpdate(insertSql.toString(), batchArgs.subList(start, end));
+            insertedRows = end;
+            progress.persistedRows(insertedRows, batchArgs.size());
+        }
 
+        progress.metadata("正在保存字段元信息");
         saveCatalog(originalFilename, displayNameOverride, tableName, fields, parsedFile.rows().size());
         try {
+            progress.metadata("正在同步知识图谱");
             knowledgeGraphService.syncGraph();
         } catch (Exception e) {
             log.warn("上传数据已保存，但同步 Neo4j 知识图谱失败：{}", e.getMessage());
@@ -398,6 +421,14 @@ public class DataUploadService {
         result.put("rowCount", parsedFile.rows().size());
         result.put("fieldCount", fields.size());
         result.put("fields", fields.stream().map(FieldMeta::toMap).toList());
+        Map<String, Object> cleaningStrategy = generateCleaningStrategy(tableName);
+        result.put("cleaningStrategy", cleaningStrategy);
+        if (cleaningActions(cleaningStrategy).isEmpty()) {
+            activateCleanedTable(tableName);
+            result.put("cleaningStatus", "ACTIVE");
+        } else {
+            result.put("cleaningStatus", "PENDING_CLEANING");
+        }
         return result;
     }
 
@@ -644,7 +675,7 @@ public class DataUploadService {
             return false;
         }
         Integer count = jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM is_data_table WHERE table_name = ? AND status = 'ACTIVE'",
+                "SELECT COUNT(*) FROM is_data_table WHERE table_name = ? AND status IN ('ACTIVE', 'PENDING_CLEANING')",
                 Integer.class,
                 tableName
         );
@@ -677,7 +708,24 @@ public class DataUploadService {
         if (!existsTable(tableName)) {
             throw new IllegalArgumentException("数据表不存在或无访问权限：" + tableName);
         }
-        permissionService.assertCanAccessTable(tableName);
+        if (!canOperatePendingCleaningTable(tableName)) {
+            permissionService.assertCanAccessTable(tableName);
+        }
+    }
+
+    private boolean canOperatePendingCleaningTable(String tableName) {
+        if (tableName == null || tableName.isBlank()) {
+            return false;
+        }
+        if (AuthContext.isAdmin()) {
+            return true;
+        }
+        Integer count = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*)
+                FROM is_data_table
+                WHERE table_name = ? AND owner_id = ? AND status IN ('ACTIVE', 'PENDING_CLEANING')
+                """, Integer.class, tableName, permissionService.currentUserId());
+        return count != null && count > 0;
     }
 
     private void assertFieldExists(String tableName, String columnName) {
@@ -704,22 +752,32 @@ public class DataUploadService {
     }
 
     private ParsedFile parseFile(MultipartFile file, String originalFilename) throws IOException {
+        return parseFile(file, originalFilename, TaskProgressTracker.noop());
+    }
+
+    private ParsedFile parseFile(MultipartFile file, String originalFilename, TaskProgressTracker progress) throws IOException {
         String lowerName = originalFilename.toLowerCase();
         if (lowerName.endsWith(".csv")) {
-            return parseCsv(file);
+            return parseCsv(file, progress);
         }
         if (lowerName.endsWith(".xlsx") || lowerName.endsWith(".xls")) {
-            return parseExcel(file);
+            return parseExcel(file, progress);
         }
         throw new IllegalArgumentException("仅支持 .xlsx、.xls、.csv 文件");
     }
 
     private ParsedFile parseExcel(MultipartFile file) throws IOException {
-        DynamicDataListener listener = new DynamicDataListener();
+        return parseExcel(file, TaskProgressTracker.noop());
+    }
+
+    private ParsedFile parseExcel(MultipartFile file, TaskProgressTracker progress) throws IOException {
+        progress.startParsingUnknown("正在解析 Excel 文件");
+        DynamicDataListener listener = new DynamicDataListener(progress::parsedRowsUnknownTotal);
         EasyExcel.read(file.getInputStream(), listener).sheet().doRead();
 
         Map<Integer, String> headMap = listener.getHeadMap();
         if (headMap == null || headMap.isEmpty()) {
+            progress.parsedRows(0, 0);
             return new ParsedFile(Collections.emptyList(), Collections.emptyList());
         }
 
@@ -737,20 +795,33 @@ public class DataUploadService {
             }
             rows.add(values);
         }
+        progress.parsedRows(rows.size(), rows.size());
         return new ParsedFile(headers, rows);
     }
 
     private ParsedFile parseCsv(MultipartFile file) throws IOException {
+        return parseCsv(file, TaskProgressTracker.noop());
+    }
+
+    private ParsedFile parseCsv(MultipartFile file, TaskProgressTracker progress) throws IOException {
+        int totalRows = countNonEmptyCsvRows(file);
+        progress.startParsing(totalRows, "正在解析 CSV 文件");
         List<List<String>> lines = new ArrayList<>();
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(file.getInputStream(), StandardCharsets.UTF_8))) {
             String line;
+            int parsedRows = 0;
             while ((line = reader.readLine()) != null) {
                 if (!line.trim().isEmpty()) {
                     lines.add(parseCsvLine(line));
+                    if (lines.size() > 1) {
+                        parsedRows++;
+                        progress.parsedRows(parsedRows, totalRows);
+                    }
                 }
             }
         }
         if (lines.isEmpty()) {
+            progress.parsedRows(0, 0);
             return new ParsedFile(Collections.emptyList(), Collections.emptyList());
         }
 
@@ -760,6 +831,19 @@ public class DataUploadService {
             headers.add(normalizeHeader(rawHeaders.get(i), i));
         }
         return new ParsedFile(headers, lines.subList(1, lines.size()));
+    }
+
+    private int countNonEmptyCsvRows(MultipartFile file) throws IOException {
+        int count = 0;
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(file.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (!line.trim().isEmpty()) {
+                    count++;
+                }
+            }
+        }
+        return Math.max(0, count - 1);
     }
 
     private List<String> parseCsvLine(String line) {
@@ -1050,7 +1134,7 @@ public class DataUploadService {
     private void saveCatalog(String originalFilename, String displayNameOverride, String tableName, List<FieldMeta> fields, int rowCount) {
         jdbcTemplate.update("""
                 INSERT INTO is_data_table(source_name, display_name, table_name, owner_id, row_count, field_count, status)
-                VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE')
+                VALUES (?, ?, ?, ?, ?, ?, 'PENDING_CLEANING')
                 """, originalFilename,
                 displayNameOverride == null || displayNameOverride.isBlank() ? removeExtension(originalFilename) : displayNameOverride,
                 tableName, permissionService.currentUserId(), rowCount, fields.size());
@@ -1100,13 +1184,17 @@ public class DataUploadService {
     }
 
     private void addColumnIfMissing(String tableName, String columnName, String definition) {
+        if (!columnExists(tableName, columnName)) {
+            jdbcTemplate.execute("ALTER TABLE `" + tableName + "` ADD COLUMN " + definition);
+        }
+    }
+
+    private boolean columnExists(String tableName, String columnName) {
         Integer count = jdbcTemplate.queryForObject("""
                 SELECT COUNT(*) FROM information_schema.columns
                 WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?
                 """, Integer.class, tableName, columnName);
-        if (count == null || count == 0) {
-            jdbcTemplate.execute("ALTER TABLE `" + tableName + "` ADD COLUMN " + definition);
-        }
+        return count != null && count > 0;
     }
 
     private String removeExtension(String filename) {
@@ -1148,6 +1236,116 @@ public class DataUploadService {
             return "\"" + safeValue.replace("\"", "\"\"") + "\"";
         }
         return safeValue;
+    }
+
+    private interface TaskProgressTracker {
+        TaskProgressTracker NOOP = new TaskProgressTracker() {
+        };
+
+        static TaskProgressTracker noop() {
+            return NOOP;
+        }
+
+        default void received(String message) {
+        }
+
+        default void startParsing(int totalRows, String message) {
+        }
+
+        default void startParsingUnknown(String message) {
+        }
+
+        default void parsedRows(int parsedRows, int totalRows) {
+        }
+
+        default void parsedRowsUnknownTotal(int parsedRows) {
+        }
+
+        default void merging(int totalRows) {
+        }
+
+        default void buildingTable(int totalRows) {
+        }
+
+        default void persistedRows(int insertedRows, int totalRows) {
+        }
+
+        default void metadata(String message) {
+        }
+    }
+
+    private class DatabaseTaskProgressTracker implements TaskProgressTracker {
+        private static final int PARSE_START = 1;
+        private static final int PARSE_END = 50;
+        private static final int PERSIST_START = 51;
+        private static final int PERSIST_END = 95;
+        private final String taskId;
+        private int lastProgress = 0;
+        private int lastParsedMessageRows = 0;
+
+        private DatabaseTaskProgressTracker(String taskId) {
+            this.taskId = taskId;
+        }
+
+        @Override
+        public void received(String message) {
+            publish("UPLOADING", 0, message);
+        }
+
+        @Override
+        public void startParsing(int totalRows, String message) {
+            publish("PARSING", PARSE_START, totalRows > 0 ? message + "，共 " + totalRows + " 行" : message);
+        }
+
+        @Override
+        public void startParsingUnknown(String message) {
+            publish("PARSING", PARSE_START, message + "，正在统计总行数");
+        }
+
+        @Override
+        public void parsedRows(int parsedRows, int totalRows) {
+            if (parsedRows > 1 && parsedRows < totalRows && parsedRows - lastParsedMessageRows < 200) {
+                return;
+            }
+            lastParsedMessageRows = parsedRows;
+            int progress = totalRows <= 0 ? PARSE_END : PARSE_START + (int) Math.floor((double) parsedRows * (PARSE_END - PARSE_START) / totalRows);
+            publish("PARSING", progress, "已真实解析 " + parsedRows + " / " + Math.max(totalRows, parsedRows) + " 行");
+        }
+
+        @Override
+        public void parsedRowsUnknownTotal(int parsedRows) {
+            if (parsedRows == 1 || parsedRows - lastParsedMessageRows >= 200) {
+                lastParsedMessageRows = parsedRows;
+                publish("PARSING", PARSE_START, "已真实解析 " + parsedRows + " 行，正在统计总行数");
+            }
+        }
+
+        @Override
+        public void merging(int totalRows) {
+            publish("BUILDING", PARSE_END, "文件合并完成，共 " + totalRows + " 行，准备入库");
+        }
+
+        @Override
+        public void buildingTable(int totalRows) {
+            publish("BUILDING", PERSIST_START, "正在建表，准备写入 " + totalRows + " 行");
+        }
+
+        @Override
+        public void persistedRows(int insertedRows, int totalRows) {
+            int progress = totalRows <= 0 ? PERSIST_END : PERSIST_START + (int) Math.floor((double) insertedRows * (PERSIST_END - PERSIST_START) / totalRows);
+            publish("BUILDING", progress, "已真实写入 " + insertedRows + " / " + Math.max(totalRows, insertedRows) + " 行");
+        }
+
+        @Override
+        public void metadata(String message) {
+            publish("BUILDING", Math.max(lastProgress, 96), message);
+        }
+
+        private void publish(String status, int progress, String message) {
+            int safeProgress = Math.max(lastProgress, Math.max(0, Math.min(progress, 99)));
+            lastProgress = safeProgress;
+            updateTask(taskId, status, safeProgress, message, null);
+        }
     }
 
     private record ParsedFile(List<String> headers, List<List<String>> rows) {
@@ -1206,8 +1404,148 @@ public class DataUploadService {
         quality.put("anomalyFieldCount", anomalyFieldCount);
         quality.put("qualityLevel", getQualityLevel(qualityScore));
         quality.put("suggestions", generateQualitySuggestions(avgNullRate, emptyFieldCount, anomalyFieldCount));
+        quality.put("cleaningStrategy", generateCleaningStrategy(tableName, fields, totalRows));
         
         return quality;
+    }
+
+    public Map<String, Object> generateCleaningStrategy(String tableName) {
+        assertKnownTable(tableName);
+        List<Map<String, Object>> fields = listFields(tableName);
+        return generateCleaningStrategy(tableName, fields, countRows(tableName));
+    }
+
+    private Map<String, Object> generateCleaningStrategy(String tableName, List<Map<String, Object>> fields, long totalRows) {
+        List<Map<String, Object>> actions = new ArrayList<>();
+        int totalNullCells = 0;
+        int totalAnomalyRows = 0;
+
+        for (Map<String, Object> field : fields) {
+            String columnName = Objects.toString(field.get("columnName"), "");
+            if (columnName.isBlank()) {
+                continue;
+            }
+            String displayName = Objects.toString(field.getOrDefault("displayName", columnName), columnName);
+            String fieldType = Objects.toString(field.getOrDefault("fieldType", "TEXT"), "TEXT");
+            Map<String, Object> stats = getFieldStatistics(tableName, columnName);
+            long nullCount = ((Number) stats.getOrDefault("nullCount", 0)).longValue();
+            if (nullCount > 0) {
+                totalNullCells += (int) Math.min(Integer.MAX_VALUE, nullCount);
+                Map<String, Object> action = new LinkedHashMap<>();
+                action.put("type", "FILL_NULL");
+                action.put("columnName", columnName);
+                action.put("displayName", displayName);
+                action.put("fieldType", fieldType);
+                action.put("affectedRows", nullCount);
+                action.put("fillValue", defaultFillValue(fieldType));
+                List<Map<String, Object>> sampleRows = findNullRows(tableName, columnName);
+                action.put("rowIds", sampleRows.stream().map(row -> row.get("sys_id")).toList());
+                action.put("sampleRows", sampleRows);
+                action.put("description", "将字段“" + displayName + "”的 " + nullCount + " 个空值填充为默认值");
+                actions.add(action);
+            }
+
+            List<Map<String, Object>> anomalies = (List<Map<String, Object>>) stats.getOrDefault("anomalies", List.of());
+            if (!anomalies.isEmpty()) {
+                totalAnomalyRows += anomalies.size();
+                Map<String, Object> action = new LinkedHashMap<>();
+                action.put("type", "MARK_ANOMALY_AND_ISOLATE");
+                action.put("columnName", columnName);
+                action.put("displayName", displayName);
+                action.put("affectedRows", anomalies.size());
+                action.put("rowIds", anomalies.stream().map(item -> item.get("rowId")).toList());
+                action.put("sampleRows", findRowsByIds(tableName, anomalies.stream().map(item -> item.get("rowId")).toList(), 20));
+                action.put("description", "将字段“" + displayName + "”检测到的 " + anomalies.size() + " 个异常值所在行标记并隔离");
+                actions.add(action);
+            }
+        }
+
+        Map<String, Object> strategy = new LinkedHashMap<>();
+        strategy.put("tableName", tableName);
+        strategy.put("totalRows", totalRows);
+        strategy.put("actionCount", actions.size());
+        strategy.put("totalNullCells", totalNullCells);
+        strategy.put("totalAnomalyRows", totalAnomalyRows);
+        strategy.put("requiresConfirmation", true);
+        strategy.put("actions", actions);
+        strategy.put("summary", actions.isEmpty()
+                ? "未发现需要自动处理的空值或数值异常"
+                : "发现 " + totalNullCells + " 个空值、" + totalAnomalyRows + " 个异常行，可确认后自动处理");
+        return strategy;
+    }
+
+    public Map<String, Object> applyCleaningStrategy(String tableName, Map<String, Object> request) {
+        assertKnownTable(tableName);
+        List<Map<String, Object>> actions = parseCleaningActions(tableName, request);
+        List<Map<String, Object>> processedActions = new ArrayList<>();
+        int filledRows = 0;
+        int markedRows = 0;
+
+        for (Map<String, Object> action : actions) {
+            String type = Objects.toString(action.get("type"), "").toUpperCase();
+            Map<String, Object> processedAction = new LinkedHashMap<>(action);
+            if ("FILL_NULL".equals(type)) {
+                String columnName = Objects.toString(action.get("columnName"), "");
+                assertFieldExists(tableName, columnName);
+                List<Object> rowIds = parseObjectRowIds(action.get("rowIds"));
+                String fillValue = Objects.toString(action.getOrDefault("fillValue", defaultFillValue(
+                        fieldTypeOf(tableName, columnName)
+                )), "");
+                String quotedColumn = quoteColumn(columnName);
+                filledRows += jdbcTemplate.update(
+                        "UPDATE `" + tableName + "` SET " + quotedColumn + " = ? WHERE " + quotedColumn + " IS NULL OR " + quotedColumn + " = ''",
+                        fillValue
+                );
+                processedAction.put("afterRows", findRowsByIds(tableName, rowIds, 20));
+            } else if ("MARK_ANOMALY_AND_ISOLATE".equals(type)) {
+                ensureCleaningColumns(tableName);
+                List<Long> rowIds = parseRowIds(action.get("rowIds"));
+                if (!rowIds.isEmpty()) {
+                    String columnName = Objects.toString(action.get("columnName"), "");
+                    String reason = "字段 " + columnName + " 存在数值异常";
+                    markedRows += markRowsAsAnomaly(tableName, rowIds, reason);
+                    processedAction.put("afterRows", findRowsByIds(tableName, new ArrayList<>(rowIds), 20));
+                }
+            }
+            processedActions.add(processedAction);
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("tableName", tableName);
+        result.put("filledRows", filledRows);
+        result.put("markedAnomalyRows", markedRows);
+        result.put("appliedActions", actions.size());
+        result.put("processedActions", processedActions);
+        result.put("cleaningStrategy", generateCleaningStrategy(tableName));
+        return result;
+    }
+
+    public Map<String, Object> activateCleanedTable(String tableName) {
+        return activateCleanedTable(tableName, false);
+    }
+
+    public Map<String, Object> activateCleanedTable(String tableName, boolean skipCleaning) {
+        assertKnownTable(tableName);
+        Map<String, Object> cleaningStrategy = generateCleaningStrategy(tableName);
+        List<Map<String, Object>> actions = cleaningActions(cleaningStrategy);
+        if (!skipCleaning && !actions.isEmpty()) {
+            throw new IllegalArgumentException("请先处理空值与异常值，确认没有待处理问题后才能存入我的数据表");
+        }
+        int updated = jdbcTemplate.update("""
+                UPDATE is_data_table
+                SET status = 'ACTIVE'
+                WHERE table_name = ?
+                  AND (? = 1 OR owner_id = ?)
+                """, tableName, AuthContext.isAdmin() ? 1 : 0, permissionService.currentUserId());
+        if (updated == 0) {
+            throw new IllegalArgumentException("数据表不存在或无权限激活：" + tableName);
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("tableName", tableName);
+        result.put("status", "ACTIVE");
+        result.put("skipCleaning", skipCleaning);
+        result.put("cleaningStrategy", cleaningStrategy);
+        return result;
     }
     
     public Map<String, Object> getFieldStatistics(String tableName, String columnName) {
@@ -1265,7 +1603,7 @@ public class DataUploadService {
         assertFieldExists(tableName, columnName);
         
         List<Map<String, Object>> fieldMeta = jdbcTemplate.queryForList(
-            "SELECT field_type AS fieldType FROM is_data_field WHERE table_name = ? AND column_name = ?",
+            "SELECT source_field_name AS sourceFieldName, display_name AS displayName, field_type AS fieldType FROM is_data_field WHERE table_name = ? AND column_name = ?",
             tableName, columnName
         );
         
@@ -1273,42 +1611,217 @@ public class DataUploadService {
             return List.of();
         }
         
-        String fieldType = Objects.toString(fieldMeta.get(0).get("fieldType"), "TEXT");
-        
-        if (!"NUMBER".equals(fieldType)) {
-            return List.of();
-        }
-        
+        Map<String, Object> meta = fieldMeta.get(0);
+        String fieldType = Objects.toString(meta.get("fieldType"), "TEXT").toUpperCase();
+        String fieldLabel = (Objects.toString(meta.get("sourceFieldName"), "") + " "
+                + Objects.toString(meta.get("displayName"), "") + " " + columnName).toLowerCase();
         String quotedColumn = quoteColumn(columnName);
-        Map<String, Object> stats = new LinkedHashMap<>();
-        addNumericStatistics(stats, tableName, quotedColumn);
-        
-        Double avg = (Double) stats.get("avg");
-        Double stdDev = (Double) stats.get("stdDev");
-        
-        if (avg == null || stdDev == null || stdDev == 0) {
-            return List.of();
-        }
-        
-        double lowerBound = avg - 3 * stdDev;
-        double upperBound = avg + 3 * stdDev;
-        
-        List<Map<String, Object>> anomalies = jdbcTemplate.queryForList(
-            "SELECT sys_id, " + quotedColumn + " AS value FROM `" + tableName + 
-            "` WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != '' " +
-            "AND (CAST(" + quotedColumn + " AS DECIMAL(20,4)) < ? OR CAST(" + quotedColumn + " AS DECIMAL(20,4)) > ?) " +
-            "LIMIT 100",
-            lowerBound, upperBound
+        String isolationFilter = columnExists(tableName, "cleaning_isolated")
+                ? " AND (`cleaning_isolated` IS NULL OR `cleaning_isolated` = 0)"
+                : "";
+
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+                "SELECT sys_id, " + quotedColumn + " AS value FROM `" + tableName + "` WHERE "
+                        + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != ''"
+                        + isolationFilter + " LIMIT 50000"
         );
-        
-        return anomalies.stream().map(row -> {
-            Map<String, Object> anomaly = new LinkedHashMap<>();
-            anomaly.put("rowId", row.get("sys_id"));
-            anomaly.put("value", row.get("value"));
-            anomaly.put("type", "OUTLIER");
-            anomaly.put("reason", "数值超出 3σ 范围 [" + String.format("%.2f", lowerBound) + ", " + String.format("%.2f", upperBound) + "]");
-            return anomaly;
-        }).toList();
+
+        List<Map<String, Object>> anomalies = new ArrayList<>();
+        boolean phoneField = looksPhoneField(fieldLabel);
+        boolean emailField = looksEmailField(fieldLabel);
+        boolean dateField = "DATE".equals(fieldType) || looksDateField(fieldLabel);
+        boolean ageField = looksAgeField(fieldLabel);
+        boolean amountField = looksAmountField(fieldLabel);
+        boolean levelField = looksLevelField(fieldLabel);
+        boolean numericField = "NUMBER".equals(fieldType) || ageField || amountField || looksNumericField(fieldLabel);
+
+        for (Map<String, Object> row : rows) {
+            if (anomalies.size() >= 100) {
+                break;
+            }
+            Object rowId = row.get("sys_id");
+            String value = Objects.toString(row.get("value"), "").trim();
+            if (value.isEmpty()) {
+                continue;
+            }
+            if (emailField && !isValidEmail(value)) {
+                anomalies.add(anomaly(rowId, value, "INVALID_EMAIL", "邮箱格式不合法"));
+                continue;
+            }
+            if (phoneField && !isValidPhone(value)) {
+                anomalies.add(anomaly(rowId, value, "INVALID_PHONE", "手机号格式不合法"));
+                continue;
+            }
+            if (dateField && !isValidDateLike(value)) {
+                anomalies.add(anomaly(rowId, value, "INVALID_DATE", "日期格式不合法或超出合理范围"));
+                continue;
+            }
+            if (levelField && !isValidLevelValue(value)) {
+                anomalies.add(anomaly(rowId, value, "INVALID_LEVEL", "等级/状态值不在常见枚举范围内"));
+                continue;
+            }
+            if (numericField) {
+                Double number = parseNumber(value);
+                if (number == null) {
+                    anomalies.add(anomaly(rowId, value, "INVALID_NUMBER", "数值字段包含非数字内容"));
+                    continue;
+                }
+                if (ageField && (number < 0 || number > 120)) {
+                    anomalies.add(anomaly(rowId, value, "INVALID_AGE", "年龄超出 0-120 的合理范围"));
+                    continue;
+                }
+                if (amountField && number < 0) {
+                    anomalies.add(anomaly(rowId, value, "NEGATIVE_AMOUNT", "金额/数量字段不应为负数"));
+                }
+            }
+        }
+
+        if (numericField && !phoneField && anomalies.size() < 100) {
+            appendNumericOutliers(rows, anomalies);
+        }
+
+        return anomalies.stream().limit(100).toList();
+    }
+
+    private void appendNumericOutliers(List<Map<String, Object>> rows, List<Map<String, Object>> anomalies) {
+        List<Double> numbers = new ArrayList<>();
+        Map<Object, Double> rowNumbers = new LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            Double number = parseNumber(Objects.toString(row.get("value"), "").trim());
+            if (number != null) {
+                numbers.add(number);
+                rowNumbers.put(row.get("sys_id"), number);
+            }
+        }
+        if (numbers.size() < 4) {
+            return;
+        }
+        Collections.sort(numbers);
+        double avg = numbers.stream().mapToDouble(Double::doubleValue).average().orElse(0);
+        double stdDev = Math.sqrt(numbers.stream().mapToDouble(value -> Math.pow(value - avg, 2)).average().orElse(0));
+        double q1 = percentile(numbers, 0.25);
+        double q3 = percentile(numbers, 0.75);
+        double iqr = q3 - q1;
+        double sigmaLower = stdDev == 0 ? Double.NEGATIVE_INFINITY : avg - 3 * stdDev;
+        double sigmaUpper = stdDev == 0 ? Double.POSITIVE_INFINITY : avg + 3 * stdDev;
+        double iqrLower = iqr == 0 ? Double.NEGATIVE_INFINITY : q1 - 1.5 * iqr;
+        double iqrUpper = iqr == 0 ? Double.POSITIVE_INFINITY : q3 + 1.5 * iqr;
+
+        for (Map<String, Object> row : rows) {
+            if (anomalies.size() >= 100) {
+                return;
+            }
+            Object rowId = row.get("sys_id");
+            if (hasAnomalyForRow(anomalies, rowId)) {
+                continue;
+            }
+            Double value = rowNumbers.get(rowId);
+            if (value == null) {
+                continue;
+            }
+            boolean sigmaOutlier = value < sigmaLower || value > sigmaUpper;
+            boolean iqrOutlier = value < iqrLower || value > iqrUpper;
+            if (sigmaOutlier || iqrOutlier) {
+                String reason = iqrOutlier
+                        ? "数值超出 IQR 四分位范围 [" + String.format("%.2f", iqrLower) + ", " + String.format("%.2f", iqrUpper) + "]"
+                        : "数值超出 3σ 范围 [" + String.format("%.2f", sigmaLower) + ", " + String.format("%.2f", sigmaUpper) + "]";
+                anomalies.add(anomaly(rowId, row.get("value"), iqrOutlier ? "IQR_OUTLIER" : "SIGMA_OUTLIER", reason));
+            }
+        }
+    }
+
+    private boolean hasAnomalyForRow(List<Map<String, Object>> anomalies, Object rowId) {
+        return anomalies.stream().anyMatch(item -> Objects.equals(item.get("rowId"), rowId));
+    }
+
+    private Map<String, Object> anomaly(Object rowId, Object value, String type, String reason) {
+        Map<String, Object> anomaly = new LinkedHashMap<>();
+        anomaly.put("rowId", rowId);
+        anomaly.put("value", value);
+        anomaly.put("type", type);
+        anomaly.put("reason", reason);
+        return anomaly;
+    }
+
+    private double percentile(List<Double> sortedNumbers, double percentile) {
+        if (sortedNumbers.isEmpty()) {
+            return 0;
+        }
+        double index = percentile * (sortedNumbers.size() - 1);
+        int lower = (int) Math.floor(index);
+        int upper = (int) Math.ceil(index);
+        if (lower == upper) {
+            return sortedNumbers.get(lower);
+        }
+        return sortedNumbers.get(lower) + (sortedNumbers.get(upper) - sortedNumbers.get(lower)) * (index - lower);
+    }
+
+    private Double parseNumber(String value) {
+        try {
+            String normalized = value.replace(",", "").trim();
+            if (!normalized.matches("^-?\\d+(\\.\\d+)?$")) {
+                return null;
+            }
+            return Double.parseDouble(normalized);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private boolean looksEmailField(String label) {
+        return label.contains("email") || label.contains("邮箱") || label.contains("邮件");
+    }
+
+    private boolean looksPhoneField(String label) {
+        return label.contains("phone") || label.contains("mobile") || label.contains("tel") || label.contains("手机") || label.contains("电话");
+    }
+
+    private boolean looksDateField(String label) {
+        return label.contains("date") || label.contains("time") || label.contains("日期") || label.contains("时间");
+    }
+
+    private boolean looksAgeField(String label) {
+        return label.contains("age") || label.contains("年龄");
+    }
+
+    private boolean looksAmountField(String label) {
+        return label.contains("amount") || label.contains("price") || label.contains("金额") || label.contains("价格")
+                || label.contains("数量") || label.contains("销量") || label.contains("销售额");
+    }
+
+    private boolean looksLevelField(String label) {
+        return label.contains("level") || label.contains("grade") || label.contains("等级") || label.contains("级别")
+                || label.contains("状态");
+    }
+
+    private boolean looksNumericField(String label) {
+        return label.contains("count") || label.contains("score") || label.contains("rate") || label.contains("num")
+                || label.contains("分数") || label.contains("比例") || label.contains("率");
+    }
+
+    private boolean isValidEmail(String value) {
+        return value.matches("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$");
+    }
+
+    private boolean isValidPhone(String value) {
+        return value.matches("^1[3-9]\\d{9}$") || value.matches("^\\+?\\d{6,20}$");
+    }
+
+    private boolean isValidDateLike(String value) {
+        if (!value.matches("^\\d{4}[-/]\\d{1,2}[-/]\\d{1,2}.*$")) {
+            return false;
+        }
+        String[] parts = value.split("[ T]")[0].split("[-/]");
+        int year = Integer.parseInt(parts[0]);
+        int month = Integer.parseInt(parts[1]);
+        int day = Integer.parseInt(parts[2]);
+        return year >= 1900 && year <= 2100 && month >= 1 && month <= 12 && day >= 1 && day <= 31;
+    }
+
+    private boolean isValidLevelValue(String value) {
+        String normalized = value.trim().toUpperCase();
+        return List.of("A", "B", "C", "D", "S", "VIP", "SVIP", "高", "中", "低", "正常", "有效", "无", "是", "否",
+                "一级", "二级", "三级", "未分级", "未知等级").contains(normalized);
     }
     
     public Map<String, Object> getFieldDistribution(String tableName, String columnName) {
@@ -1353,6 +1866,148 @@ public class DataUploadService {
             "newValue", newValue,
             "affectedRows", affected
         );
+    }
+
+    public Map<String, Object> updateCell(String tableName, Long rowId, String columnName, Object value) {
+        assertKnownTable(tableName);
+        assertFieldExists(tableName, columnName);
+        if (rowId == null || rowId <= 0) {
+            throw new IllegalArgumentException("行ID不能为空");
+        }
+        if ("sys_id".equalsIgnoreCase(columnName)) {
+            throw new IllegalArgumentException("系统ID不允许修改");
+        }
+        String quotedColumn = quoteColumn(columnName);
+        int affected = jdbcTemplate.update(
+                "UPDATE `" + tableName + "` SET " + quotedColumn + " = ? WHERE sys_id = ?",
+                value, rowId
+        );
+        return Map.of(
+                "tableName", tableName,
+                "rowId", rowId,
+                "columnName", columnName,
+                "value", value == null ? "" : value,
+                "affectedRows", affected
+        );
+    }
+
+    private List<Map<String, Object>> parseCleaningActions(String tableName, Map<String, Object> request) {
+        Object rawActions = request == null ? null : request.get("actions");
+        if (rawActions == null) {
+            return (List<Map<String, Object>>) generateCleaningStrategy(tableName).getOrDefault("actions", List.of());
+        }
+        if (!(rawActions instanceof List<?> list)) {
+            throw new IllegalArgumentException("清洗策略格式不正确");
+        }
+        List<Map<String, Object>> actions = new ArrayList<>();
+        for (Object item : list) {
+            if (item instanceof Map<?, ?> map) {
+                Map<String, Object> action = new LinkedHashMap<>();
+                map.forEach((key, value) -> action.put(String.valueOf(key), value));
+                actions.add(action);
+            }
+        }
+        return actions;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> cleaningActions(Map<String, Object> cleaningStrategy) {
+        Object rawActions = cleaningStrategy == null ? null : cleaningStrategy.get("actions");
+        if (!(rawActions instanceof List<?> list)) {
+            return List.of();
+        }
+        List<Map<String, Object>> actions = new ArrayList<>();
+        for (Object item : list) {
+            if (item instanceof Map<?, ?> map) {
+                actions.add((Map<String, Object>) map);
+            }
+        }
+        return actions;
+    }
+
+    private String defaultFillValue(String fieldType) {
+        return switch (Objects.toString(fieldType, "TEXT").toUpperCase()) {
+            case "NUMBER" -> "0";
+            case "DATE" -> "1970-01-01";
+            default -> "未填写";
+        };
+    }
+
+    private String fieldTypeOf(String tableName, String columnName) {
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+                "SELECT field_type AS fieldType FROM is_data_field WHERE table_name = ? AND column_name = ? LIMIT 1",
+                tableName, columnName
+        );
+        return rows.isEmpty() ? "TEXT" : Objects.toString(rows.get(0).get("fieldType"), "TEXT");
+    }
+
+    private List<Map<String, Object>> findNullRows(String tableName, String columnName) {
+        String quotedColumn = quoteColumn(columnName);
+        return jdbcTemplate.queryForList(
+                "SELECT * FROM `" + tableName + "` WHERE " + quotedColumn + " IS NULL OR " + quotedColumn + " = '' LIMIT 20"
+        );
+    }
+
+    private List<Map<String, Object>> findRowsByIds(String tableName, List<?> rawRowIds, int limit) {
+        List<Object> rowIds = parseObjectRowIds(rawRowIds).stream().limit(limit).toList();
+        if (rowIds.isEmpty()) {
+            return List.of();
+        }
+        String placeholders = String.join(",", Collections.nCopies(rowIds.size(), "?"));
+        return jdbcTemplate.queryForList(
+                "SELECT * FROM `" + tableName + "` WHERE sys_id IN (" + placeholders + ") ORDER BY sys_id",
+                rowIds.toArray()
+        );
+    }
+
+    private List<Object> parseObjectRowIds(Object rawRowIds) {
+        if (!(rawRowIds instanceof List<?> list)) {
+            return List.of();
+        }
+        List<Object> rowIds = new ArrayList<>();
+        for (Object value : list) {
+            if (value != null && !rowIds.contains(value)) {
+                rowIds.add(value);
+            }
+            if (rowIds.size() >= 1000) {
+                break;
+            }
+        }
+        return rowIds;
+    }
+
+    private void ensureCleaningColumns(String tableName) {
+        addColumnIfMissing(tableName, "is_cleaning_anomaly", "`is_cleaning_anomaly` TINYINT(1) NOT NULL DEFAULT 0");
+        addColumnIfMissing(tableName, "cleaning_isolated", "`cleaning_isolated` TINYINT(1) NOT NULL DEFAULT 0");
+        addColumnIfMissing(tableName, "cleaning_anomaly_reason", "`cleaning_anomaly_reason` VARCHAR(1000) NULL");
+    }
+
+    private List<Long> parseRowIds(Object rawRowIds) {
+        if (!(rawRowIds instanceof List<?> list)) {
+            return List.of();
+        }
+        return list.stream()
+                .map(value -> Long.parseLong(String.valueOf(value)))
+                .distinct()
+                .limit(1000)
+                .toList();
+    }
+
+    private int markRowsAsAnomaly(String tableName, List<Long> rowIds, String reason) {
+        int affected = 0;
+        int chunkSize = 200;
+        for (int start = 0; start < rowIds.size(); start += chunkSize) {
+            List<Long> chunk = rowIds.subList(start, Math.min(start + chunkSize, rowIds.size()));
+            String placeholders = String.join(",", Collections.nCopies(chunk.size(), "?"));
+            List<Object> args = new ArrayList<>();
+            args.add(reason);
+            args.addAll(chunk);
+            affected += jdbcTemplate.update(
+                    "UPDATE `" + tableName + "` SET `is_cleaning_anomaly` = 1, `cleaning_isolated` = 1, `cleaning_anomaly_reason` = ? WHERE sys_id IN (" + placeholders + ")",
+                    args.toArray()
+            );
+        }
+        return affected;
     }
     
     public Map<String, Object> deleteRows(String tableName, List<Long> rowIds) {

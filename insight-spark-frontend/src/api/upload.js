@@ -41,6 +41,12 @@ export const getFieldDistribution = (tableName, columnName) =>
 export const batchReplace = (tableName, columnName, payload) =>
   http.post(`/api/data/tables/${tableName}/fields/${columnName}/batch-replace`, payload).then(unwrap)
 
+export const getCleaningStrategy = (tableName) => http.get(`/api/data/tables/${tableName}/cleaning-strategy`).then(unwrap)
+export const applyCleaningStrategy = (tableName, payload) =>
+  http.post(`/api/data/tables/${tableName}/apply-cleaning-strategy`, payload).then(unwrap)
+export const activateCleanedTable = (tableName, payload = {}) =>
+  http.post(`/api/data/tables/${tableName}/activate-cleaned`, payload).then(unwrap)
+
 export const deleteRows = (tableName, payload) => http.post(`/api/data/tables/${tableName}/delete-rows`, payload).then(unwrap)
 
 export const deleteColumn = (tableName, columnName) =>
@@ -48,6 +54,9 @@ export const deleteColumn = (tableName, columnName) =>
 
 export const transformData = (tableName, columnName, payload) =>
   http.post(`/api/data/tables/${tableName}/fields/${columnName}/transform`, payload).then(unwrap)
+
+export const updateCell = (tableName, rowId, columnName, payload) =>
+  http.post(`/api/data/tables/${tableName}/rows/${rowId}/fields/${columnName}`, payload).then(unwrap)
 
 export const validateFile = (formData) => http.post('/api/data/validate-file', formData, multipart).then(unwrap)
 export const checkDuplicate = (formData) => http.post('/api/data/check-duplicate', formData, multipart).then(unwrap)

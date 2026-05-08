@@ -29,7 +29,7 @@
           <el-tag :type="currentUser?.role === 'ADMIN' ? 'warning' : 'success'">
             {{ portalLabel }}
           </el-tag>
-          <el-select v-model="selectedTableName" placeholder="选择数据表" class="table-select" clearable>
+          <el-select v-if="activeModule === 'chat'" v-model="selectedTableName" placeholder="选择数据表" class="table-select" clearable>
           <el-option
               v-for="table in tables"
               :key="table.tableName"
@@ -110,6 +110,14 @@ const templateRequirement = ref('')
 const uploading = ref(false)
 const uploadResult = ref(null)
 const uploadTask = ref(null)
+const uploadProgress = ref({
+  visible: false,
+  percentage: 0,
+  loaded: 0,
+  total: 0,
+  computable: false,
+  status: 'READY'
+})
 const previewRows = ref([])
 const previewPage = ref(1)
 const previewPageSize = ref(10)
@@ -886,7 +894,15 @@ const onFileRemove = (file, fileList = []) => {
 const submitUpload = async () => {
   if (!uploadFile.value && !uploadFiles.value.length) return
   uploading.value = true
-  uploadTask.value = { status: 'UPLOADING', progress: 20, message: '文件上传中' }
+  uploadTask.value = null
+  uploadProgress.value = {
+    visible: true,
+    percentage: 0,
+    loaded: 0,
+    total: 0,
+    computable: false,
+    status: 'UPLOADING'
+  }
   const formData = new FormData()
   const batchMode = uploadFiles.value.length > 1 || Boolean(modelRequirement.value.trim())
   if (batchMode) {
@@ -900,11 +916,34 @@ const submitUpload = async () => {
     formData.append('displayName', uploadDisplayName.value)
   }
   try {
-    const task = unwrap(await axios.post(`${API_BASE}/api/data/${batchMode ? 'upload-batch-async' : 'upload-async'}`, formData))
+    const task = unwrap(await axios.post(`${API_BASE}/api/data/${batchMode ? 'upload-batch-async' : 'upload-async'}`, formData, {
+      onUploadProgress: (event) => {
+        const total = event.total || 0
+        uploadProgress.value = {
+          visible: true,
+          percentage: total > 0 ? Math.min(100, Math.round((event.loaded * 100) / total)) : 0,
+          loaded: event.loaded || 0,
+          total,
+          computable: total > 0,
+          status: 'UPLOADING'
+        }
+      }
+    }))
+    uploadProgress.value = {
+      ...uploadProgress.value,
+      visible: true,
+      percentage: 100,
+      status: 'SUCCESS'
+    }
     uploadTask.value = task
     await pollUploadTask(task.taskId)
     ElMessage.success('文件已解析入库')
   } catch (error) {
+    uploadProgress.value = {
+      ...uploadProgress.value,
+      visible: true,
+      status: 'FAILED'
+    }
     ElMessage.error(error.message || '上传失败')
   } finally {
     uploading.value = false
@@ -1436,6 +1475,7 @@ provide('workbench', {
   uploading,
   uploadResult,
   uploadTask,
+  uploadProgress,
   previewRows,
   previewPage,
   previewPageSize,

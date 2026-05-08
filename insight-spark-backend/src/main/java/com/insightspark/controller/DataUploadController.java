@@ -272,6 +272,36 @@ public class DataUploadController {
         }
     }
 
+    @GetMapping("/tables/{tableName}/cleaning-strategy")
+    public ApiResponse<Map<String, Object>> generateCleaningStrategy(@PathVariable String tableName) {
+        try {
+            return ApiResponse.success(dataUploadService.generateCleaningStrategy(tableName));
+        } catch (Exception e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    @PostMapping("/tables/{tableName}/apply-cleaning-strategy")
+    public ApiResponse<Map<String, Object>> applyCleaningStrategy(@PathVariable String tableName,
+                                                                  @RequestBody Map<String, Object> request) {
+        try {
+            return ApiResponse.success(dataUploadService.applyCleaningStrategy(tableName, request));
+        } catch (Exception e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    @PostMapping("/tables/{tableName}/activate-cleaned")
+    public ApiResponse<Map<String, Object>> activateCleanedTable(@PathVariable String tableName,
+                                                                 @RequestBody(required = false) Map<String, Object> request) {
+        try {
+            boolean skipCleaning = request != null && Boolean.parseBoolean(String.valueOf(request.getOrDefault("skipCleaning", false)));
+            return ApiResponse.success(dataUploadService.activateCleanedTable(tableName, skipCleaning));
+        } catch (Exception e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
     @PostMapping("/tables/{tableName}/delete-rows")
     public ApiResponse<Map<String, Object>> deleteRows(@PathVariable String tableName, @RequestBody Map<String, Object> request) {
         try {
@@ -301,6 +331,18 @@ public class DataUploadController {
             String transformType = String.valueOf(request.get("transformType"));
             Map<String, Object> options = (Map<String, Object>) request.getOrDefault("options", Map.of());
             return ApiResponse.success(dataUploadService.transformData(tableName, columnName, transformType, options));
+        } catch (Exception e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    @PostMapping("/tables/{tableName}/rows/{rowId}/fields/{columnName}")
+    public ApiResponse<Map<String, Object>> updateCell(@PathVariable String tableName,
+                                                       @PathVariable Long rowId,
+                                                       @PathVariable String columnName,
+                                                       @RequestBody Map<String, Object> request) {
+        try {
+            return ApiResponse.success(dataUploadService.updateCell(tableName, rowId, columnName, request.get("value")));
         } catch (Exception e) {
             return ApiResponse.badRequest(e.getMessage());
         }

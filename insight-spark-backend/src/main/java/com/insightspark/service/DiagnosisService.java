@@ -692,7 +692,7 @@ public class DiagnosisService {
 
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
 
-                throw new IllegalStateException("Neo4j 请求失败，状态码：" + response.statusCode());
+                throw new IllegalStateException("HTTP " + response.statusCode() + " - " + response.body());
 
             }
 
@@ -704,7 +704,7 @@ public class DiagnosisService {
 
             if (!errors.isEmpty()) {
 
-                throw new IllegalStateException("Neo4j 执行失败：" + Objects.toString(errors.get(0).get("message"), "未知错误"));
+                throw new IllegalStateException(formatNeo4jErrors(errors));
 
             }
 
@@ -754,10 +754,30 @@ public class DiagnosisService {
 
         } catch (Exception e) {
 
-            throw new IllegalStateException("Neo4j 查询失败：" + e.getMessage());
+            throw new IllegalStateException("Neo4j 查询失败：" + safeErrorMessage(e), e);
 
         }
 
+    }
+
+    private String formatNeo4jErrors(List<Map<String, Object>> errors) {
+        return errors.stream()
+                .map(error -> {
+                    String code = Objects.toString(error.get("code"), "").trim();
+                    String message = Objects.toString(error.get("message"), "").trim();
+                    if (code.isBlank()) {
+                        return message.isBlank() ? Objects.toString(error) : message;
+                    }
+                    return message.isBlank() ? code : code + " - " + message;
+                })
+                .filter(item -> !item.isBlank())
+                .findFirst()
+                .orElse("未知 Neo4j 错误");
+    }
+
+    private String safeErrorMessage(Exception e) {
+        String message = e == null ? "" : Objects.toString(e.getMessage(), "").trim();
+        return message.isBlank() && e != null ? e.getClass().getSimpleName() : message;
     }
 
 

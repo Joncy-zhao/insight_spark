@@ -77,9 +77,6 @@ public class ChatBiService {
             graphContext = asMapList(graphPath.get("ragContext"));
         }
         if (graphContext.isEmpty()) {
-            graphContext = knowledgeGraphService.retrieveContext(question, activeTable);
-        }
-        if (graphContext.isEmpty()) {
             graphContext = buildLocalFieldContext(activeTable, fields);
         }
         List<Map<String, Object>> previewRows = dataUploadService.preview(activeTable, 1, 8);
