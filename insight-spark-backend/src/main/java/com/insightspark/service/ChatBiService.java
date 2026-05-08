@@ -1,4 +1,4 @@
-package com.insightspark.service;
+﻿package com.insightspark.service;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -81,9 +81,6 @@ public class ChatBiService {
             knowledgeGraphService.syncGraph();
             graphPath = knowledgeGraphService.retrieveMultiHopContext(question, activeTable);
             graphContext = asMapList(graphPath.get("ragContext"));
-        }
-        if (graphContext.isEmpty()) {
-            graphContext = knowledgeGraphService.retrieveContext(question, activeTable);
         }
         if (graphContext.isEmpty()) {
             graphContext = buildLocalFieldContext(activeTable, fields);
@@ -500,7 +497,6 @@ public class ChatBiService {
         ensureNotCancelled("上传表查询后");
         return rows;
     }
-
     private Map<String, Object> safeFieldMapping(Object raw) {
         if (!(raw instanceof Map<?, ?> rawMap)) {
             return Map.of();

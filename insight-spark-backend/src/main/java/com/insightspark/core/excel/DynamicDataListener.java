@@ -8,6 +8,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.IntConsumer;
 
 /**
  * 核心：动态读取任意未知结构的 Excel 文件的监听器
@@ -17,6 +18,15 @@ public class DynamicDataListener extends AnalysisEventListener<Map<Integer, Stri
     private static final Logger log = LoggerFactory.getLogger(DynamicDataListener.class);
     private Map<Integer, String> headMap;
     private final List<Map<Integer, String>> dataList = new ArrayList<>();
+    private final IntConsumer rowProgress;
+
+    public DynamicDataListener() {
+        this(null);
+    }
+
+    public DynamicDataListener(IntConsumer rowProgress) {
+        this.rowProgress = rowProgress;
+    }
 
     // 1. 读取表头：每次解析新文件时都会触发
     @Override
@@ -29,6 +39,9 @@ public class DynamicDataListener extends AnalysisEventListener<Map<Integer, Stri
     @Override
     public void invoke(Map<Integer, String> data, AnalysisContext context) {
         dataList.add(data);
+        if (rowProgress != null) {
+            rowProgress.accept(dataList.size());
+        }
     }
 
     // 3. 收尾工作：所有数据读取完毕后触发

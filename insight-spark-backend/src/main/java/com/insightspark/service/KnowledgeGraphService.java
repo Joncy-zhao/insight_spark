@@ -258,75 +258,19 @@ public class KnowledgeGraphService {
     }
 
     public Map<String, Object> multiHopSearch(String keyword, String tableName, int depth, int limit) {
-        if (neo4jEnabled) {
-            try {
-                return neo4jMultiHopSearch(keyword, tableName, depth, limit);
-            } catch (Exception ignored) {
-                // Neo4j is the primary GraphRAG store. Local metadata remains a resilience fallback
-                // so report generation can still explain the missing graph dependency.
-            }
+        if (!neo4jEnabled) {
+            throw new IllegalStateException("Neo4j 未启用，已禁止回退到本地 MySQL 知识图谱");
         }
-        List<Map<String, Object>> seeds = new ArrayList<>();
-        if (tableName != null && !tableName.isBlank()) {
-            seeds.addAll(search(tableName, limit));
+        try {
+            return neo4jMultiHopSearch(keyword, tableName, depth, limit);
+        } catch (Exception e) {
+            throw new IllegalStateException("Neo4j 查询失败：" + safeErrorMessage(e), e);
         }
-        seeds.addAll(search(keyword, limit));
-        Map<String, Map<String, Object>> nodeMap = new LinkedHashMap<>();
-        for (Map<String, Object> seed : seeds) {
-            nodeMap.put(Objects.toString(seed.get("nodeKey")), seed);
-        }
-        List<String> frontier = new ArrayList<>(nodeMap.keySet());
-        List<Map<String, Object>> allEdges = new ArrayList<>();
-        int safeDepth = Math.max(1, Math.min(depth, 4));
-        int safeLimit = Math.max(5, Math.min(limit, 80));
-        for (int i = 0; i < safeDepth && !frontier.isEmpty(); i++) {
-            List<Map<String, Object>> edges = jdbcTemplate.queryForList("""
-                    SELECT from_key AS fromKey, to_key AS toKey, relation_type AS relationType, weight
-                    FROM is_kg_edge
-                    WHERE from_key IN (%s) OR to_key IN (%s)
-                    ORDER BY weight DESC
-                    LIMIT %d
-                    """.formatted(placeholders(frontier.size()), placeholders(frontier.size()), safeLimit * 3),
-                    doubledArgs(frontier));
-            allEdges.addAll(edges);
-            List<String> next = new ArrayList<>();
-            for (Map<String, Object> edge : edges) {
-                next.add(Objects.toString(edge.get("fromKey")));
-                next.add(Objects.toString(edge.get("toKey")));
-            }
-            next.removeIf(nodeMap::containsKey);
-            if (next.isEmpty()) {
-                break;
-            }
-            List<Map<String, Object>> nextNodes = jdbcTemplate.queryForList("""
-                    SELECT node_key AS nodeKey, node_type AS nodeType, label, source_type AS sourceType,
-                           source_id AS sourceId, content, weight
-                    FROM is_kg_node
-                    WHERE node_key IN (%s)
-                    ORDER BY weight DESC
-                    LIMIT %d
-                    """.formatted(placeholders(next.size()), safeLimit), next.toArray());
-            frontier = new ArrayList<>();
-            for (Map<String, Object> node : nextNodes) {
-                String nodeKey = Objects.toString(node.get("nodeKey"));
-                nodeMap.putIfAbsent(nodeKey, node);
-                frontier.add(nodeKey);
-            }
-        }
-        List<Map<String, Object>> context = nodeMap.values().stream()
-                .sorted((a, b) -> Double.compare(parseWeight(b.get("weight")), parseWeight(a.get("weight"))))
-                .limit(safeLimit)
-                .toList();
-        return Map.of("nodes", context, "edges", allEdges, "ragContext", context,
-                "pathText", buildPathText(context, allEdges),
-                "depth", safeDepth, "neo4jEnabled", neo4jEnabled);
     }
 
     public List<Map<String, Object>> retrieveContext(String question, String tableName) {
-        List<Map<String, Object>> context = new ArrayList<>();
-        if (tableName != null && !tableName.isBlank()) {
-            context.addAll(search(tableName, 8));
-        }
+        return castMapList(multiHopSearch(question, tableName, 2, 12).getOrDefault("ragContext", List.of()));
+        /*
         if (question != null && !question.isBlank()) {
             for (String token : question.split("[\\s,锛屻€傦紱;锛?]+")) {
                 if (token.length() >= 2) {
@@ -337,11 +281,7 @@ public class KnowledgeGraphService {
                 }
             }
         }
-        Map<String, Map<String, Object>> dedup = new LinkedHashMap<>();
-        for (Map<String, Object> item : context) {
-            dedup.putIfAbsent(Objects.toString(item.get("nodeKey")), item);
-        }
-        return dedup.values().stream().limit(12).toList();
+        */
     }
 
     public Map<String, Object> retrieveMultiHopContext(String question, String tableName) {
@@ -425,11 +365,12 @@ public class KnowledgeGraphService {
                 .build();
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            throw new IllegalStateException("Neo4j request failed: " + response.statusCode());
+            throw new IllegalStateException("HTTP " + response.statusCode() + " - " + response.body());
         }
         Map<String, Object> body = objectMapper.readValue(response.body(), Map.class);
-        if (!castMapList(body.get("errors")).isEmpty()) {
-            throw new IllegalStateException("Neo4j query failed");
+        List<Map<String, Object>> errors = castMapList(body.get("errors"));
+        if (!errors.isEmpty()) {
+            throw new IllegalStateException(formatNeo4jErrors(errors));
         }
         List<Map<String, Object>> results = castMapList(body.get("results"));
         if (results.isEmpty()) {
@@ -448,6 +389,26 @@ public class KnowledgeGraphService {
             }
         }
         return rows;
+    }
+
+    private String formatNeo4jErrors(List<Map<String, Object>> errors) {
+        return errors.stream()
+                .map(error -> {
+                    String code = Objects.toString(error.get("code"), "").trim();
+                    String message = Objects.toString(error.get("message"), "").trim();
+                    if (code.isBlank()) {
+                        return message.isBlank() ? Objects.toString(error) : message;
+                    }
+                    return message.isBlank() ? code : code + " - " + message;
+                })
+                .filter(item -> !item.isBlank())
+                .findFirst()
+                .orElse("未知 Neo4j 错误");
+    }
+
+    private String safeErrorMessage(Exception e) {
+        String message = e == null ? "" : Objects.toString(e.getMessage(), "").trim();
+        return message.isBlank() && e != null ? e.getClass().getSimpleName() : message;
     }
 
     private List<Map<String, Object>> castMapList(Object value) {
