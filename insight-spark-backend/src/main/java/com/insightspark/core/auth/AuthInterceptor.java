@@ -34,7 +34,8 @@ public class AuthInterceptor implements HandlerInterceptor {
                 || uri.startsWith("/api/datasources")
                 || uri.startsWith("/api/audit")
                 || uri.startsWith("/api/diagnosis")
-                || uri.startsWith("/api/knowledge");
+                || uri.startsWith("/api/knowledge")
+                || uri.startsWith("/api/c");
 
         if (!loginRequired) {
             return true;
@@ -71,7 +72,8 @@ public class AuthInterceptor implements HandlerInterceptor {
                 || uri.startsWith("/api/datasources")
                 || uri.startsWith("/api/audit")
                 || uri.startsWith("/api/knowledge")
-                || uri.startsWith("/api/permission/admin");
+                || uri.startsWith("/api/permission/admin")
+                || uri.startsWith("/api/c/admin");
     }
 
     private void writeJson(HttpServletResponse response, int status, String message) throws Exception {

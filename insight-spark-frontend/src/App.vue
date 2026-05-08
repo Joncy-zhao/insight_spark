@@ -11,7 +11,7 @@
       </div>
 
       <el-menu :default-active="activeModule" class="nav-menu" @select="activeModule = $event">
-        <el-menu-item-group v-for="group in visibleMenuGroups" :key="group.title" :title="group.title">
+        <el-menu-item-group v-for="group in visibleMenuGroups" :key="group.id" :title="group.title">
           <el-menu-item v-for="module in group.modules" :key="module.key" :index="module.key">
             <span>{{ module.title }}</span>
           </el-menu-item>
@@ -49,8 +49,15 @@
         <DiagnosisReportView v-if="activeModule === 'diagnosis'" />
         <KnowledgeGraphView v-if="activeModule === 'knowledgeGraph'" />
         <SqlAuditView v-if="activeModule === 'audit'" />
+        <UserWorkbenchView v-if="activeModule === 'workbench'" />
+        <UserDashboardView v-if="activeModule === 'dashboard'" />
+        <BusinessCollaborationView v-if="activeModule === 'collaboration'" />
+        <AdminWorkbenchView v-if="activeModule === 'adminWorkbench'" />
+        <AdminDashboardView v-if="activeModule === 'adminDashboard'" />
+        <StackCSystemConfigView v-if="activeModule === 'stackCConfig'" />
+        <PerformanceGovernanceView v-if="activeModule === 'performanceGovernance'" />
         <PlaceholderView
-            v-if="!['upload', 'chat', 'audit', 'permission', 'permissionAdmin', 'datasource', 'diagnosis', 'knowledgeGraph'].includes(activeModule)"
+            v-if="!['upload', 'chat', 'audit', 'permission', 'permissionAdmin', 'datasource', 'diagnosis', 'knowledgeGraph', 'workbench', 'dashboard', 'collaboration', 'adminWorkbench', 'adminDashboard', 'stackCConfig', 'performanceGovernance'].includes(activeModule)"
         />
       </el-main>
     </el-container>
@@ -70,6 +77,13 @@ import DatasourceManageView from './views/admin/DatasourceManageView.vue'
 import DiagnosisReportView from './views/user/DiagnosisReportView.vue'
 import KnowledgeGraphView from './views/admin/KnowledgeGraphView.vue'
 import SqlAuditView from './views/admin/SqlAuditView.vue'
+import StackCSystemConfigView from './views/admin/StackCSystemConfigView.vue'
+import PerformanceGovernanceView from './views/admin/PerformanceGovernanceView.vue'
+import AdminWorkbenchView from './views/admin/AdminWorkbenchView.vue'
+import AdminDashboardView from './views/admin/AdminDashboardView.vue'
+import UserWorkbenchView from './views/user/UserWorkbenchView.vue'
+import UserDashboardView from './views/user/UserDashboardView.vue'
+import BusinessCollaborationView from './views/user/BusinessCollaborationView.vue'
 import PlaceholderView from './views/PlaceholderView.vue'
 import AuthView from './views/AuthView.vue'
 import { currentUser, isAuthenticated, clearSession, restoreSessionHeader } from './store/session'
@@ -165,12 +179,12 @@ const visibleMenuGroups = computed(() => {
   return menuGroups
       .map(group => ({
         ...group,
-        modules: group.modules.filter(module => module.role === role)
+        modules: group.modules.filter(module => module.role === 'ALL' || module.role === role)
       }))
       .filter(group => group.modules.length)
 })
 const isPermissionModule = computed(() => activeModule.value === 'permission' || activeModule.value === 'permissionAdmin')
-const isAdminModule = computed(() => ['datasource', 'permissionAdmin', 'knowledgeGraph', 'audit'].includes(activeModule.value))
+const isAdminModule = computed(() => ['datasource', 'permissionAdmin', 'knowledgeGraph', 'audit', 'stackCConfig', 'adminWorkbench', 'adminDashboard', 'performanceGovernance'].includes(activeModule.value))
 const isAdminUser = computed(() => currentUser.value?.role === 'ADMIN')
 const portalLabel = computed(() => isAdminUser.value ? '管理员门户' : '用户门户')
 const placeholderStep = computed(() => activeModule.value === 'audit' ? 1 : 0)
@@ -1626,11 +1640,21 @@ provide('workbench', {
   color: #cbd5e1;
 }
 
+/* 分组 title 为空时不占位，避免两个 el-menu-item-group 之间出现一条深色「缝隙」 */
 .nav-menu .el-menu-item-group__title {
+  padding: 0 !important;
+  min-height: 0 !important;
+  line-height: 0 !important;
+  font-size: 0 !important;
+  overflow: hidden;
+}
+
+.nav-menu .el-menu-item-group__title:not(:empty) {
   color: #7dd3fc;
   font-size: 12px;
+  line-height: 1.4;
   letter-spacing: 0;
-  padding: 18px 20px 6px;
+  padding: 12px 20px 6px !important;
 }
 
 .nav-menu .el-menu-item.is-active {

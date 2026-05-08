@@ -1,7 +1,33 @@
+/**
+ * 用户 / 管理：工作台、看板已分 key、分页面。
+ * 业务批注与协同仅用户端（任务书全栈 C 用户项 9）；管理员无此项，管理员第 9 项为系统配置等。
+ */
 export const menuGroups = [
   {
+    id: 'portal-user',
     title: '',
     modules: [
+      {
+        key: 'workbench',
+        role: 'USER',
+        index: '1',
+        title: '首页工作台',
+        subtitle: '用户工作台：公告、个人最近看板。'
+      },
+      {
+        key: 'dashboard',
+        role: 'USER',
+        index: '4',
+        title: '我的看板',
+        subtitle: '用户看板：个人/公共看板、布局 JSON；批注协同见独立菜单。'
+      },
+      {
+        key: 'collaboration',
+        role: 'USER',
+        index: '9',
+        title: '业务批注与协同',
+        subtitle: '按看板查看与发表批注、评论；独立页便于后续接入 WebSocket、圈注等。'
+      },
       {
         key: 'upload',
         role: 'USER',
@@ -33,8 +59,23 @@ export const menuGroups = [
     ]
   },
   {
+    id: 'portal-admin',
     title: '',
     modules: [
+      {
+        key: 'adminWorkbench',
+        role: 'ADMIN',
+        index: '1',
+        title: '首页工作台',
+        subtitle: '管理员工作台：可与用户端独立接全平台统计、健康度等。'
+      },
+      {
+        key: 'adminDashboard',
+        role: 'ADMIN',
+        index: '4',
+        title: '看板管理',
+        subtitle: '公共/全局看板与全平台看板维护（任务书管理员侧模块 3；与用户端「我的看板」分工）。'
+      },
       {
         key: 'datasource',
         role: 'ADMIN',
@@ -55,6 +96,20 @@ export const menuGroups = [
         index: '6',
         title: 'SQL安全审计中心',
         subtitle: '全量 SQL 日志、审计规则配置、风险等级、敏感脱敏、慢查询监控与导出。'
+      },
+      {
+        key: 'stackCConfig',
+        role: 'ADMIN',
+        index: '9',
+        title: '系统配置（全栈C）',
+        subtitle: '全局 KV 配置项维护；与 is_system_config 表联动。'
+      },
+      {
+        key: 'performanceGovernance',
+        role: 'ADMIN',
+        index: '10',
+        title: '性能治理中心',
+        subtitle: 'JVM/慢查询/批处理任务/告警阈值；数据来自审计日志与全栈 C 接口。'
       }
     ]
   }
