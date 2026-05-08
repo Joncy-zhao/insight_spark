@@ -90,7 +90,7 @@ public class PermissionService {
             return jdbcTemplate.queryForList("""
                     SELECT id, source_name AS sourceName, display_name AS displayName, table_name AS tableName,
                            owner_id AS ownerId, row_count AS rowCount, field_count AS fieldCount,
-                           status, created_at AS createdAt, 'ADMIN' AS accessSource
+                           status, created_at AS createdAt, 'ADMIN' AS accessSource, 'UPLOAD' AS sourceType
                     FROM is_data_table
                     WHERE status = 'ACTIVE'
                     ORDER BY created_at DESC
@@ -100,7 +100,8 @@ public class PermissionService {
                 SELECT t.id, t.source_name AS sourceName, t.display_name AS displayName, t.table_name AS tableName,
                        t.owner_id AS ownerId, t.row_count AS rowCount, t.field_count AS fieldCount,
                        t.status, t.created_at AS createdAt,
-                       CASE WHEN t.owner_id = ? THEN 'OWNER' ELSE 'GRANTED' END AS accessSource
+                       CASE WHEN t.owner_id = ? THEN 'OWNER' ELSE 'GRANTED' END AS accessSource,
+                       'UPLOAD' AS sourceType
                 FROM is_data_table t
                 LEFT JOIN is_data_permission p ON p.table_name = t.table_name
                      AND p.user_id = ? AND p.permission_type = 'READ'

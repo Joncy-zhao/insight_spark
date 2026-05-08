@@ -26,8 +26,13 @@
       </el-form-item>
 
       <el-form-item label="诊断数据表">
-        <el-select v-model="selectedTableName" placeholder="选择数据表" class="full-width">
-          <el-option v-for="table in tables" :key="table.tableName" :label="table.displayName" :value="table.tableName" />
+        <el-select v-model="selectedTableName" placeholder="选择数据源" class="full-width" filterable>
+          <el-option-group v-if="uploadTables?.length" label="上传数据表">
+            <el-option v-for="table in uploadTables" :key="table.tableName" :label="table.displayName" :value="table.tableName" />
+          </el-option-group>
+          <el-option-group v-if="officialQueryTables?.length" label="官方授权库">
+            <el-option v-for="table in officialQueryTables" :key="table.tableName" :label="table.displayName" :value="table.tableName" />
+          </el-option-group>
         </el-select>
       </el-form-item>
 
@@ -264,6 +269,8 @@ const {
   runDiagnosis,
   selectedTableName,
   tables,
+  uploadTables,
+  officialQueryTables,
   uploadKnowledgeDoc
 } = inject('workbench')
 

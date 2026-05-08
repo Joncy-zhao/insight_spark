@@ -92,8 +92,9 @@
           <h2>我的数据表</h2>
           <p>展示上传文件生成的数据表，可重命名、删除、快速查询，并同步给对话分析和权限模块。</p>
         </div>
+        <el-tag type="info" effect="plain">仅上传表</el-tag>
       </div>
-      <el-table :data="tables" height="320" empty-text="暂无数据表，请先上传文件" @row-click="selectTable">
+      <el-table :data="uploadTables" height="320" empty-text="暂无数据表，请先上传文件" @row-click="selectTable">
         <el-table-column label="显示名称" min-width="170">
           <template #default="{ row }">
             <el-input v-model="row.displayName" size="small" />
@@ -382,6 +383,7 @@ const workbench = inject('workbench')
 const {
   activeModule,
   tables,
+  uploadTables,
   selectedTableName,
   uploadFile,
   uploadFiles,

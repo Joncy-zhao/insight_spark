@@ -64,7 +64,8 @@ public class AuthInterceptor implements HandlerInterceptor {
     private boolean isPublicAuthEndpoint(String uri) {
         return uri.startsWith("/api/auth/login")
                 || uri.startsWith("/api/auth/register")
-                || uri.startsWith("/api/auth/captcha");
+                || uri.startsWith("/api/auth/captcha")
+                || uri.startsWith("/api/c/dashboards/share");
     }
 
     private boolean isAdminEndpoint(String uri) {

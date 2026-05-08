@@ -1,5 +1,6 @@
 <template>
-  <AuthView v-if="!isAuthenticated" @authenticated="handleAuthenticated" />
+  <UserDashboardView v-if="sharePreviewToken" />
+  <AuthView v-else-if="!isAuthenticated" @authenticated="handleAuthenticated" />
   <el-container v-else class="app-shell">
     <el-aside width="248px" class="app-aside">
       <div class="brand">
@@ -29,13 +30,23 @@
           <el-tag :type="currentUser?.role === 'ADMIN' ? 'warning' : 'success'">
             {{ portalLabel }}
           </el-tag>
-          <el-select v-model="selectedTableName" placeholder="选择数据表" class="table-select" clearable>
-          <el-option
-              v-for="table in tables"
-              :key="table.tableName"
-              :label="table.displayName"
-              :value="table.tableName"
-          />
+          <el-select v-model="selectedTableName" placeholder="选择数据源" class="table-select" clearable filterable>
+            <el-option-group v-if="uploadTables.length" label="上传数据表">
+              <el-option
+                  v-for="table in uploadTables"
+                  :key="table.tableName"
+                  :label="table.displayName"
+                  :value="table.tableName"
+              />
+            </el-option-group>
+            <el-option-group v-if="officialQueryTables.length" label="官方授权库">
+              <el-option
+                  v-for="table in officialQueryTables"
+                  :key="table.tableName"
+                  :label="table.displayName"
+                  :value="table.tableName"
+              />
+            </el-option-group>
           </el-select>
           <el-button @click="handleLogout">退出</el-button>
         </div>
@@ -65,7 +76,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, provide, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 import * as echarts from 'echarts'
@@ -86,10 +97,46 @@ import UserDashboardView from './views/user/UserDashboardView.vue'
 import BusinessCollaborationView from './views/user/BusinessCollaborationView.vue'
 import PlaceholderView from './views/PlaceholderView.vue'
 import AuthView from './views/AuthView.vue'
-import { currentUser, isAuthenticated, clearSession, restoreSessionHeader } from './store/session'
+import { authToken, currentUser, isAuthenticated, clearSession, restoreSessionHeader } from './store/session'
 import { logout } from './api/auth'
 
 const API_BASE = 'http://localhost:8080'
+const LAST_SELECTED_TABLE_KEY = 'insight:lastSelectedTableName'
+const sharePreviewToken = (() => {
+  try {
+    return String(new URL(window.location.href).searchParams.get('shareToken') || '').trim()
+  } catch {
+    return ''
+  }
+})()
+
+const saveLastSelectedTable = (tableName) => {
+  try {
+    if (tableName) {
+      localStorage.setItem(LAST_SELECTED_TABLE_KEY, tableName)
+    } else {
+      localStorage.removeItem(LAST_SELECTED_TABLE_KEY)
+    }
+  } catch (error) {
+    // ignore storage errors in restricted browser contexts
+  }
+}
+
+const readLastSelectedTable = () => {
+  try {
+    return String(localStorage.getItem(LAST_SELECTED_TABLE_KEY) || '').trim()
+  } catch (error) {
+    return ''
+  }
+}
+
+const clearLastSelectedTable = () => {
+  try {
+    localStorage.removeItem(LAST_SELECTED_TABLE_KEY)
+  } catch (error) {
+    // ignore storage errors in restricted browser contexts
+  }
+}
 
 const datasourceHealthMap = ref({})
 const activeModule = ref('upload')
@@ -159,9 +206,22 @@ const diagnosisForm = ref({ metricField: '', dimensionFields: [], timeField: '',
 const diagnosisPickerVisible = ref(false)
 const diagnosisPickerForm = ref({ metricField: '', dimensionFields: [], timeField: '' })
 const diagnosisLoading = ref(false)
+const streamAbortController = ref(null)
+const activeChatRequestId = ref(0)
+const stopRequested = ref(false)
+const isStreaming = ref(false)
+const recentChatQueries = ref([])
+const recentChatQueryKeyword = ref('')
+const recentChatQueryPage = ref(1)
+const recentChatQueryPageSize = ref(8)
+const recentChatQueryTotal = ref(0)
 const diagnosisProgress = ref({ percentage: 0, step: '待开始', logs: [] })
 const currentDiagnosis = ref(null)
 const diagnosisReports = ref([])
+const pinDialogVisible = ref(false)
+const pinning = ref(false)
+const pinDashboardId = ref(null)
+const dashboardOptions = ref([])
 const question = ref('')
 const loading = ref(false)
 const messages = ref([
@@ -171,6 +231,9 @@ const currentChartType = ref('')
 const chartSortMode = ref('desc')
 const lastAnalysis = ref(null)
 let chartInstance = null
+const handleChartResize = () => {
+  chartInstance?.resize()
+}
 
 const moduleTitle = computed(() => moduleMap[activeModule.value].title)
 const moduleSubtitle = computed(() => moduleMap[activeModule.value].subtitle)
@@ -189,6 +252,8 @@ const isAdminUser = computed(() => currentUser.value?.role === 'ADMIN')
 const portalLabel = computed(() => isAdminUser.value ? '管理员门户' : '用户门户')
 const placeholderStep = computed(() => activeModule.value === 'audit' ? 1 : 0)
 const previewColumns = computed(() => previewRows.value.length ? Object.keys(previewRows.value[0]) : [])
+const uploadTables = computed(() => tables.value.filter(item => String(item?.sourceType || '').toUpperCase() !== 'OFFICIAL'))
+const officialQueryTables = computed(() => tables.value.filter(item => String(item?.sourceType || '').toUpperCase() === 'OFFICIAL'))
 const chartTypeLabel = computed(() => {
   if (currentChartType.value === 'bar') return '柱状图'
   if (currentChartType.value === 'pie') return '饼图'
@@ -199,6 +264,34 @@ const numericFields = computed(() => fields.value.filter(field => field.fieldTyp
 const dateFields = computed(() => fields.value.filter(field => field.fieldType === 'DATE'))
 const dimensionCandidateFields = computed(() => fields.value.filter(field => field.fieldType !== 'NUMBER'))
 const canDiagnoseLastAnalysis = computed(() => Boolean(lastAnalysis.value && numericFields.value.length))
+const canRegenerateLastAnalysis = computed(() => Boolean(String(lastAnalysis.value?.sourceQuestion || '').trim()))
+const canPinLastAnalysis = computed(() => Boolean(lastAnalysis.value?.data?.length))
+
+const getChatChartContainer = () => document.getElementById('echarts-container')
+
+const ensureChatChartInstance = () => {
+  const container = getChatChartContainer()
+  if (!container) return null
+
+  if (chartInstance?.isDisposed?.()) {
+    chartInstance = null
+  }
+
+  if (chartInstance && chartInstance.getDom?.() !== container) {
+    try {
+      chartInstance.dispose()
+    } catch (error) {
+      // ignore stale echarts instance dispose error
+    }
+    chartInstance = null
+  }
+
+  if (!chartInstance) {
+    chartInstance = echarts.getInstanceByDom(container) || echarts.init(container)
+  }
+
+  return chartInstance
+}
 const loadDatasourceHealth = async (datasourceId) => {
   if (!datasourceId) return
   datasourceHealthMap.value[datasourceId] = unwrap(
@@ -236,13 +329,10 @@ const bootstrapPersistedSession = async () => {
 const bootstrapWorkbench = async () => {
 
   normalizeActiveModule()
-  const container = document.getElementById('echarts-container')
-  if (container) {
-    chartInstance = echarts.init(container)
-  }
-  window.addEventListener('resize', () => chartInstance?.resize())
+  ensureChatChartInstance()
+  window.addEventListener('resize', handleChartResize)
   try {
-    await Promise.all([loadTables(), loadBusinessModels(), loadAnalysisTemplates()])
+    await Promise.all([loadTables(), loadBusinessModels(), loadAnalysisTemplates(), loadRecentChatQueries()])
   } catch (error) {
     if ((error.message || '').includes('登录已失效') || (error.message || '').includes('请先登录')) {
       ElMessage.warning('登录状态已过期，请重新登录')
@@ -253,12 +343,181 @@ const bootstrapWorkbench = async () => {
   }
 }
 
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', handleChartResize)
+})
+
 const normalizeActiveModule = () => {
   const firstModule = visibleMenuGroups.value[0]?.modules[0]?.key || 'upload'
   const allowed = visibleMenuGroups.value.some(group => group.modules.some(module => module.key === activeModule.value))
   if (!allowed) {
     activeModule.value = firstModule
   }
+}
+
+const normalizeChatHistoryItem = (item) => ({
+  id: String(item?.id || `${item?.tableName || ''}::${item?.question || ''}`),
+  question: String(item?.question || '').trim(),
+  tableName: String(item?.tableName || '').trim(),
+  chartType: String(item?.chartType || '').trim(),
+  createdAt: item?.createdAt || new Date().toISOString()
+})
+
+const isOfficialTableName = (tableName) => String(tableName || '').startsWith('official:')
+const isAccessibleTable = (tableName) => tables.value.some(item => item.tableName === tableName)
+
+const loadRecentChatQueries = async (options = {}) => {
+  if (!isAuthenticated.value) {
+    recentChatQueries.value = []
+    recentChatQueryTotal.value = 0
+    recentChatQueryPage.value = 1
+    return
+  }
+  const nextPage = Math.max(1, Number(options.page ?? recentChatQueryPage.value ?? 1))
+  const nextPageSize = Math.max(1, Math.min(50, Number(options.pageSize ?? recentChatQueryPageSize.value ?? 8)))
+  const nextKeyword = String(options.keyword ?? recentChatQueryKeyword.value ?? '').trim()
+  const skipAdjust = Boolean(options.skipAdjust)
+  try {
+    const data = unwrap(await axios.get(`${API_BASE}/api/chat/history`, {
+      params: {
+        page: nextPage,
+        pageSize: nextPageSize,
+        keyword: nextKeyword || undefined
+      }
+    }))
+    const items = Array.isArray(data?.items)
+        ? data.items.map(normalizeChatHistoryItem).filter(item => item.question)
+        : []
+    recentChatQueries.value = items
+    recentChatQueryTotal.value = Number(data?.total || 0)
+    recentChatQueryPage.value = Number(data?.page || nextPage)
+    recentChatQueryPageSize.value = Number(data?.pageSize || nextPageSize)
+    recentChatQueryKeyword.value = String(data?.keyword ?? nextKeyword).trim()
+
+    if (!skipAdjust) {
+      const maxPage = Math.max(1, Math.ceil(recentChatQueryTotal.value / recentChatQueryPageSize.value))
+      if (recentChatQueryPage.value > maxPage) {
+        recentChatQueryPage.value = maxPage
+        await loadRecentChatQueries({
+          page: maxPage,
+          pageSize: recentChatQueryPageSize.value,
+          keyword: recentChatQueryKeyword.value,
+          skipAdjust: true
+        })
+      }
+    }
+  } catch (error) {
+    recentChatQueries.value = []
+    recentChatQueryTotal.value = 0
+    if (error?.response?.status !== 401) {
+      console.warn('loadRecentChatQueries failed:', error)
+    }
+  }
+}
+
+const searchRecentChatQueries = async () => {
+  recentChatQueryPage.value = 1
+  await loadRecentChatQueries({
+    page: 1,
+    pageSize: recentChatQueryPageSize.value,
+    keyword: recentChatQueryKeyword.value
+  })
+}
+
+const resetRecentChatQuerySearch = async () => {
+  recentChatQueryKeyword.value = ''
+  recentChatQueryPage.value = 1
+  await loadRecentChatQueries({
+    page: 1,
+    pageSize: recentChatQueryPageSize.value,
+    keyword: ''
+  })
+}
+
+const handleRecentChatPageChange = async (page) => {
+  recentChatQueryPage.value = page
+  await loadRecentChatQueries({
+    page,
+    pageSize: recentChatQueryPageSize.value,
+    keyword: recentChatQueryKeyword.value
+  })
+}
+
+const handleRecentChatPageSizeChange = async (pageSize) => {
+  recentChatQueryPageSize.value = pageSize
+  recentChatQueryPage.value = 1
+  await loadRecentChatQueries({
+    page: 1,
+    pageSize,
+    keyword: recentChatQueryKeyword.value
+  })
+}
+
+const removeRecentChatQuery = async (entry) => {
+  if (!entry?.id) return
+  try {
+    await axios.post(`${API_BASE}/api/chat/history/${entry.id}/delete`).then(unwrap)
+    ElMessage.success('已删除历史记录')
+    await loadRecentChatQueries({
+      page: recentChatQueryPage.value,
+      pageSize: recentChatQueryPageSize.value,
+      keyword: recentChatQueryKeyword.value
+    })
+  } catch (error) {
+    ElMessage.error(error.message || '删除历史记录失败')
+  }
+}
+
+const formatChatHistoryTime = (value) => {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  }).format(date)
+}
+
+const reuseChatQuestion = async (entry) => {
+  if (!entry?.question) return
+  if (loading.value || isStreaming.value) {
+    ElMessage.warning('当前正在生成，请稍后再试')
+    return
+  }
+  await sendQuestion({
+    questionText: entry.question,
+    tableName: entry.tableName || selectedTableName.value
+  })
+}
+
+const regenerateLastAnalysis = async () => {
+  if (loading.value || isStreaming.value) {
+    ElMessage.warning('当前正在生成，请稍后再试')
+    return
+  }
+  const sourceQuestion = String(lastAnalysis.value?.sourceQuestion || '').trim()
+  const sourceTableName = String(
+      lastAnalysis.value?.sourceTableName || lastAnalysis.value?.tableName || selectedTableName.value || ''
+  ).trim()
+  if (!sourceQuestion) {
+    ElMessage.warning('暂无可重新生成的问题，请先完成一次查询')
+    return
+  }
+  if (!sourceTableName) {
+    ElMessage.warning('原数据源为空，无法重新生成')
+    return
+  }
+  if (!isAccessibleTable(sourceTableName)) {
+    ElMessage.warning('原数据源已不可访问，请先重新选择数据源')
+    return
+  }
+  await sendQuestion({
+    questionText: sourceQuestion,
+    tableName: sourceTableName,
+    regenerate: true
+  })
 }
 
 const handleAuthenticated = async () => {
@@ -270,11 +529,20 @@ const handleLogout = async () => {
     await logout()
   } finally {
     clearSession()
+    clearLastSelectedTable()
+    selectedTableName.value = ''
+    tables.value = []
+    recentChatQueries.value = []
+    recentChatQueryKeyword.value = ''
+    recentChatQueryPage.value = 1
+    recentChatQueryPageSize.value = 8
+    recentChatQueryTotal.value = 0
     activeModule.value = 'upload'
   }
 }
 
 watch(selectedTableName, async (tableName) => {
+  saveLastSelectedTable(tableName || '')
   if (!tableName) {
     previewRows.value = []
     fields.value = []
@@ -286,11 +554,14 @@ watch(selectedTableName, async (tableName) => {
 watch(activeModule, async (moduleName) => {
   if (moduleName === 'chat') {
     await nextTick()
-    if (!chartInstance) {
-      const container = document.getElementById('echarts-container')
-      if (container) chartInstance = echarts.init(container)
+    const instance = ensureChatChartInstance()
+    instance?.resize()
+    if (lastAnalysis.value?.data?.length) {
+      renderChart(lastAnalysis.value.data, lastAnalysis.value?.chartType || currentChartType.value || 'bar')
+    } else {
+      instance?.clear()
     }
-    chartInstance?.resize()
+    await loadRecentChatQueries()
   }
   if (moduleName === 'audit') {
     await Promise.all([loadAuditLogs(), loadAuditRules()])
@@ -323,9 +594,18 @@ const unwrap = (response) => {
 const loadTables = async () => {
   const data = unwrap(await axios.get(`${API_BASE}/api/data/tables`))
   tables.value = data
-  if (!selectedTableName.value && data.length) {
-    selectedTableName.value = data[0].tableName
+  const exists = (name) => Boolean(name) && data.some(item => item.tableName === name)
+  const currentSelection = selectedTableName.value
+  const storedSelection = readLastSelectedTable()
+  if (exists(currentSelection)) {
+    selectedTableName.value = currentSelection
+    return
   }
+  if (exists(storedSelection)) {
+    selectedTableName.value = storedSelection
+    return
+  }
+  selectedTableName.value = data.length ? data[0].tableName : ''
 }
 
 const loadPermissionCenter = async () => {
@@ -531,6 +811,10 @@ const updateUploadField = async (row) => {
     ElMessage.warning('请先在"我的数据表"中选择要编辑的数据表')
     return
   }
+  if (isOfficialTableName(selectedTableName.value)) {
+    ElMessage.warning('官方库字段请在数据源管理中维护')
+    return
+  }
   try {
     await axios.post(`${API_BASE}/api/data/tables/${selectedTableName.value}/fields/${row.columnName}`, {
       displayName: row.displayName,
@@ -730,16 +1014,19 @@ const completeDiagnosisProgress = (logs = []) => {
   }
 }
 
-const captureChartSnapshot = (analysis) => ({
+const captureChartSnapshot = (analysis) => {
+  const instance = ensureChatChartInstance()
+  return {
   chartType: analysis?.chartType || currentChartType.value,
   fieldMapping: analysis?.fieldMapping || {},
   data: analysis?.data || [],
   generatedSql: analysis?.sql || analysis?.sourceSql || '',
   sourceQuestion: analysis?.sourceQuestion || '',
-  imageDataUrl: chartInstance?.getDataURL
-    ? chartInstance.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#ffffff' })
+  imageDataUrl: instance?.getDataURL
+    ? instance.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#ffffff' })
     : ''
-})
+  }
+}
 
 const findAnalysisField = (displayName, fieldType) => {
   const sql = (lastAnalysis.value?.sql || '').toLowerCase()
@@ -782,10 +1069,7 @@ const restoreDiagnosisBinding = async (report) => {
   }
   activeModule.value = 'chat'
   await nextTick()
-  if (!chartInstance) {
-    const container = document.getElementById('echarts-container')
-    if (container) chartInstance = echarts.init(container)
-  }
+  ensureChatChartInstance()
   if (source?.data?.length) {
     lastAnalysis.value = {
       tableName: report?.tableName || selectedTableName.value,
@@ -1002,56 +1286,204 @@ const applyBusinessModel = async (model) => {
 }
 
 const renameDataTable = async (row) => {
+  if (isOfficialTableName(row?.tableName)) {
+    ElMessage.warning('官方库表不支持在此重命名')
+    return
+  }
   await axios.post(`${API_BASE}/api/data/tables/${row.tableName}/rename`, { displayName: row.displayName }).then(unwrap)
   ElMessage.success('数据表已重命名')
   await loadTables()
 }
 
 const deleteDataTable = async (row) => {
+  if (isOfficialTableName(row?.tableName)) {
+    ElMessage.warning('官方库表不支持在此删除')
+    return
+  }
   await axios.post(`${API_BASE}/api/data/tables/${row.tableName}/delete`).then(unwrap)
   ElMessage.success('数据表已删除')
   await loadTables()
 }
 
-const sendQuestion = async () => {
-  if (!question.value.trim()) return
-  if (!selectedTableName.value) {
+const copySqlToClipboard = async (sql) => {
+  const text = String(sql || '').trim()
+  if (!text) {
+    ElMessage.warning('没有可复制的 SQL')
+    return
+  }
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      const textarea = document.createElement('textarea')
+      textarea.value = text
+      textarea.setAttribute('readonly', 'readonly')
+      textarea.style.position = 'fixed'
+      textarea.style.top = '-9999px'
+      document.body.appendChild(textarea)
+      textarea.select()
+      const copied = document.execCommand('copy')
+      document.body.removeChild(textarea)
+      if (!copied) {
+        throw new Error('copy command failed')
+      }
+    }
+    ElMessage.success('SQL 已复制')
+  } catch (error) {
+    ElMessage.error('复制失败，请手动复制')
+  }
+}
+
+const loadDashboardOptions = async () => {
+  const res = await axios.get(`${API_BASE}/api/c/dashboards`)
+  const body = res.data
+  if (body.code && body.code !== 200) {
+    throw new Error(body.message || '加载看板失败')
+  }
+  const rows = Array.isArray(body.data) ? body.data : []
+  dashboardOptions.value = rows.map(item => ({
+    id: Number(item.id),
+    name: String(item.name || `看板#${item.id}`),
+    isPublic: Boolean(item.isPublic)
+  }))
+  if (!pinDashboardId.value && dashboardOptions.value.length) {
+    pinDashboardId.value = dashboardOptions.value[0].id
+  }
+}
+
+const openPinDialog = async () => {
+  if (!canPinLastAnalysis.value) {
+    ElMessage.warning('暂无可钉入的图表结果')
+    return
+  }
+  try {
+    await loadDashboardOptions()
+    if (!dashboardOptions.value.length) {
+      ElMessage.warning('暂无可用看板，请先到“我的看板”创建')
+      return
+    }
+    pinDialogVisible.value = true
+  } catch (error) {
+    ElMessage.error(error.message || '加载看板列表失败')
+  }
+}
+
+const pinChartToDashboard = async () => {
+  if (!lastAnalysis.value || !pinDashboardId.value) {
+    ElMessage.warning('请选择目标看板')
+    return
+  }
+  pinning.value = true
+  try {
+    const payload = {
+      title: String(lastAnalysis.value?.sourceQuestion || '图表卡片').slice(0, 80),
+      chartType: lastAnalysis.value?.chartType || currentChartType.value || 'bar',
+      tableName: lastAnalysis.value?.tableName || '',
+      sql: lastAnalysis.value?.sql || '',
+      fieldMapping: lastAnalysis.value?.fieldMapping || {},
+      data: Array.isArray(lastAnalysis.value?.data) ? lastAnalysis.value.data : []
+    }
+    const res = await axios.post(`${API_BASE}/api/c/dashboards/${pinDashboardId.value}/pin-chart`, payload)
+    const body = res.data
+    if (body.code && body.code !== 200) {
+      throw new Error(body.message || '钉入失败')
+    }
+    ElMessage.success('图表已钉入看板')
+    pinDialogVisible.value = false
+  } catch (error) {
+    ElMessage.error(error.message || '钉入看板失败')
+  } finally {
+    pinning.value = false
+  }
+}
+
+const isAbortLikeError = (error) => {
+  const name = String(error?.name || '').toLowerCase()
+  const code = String(error?.code || '').toUpperCase()
+  const message = String(error?.message || '').toLowerCase()
+  return name === 'aborterror'
+      || name === 'cancelederror'
+      || code === 'ERR_CANCELED'
+      || message.includes('手动停止')
+      || message.includes('aborted')
+      || message.includes('stopped')
+      || message.includes('cancel')
+}
+
+const stopQuestionGeneration = () => {
+  if (!loading.value && !isStreaming.value) {
+    return
+  }
+  stopRequested.value = true
+  if (streamAbortController.value) {
+    streamAbortController.value.abort()
+    streamAbortController.value = null
+  }
+  isStreaming.value = false
+}
+
+const sendQuestion = async (options = {}) => {
+  const requestId = activeChatRequestId.value + 1
+  activeChatRequestId.value = requestId
+  const isCurrentRequest = () => activeChatRequestId.value === requestId
+  const userQuestion = String(options?.questionText ?? question.value ?? '').trim()
+  const requestedTableName = String(options?.tableName || '').trim()
+  const queryTableName = requestedTableName || selectedTableName.value
+  const isRegenerate = Boolean(options?.regenerate)
+
+  if (!userQuestion) return
+  if (!queryTableName) {
     ElMessage.warning('请先选择一个数据表')
     return
   }
-
-  const userQuestion = question.value
-  messages.value.push({ role: 'user', content: userQuestion })
+  if (requestedTableName && !isAccessibleTable(requestedTableName)) {
+    ElMessage.warning('指定的数据源不存在或无权限访问')
+    return
+  }
+  if (selectedTableName.value !== queryTableName) {
+    selectedTableName.value = queryTableName
+  }
+  stopRequested.value = false
+  messages.value.push({
+    role: 'user',
+    content: isRegenerate ? `${userQuestion}\n（重新生成）` : userQuestion
+  })
   question.value = ''
   loading.value = true
 
-  try {
-    let data
-    try {
-      data = unwrap(await axios.post(`${API_BASE}/api/chat/ask-enhanced`, {
-        question: userQuestion,
-        tableName: selectedTableName.value
-      }))
-    } catch (enhancedError) {
-      if (enhancedError?.response?.status !== 404) {
-        throw enhancedError
-      }
-      data = unwrap(await axios.post(`${API_BASE}/api/chat/ask`, {
-        question: userQuestion,
-        tableName: selectedTableName.value
-      }))
-      data.fallbackUsed = data.engine === 'java-fallback'
-    }
+  const streamMessageIndex = messages.value.length
+  messages.value.push({ role: 'system', content: '正在分析中...', sql: '', thinkingLogs: [], thinkingCollapsed: true })
+  const thinkingLogs = []
+  const seenThinkingSet = new Set()
+
+  const updateStreamMessage = (patch) => {
+    if (!isCurrentRequest()) return
+    const current = messages.value[streamMessageIndex] || { role: 'system', content: '', sql: '' }
+    messages.value.splice(streamMessageIndex, 1, {
+      ...current,
+      ...patch
+    })
+  }
+
+  const applyAnalysisResult = (data) => {
+    if (stopRequested.value || !isCurrentRequest()) return
+    const sourceTableName = String(data?.tableName || queryTableName || '').trim()
+    const fallbackTag = data.fallbackUsed ? '（规则兜底）' : ''
+    const compactLogs = thinkingLogs.slice(0, 8)
     lastAnalysis.value = {
       ...data,
       sourceQuestion: userQuestion,
-      sourceSql: data.sql
+      sourceSql: data.sql,
+      sourceTableName
     }
     currentChartType.value = data.chartType
-    messages.value.push({
-      role: 'system',
-      content: `${data.message}${data.fallbackUsed ? '（规则兜底）' : ''}`,
-      sql: data.sql
+    updateStreamMessage({
+      content: `${data.message}${fallbackTag}`,
+      sql: data.sql,
+      thinkingLogs: compactLogs,
+      thinkingCollapsed: true,
+      sourceQuestion: userQuestion,
+      sourceTableName
     })
 
     nextTick(() => {
@@ -1062,19 +1494,217 @@ const sendQuestion = async () => {
     if (data.data?.length) {
       renderChart(data.data, data.chartType)
     } else {
-      chartInstance?.clear()
+      ensureChatChartInstance()?.clear()
       ElMessage.warning('查询成功，但没有符合条件的数据')
     }
+  }
+
+  const streamWithAuth = async () => {
+    const token = authToken.value || localStorage.getItem('token') || ''
+    isStreaming.value = true
+    if (!token) {
+      throw new Error('登录状态缺失，请重新登录')
+    }
+
+    const controller = new AbortController()
+    streamAbortController.value = controller
+    if (stopRequested.value) {
+      controller.abort()
+    }
+    try {
+      const response = await fetch(`${API_BASE}/api/chat/ask-stream?${new URLSearchParams({ question: userQuestion, tableName: queryTableName }).toString()}`, {
+        method: 'GET',
+        headers: {
+          Accept: 'text/event-stream',
+          Authorization: `Bearer ${token}`
+        },
+        cache: 'no-store',
+        signal: controller.signal
+      })
+
+      if (!response.ok || !response.body) {
+        throw new Error(response.status === 401 ? '登录已失效，请重新登录' : `流式请求失败(${response.status})`)
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder('utf-8')
+      let buffer = ''
+
+      const consumeEvent = (rawEvent) => {
+        const parsed = processEvent(rawEvent)
+        if (!parsed) return null
+        if (parsed.eventName === 'thinking') {
+          const step = parsed.payload
+          const line = `${step.title || step.stage || '处理中'}：${step.detail || ''}`
+          const normalizedLine = line.trim()
+          if (!seenThinkingSet.has(normalizedLine)) {
+            seenThinkingSet.add(normalizedLine)
+            thinkingLogs.push(normalizedLine)
+          }
+          const latestLine = thinkingLogs[thinkingLogs.length - 1] || '处理中'
+          updateStreamMessage({
+            content: `分析中（${thinkingLogs.length}步）· 当前：${latestLine}`,
+            thinkingLogs: thinkingLogs.slice(0, 8),
+            thinkingCollapsed: true
+          })
+          nextTick(() => {
+            const chatDom = document.getElementById('chatHistory')
+            if (chatDom) chatDom.scrollTop = chatDom.scrollHeight
+          })
+          return null
+        }
+        if (parsed.eventName === 'result') {
+          return parsed.payload
+        }
+        if (parsed.eventName === 'cancelled') {
+          const message = parsed.payload?.message || '用户已手动停止生成'
+          const cancelError = new Error(message)
+          cancelError.name = 'AbortError'
+          throw cancelError
+        }
+        if (parsed.eventName === 'error') {
+          throw new Error(parsed.payload?.message || '流式分析失败')
+        }
+        return null
+      }
+
+      const processEvent = (chunk) => {
+        const lines = chunk.split('\n')
+        let eventName = 'message'
+        const dataLines = []
+        for (const line of lines) {
+          if (line.startsWith('event:')) eventName = line.slice(6).trim()
+          else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
+        }
+        const dataText = dataLines.join('\n').trim()
+        if (!dataText) return null
+        let payload
+        try { payload = JSON.parse(dataText) } catch { payload = { message: dataText } }
+        return { eventName, payload }
+      }
+
+      const parseBufferedEvents = () => {
+        const normalized = buffer.replace(/\r\n/g, '\n')
+        const chunks = normalized.split('\n\n')
+        if (chunks.length <= 1) {
+          buffer = normalized
+          return []
+        }
+        buffer = chunks.pop() || ''
+        return chunks
+      }
+
+      while (true) {
+        if (stopRequested.value || !isCurrentRequest()) {
+          const stopError = new Error('用户已手动停止生成')
+          stopError.name = 'AbortError'
+          throw stopError
+        }
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        const rawEvents = parseBufferedEvents()
+        for (const rawEvent of rawEvents) {
+          const result = consumeEvent(rawEvent)
+          if (result) return result
+        }
+      }
+
+      if (buffer.trim()) {
+        const result = consumeEvent(buffer.trim())
+        if (result) return result
+      }
+
+      if (stopRequested.value || !isCurrentRequest()) {
+        const stopError = new Error('用户已手动停止生成')
+        stopError.name = 'AbortError'
+        throw stopError
+      }
+      throw new Error('流式连接已结束，但未收到结果')
+    } finally {
+      if (streamAbortController.value === controller) {
+        streamAbortController.value = null
+      }
+      isStreaming.value = false
+    }
+  }
+
+  try {
+    let data
+    try {
+      data = await streamWithAuth()
+    } catch (streamError) {
+      if (!isCurrentRequest()) {
+        return
+      }
+      if (stopRequested.value || isAbortLikeError(streamError)) {
+        updateStreamMessage({ content: '已手动停止本次生成。' })
+        return
+      }
+      let fallbackData
+      const fallbackController = new AbortController()
+      streamAbortController.value = fallbackController
+      try {
+        fallbackData = unwrap(await axios.post(`${API_BASE}/api/chat/ask-enhanced`, {
+          question: userQuestion,
+          tableName: queryTableName
+        }, {
+          signal: fallbackController.signal
+        }))
+      } catch (enhancedError) {
+        if (stopRequested.value || isAbortLikeError(enhancedError)) {
+          updateStreamMessage({ content: '已手动停止本次生成。' })
+          return
+        }
+        if (enhancedError?.response?.status !== 404) {
+          throw enhancedError
+        }
+        fallbackData = unwrap(await axios.post(`${API_BASE}/api/chat/ask`, {
+          question: userQuestion,
+          tableName: queryTableName
+        }, {
+          signal: fallbackController.signal
+        }))
+        fallbackData.fallbackUsed = String(fallbackData.engine || '').startsWith('java-fallback')
+      } finally {
+        if (streamAbortController.value === fallbackController) {
+          streamAbortController.value = null
+        }
+      }
+      if (!isCurrentRequest() || stopRequested.value) {
+        updateStreamMessage({ content: '已手动停止本次生成。' })
+        return
+      }
+      data = fallbackData
+      ElMessage.warning(`流式通道不可用（${streamError.message}），已自动切换普通模式`)
+    }
+
+    if (!isCurrentRequest()) {
+      return
+    }
+    applyAnalysisResult(data)
+    await loadRecentChatQueries()
+
     if (isAdminUser.value) {
       await loadAuditLogs()
     }
   } catch (error) {
-    messages.value.push({ role: 'system', content: `分析失败：${error.message}` })
+    if (!isCurrentRequest()) {
+      return
+    }
+    updateStreamMessage({ content: `分析失败：${error.message}` })
     if (isAdminUser.value) {
       await loadAuditLogs()
     }
   } finally {
+    if (!isCurrentRequest()) {
+      return
+    }
     loading.value = false
+    isStreaming.value = false
+    streamAbortController.value = null
+    stopRequested.value = false
   }
 }
 
@@ -1314,12 +1944,13 @@ const dataUrlToBlob = (dataUrl) => {
 }
 
 const exportChartAsImage = () => {
-  if (!chartInstance || !lastAnalysis.value?.data?.length) {
+  const instance = ensureChatChartInstance()
+  if (!instance || !lastAnalysis.value?.data?.length) {
     ElMessage.warning('暂无可导出的图表')
     return
   }
-  chartInstance.resize()
-  const url = chartInstance.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#fff' })
+  instance.resize()
+  const url = instance.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#fff' })
   if (!url) {
     ElMessage.error('导出失败，请稍后重试')
     return
@@ -1350,6 +1981,8 @@ const exportChartAsImage = () => {
 }
 
 const renderChart = (data, type) => {
+  const instance = ensureChatChartInstance()
+  if (!instance) return
   const normalizedData = getSortedChartData(data)
   const xAxisData = normalizedData.map(item => item.name)
   const seriesData = normalizedData.map(item => Number(item.value ?? 0))
@@ -1411,7 +2044,7 @@ const renderChart = (data, type) => {
     }
   }
 
-  chartInstance?.setOption(option, true)
+  instance.setOption(option, true)
 }
 
 provide('workbench', {
@@ -1480,6 +2113,8 @@ provide('workbench', {
   diagnosisReports,
   question,
   loading,
+  isStreaming,
+  recentChatQueries,
   messages,
   currentChartType,
   chartSortMode,
@@ -1496,6 +2131,14 @@ provide('workbench', {
   dateFields,
   dimensionCandidateFields,
   canDiagnoseLastAnalysis,
+  canRegenerateLastAnalysis,
+  canPinLastAnalysis,
+  uploadTables,
+  officialQueryTables,
+  recentChatQueryKeyword,
+  recentChatQueryPage,
+  recentChatQueryPageSize,
+  recentChatQueryTotal,
   loadTables,
   loadPermissionCenter,
   loadAdminPermissionRequests,
@@ -1548,6 +2191,22 @@ provide('workbench', {
   renameDataTable,
   deleteDataTable,
   sendQuestion,
+  regenerateLastAnalysis,
+  openPinDialog,
+  pinChartToDashboard,
+  pinDialogVisible,
+  pinning,
+  pinDashboardId,
+  dashboardOptions,
+  stopQuestionGeneration,
+  copySqlToClipboard,
+  reuseChatQuestion,
+  removeRecentChatQuery,
+  searchRecentChatQueries,
+  resetRecentChatQuerySearch,
+  handleRecentChatPageChange,
+  handleRecentChatPageSizeChange,
+  formatChatHistoryTime,
   loadAuditLogs,
   loadAuditRules,
   updateAuditRuleStatus,
@@ -1858,6 +2517,7 @@ provide('workbench', {
   font-size: 14px;
   box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
   word-break: break-word;
+  white-space: pre-wrap;
 }
 
 .user .bubble {

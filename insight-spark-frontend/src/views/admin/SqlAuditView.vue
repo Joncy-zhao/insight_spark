@@ -34,7 +34,7 @@
             <div class="panel-header">
               <div>
                 <h2>提交 SQL 审计</h2>
-                <p>B端可手工提交 SQL，系统按当前规则判定风险并留痕。</p>
+              <p>B端可手工提交 SQL，系统按当前规则判定风险并留痕；支持上传表与官方授权库。</p>
               </div>
             </div>
             <el-input v-model="manualAuditSql" type="textarea" :rows="4" placeholder="输入待审计 SQL，例如 SELECT * FROM `biz_data_xxx` LIMIT 20" />
@@ -155,6 +155,8 @@ const {
   loadPreview,
   loadSchemaTables,
   loadTables,
+  uploadTables,
+  officialQueryTables,
   loading,
   messages,
   moduleSubtitle,

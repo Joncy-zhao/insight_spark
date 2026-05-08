@@ -13,8 +13,19 @@
                 <div class="avatar">{{ msg.role === 'system' ? '🤖' : '👤' }}</div>
                 <div class="msg-content">
                   <div class="bubble">{{ msg.content }}</div>
+                  <details v-if="msg.thinkingLogs?.length" class="thinking-details" :open="msg.thinkingCollapsed === false">
+                    <summary>查看思考过程（{{ msg.thinkingLogs.length }}步）</summary>
+                    <ol class="thinking-list">
+                      <li v-for="(line, lineIndex) in msg.thinkingLogs" :key="`${index}-${lineIndex}`">
+                        {{ line }}
+                      </li>
+                    </ol>
+                  </details>
                   <div v-if="msg.sql" class="sql-block">
-                    <div class="sql-title">生成的思考过程 (SQL)</div>
+                    <div class="sql-head">
+                      <div class="sql-title">生成的 SQL</div>
+                      <el-button size="small" text type="primary" @click="copySqlToClipboard(msg.sql)">复制</el-button>
+                    </div>
                     <pre class="sql-code">{{ msg.sql }}</pre>
                   </div>
                 </div>
@@ -35,6 +46,55 @@
                   </el-button>
                 </template>
               </el-input>
+              <el-button v-if="loading" type="danger" plain class="stop-btn" @click="stopQuestionGeneration">
+                停止生成
+              </el-button>
+            </div>
+            <div class="recent-queries">
+              <div class="recent-title">最近查询</div>
+              <div class="recent-toolbar">
+                <el-input
+                    v-model.trim="recentChatQueryKeyword"
+                    placeholder="按问题关键词搜索历史"
+                    clearable
+                    size="small"
+                    @keyup.enter="searchRecentChatQueries"
+                    @clear="resetRecentChatQuerySearch"
+                />
+                <el-button size="small" type="primary" @click="searchRecentChatQueries">搜索</el-button>
+                <el-button size="small" @click="resetRecentChatQuerySearch">重置</el-button>
+              </div>
+              <div class="recent-list">
+                <el-tag
+                    v-for="item in recentChatQueries"
+                    :key="item.id"
+                    effect="plain"
+                    class="recent-tag"
+                    @click="reuseChatQuestion(item)"
+                >
+                  <span class="recent-main">{{ item.question }}</span>
+                  <small>（{{ item.tableName || '未指定数据表' }} · {{ formatChatHistoryTime(item.createdAt) }}）</small>
+                  <button
+                      type="button"
+                      class="recent-delete"
+                      @click.stop="removeRecentChatQuery(item)"
+                  >
+                    ×
+                  </button>
+                </el-tag>
+                <div v-if="!recentChatQueries.length" class="recent-empty">暂无历史记录</div>
+              </div>
+              <el-pagination
+                  class="recent-pagination"
+                  layout="total, sizes, prev, pager, next"
+                  :total="recentChatQueryTotal"
+                  :current-page="recentChatQueryPage"
+                  :page-size="recentChatQueryPageSize"
+                  :page-sizes="[5, 8, 10, 20]"
+                  small
+                  @current-change="handleRecentChatPageChange"
+                  @size-change="handleRecentChatPageSizeChange"
+              />
             </div>
           </div>
 
@@ -48,12 +108,32 @@
                 <el-tag v-if="currentChartType" type="success" effect="dark" round>
                   {{ chartTypeLabel }}效果
                 </el-tag>
+                <el-button
+                    v-if="canRegenerateLastAnalysis"
+                    size="small"
+                    type="primary"
+                    plain
+                    :disabled="loading || isStreaming"
+                    @click="regenerateLastAnalysis"
+                >
+                  重新生成
+                </el-button>
                 <el-select v-model="chartSortMode" size="small" style="width: 150px;" @change="() => lastAnalysis?.data?.length && renderChart(lastAnalysis.data, currentChartType)">
                   <el-option label="按数值降序" value="desc" />
                   <el-option label="按数值升序" value="asc" />
                   <el-option label="按名称排序" value="name" />
                 </el-select>
                 <el-button v-if="lastAnalysis?.data?.length" size="small" @click="exportChartAsImage">导出图片</el-button>
+                <el-button
+                    v-if="canPinLastAnalysis"
+                    size="small"
+                    type="success"
+                    plain
+                    :disabled="loading || isStreaming"
+                    @click="openPinDialog"
+                >
+                  钉入看板
+                </el-button>
                 <el-button
                     v-if="canDiagnoseLastAnalysis"
                     type="warning"
@@ -127,7 +207,26 @@
               <el-button type="primary" :loading="diagnosisLoading" @click="confirmDiagnosisPicker">生成诊断报告</el-button>
             </template>
           </el-dialog>
-        </section>
+        
+          <el-dialog v-model="pinDialogVisible" title="钉入我的看板" width="520px">
+            <el-form label-position="top">
+              <el-form-item label="目标看板">
+                <el-select v-model="pinDashboardId" class="full-width" placeholder="请选择看板">
+                  <el-option
+                      v-for="dashboard in dashboardOptions"
+                      :key="dashboard.id"
+                      :label="dashboard.name + (dashboard.isPublic ? '（公开）' : '')"
+                      :value="dashboard.id"
+                  />
+                </el-select>
+              </el-form-item>
+            </el-form>
+            <template #footer>
+              <el-button @click="pinDialogVisible = false">取消</el-button>
+              <el-button type="primary" :loading="pinning" @click="pinChartToDashboard">确认钉入</el-button>
+            </template>
+          </el-dialog>
+</section>
 </template>
 
 <script setup>
@@ -160,6 +259,8 @@ const {
   diagnosisReports,
   dimensionCandidateFields,
   canDiagnoseLastAnalysis,
+  canRegenerateLastAnalysis,
+  canPinLastAnalysis,
   confirmDiagnosisPicker,
   diagnoseFromLastAnalysis,
   field,
@@ -171,6 +272,7 @@ const {
   isAdminModule,
   isAdminUser,
   isPermissionModule,
+  isStreaming,
   lastAnalysis,
   loadAdminPermissionRequests,
   loadAuditLogs,
@@ -201,6 +303,19 @@ const {
   previewColumns,
   previewRows,
   question,
+  copySqlToClipboard,
+  recentChatQueries,
+  recentChatQueryKeyword,
+  recentChatQueryPage,
+  recentChatQueryPageSize,
+  recentChatQueryTotal,
+  reuseChatQuestion,
+  removeRecentChatQuery,
+  searchRecentChatQueries,
+  resetRecentChatQuerySearch,
+  handleRecentChatPageChange,
+  handleRecentChatPageSizeChange,
+  formatChatHistoryTime,
   renderChart,
   requestableTables,
   result,
@@ -215,6 +330,14 @@ const {
   selectedDatasourceId,
   selectedTableName,
   sendQuestion,
+  regenerateLastAnalysis,
+  openPinDialog,
+  pinChartToDashboard,
+  pinDialogVisible,
+  pinning,
+  pinDashboardId,
+  dashboardOptions,
+  stopQuestionGeneration,
   seriesData,
   statusTagType,
   submitPermissionRequest,
@@ -237,5 +360,108 @@ const {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+.ask-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ask-bar :deep(.el-input) {
+  flex: 1;
+}
+.stop-btn {
+  flex: 0 0 auto;
+}
+.recent-queries {
+  margin-top: 10px;
+}
+.recent-title {
+  margin-bottom: 8px;
+  color: #6b7280;
+  font-size: 12px;
+}
+.recent-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.recent-toolbar :deep(.el-input) {
+  flex: 1;
+}
+.recent-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.recent-empty {
+  color: #9ca3af;
+  font-size: 12px;
+}
+.recent-tag {
+  cursor: pointer;
+  max-width: 100%;
+}
+.recent-main {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recent-tag :deep(.el-tag__content) {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.recent-tag small {
+  color: #9ca3af;
+}
+.recent-delete {
+  border: 0;
+  background: transparent;
+  color: #9ca3af;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.recent-delete:hover {
+  color: #ef4444;
+}
+.recent-pagination {
+  margin-top: 10px;
+  justify-content: flex-end;
+}
+.thinking-details {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+.thinking-details summary {
+  cursor: pointer;
+  color: #374151;
+  font-size: 13px;
+}
+.thinking-list {
+  margin: 8px 0 0 18px;
+  max-height: 140px;
+  overflow: auto;
+  color: #4b5563;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.sql-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: #1f2937;
+  border-bottom: 1px solid #374151;
+}
+.sql-head .sql-title {
+  padding: 0;
+  border: 0;
 }
 </style>

@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -61,6 +62,42 @@ public class StackCDashboardController {
         try {
             dashboardService.delete(id);
             return ApiResponse.success("已删除", null);
+        } catch (IllegalArgumentException e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    @PostMapping("/{id}/share/enable")
+    public ApiResponse<Map<String, Object>> enableShare(@PathVariable long id, @RequestBody(required = false) Map<String, Object> body) {
+        try {
+            return ApiResponse.success("分享链接已启用", dashboardService.enableShare(id, body));
+        } catch (IllegalArgumentException e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    @PostMapping("/{id}/share/disable")
+    public ApiResponse<Map<String, Object>> disableShare(@PathVariable long id) {
+        try {
+            return ApiResponse.success("分享链接已关闭", dashboardService.disableShare(id));
+        } catch (IllegalArgumentException e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    @GetMapping("/share")
+    public ApiResponse<Map<String, Object>> getByShareToken(@RequestParam String token) {
+        try {
+            return ApiResponse.success(dashboardService.getByShareToken(token));
+        } catch (IllegalArgumentException e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    @PostMapping("/{id}/pin-chart")
+    public ApiResponse<Map<String, Object>> pinChart(@PathVariable long id, @RequestBody Map<String, Object> body) {
+        try {
+            return ApiResponse.success("图表已钉入看板", dashboardService.pinChart(id, body));
         } catch (IllegalArgumentException e) {
             return ApiResponse.badRequest(e.getMessage());
         }

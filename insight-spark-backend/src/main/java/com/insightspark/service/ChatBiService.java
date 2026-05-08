@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CancellationException;
 
 @Service
 public class ChatBiService {
@@ -41,14 +42,17 @@ public class ChatBiService {
 
     public Map<String, Object> executeChat(String question, String tableName) {
         log.info("Received chat question: {}", question);
+        ensureNotCancelled("请求初始化");
 
         String activeTable = (tableName == null || tableName.isBlank()) ? dataUploadService.latestTableName()
                 : tableName;
         boolean officialSource = datasourceService.isOfficialSource(activeTable);
         String queryTableName = officialSource ? datasourceService.physicalTableName(activeTable) : activeTable;
         dataUploadService.assertKnownTable(activeTable);
+        ensureNotCancelled("数据源校验");
 
         if (!officialSource && question.contains("关联官方")) {
+            ensureNotCancelled("联邦数据关联");
             List<Map<String, Object>> joinedRows = datasourceService.executeFederalJoin(activeTable, 200);
             Map<String, Object> response = new HashMap<>();
             response.put("tableName", activeTable);
@@ -69,9 +73,11 @@ public class ChatBiService {
         if (fields == null || fields.isEmpty()) {
             throw new IllegalArgumentException("当前数据表没有字段元信息，请在“数据上传”页面重新上传文件，或选择字段数大于 0 的数据表。");
         }
+        ensureNotCancelled("字段元信息加载");
         Map<String, Object> graphPath = knowledgeGraphService.retrieveMultiHopContext(question, activeTable);
         List<Map<String, Object>> graphContext = asMapList(graphPath.get("ragContext"));
         if (graphContext.isEmpty() && !knowledgeGraphService.hasGraphData()) {
+            ensureNotCancelled("图谱补全同步");
             knowledgeGraphService.syncGraph();
             graphPath = knowledgeGraphService.retrieveMultiHopContext(question, activeTable);
             graphContext = asMapList(graphPath.get("ragContext"));
@@ -82,34 +88,52 @@ public class ChatBiService {
         if (graphContext.isEmpty()) {
             graphContext = buildLocalFieldContext(activeTable, fields);
         }
+        ensureNotCancelled("图谱上下文准备");
         List<Map<String, Object>> previewRows = dataUploadService.preview(activeTable, 1, 8);
+        ensureNotCancelled("样例数据预览");
         Optional<Map<String, Object>> aiResult = pythonAiService.textToSql(question, queryTableName, fields,
                 previewRows);
+        ensureNotCancelled("SQL 生成");
 
         String generatedSql;
         String chartType;
         Map<String, Object> fieldMapping;
         String engine;
+        String fallbackReason = null;
 
         if (aiResult.isPresent()) {
-            Map<String, Object> ai = aiResult.get();
-            generatedSql = Objects.toString(ai.get("sql"));
-            chartType = Objects.toString(ai.getOrDefault("chartType", "bar"));
-            fieldMapping = (Map<String, Object>) ai.getOrDefault("fieldMapping", Map.of());
-            engine = "python-ai-service";
+            try {
+                Map<String, Object> ai = aiResult.get();
+                generatedSql = Objects.toString(ai.get("sql"), "").trim();
+                chartType = Objects.toString(ai.getOrDefault("chartType", "bar"), "bar").trim();
+                fieldMapping = safeFieldMapping(ai.get("fieldMapping"));
+                if (generatedSql.isBlank()) {
+                    throw new IllegalArgumentException("AI 返回 SQL 为空");
+                }
+                if (chartType.isBlank()) {
+                    chartType = "bar";
+                }
+                engine = "python-ai-service";
+            } catch (Exception parseEx) {
+                log.warn("AI 返回内容解析失败，切换 Java 兜底策略: {}", parseEx.getMessage());
+                RuleBasedNl2SqlStrategy.FieldChoice fieldChoice = ruleBasedNl2SqlStrategy.chooseFields(question, fields);
+                chartType = ruleBasedNl2SqlStrategy.chooseChartType(question, fieldChoice.dimensionType());
+                generatedSql = ruleBasedNl2SqlStrategy.buildSql(queryTableName, fieldChoice, chartType);
+                fieldMapping = fallbackFieldMapping(fieldChoice);
+                engine = "java-fallback-ai-parse";
+                fallbackReason = "AI_RESPONSE_INVALID";
+            }
         } else {
             RuleBasedNl2SqlStrategy.FieldChoice fieldChoice = ruleBasedNl2SqlStrategy.chooseFields(question, fields);
             chartType = ruleBasedNl2SqlStrategy.chooseChartType(question, fieldChoice.dimensionType());
             generatedSql = ruleBasedNl2SqlStrategy.buildSql(queryTableName, fieldChoice, chartType);
-            fieldMapping = Map.of(
-                    "dimension", fieldChoice.dimensionDisplayName(),
-                    "metric", fieldChoice.metricDisplayName() == null ? "记录数" : fieldChoice.metricDisplayName(),
-                    "dimensionKey", fieldChoice.dimensionColumn(),
-                    "metricKey", fieldChoice.metricColumn() == null ? "value" : fieldChoice.metricColumn());
+            fieldMapping = fallbackFieldMapping(fieldChoice);
             engine = "java-fallback";
+            fallbackReason = "AI_UNAVAILABLE";
         }
 
         log.info("Generated SQL: {}", generatedSql);
+        ensureNotCancelled("SQL 审计前");
 
         SqlAuditService.AuditResult auditResult = sqlAuditService.inspect(generatedSql, activeTable);
         if (auditResult.blocked()) {
@@ -121,14 +145,47 @@ public class ChatBiService {
         generatedSql = sqlAuditService.ensureLimit(generatedSql, 200);
         long startedAt = System.currentTimeMillis();
         List<Map<String, Object>> queryResult;
+        boolean fallbackExecuted = false;
         Integer previousTimeout = jdbcTemplate.getQueryTimeout();
         try {
             jdbcTemplate.setQueryTimeout(5);
-            queryResult = officialSource
-                    ? datasourceService.executeQueryWithoutAudit(activeTable, generatedSql)
-                    : queryUploadTable(generatedSql);
+            try {
+                ensureNotCancelled("执行查询前");
+                queryResult = officialSource
+                        ? datasourceService.executeQueryWithoutAudit(activeTable, generatedSql)
+                        : queryUploadTable(generatedSql);
+                ensureNotCancelled("执行查询后");
+            } catch (RuntimeException executionError) {
+                if (engine.startsWith("java-fallback")) {
+                    throw executionError;
+                }
+                log.warn("AI SQL 执行失败，尝试 Java 规则兜底重试: {}", executionError.getMessage());
+                ensureNotCancelled("兜底重试前");
+                RuleBasedNl2SqlStrategy.FieldChoice fieldChoice = ruleBasedNl2SqlStrategy.chooseFields(question, fields);
+                String fallbackChartType = ruleBasedNl2SqlStrategy.chooseChartType(question, fieldChoice.dimensionType());
+                String fallbackSql = ruleBasedNl2SqlStrategy.buildSql(queryTableName, fieldChoice, fallbackChartType);
+                String limitedFallbackSql = sqlAuditService.ensureLimit(fallbackSql, 200);
+                SqlAuditService.AuditResult fallbackAudit = sqlAuditService.inspect(limitedFallbackSql, activeTable);
+                if (fallbackAudit.blocked()) {
+                    throw executionError;
+                }
+                generatedSql = limitedFallbackSql;
+                chartType = fallbackChartType;
+                fieldMapping = fallbackFieldMapping(fieldChoice);
+                engine = "java-fallback-exec-retry";
+                fallbackReason = "AI_SQL_EXEC_FAILED";
+                fallbackExecuted = true;
+                ensureNotCancelled("兜底重试执行前");
+                queryResult = officialSource
+                        ? datasourceService.executeQueryWithoutAudit(activeTable, generatedSql)
+                        : queryUploadTable(generatedSql);
+                ensureNotCancelled("兜底重试执行后");
+            }
+            ensureNotCancelled("结果加工前");
+            queryResult = attachDimensionKey(queryResult, fieldMapping);
             queryResult = sqlAuditService.maskRows(activeTable, queryResult);
             if (isAllNullChartRows(queryResult)) {
+                ensureNotCancelled("空结果恢复前");
                 Map<String, Object> recovery = rebuildQueryFromTableProfile(activeTable, queryTableName, question,
                         fields, chartType);
                 if (recovery != null) {
@@ -139,6 +196,7 @@ public class ChatBiService {
                 }
             }
             queryResult = normalizeChartRows(queryResult, chartType, fieldMapping);
+            ensureNotCancelled("结果归一化后");
             long durationMs = System.currentTimeMillis() - startedAt;
             sqlAuditService.record(question, activeTable, engine, generatedSql, auditResult,
                     "SUCCESS", durationMs, null);
@@ -160,6 +218,8 @@ public class ChatBiService {
         response.put("chartType", chartType);
         response.put("fieldMapping", fieldMapping);
         response.put("engine", engine);
+        response.put("fallbackUsed", engine.startsWith("java-fallback") || fallbackExecuted);
+        response.put("fallbackReason", fallbackReason);
         response.put("graphContext", graphContext);
         response.put("riskLevel", auditResult.riskLevel());
         response.put("riskReason", auditResult.riskReason());
@@ -271,6 +331,7 @@ public class ChatBiService {
                 + "` <> '' "
                 + "GROUP BY `" + dimensionKey + "` ORDER BY metric_value DESC LIMIT 30";
         List<Map<String, Object>> data = jdbcTemplate.queryForList(sql);
+        data = attachDimensionKey(data, Map.of("dimensionKey", dimensionKey));
         data = sqlAuditService.maskRows(activeTable, data);
         return Map.of(
                 "sql", sql,
@@ -433,7 +494,76 @@ public class ChatBiService {
     }
 
     private List<Map<String, Object>> queryUploadTable(String sql) {
+        ensureNotCancelled("上传表查询前");
         jdbcTemplate.setQueryTimeout(5);
-        return jdbcTemplate.queryForList(sql);
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql);
+        ensureNotCancelled("上传表查询后");
+        return rows;
+    }
+
+    private Map<String, Object> safeFieldMapping(Object raw) {
+        if (!(raw instanceof Map<?, ?> rawMap)) {
+            return Map.of();
+        }
+        Map<String, Object> safe = new HashMap<>();
+        for (Map.Entry<?, ?> entry : rawMap.entrySet()) {
+            String key = Objects.toString(entry.getKey(), "").trim();
+            if (!key.isBlank()) {
+                safe.put(key, entry.getValue());
+            }
+        }
+        return safe;
+    }
+
+    private Map<String, Object> fallbackFieldMapping(RuleBasedNl2SqlStrategy.FieldChoice fieldChoice) {
+        return Map.of(
+                "dimension", fieldChoice.dimensionDisplayName(),
+                "metric", fieldChoice.metricDisplayName() == null ? "记录数" : fieldChoice.metricDisplayName(),
+                "dimensionKey", fieldChoice.dimensionColumn(),
+                "metricKey", fieldChoice.metricColumn() == null ? "value" : fieldChoice.metricColumn());
+    }
+
+    private List<Map<String, Object>> attachDimensionKey(List<Map<String, Object>> rows, Map<String, Object> fieldMapping) {
+        if (rows == null || rows.isEmpty()) {
+            return rows;
+        }
+        String dimensionKey = Objects.toString(fieldMapping.getOrDefault("dimensionKey", ""), "").trim();
+        if (dimensionKey.isBlank()) {
+            return rows;
+        }
+        List<Map<String, Object>> annotated = new ArrayList<>(rows.size());
+        for (Map<String, Object> row : rows) {
+            Map<String, Object> copy = new HashMap<>(row);
+            if (!copy.containsKey(dimensionKey)) {
+                Object aliasValue = firstNonBlankValue(copy, "dim_name", "name", "dimension");
+                if (aliasValue != null) {
+                    copy.put(dimensionKey, aliasValue);
+                }
+            }
+            annotated.add(copy);
+        }
+        return annotated;
+    }
+
+    private Object firstNonBlankValue(Map<String, Object> row, String... keys) {
+        for (String key : keys) {
+            if (row.containsKey(key)) {
+                Object value = row.get(key);
+                if (value == null) {
+                    continue;
+                }
+                if (value instanceof String text && text.trim().isEmpty()) {
+                    continue;
+                }
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private void ensureNotCancelled(String stage) {
+        if (Thread.currentThread().isInterrupted()) {
+            throw new CancellationException("用户已停止生成（" + stage + "）");
+        }
     }
 }

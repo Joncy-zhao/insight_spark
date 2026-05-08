@@ -47,6 +47,9 @@ public class DataUploadService {
     private DatasourceService datasourceService;
 
     @Autowired
+    private SqlAuditService sqlAuditService;
+
+    @Autowired
     private KnowledgeGraphService knowledgeGraphService;
 
     private final ExecutorService uploadExecutor = Executors.newCachedThreadPool();
@@ -464,14 +467,17 @@ public class DataUploadService {
     }
 
     public List<Map<String, Object>> preview(String tableName, int page, int pageSize) {
+        List<Map<String, Object>> rows;
         if (datasourceService.isOfficialSource(tableName)) {
-            return datasourceService.previewQueryTable(tableName, page, pageSize);
+            rows = datasourceService.previewQueryTable(tableName, page, pageSize);
+        } else {
+            assertKnownTable(tableName);
+            int safePage = Math.max(1, page);
+            int safeLimit = Math.max(1, Math.min(pageSize, 100));
+            int offset = (safePage - 1) * safeLimit;
+            rows = jdbcTemplate.queryForList("SELECT * FROM `" + tableName + "` LIMIT " + safeLimit + " OFFSET " + offset);
         }
-        assertKnownTable(tableName);
-        int safePage = Math.max(1, page);
-        int safeLimit = Math.max(1, Math.min(pageSize, 100));
-        int offset = (safePage - 1) * safeLimit;
-        return jdbcTemplate.queryForList("SELECT * FROM `" + tableName + "` LIMIT " + safeLimit + " OFFSET " + offset);
+        return sqlAuditService.maskRows(tableName, rows);
     }
 
     public Map<String, Object> previewPage(String tableName, int page, int pageSize) {
@@ -507,6 +513,7 @@ public class DataUploadService {
             String columnSql = String.join(", ", columns.stream().map(this::quoteColumn).toList());
             rows = jdbcTemplate.queryForList("SELECT " + columnSql + " FROM `" + tableName + "` LIMIT 50000");
         }
+        rows = sqlAuditService.maskRows(tableName, rows);
 
         StringBuilder csv = new StringBuilder("\uFEFF");
         appendCsvLine(csv, headers);
@@ -652,22 +659,11 @@ public class DataUploadService {
     }
 
     public String latestTableName() {
-        List<String> tableNames = jdbcTemplate.queryForList("""
-                SELECT t.table_name
-                FROM is_data_table t
-                LEFT JOIN is_data_permission p
-                       ON p.table_name = t.table_name
-                      AND p.user_id = ?
-                      AND p.permission_type = 'READ'
-                WHERE t.status = 'ACTIVE'
-                  AND (t.owner_id = ? OR p.id IS NOT NULL)
-                ORDER BY t.created_at DESC
-                LIMIT 1
-                """, String.class, permissionService.currentUserId(), permissionService.currentUserId());
-        if (tableNames.isEmpty()) {
-            throw new IllegalArgumentException("请先上传 Excel/CSV 数据表");
+        List<Map<String, Object>> tables = listTables();
+        if (tables.isEmpty()) {
+            throw new IllegalArgumentException("请先上传 Excel/CSV 数据表或授权官方库数据表");
         }
-        return tableNames.get(0);
+        return Objects.toString(tables.get(0).get("tableName"), "");
     }
 
     public void assertKnownTable(String tableName) {
@@ -1213,126 +1209,28 @@ public class DataUploadService {
     public Map<String, Object> getFieldStatistics(String tableName, String columnName) {
         assertKnownTable(tableName);
         assertFieldExists(tableName, columnName);
-        
-        String quotedColumn = quoteColumn(columnName);
-        long totalCount = countRows(tableName);
-        
-        Long nullCount = jdbcTemplate.queryForObject(
-            "SELECT COUNT(*) FROM `" + tableName + "` WHERE " + quotedColumn + " IS NULL OR " + quotedColumn + " = ''",
-            Long.class
-        );
-        
-        Long distinctCount = jdbcTemplate.queryForObject(
-            "SELECT COUNT(DISTINCT " + quotedColumn + ") FROM `" + tableName + "` WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != ''",
-            Long.class
-        );
-        
-        nullCount = nullCount == null ? 0 : nullCount;
-        distinctCount = distinctCount == null ? 0 : distinctCount;
-        long nonNullCount = totalCount - nullCount;
-        
-        Map<String, Object> stats = new LinkedHashMap<>();
-        stats.put("columnName", columnName);
-        stats.put("totalCount", totalCount);
-        stats.put("nonNullCount", nonNullCount);
-        stats.put("nullCount", nullCount);
-        stats.put("nullRate", totalCount > 0 ? Math.round((double) nullCount / totalCount * 10000) / 100.0 : 0);
-        stats.put("distinctCount", distinctCount);
-        stats.put("duplicateRate", nonNullCount > 0 ? Math.round((1 - (double) distinctCount / nonNullCount) * 10000) / 100.0 : 0);
-        
-        List<Map<String, Object>> fieldMeta = jdbcTemplate.queryForList(
-            "SELECT field_type AS fieldType FROM is_data_field WHERE table_name = ? AND column_name = ?",
-            tableName, columnName
-        );
-        
-        if (!fieldMeta.isEmpty()) {
-            String fieldType = Objects.toString(fieldMeta.get(0).get("fieldType"), "TEXT");
-            
-            if ("NUMBER".equals(fieldType)) {
-                addNumericStatistics(stats, tableName, quotedColumn);
-            } else if ("DATE".equals(fieldType)) {
-                addDateStatistics(stats, tableName, quotedColumn);
-            }
+        if (datasourceService.isOfficialSource(tableName)) {
+            return getFieldStatisticsForOfficialSource(tableName, columnName);
         }
-        
-        stats.put("anomalies", detectAnomalies(tableName, columnName));
-        
-        return stats;
+        return getFieldStatisticsForUploadSource(tableName, columnName);
     }
     
     public List<Map<String, Object>> detectAnomalies(String tableName, String columnName) {
         assertKnownTable(tableName);
         assertFieldExists(tableName, columnName);
-        
-        List<Map<String, Object>> fieldMeta = jdbcTemplate.queryForList(
-            "SELECT field_type AS fieldType FROM is_data_field WHERE table_name = ? AND column_name = ?",
-            tableName, columnName
-        );
-        
-        if (fieldMeta.isEmpty()) {
-            return List.of();
+        if (datasourceService.isOfficialSource(tableName)) {
+            return detectAnomaliesForOfficialSource(tableName, columnName);
         }
-        
-        String fieldType = Objects.toString(fieldMeta.get(0).get("fieldType"), "TEXT");
-        
-        if (!"NUMBER".equals(fieldType)) {
-            return List.of();
-        }
-        
-        String quotedColumn = quoteColumn(columnName);
-        Map<String, Object> stats = new LinkedHashMap<>();
-        addNumericStatistics(stats, tableName, quotedColumn);
-        
-        Double avg = (Double) stats.get("avg");
-        Double stdDev = (Double) stats.get("stdDev");
-        
-        if (avg == null || stdDev == null || stdDev == 0) {
-            return List.of();
-        }
-        
-        double lowerBound = avg - 3 * stdDev;
-        double upperBound = avg + 3 * stdDev;
-        
-        List<Map<String, Object>> anomalies = jdbcTemplate.queryForList(
-            "SELECT sys_id, " + quotedColumn + " AS value FROM `" + tableName + 
-            "` WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != '' " +
-            "AND (CAST(" + quotedColumn + " AS DECIMAL(20,4)) < ? OR CAST(" + quotedColumn + " AS DECIMAL(20,4)) > ?) " +
-            "LIMIT 100",
-            lowerBound, upperBound
-        );
-        
-        return anomalies.stream().map(row -> {
-            Map<String, Object> anomaly = new LinkedHashMap<>();
-            anomaly.put("rowId", row.get("sys_id"));
-            anomaly.put("value", row.get("value"));
-            anomaly.put("type", "OUTLIER");
-            anomaly.put("reason", "数值超出 3σ 范围 [" + String.format("%.2f", lowerBound) + ", " + String.format("%.2f", upperBound) + "]");
-            return anomaly;
-        }).toList();
+        return detectAnomaliesForUploadSource(tableName, columnName);
     }
     
     public Map<String, Object> getFieldDistribution(String tableName, String columnName) {
         assertKnownTable(tableName);
         assertFieldExists(tableName, columnName);
-        
-        String quotedColumn = quoteColumn(columnName);
-        
-        List<Map<String, Object>> fieldMeta = jdbcTemplate.queryForList(
-            "SELECT field_type AS fieldType FROM is_data_field WHERE table_name = ? AND column_name = ?",
-            tableName, columnName
-        );
-        
-        if (fieldMeta.isEmpty()) {
-            return Map.of("columnName", columnName, "distribution", List.of());
+        if (datasourceService.isOfficialSource(tableName)) {
+            return getFieldDistributionForOfficialSource(tableName, columnName);
         }
-        
-        String fieldType = Objects.toString(fieldMeta.get(0).get("fieldType"), "TEXT");
-        
-        if ("NUMBER".equals(fieldType)) {
-            return getNumericDistribution(tableName, quotedColumn, columnName);
-        } else {
-            return getCategoricalDistribution(tableName, quotedColumn, columnName);
-        }
+        return getFieldDistributionForUploadSource(tableName, columnName);
     }
     
     public Map<String, Object> batchReplace(String tableName, String columnName, String oldValue, String newValue) {
@@ -1544,17 +1442,336 @@ public class DataUploadService {
         
         return suggestions;
     }
+
+    private Map<String, Object> getFieldStatisticsForUploadSource(String tableName, String columnName) {
+        String quotedColumn = quoteColumn(columnName);
+        long totalCount = countRows(tableName);
+
+        Long nullCount = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM `" + tableName + "` WHERE " + quotedColumn + " IS NULL OR " + quotedColumn + " = ''",
+            Long.class
+        );
+
+        Long distinctCount = jdbcTemplate.queryForObject(
+            "SELECT COUNT(DISTINCT " + quotedColumn + ") FROM `" + tableName + "` WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != ''",
+            Long.class
+        );
+
+        nullCount = nullCount == null ? 0 : nullCount;
+        distinctCount = distinctCount == null ? 0 : distinctCount;
+        long nonNullCount = totalCount - nullCount;
+
+        Map<String, Object> stats = new LinkedHashMap<>();
+        stats.put("columnName", columnName);
+        stats.put("totalCount", totalCount);
+        stats.put("nonNullCount", nonNullCount);
+        stats.put("nullCount", nullCount);
+        stats.put("nullRate", totalCount > 0 ? Math.round((double) nullCount / totalCount * 10000) / 100.0 : 0);
+        stats.put("distinctCount", distinctCount);
+        stats.put("duplicateRate", nonNullCount > 0 ? Math.round((1 - (double) distinctCount / nonNullCount) * 10000) / 100.0 : 0);
+
+        List<Map<String, Object>> fieldMeta = jdbcTemplate.queryForList(
+            "SELECT field_type AS fieldType FROM is_data_field WHERE table_name = ? AND column_name = ?",
+            tableName, columnName
+        );
+
+        if (!fieldMeta.isEmpty()) {
+            String fieldType = Objects.toString(fieldMeta.get(0).get("fieldType"), "TEXT");
+
+            if ("NUMBER".equals(fieldType)) {
+                addNumericStatistics(stats, tableName, quotedColumn);
+            } else if ("DATE".equals(fieldType)) {
+                addDateStatistics(stats, tableName, quotedColumn);
+            }
+        }
+
+        stats.put("anomalies", detectAnomaliesForUploadSource(tableName, columnName));
+        return stats;
+    }
+
+    private Map<String, Object> getFieldStatisticsForOfficialSource(String tableName, String columnName) {
+        String quotedColumn = quoteColumn(columnName);
+        long totalCount = countRows(tableName);
+        String physicalTable = datasourceService.physicalTableName(tableName);
+        String sourceKey = tableName;
+
+        long nullCount = readLongValue(datasourceService.executeQueryWithoutAudit(sourceKey,
+                "SELECT COUNT(*) AS v FROM `" + physicalTable + "` WHERE " + quotedColumn + " IS NULL OR " + quotedColumn + " = ''"), "v");
+        long distinctCount = readLongValue(datasourceService.executeQueryWithoutAudit(sourceKey,
+                "SELECT COUNT(DISTINCT " + quotedColumn + ") AS v FROM `" + physicalTable + "` WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != ''"), "v");
+        long nonNullCount = Math.max(0, totalCount - nullCount);
+
+        Map<String, Object> stats = new LinkedHashMap<>();
+        stats.put("columnName", columnName);
+        stats.put("totalCount", totalCount);
+        stats.put("nonNullCount", nonNullCount);
+        stats.put("nullCount", nullCount);
+        stats.put("nullRate", totalCount > 0 ? Math.round((double) nullCount / totalCount * 10000) / 100.0 : 0);
+        stats.put("distinctCount", distinctCount);
+        stats.put("duplicateRate", nonNullCount > 0 ? Math.round((1 - (double) distinctCount / nonNullCount) * 10000) / 100.0 : 0);
+
+        String fieldType = resolveFieldType(tableName, columnName);
+        if ("NUMBER".equals(fieldType)) {
+            Map<String, Object> numStats = firstRow(datasourceService.executeQueryWithoutAudit(sourceKey,
+                    "SELECT " +
+                            "MIN(CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))) AS minValue, " +
+                            "MAX(CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))) AS maxValue, " +
+                            "AVG(CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))) AS avgValue, " +
+                            "STD(CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))) AS stdDev " +
+                            "FROM `" + physicalTable + "` " +
+                            "WHERE " + quotedColumn + " IS NOT NULL " +
+                            "AND TRIM(" + quotedColumn + ") <> '' " +
+                            "AND TRIM(" + quotedColumn + ") REGEXP '^-?[0-9]+(\\\\.[0-9]+)?$'"));
+            stats.put("min", numStats.get("minValue"));
+            stats.put("max", numStats.get("maxValue"));
+            stats.put("avg", numStats.get("avgValue"));
+            stats.put("stdDev", numStats.get("stdDev"));
+        } else if ("DATE".equals(fieldType)) {
+            Map<String, Object> dateStats = firstRow(datasourceService.executeQueryWithoutAudit(sourceKey,
+                    "SELECT MIN(" + quotedColumn + ") AS minDate, MAX(" + quotedColumn + ") AS maxDate " +
+                            "FROM `" + physicalTable + "` WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != ''"));
+            stats.put("minDate", dateStats.get("minDate"));
+            stats.put("maxDate", dateStats.get("maxDate"));
+        }
+
+        stats.put("anomalies", detectAnomaliesForOfficialSource(tableName, columnName));
+        return stats;
+    }
+
+    private List<Map<String, Object>> detectAnomaliesForUploadSource(String tableName, String columnName) {
+        List<Map<String, Object>> fieldMeta = jdbcTemplate.queryForList(
+            "SELECT field_type AS fieldType FROM is_data_field WHERE table_name = ? AND column_name = ?",
+            tableName, columnName
+        );
+
+        if (fieldMeta.isEmpty()) {
+            return List.of();
+        }
+
+        String fieldType = Objects.toString(fieldMeta.get(0).get("fieldType"), "TEXT");
+        if (!"NUMBER".equals(fieldType)) {
+            return List.of();
+        }
+
+        String quotedColumn = quoteColumn(columnName);
+        Map<String, Object> stats = new LinkedHashMap<>();
+        addNumericStatistics(stats, tableName, quotedColumn);
+
+        Double avg = toNullableDouble(stats.get("avg"));
+        Double stdDev = toNullableDouble(stats.get("stdDev"));
+
+        if (avg == null || stdDev == null || stdDev == 0) {
+            return List.of();
+        }
+
+        double lowerBound = avg - 3 * stdDev;
+        double upperBound = avg + 3 * stdDev;
+
+        String numericExpr = "CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))";
+        List<Map<String, Object>> anomalies = jdbcTemplate.queryForList(
+            "SELECT sys_id, " + quotedColumn + " AS value FROM `" + tableName +
+            "` WHERE " + quotedColumn + " IS NOT NULL " +
+            "AND TRIM(" + quotedColumn + ") <> '' " +
+            "AND TRIM(" + quotedColumn + ") REGEXP '^-?[0-9]+(\\\\.[0-9]+)?$' " +
+            "AND (" + numericExpr + " < ? OR " + numericExpr + " > ?) " +
+            "LIMIT 100",
+            lowerBound, upperBound
+        );
+        anomalies = sqlAuditService.maskRows(tableName, anomalies);
+
+        return anomalies.stream().map(row -> {
+            Map<String, Object> anomaly = new LinkedHashMap<>();
+            anomaly.put("rowId", row.get("sys_id"));
+            anomaly.put("value", row.get("value"));
+            anomaly.put("type", "OUTLIER");
+            anomaly.put("reason", "数值超出 3σ 范围 [" + String.format("%.2f", lowerBound) + ", " + String.format("%.2f", upperBound) + "]");
+            return anomaly;
+        }).toList();
+    }
+
+    private List<Map<String, Object>> detectAnomaliesForOfficialSource(String tableName, String columnName) {
+        String fieldType = resolveFieldType(tableName, columnName);
+        if (!"NUMBER".equals(fieldType)) {
+            return List.of();
+        }
+        String quotedColumn = quoteColumn(columnName);
+        String physicalTable = datasourceService.physicalTableName(tableName);
+        String sourceKey = tableName;
+        Map<String, Object> numStats = firstRow(datasourceService.executeQueryWithoutAudit(sourceKey,
+                "SELECT " +
+                        "AVG(CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))) AS avgValue, " +
+                        "STD(CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))) AS stdDev " +
+                        "FROM `" + physicalTable + "` " +
+                        "WHERE " + quotedColumn + " IS NOT NULL " +
+                        "AND TRIM(" + quotedColumn + ") <> '' " +
+                        "AND TRIM(" + quotedColumn + ") REGEXP '^-?[0-9]+(\\\\.[0-9]+)?$'"));
+        Double avg = toNullableDouble(numStats.get("avgValue"));
+        Double stdDev = toNullableDouble(numStats.get("stdDev"));
+        if (avg == null || stdDev == null || stdDev == 0) {
+            return List.of();
+        }
+        double lowerBound = avg - 3 * stdDev;
+        double upperBound = avg + 3 * stdDev;
+        String numericExpr = "CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))";
+        List<Map<String, Object>> anomalies = datasourceService.executeQueryWithoutAudit(sourceKey,
+                "SELECT " + quotedColumn + " AS value FROM `" + physicalTable + "` " +
+                        "WHERE " + quotedColumn + " IS NOT NULL " +
+                        "AND TRIM(" + quotedColumn + ") <> '' " +
+                        "AND TRIM(" + quotedColumn + ") REGEXP '^-?[0-9]+(\\\\.[0-9]+)?$' " +
+                        "AND (" + numericExpr + " < " + lowerBound + " OR " + numericExpr + " > " + upperBound + ") " +
+                        "LIMIT 100");
+        anomalies = sqlAuditService.maskRows(tableName, anomalies);
+
+        return anomalies.stream().map(row -> {
+            Map<String, Object> anomaly = new LinkedHashMap<>();
+            anomaly.put("value", row.get("value"));
+            anomaly.put("type", "OUTLIER");
+            anomaly.put("reason", "数值超出 3σ 范围 [" + String.format("%.2f", lowerBound) + ", " + String.format("%.2f", upperBound) + "]");
+            return anomaly;
+        }).toList();
+    }
+
+    private Map<String, Object> getFieldDistributionForUploadSource(String tableName, String columnName) {
+        String quotedColumn = quoteColumn(columnName);
+
+        List<Map<String, Object>> fieldMeta = jdbcTemplate.queryForList(
+            "SELECT field_type AS fieldType FROM is_data_field WHERE table_name = ? AND column_name = ?",
+            tableName, columnName
+        );
+
+        if (fieldMeta.isEmpty()) {
+            return Map.of("columnName", columnName, "distribution", List.of());
+        }
+
+        String fieldType = Objects.toString(fieldMeta.get(0).get("fieldType"), "TEXT");
+        if ("NUMBER".equals(fieldType)) {
+            return getNumericDistribution(tableName, quotedColumn, columnName);
+        }
+        return getCategoricalDistribution(tableName, quotedColumn, columnName);
+    }
+
+    private Map<String, Object> getFieldDistributionForOfficialSource(String tableName, String columnName) {
+        String fieldType = resolveFieldType(tableName, columnName);
+        String quotedColumn = quoteColumn(columnName);
+        String physicalTable = datasourceService.physicalTableName(tableName);
+        String sourceKey = tableName;
+        List<Map<String, Object>> distribution;
+        if ("NUMBER".equals(fieldType)) {
+            String numericExpr = "CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))";
+            distribution = datasourceService.executeQueryWithoutAudit(sourceKey,
+                    "WITH numeric_data AS (" +
+                            " SELECT " + numericExpr + " AS numeric_value FROM `" + physicalTable + "` " +
+                            " WHERE " + quotedColumn + " IS NOT NULL " +
+                            "   AND TRIM(" + quotedColumn + ") <> '' " +
+                            "   AND TRIM(" + quotedColumn + ") REGEXP '^-?[0-9]+(\\\\.[0-9]+)?$'" +
+                            "), stats AS (" +
+                            " SELECT MIN(numeric_value) AS min_value, MAX(numeric_value) AS max_value FROM numeric_data" +
+                            ") " +
+                            "SELECT CASE " +
+                            " WHEN stats.max_value = stats.min_value THEN 0 " +
+                            " ELSE FLOOR((numeric_data.numeric_value - stats.min_value) / NULLIF((stats.max_value - stats.min_value) / 10, 0)) " +
+                            " END AS bucket, COUNT(*) AS count " +
+                            "FROM numeric_data CROSS JOIN stats " +
+                            "GROUP BY bucket ORDER BY bucket LIMIT 20");
+            return Map.of(
+                    "columnName", columnName,
+                    "type", "NUMERIC",
+                    "distribution", distribution
+            );
+        }
+        distribution = datasourceService.executeQueryWithoutAudit(sourceKey,
+                "SELECT " + quotedColumn + " AS category, COUNT(*) AS count " +
+                        "FROM `" + physicalTable + "` " +
+                        "WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != '' " +
+                        "GROUP BY " + quotedColumn + " " +
+                        "ORDER BY count DESC LIMIT 20");
+        distribution = applyMaskOnAlias(distribution, tableName, columnName, "category");
+        return Map.of(
+                "columnName", columnName,
+                "type", "CATEGORICAL",
+                "distribution", distribution
+        );
+    }
+
+    private String resolveFieldType(String tableName, String columnName) {
+        if (datasourceService.isOfficialSource(tableName)) {
+            return datasourceService.listQueryFields(tableName).stream()
+                    .filter(item -> columnName.equals(Objects.toString(item.get("columnName"), "")))
+                    .map(item -> Objects.toString(item.get("fieldType"), "TEXT"))
+                    .findFirst()
+                    .orElse("TEXT");
+        }
+        List<Map<String, Object>> fieldMeta = jdbcTemplate.queryForList(
+                "SELECT field_type AS fieldType FROM is_data_field WHERE table_name = ? AND column_name = ?",
+                tableName, columnName
+        );
+        if (fieldMeta.isEmpty()) {
+            return "TEXT";
+        }
+        return Objects.toString(fieldMeta.get(0).get("fieldType"), "TEXT");
+    }
+
+    private long readLongValue(List<Map<String, Object>> rows, String key) {
+        if (rows == null || rows.isEmpty()) {
+            return 0L;
+        }
+        Object value = rows.get(0).get(key);
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        String text = Objects.toString(value, "").trim();
+        if (text.isBlank()) {
+            return 0L;
+        }
+        try {
+            return Long.parseLong(text);
+        } catch (NumberFormatException ex) {
+            return Math.round(Double.parseDouble(text));
+        }
+    }
+
+    private Map<String, Object> firstRow(List<Map<String, Object>> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return Map.of();
+        }
+        return rows.get(0);
+    }
+
+    private List<Map<String, Object>> applyMaskOnAlias(List<Map<String, Object>> rows, String tableName,
+                                                        String sourceColumn, String aliasColumn) {
+        if (rows == null || rows.isEmpty()) {
+            return rows;
+        }
+        List<Map<String, Object>> normalized = new ArrayList<>(rows.size());
+        for (Map<String, Object> row : rows) {
+            Map<String, Object> copy = new LinkedHashMap<>(row);
+            if (!copy.containsKey(sourceColumn) && copy.containsKey(aliasColumn)) {
+                copy.put(sourceColumn, copy.get(aliasColumn));
+            }
+            normalized.add(copy);
+        }
+        List<Map<String, Object>> masked = sqlAuditService.maskRows(tableName, normalized);
+        for (Map<String, Object> row : masked) {
+            if (row.containsKey(sourceColumn) && row.containsKey(aliasColumn)) {
+                row.put(aliasColumn, row.get(sourceColumn));
+            }
+        }
+        return masked;
+    }
     
     private void addNumericStatistics(Map<String, Object> stats, String tableName, String quotedColumn) {
+        String numericExpr = "CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))";
         try {
             Map<String, Object> numStats = jdbcTemplate.queryForMap(
                 "SELECT " +
-                "  MIN(CAST(" + quotedColumn + " AS DECIMAL(20,4))) AS minValue, " +
-                "  MAX(CAST(" + quotedColumn + " AS DECIMAL(20,4))) AS maxValue, " +
-                "  AVG(CAST(" + quotedColumn + " AS DECIMAL(20,4))) AS avgValue, " +
-                "  STDDEV(CAST(" + quotedColumn + " AS DECIMAL(20,4))) AS stdDev " +
+                "  MIN(" + numericExpr + ") AS minValue, " +
+                "  MAX(" + numericExpr + ") AS maxValue, " +
+                "  AVG(" + numericExpr + ") AS avgValue, " +
+                "  STD(" + numericExpr + ") AS stdDev " +
                 "FROM `" + tableName + "` " +
-                "WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != ''"
+                "WHERE " + quotedColumn + " IS NOT NULL " +
+                "AND TRIM(" + quotedColumn + ") <> '' " +
+                "AND TRIM(" + quotedColumn + ") REGEXP '^-?[0-9]+(\\\\.[0-9]+)?$'"
             );
             
             stats.put("min", numStats.get("minValue"));
@@ -1562,7 +1779,7 @@ public class DataUploadService {
             stats.put("avg", numStats.get("avgValue"));
             stats.put("stdDev", numStats.get("stdDev"));
         } catch (Exception e) {
-            log.warn("计算数值统计信息失败：{}", e.getMessage());
+            log.debug("计算数值统计信息失败，table={}, column={}, reason={}", tableName, quotedColumn, e.getMessage());
         }
     }
     
@@ -1584,19 +1801,33 @@ public class DataUploadService {
     }
     
     private Map<String, Object> getNumericDistribution(String tableName, String quotedColumn, String columnName) {
-        List<Map<String, Object>> distribution = jdbcTemplate.queryForList(
-            "SELECT " +
-            "  FLOOR(CAST(" + quotedColumn + " AS DECIMAL(20,4)) / " +
-            "    (SELECT (MAX(CAST(" + quotedColumn + " AS DECIMAL(20,4))) - MIN(CAST(" + quotedColumn + " AS DECIMAL(20,4)))) / 10 " +
-            "     FROM `" + tableName + "` WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != '')) AS bucket, " +
-            "  COUNT(*) AS count " +
-            "FROM `" + tableName + "` " +
-            "WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != '' " +
-            "GROUP BY bucket " +
-            "ORDER BY bucket " +
-            "LIMIT 20"
-        );
-        
+        String numericExpr = "CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))";
+        List<Map<String, Object>> distribution;
+        try {
+            distribution = jdbcTemplate.queryForList(
+                "WITH numeric_data AS (" +
+                "  SELECT " + numericExpr + " AS numeric_value FROM `" + tableName + "` " +
+                "  WHERE " + quotedColumn + " IS NOT NULL " +
+                "    AND TRIM(" + quotedColumn + ") <> '' " +
+                "    AND TRIM(" + quotedColumn + ") REGEXP '^-?[0-9]+(\\\\.[0-9]+)?$'" +
+                "), stats AS (" +
+                "  SELECT MIN(numeric_value) AS min_value, MAX(numeric_value) AS max_value FROM numeric_data" +
+                ") " +
+                "SELECT CASE " +
+                "         WHEN stats.max_value = stats.min_value THEN 0 " +
+                "         ELSE FLOOR((numeric_data.numeric_value - stats.min_value) / NULLIF((stats.max_value - stats.min_value) / 10, 0)) " +
+                "       END AS bucket, " +
+                "       COUNT(*) AS count " +
+                "FROM numeric_data CROSS JOIN stats " +
+                "GROUP BY bucket " +
+                "ORDER BY bucket " +
+                "LIMIT 20"
+            );
+        } catch (Exception e) {
+            log.debug("计算数值分布失败，table={}, column={}, reason={}", tableName, quotedColumn, e.getMessage());
+            distribution = List.of();
+        }
+
         return Map.of(
             "columnName", columnName,
             "type", "NUMERIC",
@@ -1621,6 +1852,20 @@ public class DataUploadService {
         );
     }
     
+    private Double toNullableDouble(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Number number) {
+            return number.doubleValue();
+        }
+        try {
+            return Double.parseDouble(Objects.toString(value, "").trim());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     private String calculateMD5(byte[] bytes) {
         try {
             java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
