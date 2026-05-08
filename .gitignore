@@ -6,6 +6,10 @@ env/
 .env.*
 !.env.example
 
+# Local runtime config
+docker-compose.yml
+**/application.yml
+
 # Node
 node_modules/
 dist/

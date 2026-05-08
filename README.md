@@ -168,7 +168,7 @@ http://localhost:5173
 
 ```powershell
 cd D:\Javatest\insight-spark\insight-spark-backend
-mvn -q test
+mvn -q testss
 ```
 
 前端打包：
