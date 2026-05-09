@@ -6,9 +6,8 @@ env/
 .env.*
 !.env.example
 
-# Local runtime config（application.yml 每人本机一份，不提交；示例见 application.yml.example）
+# Local overrides only
 docker-compose.yml
-**/application.yml
 **/application-local.yml
 **/application-local.properties
 
