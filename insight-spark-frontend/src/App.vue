@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <UserDashboardView v-if="sharePreviewToken" />
   <AuthView v-else-if="!isAuthenticated" @authenticated="handleAuthenticated" />
   <el-container v-else class="app-shell">

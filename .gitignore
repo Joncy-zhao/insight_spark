@@ -6,9 +6,11 @@ env/
 .env.*
 !.env.example
 
-# Local runtime config
+# Local runtime config（application.yml 每人本机一份，不提交；示例见 application.yml.example）
 docker-compose.yml
 **/application.yml
+**/application-local.yml
+**/application-local.properties
 
 # Node
 node_modules/
