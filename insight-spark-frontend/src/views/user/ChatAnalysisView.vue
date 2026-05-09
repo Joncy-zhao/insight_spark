@@ -8,6 +8,34 @@
               </div>
             </div>
 
+            <div class="chat-datasource-bar">
+              <div class="chat-datasource-label">数据源</div>
+              <el-select
+                  v-model="selectedTableName"
+                  placeholder="Select data source"
+                  class="chat-datasource-select"
+                  clearable
+                  filterable
+              >
+                <el-option-group v-if="uploadTables.length" label="Upload tables">
+                  <el-option
+                      v-for="table in uploadTables"
+                      :key="table.tableName"
+                      :label="table.displayName"
+                      :value="table.tableName"
+                  />
+                </el-option-group>
+                <el-option-group v-if="officialQueryTables.length" label="Official tables">
+                  <el-option
+                      v-for="table in officialQueryTables"
+                      :key="table.tableName"
+                      :label="table.displayName"
+                      :value="table.tableName"
+                  />
+                </el-option-group>
+              </el-select>
+            </div>
+
             <div class="message-list" id="chatHistory">
               <div v-for="(msg, index) in messages" :key="index" :class="['message-wrapper', msg.role]">
                 <div class="avatar">{{ msg.role === 'system' ? '🤖' : '👤' }}</div>
@@ -291,6 +319,8 @@ const {
   myPermissionRequests,
   nextStatus,
   numericFields,
+  uploadTables,
+  officialQueryTables,
   officialDatasources,
   onFileChange,
   onFileRemove,
@@ -360,6 +390,21 @@ const {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+.chat-datasource-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.chat-datasource-label {
+  flex: 0 0 auto;
+  color: #6b7280;
+  font-size: 13px;
+}
+.chat-datasource-select {
+  width: 320px;
+  max-width: 100%;
 }
 .ask-bar {
   display: flex;

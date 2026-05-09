@@ -30,25 +30,6 @@
           <el-tag :type="currentUser?.role === 'ADMIN' ? 'warning' : 'success'">
             {{ portalLabel }}
           </el-tag>
-          <el-select v-model="selectedTableName" placeholder="选择数据源" class="table-select" clearable filterable>
-            <el-option-group v-if="uploadTables.length" label="上传数据表">
-              <el-option
-                  v-for="table in uploadTables"
-                  :key="table.tableName"
-                  :label="table.displayName"
-                  :value="table.tableName"
-              />
-            </el-option-group>
-            <el-option-group v-if="officialQueryTables.length" label="官方授权库">
-              <el-option
-                  v-for="table in officialQueryTables"
-                  :key="table.tableName"
-                  :label="table.displayName"
-                  :value="table.tableName"
-              />
-            </el-option-group>
-
-          </el-select>
           <el-button @click="handleLogout">退出</el-button>
         </div>
       </el-header>
