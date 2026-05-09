@@ -6,13 +6,19 @@ import com.insightspark.core.auth.AuthContext;
 import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.support.GeneratedKeyHolder;
+import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Service;
 
+import java.sql.PreparedStatement;
+import java.sql.Statement;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Collectors;
 
 @Service
 public class ChatQueryHistoryService {
@@ -57,37 +63,107 @@ public class ChatQueryHistoryService {
         addColumnIfMissing("is_chat_query_history", "query_table_name", "`query_table_name` VARCHAR(128) NULL");
     }
 
-    public void recordSuccess(String question, String tableName, Map<String, Object> result, Long executionTimeMs) {
+    /**
+     * 写入成功查询历史，返回自增主键 id（供「钉入看板」关联 chart_id）。失败时返回 null。
+     */
+    public Long recordSuccess(String question, String tableName, Map<String, Object> result, Long executionTimeMs) {
         try {
             String userId = resolveUserId();
             if (userId == null) {
-                return;
+                return null;
             }
             String resolvedTableName = resolveTableName(tableName, result);
-            jdbcTemplate.update("""
+            String sql = """
                     INSERT INTO is_chat_query_history(
                         user_id, data_source_id, query_table_name, query_text, generated_sql,
                         reasoning_process, llm_model_used, chart_type, chart_snapshot,
                         execution_status, risk_level, audit_info, execution_time_ms, is_hit_cache, is_deleted
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-                    """,
-                    userId,
-                    resolveDatasourceId(resolvedTableName),
-                    nullIfBlank(resolvedTableName),
-                    safeText(question, MAX_QUERY_TEXT_LENGTH),
-                    Objects.toString(result.get("sql"), null),
-                    toJson(result.getOrDefault("reasoningLogs", List.of())),
-                    safeText(resolveModelName(result), MAX_MODEL_NAME_LENGTH),
-                    safeText(Objects.toString(result.getOrDefault("chartType", ""), ""), MAX_CHART_TYPE_LENGTH),
-                    toJson(buildChartSnapshot(resolvedTableName, result)),
-                    1,
-                    normalizeRiskLevel(Objects.toString(result.getOrDefault("riskLevel", "SAFE"), "SAFE")),
-                    safeText(Objects.toString(result.getOrDefault("riskReason", "查询成功"), "查询成功"), MAX_AUDIT_INFO_LENGTH),
-                    executionTimeMs == null ? null : executionTimeMs.intValue(),
-                    0
-            );
+                    """;
+            KeyHolder keyHolder = new GeneratedKeyHolder();
+            jdbcTemplate.update(connection -> {
+                PreparedStatement ps = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
+                int i = 1;
+                ps.setString(i++, userId);
+                ps.setLong(i++, resolveDatasourceId(resolvedTableName));
+                String qtn = nullIfBlank(resolvedTableName);
+                if (qtn == null) {
+                    ps.setNull(i++, Types.VARCHAR);
+                } else {
+                    ps.setString(i++, qtn);
+                }
+                ps.setString(i++, safeText(question, MAX_QUERY_TEXT_LENGTH));
+                String genSql = Objects.toString(result.get("sql"), null);
+                if (genSql == null || genSql.isBlank()) {
+                    ps.setNull(i++, Types.LONGVARCHAR);
+                } else {
+                    ps.setString(i++, genSql);
+                }
+                ps.setString(i++, toJson(result.getOrDefault("reasoningLogs", List.of())));
+                ps.setString(i++, safeText(resolveModelName(result), MAX_MODEL_NAME_LENGTH));
+                ps.setString(i++, safeText(Objects.toString(result.getOrDefault("chartType", ""), ""), MAX_CHART_TYPE_LENGTH));
+                ps.setString(i++, toJson(buildChartSnapshot(resolvedTableName, result)));
+                ps.setInt(i++, 1);
+                ps.setString(i++, normalizeRiskLevel(Objects.toString(result.getOrDefault("riskLevel", "SAFE"), "SAFE")));
+                ps.setString(i++, safeText(Objects.toString(result.getOrDefault("riskReason", "查询成功"), "查询成功"), MAX_AUDIT_INFO_LENGTH));
+                if (executionTimeMs == null) {
+                    ps.setNull(i++, Types.INTEGER);
+                } else {
+                    ps.setInt(i++, executionTimeMs.intValue());
+                }
+                ps.setInt(i++, 0);
+                return ps;
+            }, keyHolder);
+            Number key = keyHolder.getKey();
+            return key == null ? null : key.longValue();
         } catch (Exception ignored) {
-            // 历史记录写入失败不应影响主流程。
+            return null;
+        }
+    }
+
+    /**
+     * 批量拉取对话图表快照（同一用户），用于看板一次加载多个图表。
+     */
+    public List<Map<String, Object>> batchChartSnapshotsForCurrentUser(List<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return List.of();
+        }
+        String userId = resolveUserId();
+        if (userId == null) {
+            return List.of();
+        }
+        List<Long> limited = ids.stream().filter(Objects::nonNull).distinct().limit(50).collect(Collectors.toList());
+        if (limited.isEmpty()) {
+            return List.of();
+        }
+        String in = limited.stream().map(id -> "?").collect(Collectors.joining(","));
+        List<Object> args = new ArrayList<>(limited);
+        String sql = """
+                SELECT id, chart_type AS chartType, chart_snapshot AS chartSnapshot, generated_sql AS generatedSql,
+                       query_table_name AS queryTableName, query_text AS queryText
+                FROM is_chat_query_history
+                WHERE id IN (""" + in + ") AND is_deleted = 0";
+        if (!AuthContext.isAdmin()) {
+            sql += " AND user_id = ?";
+            args.add(userId);
+        }
+        return jdbcTemplate.queryForList(sql, args.toArray());
+    }
+
+    public void assertHistoryChartOwnedByCurrentUser(long historyId) {
+        String userId = resolveUserId();
+        if (userId == null) {
+            throw new IllegalArgumentException("未登录");
+        }
+        if (AuthContext.isAdmin()) {
+            return;
+        }
+        Integer n = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM is_chat_query_history
+                WHERE id = ? AND user_id = ? AND is_deleted = 0 AND execution_status = 1
+                """, Integer.class, historyId, userId);
+        if (n == null || n == 0) {
+            throw new IllegalArgumentException("图表记录不存在或无权钉入");
         }
     }
 
@@ -238,6 +314,20 @@ public class ChatQueryHistoryService {
         snapshot.put("chartType", result.get("chartType"));
         snapshot.put("fieldMapping", result.get("fieldMapping"));
         snapshot.put("message", result.get("message"));
+        snapshot.put("sql", result.get("sql"));
+        snapshot.put("data", result.get("data"));
+        if (result.get("chartEngine") != null) {
+            snapshot.put("chartEngine", result.get("chartEngine"));
+        }
+        if (result.get("dimensions") != null) {
+            snapshot.put("dimensions", result.get("dimensions"));
+        }
+        if (result.get("encode") != null) {
+            snapshot.put("encode", result.get("encode"));
+        }
+        if (result.get("optionTemplate") != null) {
+            snapshot.put("optionTemplate", result.get("optionTemplate"));
+        }
         return snapshot;
     }
 

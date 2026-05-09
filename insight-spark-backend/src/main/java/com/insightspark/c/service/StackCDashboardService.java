@@ -3,11 +3,16 @@ package com.insightspark.c.service;
 import com.insightspark.core.auth.AuthContext;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.insightspark.service.ChatQueryHistoryService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.support.GeneratedKeyHolder;
+import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Service;
 
 import java.security.SecureRandom;
+import java.sql.PreparedStatement;
+import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -25,6 +30,9 @@ public class StackCDashboardService {
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    private ChatQueryHistoryService chatQueryHistoryService;
 
     private final SecureRandom secureRandom = new SecureRandom();
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -164,20 +172,143 @@ public class StackCDashboardService {
         Map<String, Object> dashboard = getById(id);
         assertOwnerOrAdmin(dashboard);
 
-        Map<String, Object> chartCard = buildChartCard(body);
-        Map<String, Object> layout = parseLayoutJson(Objects.toString(dashboard.getOrDefault("layoutJson", "{}"), "{}"));
-        List<Map<String, Object>> cards = ensureCardList(layout);
-        cards.add(chartCard);
-        layout.put("cards", cards);
-        layout.putIfAbsent("version", "1.0");
+        Object chartIdRaw = body == null ? null : body.get("chartId");
+        if (chartIdRaw == null) {
+            throw new IllegalArgumentException("缺少 chartId：请使用最新对话查询生成图表后再钉入");
+        }
+        long chartId;
+        if (chartIdRaw instanceof Number n) {
+            chartId = n.longValue();
+        } else {
+            chartId = Long.parseLong(String.valueOf(chartIdRaw).trim());
+        }
+        chatQueryHistoryService.assertHistoryChartOwnedByCurrentUser(chartId);
 
-        String layoutJson = toJson(layout);
+        KeyHolder compKeys = new GeneratedKeyHolder();
+        jdbcTemplate.update(connection -> {
+            PreparedStatement ps = connection.prepareStatement("""
+                            INSERT INTO is_dashboard_component (dashboard_id, chart_id, position_config)
+                            VALUES (?, ?, ?)
+                            """,
+                    Statement.RETURN_GENERATED_KEYS);
+            ps.setLong(1, id);
+            ps.setLong(2, chartId);
+            ps.setString(3, "{\"x\":0,\"y\":0,\"w\":6,\"h\":4}");
+            return ps;
+        }, compKeys);
+        Number compKey = compKeys.getKey();
+        if (compKey == null) {
+            throw new IllegalStateException("钉入失败：未生成看板组件记录");
+        }
+        long componentId = compKey.longValue();
+
+        Map<String, Object> layout = parseLayoutJson(Objects.toString(dashboard.getOrDefault("layoutJson", "{}"), "{}"));
+        List<Map<String, Object>> items = extractGridItems(layout);
+        int bottom = gridLayoutBottom(items);
+        Map<String, Object> cell = new LinkedHashMap<>();
+        cell.put("i", String.valueOf(componentId));
+        cell.put("x", 0);
+        cell.put("y", bottom);
+        cell.put("w", 6);
+        cell.put("h", 4);
+        items.add(cell);
+
+        Map<String, Object> merged = new LinkedHashMap<>();
+        merged.put("version", "2.0");
+        merged.put("items", items);
+        if (layout.get("cards") instanceof List<?> legacyCards && !legacyCards.isEmpty()) {
+            merged.put("cards", layout.get("cards"));
+        }
+        copyCanvasStyleIfPresent(layout, merged);
+
+        String layoutJson = toJson(merged);
         jdbcTemplate.update("""
                 UPDATE is_dashboard
                 SET layout_json = ?, updated_at = NOW()
                 WHERE id = ?
                 """, layoutJson, id);
         return getById(id);
+    }
+
+    /**
+     * 从看板移除钉入组件：删除 is_dashboard_component 行，并从 layout_json.items 中去掉对应 i。
+     */
+    public Map<String, Object> removeDashboardComponent(long dashboardId, long componentId) {
+        Map<String, Object> dashboard = getById(dashboardId);
+        assertOwnerOrAdmin(dashboard);
+        Long cnt = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM is_dashboard_component WHERE id = ? AND dashboard_id = ?
+                """, Long.class, componentId, dashboardId);
+        if (cnt == null || cnt == 0) {
+            throw new IllegalArgumentException("组件不存在或不属于该看板");
+        }
+        jdbcTemplate.update("DELETE FROM is_dashboard_component WHERE id = ? AND dashboard_id = ?",
+                componentId, dashboardId);
+
+        Map<String, Object> layout = parseLayoutJson(Objects.toString(dashboard.getOrDefault("layoutJson", "{}"), "{}"));
+        List<Map<String, Object>> items = extractGridItems(layout);
+        String compIdStr = String.valueOf(componentId);
+        items.removeIf(it -> compIdStr.equals(String.valueOf(it.get("i"))));
+
+        Map<String, Object> merged = new LinkedHashMap<>();
+        merged.put("version", "2.0");
+        merged.put("items", items);
+        if (layout.get("cards") instanceof List<?> legacyCards && !legacyCards.isEmpty()) {
+            merged.put("cards", layout.get("cards"));
+        }
+        copyCanvasStyleIfPresent(layout, merged);
+        String layoutJson = toJson(merged);
+        jdbcTemplate.update("""
+                UPDATE is_dashboard
+                SET layout_json = ?, updated_at = NOW()
+                WHERE id = ?
+                """, layoutJson, dashboardId);
+        return getById(dashboardId);
+    }
+
+    public List<Map<String, Object>> listDashboardComponents(long dashboardId) {
+        Map<String, Object> dashboard = getById(dashboardId);
+        assertCanAccess(dashboard);
+        return jdbcTemplate.queryForList("""
+                SELECT id, dashboard_id AS dashboardId, chart_id AS chartId, position_config AS positionConfig
+                FROM is_dashboard_component
+                WHERE dashboard_id = ?
+                ORDER BY id ASC
+                """, dashboardId);
+    }
+
+    /**
+     * 当前用户可访问的所有看板中，已钉入的对话图表（chart_id 去重），含所在看板名称汇总。
+     */
+    public List<Map<String, Object>> listPinnedChartsAcrossAccessibleDashboards() {
+        String uid = AuthContext.userId();
+        boolean admin = AuthContext.isAdmin();
+        if (admin) {
+            return jdbcTemplate.queryForList("""
+                    SELECT dc.chart_id AS chart_id,
+                           COUNT(DISTINCT dc.dashboard_id) AS dashboard_count,
+                           GROUP_CONCAT(DISTINCT d.name ORDER BY d.name SEPARATOR '、') AS dashboard_names
+                    FROM is_dashboard_component dc
+                    INNER JOIN is_dashboard d ON d.id = dc.dashboard_id
+                    WHERE d.status != 'ARCHIVED'
+                    GROUP BY dc.chart_id
+                    ORDER BY MAX(dc.id) DESC
+                    LIMIT 500
+                    """);
+        }
+        // 与 listVisibleForCurrentUser 一致：非 ARCHIVED 的本人或公开看板，避免漏掉非 ACTIVE 但仍可编辑的看板
+        return jdbcTemplate.queryForList("""
+                SELECT dc.chart_id AS chart_id,
+                       COUNT(DISTINCT dc.dashboard_id) AS dashboard_count,
+                       GROUP_CONCAT(DISTINCT d.name ORDER BY d.name SEPARATOR '、') AS dashboard_names
+                FROM is_dashboard_component dc
+                INNER JOIN is_dashboard d ON d.id = dc.dashboard_id
+                WHERE d.status != 'ARCHIVED'
+                  AND (d.owner_user_id = ? OR d.is_public = 1)
+                GROUP BY dc.chart_id
+                ORDER BY MAX(dc.id) DESC
+                LIMIT 300
+                """, uid);
     }
 
     private void assertCanAccess(Map<String, Object> row) {
@@ -277,34 +408,6 @@ public class StackCDashboardService {
         }
     }
 
-    private Map<String, Object> buildChartCard(Map<String, Object> body) {
-        if (body == null) {
-            throw new IllegalArgumentException("缺少图表数据");
-        }
-        String title = Objects.toString(body.getOrDefault("title", "新图表卡片"), "").trim();
-        if (title.isBlank()) {
-            title = "新图表卡片";
-        }
-        String chartType = Objects.toString(body.getOrDefault("chartType", "bar"), "bar");
-        String tableName = Objects.toString(body.getOrDefault("tableName", ""), "");
-        String sql = Objects.toString(body.getOrDefault("sql", ""), "");
-        Object data = body.get("data");
-        if (!(data instanceof List<?>)) {
-            throw new IllegalArgumentException("图表数据格式错误");
-        }
-        Map<String, Object> card = new LinkedHashMap<>();
-        card.put("cardId", "card_" + System.currentTimeMillis());
-        card.put("title", title);
-        card.put("type", "chart");
-        card.put("chartType", chartType);
-        card.put("tableName", tableName);
-        card.put("sql", sql);
-        card.put("fieldMapping", body.getOrDefault("fieldMapping", Map.of()));
-        card.put("data", data);
-        card.put("createdAt", LocalDateTime.now().toString());
-        return card;
-    }
-
     private Map<String, Object> parseLayoutJson(String layoutJson) {
         String text = Objects.toString(layoutJson, "").trim();
         if (text.isBlank()) {
@@ -319,20 +422,41 @@ public class StackCDashboardService {
     }
 
     @SuppressWarnings("unchecked")
-    private List<Map<String, Object>> ensureCardList(Map<String, Object> layout) {
-        Object cardsRaw = layout.get("cards");
-        if (cardsRaw instanceof List<?> list) {
-            List<Map<String, Object>> cards = new ArrayList<>();
-            for (Object item : list) {
-                if (item instanceof Map<?, ?> map) {
-                    Map<String, Object> card = new LinkedHashMap<>();
-                    map.forEach((k, v) -> card.put(String.valueOf(k), v));
-                    cards.add(card);
-                }
-            }
-            return cards;
+    private List<Map<String, Object>> extractGridItems(Map<String, Object> layout) {
+        Object raw = layout.get("items");
+        if (!(raw instanceof List<?> list)) {
+            return new ArrayList<>();
         }
-        return new ArrayList<>();
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Object o : list) {
+            if (o instanceof Map<?, ?> map) {
+                Map<String, Object> cell = new LinkedHashMap<>();
+                map.forEach((k, v) -> cell.put(String.valueOf(k), v));
+                out.add(cell);
+            }
+        }
+        return out;
+    }
+
+    private int gridLayoutBottom(List<Map<String, Object>> items) {
+        int m = 0;
+        for (Map<String, Object> it : items) {
+            int y = layoutInt(it.get("y"), 0);
+            int h = layoutInt(it.get("h"), 1);
+            m = Math.max(m, y + h);
+        }
+        return m;
+    }
+
+    private int layoutInt(Object v, int def) {
+        if (v instanceof Number n) {
+            return n.intValue();
+        }
+        try {
+            return Integer.parseInt(Objects.toString(v, "").trim());
+        } catch (Exception e) {
+            return def;
+        }
     }
 
     private String toJson(Object value) {
@@ -340,6 +464,17 @@ public class StackCDashboardService {
             return objectMapper.writeValueAsString(value);
         } catch (Exception e) {
             throw new IllegalArgumentException("布局序列化失败");
+        }
+    }
+
+    /** 保留设计看板画布样式（layout_json.canvasStyle），避免钉入/移除组件时丢失 */
+    @SuppressWarnings("unchecked")
+    private void copyCanvasStyleIfPresent(Map<String, Object> from, Map<String, Object> to) {
+        Object cs = from.get("canvasStyle");
+        if (cs instanceof Map<?, ?> map && !map.isEmpty()) {
+            Map<String, Object> copy = new LinkedHashMap<>();
+            map.forEach((k, v) -> copy.put(String.valueOf(k), v));
+            to.put("canvasStyle", copy);
         }
     }
 }

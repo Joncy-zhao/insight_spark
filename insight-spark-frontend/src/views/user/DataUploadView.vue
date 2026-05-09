@@ -202,6 +202,7 @@
     width="min(860px, 92vw)"
     top="6vh"
     class="quality-issue-dialog"
+    append-to-body
     :close-on-click-modal="false"
   >
     <div class="cleaning-strategy">
@@ -249,7 +250,13 @@
     </template>
   </el-dialog>
 
-  <el-dialog v-model="previewDialogVisible" :title="editablePreview ? '空值与异常值处理' : '数据预览'" width="92%" top="4vh">
+  <el-dialog
+    v-model="previewDialogVisible"
+    append-to-body
+    :title="editablePreview ? '空值与异常值处理' : '数据预览'"
+    width="92%"
+    top="4vh"
+  >
     <div class="preview-dialog-header">
       <div>
         <div class="section-title">{{ editablePreview ? '' : '展示解析后的数据' }}</div>
@@ -534,7 +541,7 @@ function validateFileBeforeUpload(file) {
     ElMessage.error('单文件不能超过 100MB')
     return false
   }
-  return false
+  return true
 }
 
 async function handleUploadChange(file, fileList) {
@@ -652,11 +659,23 @@ async function confirmApplyCleaningStrategy() {
 }
 
 async function openPreviewDialog(mode = 'preview') {
-  if (!selectedTableName.value) return
+  const tableName = String(selectedTableName.value || uploadResult.value?.tableName || '').trim()
+  if (!tableName) {
+    ElMessage.warning('未识别到当前数据表，请关闭后点击「刷新数据表」或重新上传后再试。')
+    return
+  }
+  if (!selectedTableName.value) {
+    selectedTableName.value = tableName
+  }
   previewMode.value = mode
   qualityIssueDialogVisible.value = false
-  await Promise.all([loadFields(selectedTableName.value), loadPreview(selectedTableName.value)])
-  previewDialogVisible.value = true
+  try {
+    await Promise.all([loadFields(tableName), loadPreview(tableName)])
+    previewDialogVisible.value = true
+  } catch (error) {
+    qualityIssueDialogVisible.value = true
+    ElMessage.error(error?.message || '加载数据预览失败，请检查网络或后端是否已启动')
+  }
 }
 
 async function startManualCleaning() {

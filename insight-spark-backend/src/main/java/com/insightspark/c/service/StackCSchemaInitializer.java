@@ -67,6 +67,22 @@ public class StackCSchemaInitializer {
                     """);
 
             jdbcTemplate.execute("""
+                    CREATE TABLE IF NOT EXISTS `is_dashboard_component` (
+                      `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '看板内组件主键（对应 layout_json items[].i）',
+                      `dashboard_id` BIGINT NOT NULL COMMENT '看板 id',
+                      `chart_id` BIGINT NOT NULL COMMENT 'B 端对话查询历史 is_chat_query_history.id',
+                      `position_config` VARCHAR(512) NOT NULL DEFAULT '{"x":0,"y":0,"w":6,"h":4}' COMMENT '位姿 JSON 冗余',
+                      `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                      PRIMARY KEY (`id`),
+                      KEY `idx_dashboard_component_board` (`dashboard_id`),
+                      KEY `idx_dashboard_component_chart` (`chart_id`),
+                      CONSTRAINT `fk_dashboard_component_board` FOREIGN KEY (`dashboard_id`) REFERENCES `is_dashboard` (`id`)
+                        ON DELETE CASCADE ON UPDATE CASCADE
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='看板与对话图表关联（钉入）';
+                    """);
+
+            jdbcTemplate.execute("""
                     CREATE TABLE IF NOT EXISTS `is_annotation` (
                       `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键',
                       `user_id` VARCHAR(64) NOT NULL COMMENT '作者 user_id，关联 is_user.user_id',

@@ -91,7 +91,7 @@
                   :current-page="recentChatQueryPage"
                   :page-size="recentChatQueryPageSize"
                   :page-sizes="[5, 8, 10, 20]"
-                  small
+                  size="small"
                   @current-change="handleRecentChatPageChange"
                   @size-change="handleRecentChatPageSizeChange"
               />

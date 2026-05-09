@@ -30,10 +30,28 @@ public class StackCDashboardController {
         return ApiResponse.success(dashboardService.listVisibleForCurrentUser());
     }
 
+    /**
+     * 当前用户可访问的所有看板中，已钉入的图表（按 chart_id 去重），供网格编辑器等选择。
+     * 必须声明在 /{id} 之前，避免 path 被当成 id。
+     */
+    @GetMapping("/pinned-charts")
+    public ApiResponse<List<Map<String, Object>>> listPinnedChartsAcrossDashboards() {
+        return ApiResponse.success(dashboardService.listPinnedChartsAcrossAccessibleDashboards());
+    }
+
     @GetMapping("/{id}")
     public ApiResponse<Map<String, Object>> get(@PathVariable long id) {
         try {
             return ApiResponse.success(dashboardService.getById(id));
+        } catch (IllegalArgumentException e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    @GetMapping("/{id}/components")
+    public ApiResponse<List<Map<String, Object>>> listComponents(@PathVariable long id) {
+        try {
+            return ApiResponse.success(dashboardService.listDashboardComponents(id));
         } catch (IllegalArgumentException e) {
             return ApiResponse.badRequest(e.getMessage());
         }
@@ -98,6 +116,15 @@ public class StackCDashboardController {
     public ApiResponse<Map<String, Object>> pinChart(@PathVariable long id, @RequestBody Map<String, Object> body) {
         try {
             return ApiResponse.success("图表已钉入看板", dashboardService.pinChart(id, body));
+        } catch (IllegalArgumentException e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    @DeleteMapping("/{id}/components/{componentId}")
+    public ApiResponse<Map<String, Object>> removeComponent(@PathVariable long id, @PathVariable long componentId) {
+        try {
+            return ApiResponse.success("已从看板移除", dashboardService.removeDashboardComponent(id, componentId));
         } catch (IllegalArgumentException e) {
             return ApiResponse.badRequest(e.getMessage());
         }

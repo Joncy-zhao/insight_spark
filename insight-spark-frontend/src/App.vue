@@ -1413,9 +1413,15 @@ const pinChartToDashboard = async () => {
     ElMessage.warning('请选择目标看板')
     return
   }
+  const chartIdRaw = lastAnalysis.value?.queryHistoryId ?? lastAnalysis.value?.chartId
+  if (chartIdRaw == null || chartIdRaw === '') {
+    ElMessage.warning('当前图表缺少对话历史 id，无法钉入。请重新发起一次对话查询（流式完成后会自动写入历史），再点钉入看板。')
+    return
+  }
   pinning.value = true
   try {
     const payload = {
+      chartId: Number(chartIdRaw),
       title: String(lastAnalysis.value?.sourceQuestion || '图表卡片').slice(0, 80),
       chartType: lastAnalysis.value?.chartType || currentChartType.value || 'bar',
       tableName: lastAnalysis.value?.tableName || '',

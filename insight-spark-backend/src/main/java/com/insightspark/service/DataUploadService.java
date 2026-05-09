@@ -1,4 +1,4 @@
-﻿package com.insightspark.service;
+package com.insightspark.service;
 
 import com.alibaba.excel.EasyExcel;
 import com.insightspark.core.auth.AuthContext;
@@ -1648,34 +1648,35 @@ public class DataUploadService {
     }
 
     private boolean looksEmailField(String label) {
-        return label.contains("email") || label.contains("閭") || label.contains("閭欢");
+        return label.contains("email") || label.contains("邮箱") || label.contains("邮件");
     }
 
     private boolean looksPhoneField(String label) {
-        return label.contains("phone") || label.contains("mobile") || label.contains("tel") || label.contains("鎵嬫満") || label.contains("鐢佃瘽");
+        return label.contains("phone") || label.contains("mobile") || label.contains("tel")
+                || label.contains("手机") || label.contains("电话");
     }
 
     private boolean looksDateField(String label) {
-        return label.contains("date") || label.contains("time") || label.contains("鏃ユ湡") || label.contains("鏃堕棿");
+        return label.contains("date") || label.contains("time") || label.contains("日期") || label.contains("时间");
     }
 
     private boolean looksAgeField(String label) {
-        return label.contains("age") || label.contains("骞撮緞");
+        return label.contains("age") || label.contains("年龄");
     }
 
     private boolean looksAmountField(String label) {
-        return label.contains("amount") || label.contains("price") || label.contains("閲戦") || label.contains("浠锋牸")
-                || label.contains("鏁伴噺") || label.contains("閿€閲?) || label.contains("閿€鍞");
+        return label.contains("amount") || label.contains("price") || label.contains("金额") || label.contains("价格")
+                || label.contains("数量") || label.contains("销售额") || label.contains("销售");
     }
 
     private boolean looksLevelField(String label) {
-        return label.contains("level") || label.contains("grade") || label.contains("绛夌骇") || label.contains("绾у埆")
-                || label.contains("鐘舵€?);
+        return label.contains("level") || label.contains("grade") || label.contains("等级") || label.contains("级别")
+                || label.contains("状态");
     }
 
     private boolean looksNumericField(String label) {
         return label.contains("count") || label.contains("score") || label.contains("rate") || label.contains("num")
-                || label.contains("鍒嗘暟") || label.contains("姣斾緥") || label.contains("鐜?);
+                || label.contains("分数") || label.contains("比例") || label.contains("率");
     }
 
     private boolean isValidEmail(String value) {
@@ -1699,10 +1700,14 @@ public class DataUploadService {
 
     private boolean isValidLevelValue(String value) {
         String normalized = value.trim().toUpperCase();
-        return List.of("A", "B", "C", "D", "S", "VIP", "SVIP", "楂?, "涓?, "浣?, "姝ｅ父", "鏈夋晥", "鏃?, "鏄?, "鍚?,
-                "涓€绾?, "浜岀骇", "涓夌骇", "鏈垎绾?, "鏈煡绛夌骇").contains(normalized);
+        return List.of(
+                "A", "B", "C", "D", "S", "VIP", "SVIP",
+                "高", "中", "低", "正常", "有效", "否", "是",
+                "一级", "二级", "三级", "未分级", "未知等级"
+        ).contains(normalized);
     }
-public Map<String, Object> getFieldDistribution(String tableName, String columnName) {
+
+    public Map<String, Object> getFieldDistribution(String tableName, String columnName) {
         assertKnownTable(tableName);
         assertFieldExists(tableName, columnName);
         if (datasourceService.isOfficialSource(tableName)) {

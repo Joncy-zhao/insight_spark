@@ -44,16 +44,19 @@
       </el-table-column>
     </el-table>
 
-    <el-dialog v-model="previewVisible" :title="previewTitle" width="90%" top="4vh" destroy-on-close>
+    <el-dialog v-model="previewVisible" :title="previewTitle" :width="previewDialogWidth" top="4vh" destroy-on-close>
       <div class="preview-section-head">
         <span>看板图表</span>
         <el-tag size="small" type="info">{{ previewCards.length }} 张</el-tag>
       </div>
-      <div v-if="previewCards.length" class="card-grid">
+      <div
+        v-if="previewCards.length"
+        :class="['dash-chart-grid', dashChartPreviewGridClass(previewCards.length)]"
+      >
         <article
           v-for="(card, index) in previewCards"
           :key="card._renderKey"
-          class="chart-card"
+          :class="['chart-card', { 'chart-card--pie': normalizeChartType(card.chartType) === 'pie' }]"
         >
           <div class="chart-card-head">
             <h4>{{ card.title || `图表${index + 1}` }}</h4>
@@ -113,11 +116,19 @@
 </template>
 
 <script setup>
-import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import * as echarts from 'echarts'
 import axios from 'axios'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { restoreSessionHeader } from '../../store/session'
+import {
+  buildUnifiedPreviewCards,
+  extractLegacyChartCards,
+  countChartSlotsForDashboardRow,
+  dashChartPreviewGridClass,
+  previewChartDialogWidth
+} from '../../utils/dashboardGrid.js'
+import { buildOptionFromHistoryRow } from '../../utils/chartOptionFromSnapshot.js'
 
 const API_BASE = 'http://localhost:8080'
 
@@ -126,6 +137,8 @@ const loadingList = ref(false)
 const previewVisible = ref(false)
 const previewTitle = ref('看板图表预览')
 const previewCards = ref([])
+
+const previewDialogWidth = computed(() => previewChartDialogWidth(previewCards.value.length))
 
 const editVisible = ref(false)
 const saving = ref(false)
@@ -189,29 +202,6 @@ const normalizeChartItem = (item) => {
     name: String(nameValue ?? ''),
     value: Number.isNaN(numericValue) ? 0 : numericValue
   }
-}
-
-const extractChartCards = (layoutJson, scope = 'row') => {
-  const layout = parseLayout(layoutJson)
-  const cards = Array.isArray(layout.cards) ? layout.cards : []
-  return cards
-    .map((raw, index) => {
-      if (!raw || typeof raw !== 'object') return null
-      const cardType = String(raw.type || 'chart').toLowerCase()
-      const data = Array.isArray(raw.data) ? raw.data : []
-      if (cardType !== 'chart' || !data.length) return null
-      const id = String(raw.cardId || `${scope}-${index}`)
-      return {
-        _renderKey: `${scope}-${id}-${index}`,
-        cardId: id,
-        title: String(raw.title || `图表${index + 1}`),
-        chartType: normalizeChartType(raw.chartType),
-        tableName: String(raw.tableName || ''),
-        sql: String(raw.sql || ''),
-        data
-      }
-    })
-    .filter(Boolean)
 }
 
 const buildChartOption = (card) => {
@@ -312,7 +302,11 @@ const renderPreviewCharts = async (cards) => {
       chartInstances.set(key, instance)
     }
 
-    instance.setOption(buildChartOption(card), true)
+    const option =
+      card.payloadRow != null
+        ? buildOptionFromHistoryRow(card.payloadRow, card.chartUi || {})
+        : buildChartOption(card)
+    instance.setOption(option, true)
     instance.resize()
   })
 
@@ -335,9 +329,52 @@ const handleWindowResize = () => {
 
 const openPreview = async (row) => {
   previewTitle.value = row?.name ? `${row.name} - 图表预览` : '看板图表预览'
-  previewCards.value = extractChartCards(row?.layoutJson, `preview-${row?.id || 'temp'}`)
-  previewVisible.value = true
-  await renderPreviewCharts(previewCards.value)
+  const id = row?.id
+  const scope = `preview-${id || 'temp'}`
+  if (!id) {
+    previewCards.value = extractLegacyChartCards(row?.layoutJson, scope)
+    previewVisible.value = true
+    await renderPreviewCharts(previewCards.value)
+    return
+  }
+  restoreSessionHeader()
+  try {
+    const [dashRes, compRes] = await Promise.all([
+      axios.get(`${API_BASE}/api/c/dashboards/${id}`),
+      axios.get(`${API_BASE}/api/c/dashboards/${id}/components`)
+    ])
+    if (dashRes.data.code !== 200) throw new Error(dashRes.data.message || '加载看板失败')
+    if (compRes.data.code !== 200) throw new Error(compRes.data.message || '加载组件失败')
+    const layoutJson = dashRes.data?.data?.layoutJson ?? row?.layoutJson
+    const components = Array.isArray(compRes.data.data) ? compRes.data.data : []
+    const chartIds = [
+      ...new Set(
+        components
+          .map((c) => c.chartId ?? c.chart_id ?? c.CHART_ID)
+          .filter((x) => x != null && String(x).trim() !== '')
+          .map((x) => Number(x))
+          .filter((n) => Number.isFinite(n))
+      )
+    ]
+    const payloadMap = {}
+    if (chartIds.length) {
+      const batchRes = await axios.post(`${API_BASE}/api/chat/history/charts-batch`, { ids: chartIds })
+      if (batchRes.data.code !== 200) throw new Error(batchRes.data.message || '加载图表数据失败')
+      const rows = Array.isArray(batchRes.data.data) ? batchRes.data.data : []
+      for (const r of rows) {
+        const hid = r.id != null ? String(r.id) : ''
+        if (hid) payloadMap[hid] = r
+      }
+    }
+    previewCards.value = buildUnifiedPreviewCards(layoutJson, components, payloadMap, scope)
+    previewVisible.value = true
+    await renderPreviewCharts(previewCards.value)
+  } catch (e) {
+    ElMessage.error(e.message || '加载预览失败')
+    previewCards.value = extractLegacyChartCards(row?.layoutJson, scope)
+    previewVisible.value = true
+    await renderPreviewCharts(previewCards.value)
+  }
 }
 
 const loadList = async () => {
@@ -349,7 +386,7 @@ const loadList = async () => {
     const list = Array.isArray(res.data.data) ? res.data.data : []
     rows.value = list.map((row) => ({
       ...row,
-      chartCardCount: extractChartCards(row?.layoutJson, `count-${row?.id || ''}`).length
+      chartCardCount: countChartSlotsForDashboardRow(row?.layoutJson)
     }))
   } catch (e) {
     ElMessage.error(e.message || '加载失败')
@@ -537,10 +574,31 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
-.card-grid {
+.dash-chart-grid {
+  --preview-cols: 1;
+  --plot: clamp(300px, calc((100vw - 120px) / var(--preview-cols, 1)), 720px);
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
-  gap: 12px;
+  gap: 16px;
+  justify-content: center;
+  align-items: start;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.dash-chart-grid--single {
+  --preview-cols: 1;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: center;
+}
+
+.dash-chart-grid--double {
+  --preview-cols: 2;
+  grid-template-columns: repeat(2, auto);
+}
+
+.dash-chart-grid--multi {
+  --preview-cols: 3;
+  grid-template-columns: repeat(3, auto);
 }
 
 .chart-card {
@@ -548,6 +606,16 @@ onBeforeUnmount(() => {
   border-radius: 10px;
   padding: 10px;
   background: #fff;
+  display: flex;
+  flex-direction: column;
+  width: max-content;
+  max-width: min(100%, calc(100vw - 32px));
+  box-sizing: border-box;
+}
+
+.dash-chart-grid--single .chart-card {
+  width: min(100%, 920px);
+  max-width: 100%;
 }
 
 .chart-card-head {
@@ -571,8 +639,13 @@ onBeforeUnmount(() => {
 }
 
 .chart-box {
-  width: 100%;
-  height: 300px;
+  --s: min(var(--plot), calc((min(65vh, 640px)) * 360 / 260));
+  width: min(100%, var(--s));
+  aspect-ratio: 360 / 260;
+  height: auto;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  align-self: center;
 }
 
 .sql-wrap {
@@ -598,8 +671,11 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 900px) {
-  .card-grid {
-    grid-template-columns: 1fr;
+  .dash-chart-grid--double,
+  .dash-chart-grid--multi {
+    grid-template-columns: auto;
+    justify-items: center;
+    --preview-cols: 1;
   }
 }
 </style>

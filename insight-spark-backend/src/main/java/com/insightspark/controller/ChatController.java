@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.*;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -65,6 +66,30 @@ public class ChatController {
         return ApiResponse.success(null);
     }
 
+    @PostMapping("/history/charts-batch")
+    public ApiResponse<List<Map<String, Object>>> batchChartSnapshots(@RequestBody Map<String, Object> body) {
+        Object raw = body == null ? null : body.get("ids");
+        if (!(raw instanceof List<?> list) || list.isEmpty()) {
+            return ApiResponse.badRequest("请提供 ids 数组");
+        }
+        List<Long> ids = new ArrayList<>();
+        for (Object o : list) {
+            if (o instanceof Number n) {
+                ids.add(n.longValue());
+            } else if (o != null) {
+                try {
+                    ids.add(Long.parseLong(String.valueOf(o).trim()));
+                } catch (NumberFormatException ignored) {
+                    // skip
+                }
+            }
+        }
+        if (ids.isEmpty()) {
+            return ApiResponse.badRequest("ids 格式无效");
+        }
+        return ApiResponse.success(chatQueryHistoryService.batchChartSnapshotsForCurrentUser(ids));
+    }
+
     @GetMapping(value = "/ask-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public void askQuestionStream(@RequestParam String question,
                                   @RequestParam(required = false) String tableName,
@@ -115,8 +140,11 @@ public class ChatController {
                 try {
                     Map<String, Object> result = queryFuture.get(stepIndex < titles.length ? 450 : 1000, TimeUnit.MILLISECONDS);
                     enrichEnhancedResponse(result, question, tableName);
-                    chatQueryHistoryService.recordSuccess(question, tableName, result,
+                    Long historyId = chatQueryHistoryService.recordSuccess(question, tableName, result,
                             System.currentTimeMillis() - startedAt);
+                    if (historyId != null) {
+                        result.put("queryHistoryId", historyId);
+                    }
                     writeSse(writer, "result", result);
                     return;
                 } catch (TimeoutException timeout) {
@@ -175,7 +203,10 @@ public class ChatController {
             if (enhanced) {
                 enrichEnhancedResponse(result, question, tableName);
             }
-            chatQueryHistoryService.recordSuccess(question, tableName, result, System.currentTimeMillis() - startedAt);
+            Long historyId = chatQueryHistoryService.recordSuccess(question, tableName, result, System.currentTimeMillis() - startedAt);
+            if (historyId != null) {
+                result.put("queryHistoryId", historyId);
+            }
             return ApiResponse.success(result);
         } catch (Exception e) {
             chatQueryHistoryService.recordFailure(question, tableName, rootMessage(e), System.currentTimeMillis() - startedAt);

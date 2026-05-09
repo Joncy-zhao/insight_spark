@@ -1,4 +1,4 @@
-﻿package com.insightspark.service;
+package com.insightspark.service;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -7,6 +7,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -224,7 +225,118 @@ public class ChatBiService {
                 + "」和指标「" + fieldMapping.getOrDefault("metric", "记录数")
                 + "」生成" + chartName(chartType) + "。");
 
+        attachChartEncodingSpec(response, chartType, aiResult.orElse(null));
+
         return response;
+    }
+
+    /**
+     * 写入 chart_snapshot 用的 encode + optionTemplate（与前端 ECharts dataset 对齐）。
+     * 查询结果经 normalize 后为 name/value 列；联邦快捷路径未调用此方法。
+     */
+    private void attachChartEncodingSpec(Map<String, Object> response, String chartType, Map<String, Object> aiRaw) {
+        response.put("chartEngine", "echarts");
+        response.put("dimensions", List.of("name", "value"));
+        Map<String, Object> encode = defaultEncodeForChartType(chartType);
+        if (aiRaw != null && aiRaw.get("encode") instanceof Map<?, ?> em) {
+            encode.putAll(castToObjectMap(em));
+        }
+        response.put("encode", encode);
+        Map<String, Object> template = defaultOptionTemplateForChartType(chartType);
+        if (aiRaw != null && aiRaw.get("optionTemplate") instanceof Map<?, ?> tm) {
+            template = deepMergeMaps(template, castToObjectMap(tm));
+        }
+        response.put("optionTemplate", template);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> castToObjectMap(Map<?, ?> raw) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> e : raw.entrySet()) {
+            String k = Objects.toString(e.getKey(), "").trim();
+            if (!k.isBlank()) {
+                out.put(k, e.getValue());
+            }
+        }
+        return out;
+    }
+
+    /** template 为底，overlay 覆盖同名键；嵌套 Map 递归合并；series 按下标合并每一项 */
+    private Map<String, Object> deepMergeMaps(Map<String, Object> template, Map<String, Object> overlay) {
+        Map<String, Object> out = new LinkedHashMap<>(template);
+        for (Map.Entry<String, Object> e : overlay.entrySet()) {
+            String k = e.getKey();
+            Object v = e.getValue();
+            Object base = out.get(k);
+            if ("series".equals(k) && base instanceof List<?> bl && v instanceof List<?> vl) {
+                List<Object> merged = new ArrayList<>();
+                int n = Math.max(bl.size(), vl.size());
+                for (int i = 0; i < n; i++) {
+                    Object b = i < bl.size() ? bl.get(i) : null;
+                    Object o = i < vl.size() ? vl.get(i) : null;
+                    if (b instanceof Map<?, ?> bm && o instanceof Map<?, ?> om) {
+                        merged.add(deepMergeMaps(castToObjectMap(bm), castToObjectMap(om)));
+                    } else if (o != null) {
+                        merged.add(o);
+                    } else if (b != null) {
+                        merged.add(b);
+                    }
+                }
+                out.put(k, merged);
+            } else if (base instanceof Map<?, ?> bm && v instanceof Map<?, ?> vm) {
+                out.put(k, deepMergeMaps(castToObjectMap(bm), castToObjectMap(vm)));
+            } else if (v != null) {
+                out.put(k, v);
+            }
+        }
+        return out;
+    }
+
+    private Map<String, Object> defaultEncodeForChartType(String chartType) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        if ("pie".equalsIgnoreCase(chartType)) {
+            m.put("itemName", "name");
+            m.put("value", "value");
+        } else {
+            m.put("x", "name");
+            m.put("y", "value");
+        }
+        return m;
+    }
+
+    private Map<String, Object> defaultOptionTemplateForChartType(String chartType) {
+        Map<String, Object> template = new LinkedHashMap<>();
+        if ("pie".equalsIgnoreCase(chartType)) {
+            template.put("tooltip", Map.of("trigger", "item", "confine", true));
+            Map<String, Object> s0 = new LinkedHashMap<>();
+            s0.put("minAngle", 2);
+            template.put("series", List.of(s0));
+        } else if ("line".equalsIgnoreCase(chartType)) {
+            template.put("tooltip", Map.of("trigger", "axis", "confine", true));
+            template.put("grid", mapOfGrid());
+            Map<String, Object> s0 = new LinkedHashMap<>();
+            s0.put("smooth", true);
+            template.put("series", List.of(s0));
+        } else {
+            template.put("tooltip", Map.of("trigger", "axis", "axisPointer", Map.of("type", "shadow"), "confine", true));
+            template.put("grid", mapOfGrid());
+            Map<String, Object> s0 = new LinkedHashMap<>();
+            s0.put("barMaxWidth", 32);
+            Map<String, Object> itemStyle = new LinkedHashMap<>();
+            itemStyle.put("borderRadius", List.of(4, 4, 0, 0));
+            s0.put("itemStyle", itemStyle);
+            template.put("series", List.of(s0));
+        }
+        return template;
+    }
+
+    private Map<String, Object> mapOfGrid() {
+        Map<String, Object> g = new LinkedHashMap<>();
+        g.put("left", 48);
+        g.put("right", 12);
+        g.put("top", 14);
+        g.put("bottom", 56);
+        return g;
     }
 
     private boolean isAllNullChartRows(List<Map<String, Object>> rows) {
