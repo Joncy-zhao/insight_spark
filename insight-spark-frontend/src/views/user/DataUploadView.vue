@@ -10,8 +10,10 @@
       </div>
 
       <el-upload
+        v-model:file-list="uploadFileList"
         drag
         multiple
+        action="#"
         :auto-upload="false"
         :show-file-list="true"
         :limit="5"
@@ -58,7 +60,7 @@
         <el-button @click="loadTables">刷新数据表</el-button>
       </div>
 
-      <div v-if="uploadProgress.visible || uploadTask" class="upload-progress">
+      <div v-if="uploadStatusVisible && (uploadProgress.visible || uploadTask)" class="upload-progress">
         <div v-if="uploadProgress.visible">
           <el-progress
             :percentage="Number(uploadProgress.percentage || 0)"
@@ -82,7 +84,7 @@
       </div>
 
       <el-alert
-        v-if="uploadResult"
+        v-if="uploadStatusVisible && uploadResult"
         class="result-alert"
         type="success"
         show-icon
@@ -91,8 +93,8 @@
         :description="`物理表 ${uploadResult.tableName}，共 ${uploadResult.rowCount || 0} 行、${uploadResult.fieldCount || 0} 个字段。`"
       />
 
-      <div v-if="uploadResult" class="post-upload-actions">
-        <el-button v-if="cleaningActions.length" type="warning" @click="qualityIssueDialogVisible = true">
+      <div v-if="uploadStatusVisible && uploadResult" class="post-upload-actions">
+        <el-button v-if="cleaningActions.length" type="warning" @click="openQualityIssueDialog(uploadResult.tableName)">
           处理空值与异常值
         </el-button>
         <el-button v-if="canShowPreview" type="primary" @click="openPreviewDialog">
@@ -118,9 +120,10 @@
         <el-table-column prop="rowCount" label="行数" width="90" />
         <el-table-column prop="fieldCount" label="字段" width="80" />
         <el-table-column prop="createdAt" label="创建时间" min-width="170" />
-        <el-table-column label="操作" width="280" fixed="right">
+        <el-table-column label="操作" width="330" fixed="right">
           <template #default="{ row }">
             <el-button size="small" @click.stop="renameDataTable(row)">保存</el-button>
+            <el-button size="small" type="warning" @click.stop="openTableEditor(row.tableName)">修改</el-button>
             <el-button size="small" type="primary" @click.stop="quickQuery(row)">查询</el-button>
             <el-button size="small" @click.stop="exportDataTable(row)">导出</el-button>
             <el-button size="small" type="danger" @click.stop="deleteDataTable(row)">删除</el-button>
@@ -245,22 +248,24 @@
       <el-empty v-else description="当前没有待处理的空值或异常值" />
     </div>
     <template #footer>
-      <el-button @click="skipCleaningAndPreview">不处理</el-button>
-      <el-button type="primary" @click="startImmediateCleaning">立马处理</el-button>
+      <div class="quality-dialog-footer">
+        <el-button class="footer-left" @click="skipCleaningAndPreview">不处理</el-button>
+        <el-button class="footer-right" type="primary" @click="startImmediateCleaning">立马处理</el-button>
+      </div>
     </template>
   </el-dialog>
 
   <el-dialog
     v-model="previewDialogVisible"
     append-to-body
-    :title="editablePreview ? '空值与异常值处理' : '数据预览'"
+    :title="previewMode === 'cleaning' ? '空值与异常值处理' : previewMode === 'table-edit' ? '修改数据表' : '数据预览'"
     width="92%"
     top="4vh"
   >
     <div class="preview-dialog-header">
       <div>
-        <div class="section-title">{{ editablePreview ? '' : '展示解析后的数据' }}</div>
-        <p>{{ editablePreview ? '可以手动修改空值与异常值，也可以点击自动处理后检查修改结果。' : '支持分页查看、批量替换、删除无效行和字段转换。' }}</p>
+        <div class="section-title">{{ previewMode === 'cleaning' ? '' : previewMode === 'table-edit' ? '修改当前数据表' : '展示解析后的数据' }}</div>
+        <p>{{ previewMode === 'cleaning' ? '可以手动修改空值与异常值，也可以点击自动处理后检查修改结果。' : '支持分页查看、批量替换、删除无效行和字段转换。' }}</p>
       </div>
       <div class="preview-actions">
         <el-button size="small" :disabled="!selectedTableName" @click="showBatchReplaceDialog">批量替换</el-button>
@@ -272,7 +277,7 @@
       :data="previewDisplayRows"
       height="520"
       :empty-text="editablePreview ? '暂无空值或异常值' : '请选择数据表'"
-      :cell-class-name="getCellClassName"
+      :cell-class-name="previewCellClassName"
       @selection-change="handleSelectionChange"
     >
       <el-table-column type="selection" width="48" />
@@ -290,24 +295,25 @@
       </el-table-column>
     </el-table>
     <el-pagination
-      v-if="!editablePreview"
+      v-if="previewMode !== 'cleaning'"
       class="preview-pagination"
-      layout="total, sizes, prev, pager, next"
-      :total="previewTotal"
-      :current-page="previewPage"
-      :page-size="previewPageSize"
+      layout="total, sizes, prev, pager, next, jumper"
+      :total="dialogPreviewTotal"
+      :current-page="dialogPreviewPage"
+      :page-size="dialogPreviewPageSize"
       :page-sizes="[10, 20, 50, 100]"
-      @current-change="handlePreviewPageChange"
-      @size-change="handlePreviewSizeChange"
+      @current-change="handleDialogPreviewPageChange"
+      @size-change="handleDialogPreviewSizeChange"
     />
     <template #footer>
       <template v-if="editablePreview">
-        <el-button type="warning" :disabled="!cleaningActions.length" :loading="cleaningApplying" @click="confirmApplyCleaningStrategy">
+        <el-button v-if="previewMode === 'cleaning'" type="warning" :disabled="!cleaningActions.length" :loading="cleaningApplying" @click="confirmApplyCleaningStrategy">
           自动处理
         </el-button>
-        <el-button type="primary" :loading="qualityLoading" @click="finishCleaningToPreview">
+        <el-button v-if="previewMode === 'cleaning'" type="primary" :loading="qualityLoading" @click="finishCleaningToPreview">
           处理完成
         </el-button>
+        <el-button v-else type="primary" @click="previewDialogVisible = false">完成</el-button>
       </template>
       <template v-else>
         <el-button v-if="cleaningActions.length || cleaningSkipped || cleaningResult" @click="backToCleaningStep">返回上一步</el-button>
@@ -371,9 +377,11 @@ import {
   deleteColumn,
   deleteRows,
   exportTable,
+  fetchFields,
   getDataQuality,
   getFieldDistribution,
   getFieldStatistics,
+  previewTablePage,
   transformData,
   updateCell,
   validateFile
@@ -434,17 +442,44 @@ const cleaningStage = ref('choice')
 const previewMode = ref('preview')
 const cleaningSkipped = ref(false)
 const savingCellKey = ref('')
+const cleaningContextTableName = ref('')
+const cleaningSnapshotFields = ref([])
+const frozenCleaningStrategy = ref(null)
+const uploadStatusVisible = ref(false)
+const editorTableName = ref('')
+const editorRows = ref([])
+const editorFields = ref([])
+const editorTotal = ref(0)
+const editorPage = ref(1)
+const editorPageSize = ref(10)
 let distributionChartInstance = null
+let uploadStatusHideTimer = null
 
 const batchReplaceForm = ref({ columnName: '', oldValue: '', newValue: '' })
 const transformForm = ref({ columnName: '', transformType: '', format: '%Y-%m-%d', factor: 1, fillValue: '' })
+const uploadFileList = ref([])
 
-const activeCleaningStrategy = computed(() => dataQuality.value?.cleaningStrategy || uploadResult.value?.cleaningStrategy || {})
+const activeTableName = computed(() => String(cleaningContextTableName.value || selectedTableName.value || uploadResult.value?.tableName || '').trim())
+const activeCleaningStrategy = computed(() => {
+  if (frozenCleaningStrategy.value?.tableName === activeTableName.value) {
+    return frozenCleaningStrategy.value
+  }
+  if (dataQuality.value?.tableName === activeTableName.value) {
+    return dataQuality.value.cleaningStrategy || {}
+  }
+  if (uploadResult.value?.tableName === activeTableName.value) {
+    return uploadResult.value.cleaningStrategy || {}
+  }
+  return {}
+})
 const cleaningActions = computed(() => activeCleaningStrategy.value?.actions || [])
-const visibleCleaningActions = computed(() => cleaningResult.value?.processedActions?.length ? cleaningResult.value.processedActions : cleaningActions.value)
+const visibleCleaningActions = computed(() => (
+  cleaningResult.value?.processedActions?.length ? cleaningResult.value.processedActions : cleaningActions.value
+))
 const canShowPreview = computed(() => Boolean(selectedTableName.value) && (cleaningResolved.value || !cleaningActions.value.length))
-const editablePreview = computed(() => previewMode.value === 'cleaning')
+const editablePreview = computed(() => previewMode.value === 'cleaning' || previewMode.value === 'table-edit')
 const visiblePreviewColumns = computed(() => previewColumns.value.filter(item => !['sys_id', 'is_cleaning_anomaly', 'cleaning_isolated', 'cleaning_anomaly_reason'].includes(item)))
+const editorVisibleColumns = computed(() => editorFields.value.map(field => field.columnName).filter(Boolean))
 const issueRows = computed(() => {
   const rows = []
   const seen = new Set()
@@ -460,6 +495,9 @@ const issueRows = computed(() => {
   return rows
 })
 const issueColumns = computed(() => {
+  if (cleaningSnapshotFields.value.length) {
+    return cleaningSnapshotFields.value.map(field => field.columnName).filter(Boolean)
+  }
   const columns = []
   visibleCleaningActions.value.forEach(action => {
     const columnName = action.columnName
@@ -478,8 +516,19 @@ const issueCellTypes = computed(() => {
   })
   return cellTypes
 })
-const previewDisplayRows = computed(() => editablePreview.value ? issueRows.value : previewRows.value)
-const previewDisplayColumns = computed(() => editablePreview.value ? issueColumns.value : visiblePreviewColumns.value)
+const previewDisplayRows = computed(() => {
+  if (previewMode.value === 'cleaning') return issueRows.value
+  if (previewMode.value === 'table-edit') return editorRows.value
+  return previewRows.value
+})
+const previewDisplayColumns = computed(() => {
+  if (previewMode.value === 'cleaning') return issueColumns.value
+  if (previewMode.value === 'table-edit') return editorVisibleColumns.value
+  return visiblePreviewColumns.value
+})
+const dialogPreviewTotal = computed(() => previewMode.value === 'table-edit' ? editorTotal.value : previewTotal.value)
+const dialogPreviewPage = computed(() => previewMode.value === 'table-edit' ? editorPage.value : previewPage.value)
+const dialogPreviewPageSize = computed(() => previewMode.value === 'table-edit' ? editorPageSize.value : previewPageSize.value)
 
 const statisticCards = computed(() => {
   const stats = selectedFieldStats.value
@@ -515,15 +564,30 @@ watch(selectedTableName, async (tableName) => {
 })
 
 watch(uploadResult, async (result) => {
+  if (uploadStatusHideTimer) {
+    clearTimeout(uploadStatusHideTimer)
+    uploadStatusHideTimer = null
+  }
+  uploadStatusVisible.value = Boolean(result)
   cleaningResult.value = null
   manualCleaningMode.value = false
   cleaningResolved.value = false
   cleaningStage.value = 'choice'
   previewMode.value = 'preview'
   cleaningSkipped.value = false
+  cleaningContextTableName.value = ''
+  cleaningSnapshotFields.value = []
+  frozenCleaningStrategy.value = null
   if (!result?.tableName) return
   selectedTableName.value = result.tableName
   await Promise.all([loadFields(result.tableName), loadPreview(result.tableName), loadDataQuality()])
+  cleaningContextTableName.value = result.tableName
+  cleaningSnapshotFields.value = fields.value.map(field => ({ ...field }))
+  frozenCleaningStrategy.value = dataQuality.value?.cleaningStrategy || result.cleaningStrategy || null
+  uploadStatusHideTimer = setTimeout(() => {
+    uploadStatusVisible.value = false
+    uploadStatusHideTimer = null
+  }, 5000)
   if (cleaningActions.value.length) {
     qualityIssueDialogVisible.value = true
   } else {
@@ -544,7 +608,8 @@ function validateFileBeforeUpload(file) {
   return true
 }
 
-async function handleUploadChange(file, fileList) {
+async function handleUploadChange(file, fileList = []) {
+  uploadFileList.value = fileList
   onBatchFileChange(file, fileList)
   const raw = file?.raw
   if (!raw) return
@@ -557,9 +622,10 @@ async function handleUploadChange(file, fileList) {
   }
 }
 
-function handleFileRemove(file, fileList) {
+function handleFileRemove(file, fileList = []) {
+  uploadFileList.value = fileList
   onFileRemove(file, fileList)
-  fileValidation.value = null
+  if (!fileList.length) fileValidation.value = null
 }
 
 function formatUploadBytes(bytes = 0) {
@@ -579,6 +645,82 @@ async function loadDataQuality() {
   } finally {
     qualityLoading.value = false
   }
+}
+
+async function openQualityIssueDialog(tableName) {
+  const targetTableName = String(tableName || selectedTableName.value || uploadResult.value?.tableName || '').trim()
+  if (!targetTableName) {
+    ElMessage.warning('未找到可处理的数据表')
+    return
+  }
+  selectedTableName.value = targetTableName
+  cleaningContextTableName.value = targetTableName
+  cleaningResult.value = null
+  cleaningResolved.value = false
+  cleaningSkipped.value = false
+  previewMode.value = 'cleaning'
+  try {
+    await Promise.all([loadFields(targetTableName), loadPreview(targetTableName), loadDataQuality()])
+    cleaningSnapshotFields.value = fields.value.map(field => ({ ...field }))
+    frozenCleaningStrategy.value = dataQuality.value?.cleaningStrategy || null
+    qualityIssueDialogVisible.value = true
+  } catch (error) {
+    ElMessage.error(error?.message || '加载空值与异常值处理失败')
+  }
+}
+
+async function openTableEditor(tableName) {
+  const targetTableName = String(tableName || '').trim()
+  if (!targetTableName) {
+    ElMessage.warning('未找到要修改的数据表')
+    return
+  }
+  editorTableName.value = targetTableName
+  editorPage.value = 1
+  selectedTableName.value = targetTableName
+  cleaningContextTableName.value = ''
+  cleaningResult.value = null
+  previewMode.value = 'table-edit'
+  qualityIssueDialogVisible.value = false
+  try {
+    await loadEditorTable()
+    cleaningSnapshotFields.value = editorFields.value.map(field => ({ ...field }))
+    previewDialogVisible.value = true
+  } catch (error) {
+    ElMessage.error(error?.message || '加载数据表失败')
+  }
+}
+
+async function loadEditorTable() {
+  const tableName = editorTableName.value
+  if (!tableName) return
+  const [fieldResult, pageResult] = await Promise.all([
+    fetchFields(tableName),
+    previewTablePage(tableName, editorPage.value, editorPageSize.value)
+  ])
+  if (editorTableName.value !== tableName) return
+  editorFields.value = fieldResult || []
+  editorRows.value = pageResult?.rows || []
+  editorTotal.value = pageResult?.total || 0
+}
+
+async function handleDialogPreviewPageChange(page) {
+  if (previewMode.value === 'table-edit') {
+    editorPage.value = page
+    await loadEditorTable()
+    return
+  }
+  await handlePreviewPageChange(page)
+}
+
+async function handleDialogPreviewSizeChange(size) {
+  if (previewMode.value === 'table-edit') {
+    editorPageSize.value = size
+    editorPage.value = 1
+    await loadEditorTable()
+    return
+  }
+  await handlePreviewSizeChange(size)
 }
 
 function getQualityClass(score) {
@@ -638,17 +780,24 @@ async function executeTransform() {
 }
 
 async function confirmApplyCleaningStrategy() {
-  const tableName = uploadResult.value?.tableName || selectedTableName.value
-  if (!tableName || !cleaningActions.value.length) return
+  const tableName = activeTableName.value
+  const actions = cleaningActions.value
+  if (!tableName || !actions.length) return
   try {
     cleaningApplying.value = true
-    const result = await applyCleaningStrategy(tableName, { actions: cleaningActions.value })
+    const result = await applyCleaningStrategy(tableName, { actions })
     cleaningResult.value = result
+    if (!cleaningSnapshotFields.value.length && result.cleaningStrategy?.fields?.length) {
+      cleaningSnapshotFields.value = result.cleaningStrategy.fields.map(field => ({ ...field }))
+    }
+    if (!frozenCleaningStrategy.value && result.cleaningStrategy) {
+      frozenCleaningStrategy.value = result.cleaningStrategy
+    }
     cleaningResolved.value = false
     manualCleaningMode.value = false
     cleaningSkipped.value = false
     ElMessage.success(`清洗完成：填充 ${result.filledRows || 0} 行，隔离 ${result.markedAnomalyRows || 0} 行`)
-    await refreshCurrentTable()
+    await loadTables()
   } catch (error) {
     if (error !== 'cancel') {
       ElMessage.error(error.message || '应用清洗策略失败')
@@ -659,18 +808,20 @@ async function confirmApplyCleaningStrategy() {
 }
 
 async function openPreviewDialog(mode = 'preview') {
-  const tableName = String(selectedTableName.value || uploadResult.value?.tableName || '').trim()
+  const tableName = String(activeTableName.value || selectedTableName.value || uploadResult.value?.tableName || '').trim()
   if (!tableName) {
     ElMessage.warning('未识别到当前数据表，请关闭后点击「刷新数据表」或重新上传后再试。')
     return
   }
-  if (!selectedTableName.value) {
-    selectedTableName.value = tableName
-  }
+  selectedTableName.value = tableName
+  cleaningContextTableName.value = tableName
   previewMode.value = mode
   qualityIssueDialogVisible.value = false
   try {
     await Promise.all([loadFields(tableName), loadPreview(tableName)])
+    if (!cleaningSnapshotFields.value.length || cleaningContextTableName.value !== tableName) {
+      cleaningSnapshotFields.value = fields.value.map(field => ({ ...field }))
+    }
     previewDialogVisible.value = true
   } catch (error) {
     qualityIssueDialogVisible.value = true
@@ -740,11 +891,11 @@ async function backToCleaningStep() {
 }
 
 async function completePreviewAndActivate() {
-  const tableName = uploadResult.value?.tableName || selectedTableName.value
+  const tableName = activeTableName.value || uploadResult.value?.tableName || selectedTableName.value
   if (!tableName) return
   try {
     cleaningApplying.value = true
-    await activateCleanedTable(tableName, { skipCleaning: cleaningSkipped.value })
+    await activateCleanedTable(tableName, { skipCleaning: true })
     cleaningResolved.value = true
     qualityIssueDialogVisible.value = false
     previewDialogVisible.value = false
@@ -758,11 +909,12 @@ async function completePreviewAndActivate() {
 }
 
 async function savePreviewCell(row, column) {
-  if (!selectedTableName.value || !row?.sys_id || !column) return
+  const tableName = previewMode.value === 'table-edit' ? editorTableName.value : selectedTableName.value
+  if (!tableName || !row?.sys_id || !column) return
   const key = `${row.sys_id}-${column}`
   savingCellKey.value = key
   try {
-    await updateCell(selectedTableName.value, row.sys_id, column, { value: row[column] })
+    await updateCell(tableName, row.sys_id, column, { value: row[column] })
     ElMessage.success('已保存修改')
   } catch (error) {
     ElMessage.error(error.message || '保存单元格失败')
@@ -772,18 +924,34 @@ async function savePreviewCell(row, column) {
 }
 
 function rowSnapshotColumns(rows = []) {
-  const columns = []
+  const availableColumns = new Set()
   rows.forEach(row => {
     Object.keys(row || {}).forEach(key => {
-      if (!columns.includes(key)) columns.push(key)
+      availableColumns.add(key)
     })
+  })
+  const columns = []
+  if (availableColumns.has('sys_id')) columns.push('sys_id')
+  cleaningSnapshotFields.value
+    .slice()
+    .sort((left, right) => Number(left.sortOrder ?? 0) - Number(right.sortOrder ?? 0))
+    .map(field => field.columnName)
+    .filter(column => column && availableColumns.has(column))
+    .forEach(column => columns.push(column))
+  availableColumns.forEach(column => {
+    if (!columns.includes(column)) columns.push(column)
   })
   return columns
 }
 
 function getDisplayNameForColumn(column) {
   if (column === 'sys_id') return 'ID'
-  const field = fields.value.find(item => item.columnName === column)
+  if (previewMode.value === 'table-edit') {
+    const editorField = editorFields.value.find(item => item.columnName === column)
+    return editorField?.displayName || editorField?.sourceFieldName || column
+  }
+  const field = cleaningSnapshotFields.value.find(item => item.columnName === column)
+    || fields.value.find(item => item.columnName === column)
   return field?.displayName || field?.sourceFieldName || column
 }
 
@@ -792,7 +960,7 @@ function getIssueCellType(rowId, column) {
 }
 
 function previewCellClassName({ row, column }) {
-  if (!editablePreview.value || !row || !column?.property) return ''
+  if (previewMode.value !== 'cleaning' || !row || !column?.property) return ''
   const type = getIssueCellType(row.sys_id, column.property)
   if (type === 'anomaly') return 'issue-anomaly-cell'
   if (type === 'null') return 'issue-null-cell'
@@ -1013,10 +1181,6 @@ async function refreshCurrentTable() {
 }
 
 .cleaning-strategy {
-  padding: 14px;
-  border: 1px solid #facc15;
-  border-radius: 8px;
-  background: #fefce8;
   max-height: 64vh;
   overflow-y: auto;
   overflow-x: hidden;
@@ -1058,6 +1222,14 @@ async function refreshCurrentTable() {
   font-size: 13px;
 }
 
+.preview-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #e5e7eb;
+}
+
 .cleaning-actions {
   margin: 10px 0 12px;
   display: grid;
@@ -1073,7 +1245,7 @@ async function refreshCurrentTable() {
 .cleaning-action-card {
   min-width: 0;
   padding: 10px;
-  border: 1px solid #fde68a;
+  border: 1px solid #e5e7eb;
   border-radius: 8px;
   background: #fff;
 }
@@ -1145,33 +1317,43 @@ async function refreshCurrentTable() {
 }
 
 :deep(.issue-anomaly-cell) {
-  background: #fef2f2 !important;
-  color: #991b1b;
+  background: #fff1f1 !important;
+  color: #a01818;
 }
 
 :deep(.issue-anomaly-cell .cell) {
-  color: #991b1b;
-  font-weight: 700;
+  color: #a01818;
+  font-weight: 800;
 }
 
 :deep(.issue-null-cell) {
-  background: #fffbeb !important;
-  color: #92400e;
+  background: #fffbe8 !important;
+  color: #8a5a00;
 }
 
 :deep(.issue-null-cell .cell) {
-  color: #92400e;
-  font-weight: 700;
+  color: #8a5a00;
+  font-weight: 600;
 }
 
 :deep(.issue-anomaly-cell .el-input__wrapper) {
-  background: #fff1f2;
-  box-shadow: 0 0 0 1px #ef4444 inset;
+  background: transparent;
+  box-shadow: none;
 }
 
 :deep(.issue-null-cell .el-input__wrapper) {
-  background: #fef3c7;
-  box-shadow: 0 0 0 1px #f59e0b inset;
+  background: transparent;
+  box-shadow: none;
+}
+
+:deep(.issue-anomaly-cell .el-input__inner) {
+  color: #a01818;
+  font-weight: 800;
+}
+
+:deep(.issue-null-cell .el-input__inner) {
+  color: #8a5a00;
+  font-weight: 600;
 }
 
 .row-snapshot-table td.issue-anomaly-cell {
@@ -1251,5 +1433,28 @@ async function refreshCurrentTable() {
   .upload-actions {
     flex-wrap: wrap;
   }
+
+  .quality-dialog-footer {
+    flex-direction: column;
+  }
+
+  .footer-left,
+  .footer-right {
+    margin-left: 0;
+    margin-right: 0;
+    width: 100%;
+  }
+}
+
+.quality-dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+}
+
+.footer-right {
+  margin-left: auto;
 }
 </style>

@@ -2,7 +2,7 @@
   <UserDashboardView v-if="sharePreviewToken" />
   <AuthView v-else-if="!isAuthenticated" @authenticated="handleAuthenticated" />
   <el-container v-else class="app-shell">
-    <el-aside width="248px" class="app-aside">
+    <el-aside :width="asideWidth" class="app-aside" :class="{ 'is-collapsed': isAsideCollapsed }">
       <div class="brand">
         <div class="brand-mark">BI</div>
         <div>
@@ -11,10 +11,20 @@
         </div>
       </div>
 
-      <el-menu :default-active="activeModule" class="nav-menu" @select="activeModule = $event">
+      <el-menu
+          :default-active="activeModule"
+          :collapse="isAsideCollapsed"
+          class="nav-menu"
+          @select="activeModule = $event"
+      >
         <el-menu-item-group v-for="group in visibleMenuGroups" :key="group.id" :title="group.title">
           <el-menu-item v-for="module in group.modules" :key="module.key" :index="module.key">
-            <span>{{ module.title }}</span>
+            <el-icon class="nav-icon">
+              <component :is="moduleIconMap[module.key] || Grid" />
+            </el-icon>
+            <template #title>
+              <span>{{ module.title }}</span>
+            </template>
           </el-menu-item>
         </el-menu-item-group>
       </el-menu>
@@ -22,9 +32,30 @@
 
     <el-container>
       <el-header class="topbar">
-        <div>
-          <h1>{{ moduleTitle }}</h1>
-          <p>{{ moduleSubtitle }}</p>
+        <div class="topbar-nav">
+          <button class="sidebar-toggle" :class="{ 'is-collapsed': isAsideCollapsed }" type="button" aria-label="展开或收起侧边栏" @click="toggleAside">
+            <span class="hamburger-icon" aria-hidden="true"></span>
+          </button>
+          <div class="topbar-divider" aria-hidden="true"></div>
+          <button class="home-crumb" type="button" @click="goHome">
+            <el-icon><House /></el-icon>
+            <span>首页</span>
+          </button>
+          <div
+              v-for="tab in orderedNavigationTabs"
+              :key="tab.key"
+              class="page-tab"
+              :class="{ 'is-active': tab.key === activeModule }"
+              role="button"
+              tabindex="0"
+              @click="activeModule = tab.key"
+              @keydown.enter="activeModule = tab.key"
+          >
+            <span>{{ tab.order }}. {{ tab.title }}</span>
+            <button class="tab-close" type="button" aria-label="关闭页面" @click.stop="closeTab(tab.key)">
+              <el-icon><Close /></el-icon>
+            </button>
+          </div>
         </div>
         <div class="topbar-actions">
           <el-tag :type="currentUser?.role === 'ADMIN' ? 'warning' : 'success'">
@@ -61,6 +92,26 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
+import {
+  ChatDotRound,
+  Close,
+  Connection,
+  Cpu,
+  DataAnalysis,
+  DataBoard,
+  DocumentChecked,
+  Grid,
+  Histogram,
+  House,
+  Key,
+  Lock,
+  Management,
+  Monitor,
+  Operation,
+  Setting,
+  Share,
+  Upload
+} from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 import { menuGroups, moduleMap } from './router/modules'
 import DataUploadView from './views/user/DataUploadView.vue'
@@ -84,6 +135,24 @@ import { logout } from './api/auth'
 
 const API_BASE = 'http://localhost:8080'
 const LAST_SELECTED_TABLE_KEY = 'insight:lastSelectedTableName'
+const moduleIconMap = {
+  workbench: House,
+  adminWorkbench: House,
+  dashboard: DataBoard,
+  adminDashboard: Histogram,
+  collaboration: Share,
+  upload: Upload,
+  chat: ChatDotRound,
+  permission: Lock,
+  permissionAdmin: Key,
+  diagnosis: DocumentChecked,
+  datasource: Connection,
+  knowledgeGraph: Share,
+  audit: DataAnalysis,
+  stackCConfig: Setting,
+  performanceGovernance: Cpu,
+  default: Grid
+}
 const sharePreviewToken = (() => {
   try {
     return String(new URL(window.location.href).searchParams.get('shareToken') || '').trim()
@@ -121,7 +190,10 @@ const clearLastSelectedTable = () => {
 }
 
 const datasourceHealthMap = ref({})
-const activeModule = ref('upload')
+const activeModule = ref('workbench')
+const isAsideCollapsed = ref(false)
+const navigationTabs = ref([])
+const nextTabOrder = ref(1)
 const tables = ref([])
 const selectedTableName = ref('')
 const uploadFile = ref(null)
@@ -152,6 +224,8 @@ const previewPage = ref(1)
 const previewPageSize = ref(10)
 const previewTotal = ref(0)
 const fields = ref([])
+const loadedPreviewTableName = ref('')
+const loadedFieldsTableName = ref('')
 const auditLogs = ref([])
 const auditRules = ref([])
 const graphOverview = ref({ nodeTypes: [], edgeTypes: [] })
@@ -227,6 +301,7 @@ const handleChartResize = () => {
 
 const moduleTitle = computed(() => moduleMap[activeModule.value].title)
 const moduleSubtitle = computed(() => moduleMap[activeModule.value].subtitle)
+const asideWidth = computed(() => isAsideCollapsed.value ? '64px' : '248px')
 const visibleMenuGroups = computed(() => {
   const role = currentUser.value?.role || 'USER'
   return menuGroups
@@ -240,6 +315,8 @@ const isPermissionModule = computed(() => activeModule.value === 'permission' ||
 const isAdminModule = computed(() => ['datasource', 'permissionAdmin', 'knowledgeGraph', 'audit', 'stackCConfig', 'adminWorkbench', 'adminDashboard', 'performanceGovernance'].includes(activeModule.value))
 const isAdminUser = computed(() => currentUser.value?.role === 'ADMIN')
 const portalLabel = computed(() => isAdminUser.value ? '管理员门户' : '用户门户')
+const homeModuleKey = computed(() => isAdminUser.value ? 'adminWorkbench' : 'workbench')
+const orderedNavigationTabs = computed(() => [...navigationTabs.value].sort((a, b) => a.order - b.order))
 const placeholderStep = computed(() => activeModule.value === 'audit' ? 1 : 0)
 const previewColumns = computed(() => previewRows.value.length ? Object.keys(previewRows.value[0]) : [])
 const uploadTables = computed(() => tables.value.filter(item => String(item?.sourceType || '').toUpperCase() !== 'OFFICIAL'))
@@ -338,11 +415,63 @@ onBeforeUnmount(() => {
 })
 
 const normalizeActiveModule = () => {
-  const firstModule = visibleMenuGroups.value[0]?.modules[0]?.key || 'upload'
+  const homeModule = homeModuleKey.value
+  const firstModule = visibleMenuGroups.value.some(group => group.modules.some(module => module.key === homeModule))
+      ? homeModule
+      : visibleMenuGroups.value[0]?.modules[0]?.key || 'workbench'
   const allowed = visibleMenuGroups.value.some(group => group.modules.some(module => module.key === activeModule.value))
   if (!allowed) {
     activeModule.value = firstModule
   }
+  syncNavigationTabsWithMenu()
+}
+
+const toggleAside = () => {
+  isAsideCollapsed.value = !isAsideCollapsed.value
+}
+
+const goHome = () => {
+  activeModule.value = homeModuleKey.value
+}
+
+const isHomeModule = (moduleName) => moduleName === 'workbench' || moduleName === 'adminWorkbench'
+
+const tabTitleForModule = (moduleName) => {
+  if (moduleName === 'upload') return '数据上传与处理'
+  return moduleMap[moduleName]?.title || moduleTitle.value
+}
+
+const ensureNavigationTab = (moduleName) => {
+  if (!moduleName || isHomeModule(moduleName)) return
+  if (navigationTabs.value.some(tab => tab.key === moduleName)) return
+  navigationTabs.value.push({
+    key: moduleName,
+    title: tabTitleForModule(moduleName),
+    order: nextTabOrder.value
+  })
+  nextTabOrder.value += 1
+}
+
+const syncNavigationTabsWithMenu = () => {
+  const allowedKeys = new Set(visibleMenuGroups.value.flatMap(group => group.modules.map(module => module.key)))
+  navigationTabs.value = navigationTabs.value.filter(tab => allowedKeys.has(tab.key) && !isHomeModule(tab.key))
+  if (!navigationTabs.value.length && !allowedKeys.has(activeModule.value)) {
+    activeModule.value = homeModuleKey.value
+  }
+}
+
+const closeTab = (moduleName) => {
+  const orderedTabs = orderedNavigationTabs.value
+  const closingIndex = orderedTabs.findIndex(tab => tab.key === moduleName)
+  navigationTabs.value = navigationTabs.value.filter(tab => tab.key !== moduleName)
+  if (!navigationTabs.value.length) {
+    nextTabOrder.value = 1
+  }
+
+  if (activeModule.value !== moduleName) return
+
+  const fallbackTab = orderedTabs[closingIndex - 1] || orderedTabs[closingIndex + 1]
+  activeModule.value = fallbackTab?.key || homeModuleKey.value
 }
 
 const normalizeChatHistoryItem = (item) => ({
@@ -527,21 +656,26 @@ const handleLogout = async () => {
     recentChatQueryPage.value = 1
     recentChatQueryPageSize.value = 8
     recentChatQueryTotal.value = 0
-    activeModule.value = 'upload'
+    navigationTabs.value = []
+    nextTabOrder.value = 1
+    activeModule.value = 'workbench'
   }
 }
 
-watch(selectedTableName, async (tableName) => {
+watch(selectedTableName, async (tableName, prevTableName) => {
   saveLastSelectedTable(tableName || '')
   if (!tableName) {
     previewRows.value = []
     fields.value = []
     return
   }
+  if (tableName === prevTableName) return
   await Promise.all([loadPreview(tableName), loadFields(tableName)])
 })
 
 watch(activeModule, async (moduleName) => {
+  ensureNavigationTab(moduleName)
+
   if (moduleName === 'chat') {
     await nextTick()
     const instance = ensureChatChartInstance()
@@ -581,12 +715,23 @@ const unwrap = (response) => {
   return body.data ?? body
 }
 
-const loadTables = async () => {
+const loadTables = async (options = {}) => {
   const data = unwrap(await axios.get(`${API_BASE}/api/data/tables`))
   tables.value = data
   const exists = (name) => Boolean(name) && data.some(item => item.tableName === name)
-  const currentSelection = selectedTableName.value
-  const storedSelection = readLastSelectedTable()
+  const currentSelection = String(selectedTableName.value || '').trim()
+  const storedSelection = String(readLastSelectedTable() || '').trim()
+  const preferredSelection = String(options.preferredTableName || '').trim()
+  const keepCurrentSelection = Boolean(options.keepCurrentSelection)
+
+  if (exists(preferredSelection)) {
+    selectedTableName.value = preferredSelection
+    return
+  }
+  if (keepCurrentSelection && currentSelection) {
+    selectedTableName.value = currentSelection
+    return
+  }
   if (exists(currentSelection)) {
     selectedTableName.value = currentSelection
     return
@@ -1121,12 +1266,17 @@ const loadPreview = async (tableName) => {
   const page = unwrap(await axios.get(`${API_BASE}/api/data/tables/${tableName}/preview-page`, {
     params: { page: previewPage.value, pageSize: previewPageSize.value }
   }))
+  if (selectedTableName.value !== tableName) return
   previewRows.value = page.rows || []
   previewTotal.value = page.total || 0
+  loadedPreviewTableName.value = tableName
 }
 
 const loadFields = async (tableName) => {
-  fields.value = unwrap(await axios.get(`${API_BASE}/api/data/tables/${tableName}/fields`))
+  const result = unwrap(await axios.get(`${API_BASE}/api/data/tables/${tableName}/fields`))
+  if (selectedTableName.value !== tableName) return
+  fields.value = result
+  loadedFieldsTableName.value = tableName
 }
 
 const selectTable = (row) => {
@@ -1181,6 +1331,7 @@ const submitUpload = async () => {
     formData.append('file', uploadFile.value)
     formData.append('displayName', uploadDisplayName.value)
   }
+  const uploadedTableName = String(selectedTableName.value || '').trim()
   try {
     const task = unwrap(await axios.post(`${API_BASE}/api/data/${batchMode ? 'upload-batch-async' : 'upload-async'}`, formData, {
       onUploadProgress: (event) => {
@@ -1202,7 +1353,7 @@ const submitUpload = async () => {
       status: 'SUCCESS'
     }
     uploadTask.value = task
-    await pollUploadTask(task.taskId)
+    await pollUploadTask(task.taskId, uploadedTableName)
     ElMessage.success('文件已解析入库')
   } catch (error) {
     uploadProgress.value = {
@@ -1224,7 +1375,7 @@ const refreshUploadTask = async (taskId) => {
   }
 }
 
-const pollUploadTask = async (taskId) => {
+const pollUploadTask = async (taskId, uploadedTableName = '') => {
   for (let i = 0; i < 120; i++) {
     await new Promise(resolve => setTimeout(resolve, 1000))
     await refreshUploadTask(taskId)
@@ -1232,8 +1383,11 @@ const pollUploadTask = async (taskId) => {
       const result = uploadTask.value.resultJson ? JSON.parse(uploadTask.value.resultJson) : {}
       uploadResult.value = result
       uploadDisplayName.value = ''
-      selectedTableName.value = result.tableName || selectedTableName.value
-      await Promise.all([loadTables(), loadBusinessModels()])
+      const resolvedTableName = String(result.tableName || uploadedTableName || selectedTableName.value || '').trim()
+      if (resolvedTableName) {
+        selectedTableName.value = resolvedTableName
+      }
+      await Promise.all([loadTables({ preferredTableName: resolvedTableName, keepCurrentSelection: true }), loadBusinessModels()])
       return
     }
     if (uploadTask.value?.status === 'FAILED') {
@@ -2266,6 +2420,13 @@ provide('workbench', {
   background: #111827;
   color: #fff;
   border-right: 1px solid #202b3d;
+  transition: width 0.35s cubic-bezier(0.2, 0, 0, 1);
+  overflow-x: hidden;
+  white-space: nowrap;
+}
+
+.app-aside.is-collapsed .brand {
+  padding: 0 14px;
 }
 
 .brand {
@@ -2275,11 +2436,24 @@ provide('workbench', {
   gap: 12px;
   padding: 0 20px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  transition: padding 0.35s cubic-bezier(0.2, 0, 0, 1);
+  overflow: hidden;
+}
+
+.brand > div:last-child {
+  transition: opacity 0.2s cubic-bezier(0.2, 0, 0, 1);
+  opacity: 1;
+}
+
+.app-aside.is-collapsed .brand > div:last-child {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .brand-mark {
   width: 36px;
   height: 36px;
+  flex-shrink: 0;
   display: grid;
   place-items: center;
   border-radius: 8px;
@@ -2304,6 +2478,14 @@ provide('workbench', {
   border: 1px solid rgba(125, 211, 252, 0.18);
   border-radius: 8px;
   background: rgba(125, 211, 252, 0.08);
+  transition: opacity 0.2s cubic-bezier(0.2, 0, 0, 1), transform 0.35s cubic-bezier(0.2, 0, 0, 1);
+  transform-origin: left center;
+}
+
+.app-aside.is-collapsed .role-panel {
+  opacity: 0;
+  pointer-events: none;
+  transform: scaleX(0.8);
 }
 
 .role-name {
@@ -2363,27 +2545,169 @@ provide('workbench', {
 }
 
 .topbar {
-  height: 72px;
+  height: 52px;
   background: #fff;
   display: flex;
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid #e5e7eb;
+  padding: 0 16px 0 0;
 }
 
-.topbar h1 {
-  margin: 0;
-  font-size: 20px;
-  line-height: 1.3;
+.topbar-nav {
+  min-width: 0;
+  height: 100%;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
-.topbar p {
-  margin: 4px 0 0;
+.sidebar-toggle,
+.home-crumb,
+.tab-close {
+  border: 0;
+  background: transparent;
+  color: #475467;
+  cursor: pointer;
+}
+
+.sidebar-toggle {
+  width: 52px;
+  height: 52px;
+  display: inline-grid;
+  place-items: center;
+}
+
+.sidebar-toggle:hover,
+.home-crumb:hover,
+.tab-close:hover {
+  color: #2f7cf6;
+  background: #f5f8ff;
+}
+
+.hamburger-icon,
+.hamburger-icon::before,
+.hamburger-icon::after {
+  width: 18px;
+  height: 2px;
+  display: block;
+  border-radius: 999px;
+  background: #2f4f77;
+  box-shadow: 0 1px 2px rgba(47, 79, 119, 0.22);
+  transition: transform 0.3s cubic-bezier(0.2, 0, 0, 1), opacity 0.3s cubic-bezier(0.2, 0, 0, 1), background-color 0.2s ease;
+}
+
+.hamburger-icon {
+  position: relative;
+}
+
+/* 简单的缩放效果，不使用箭头 */
+.sidebar-toggle.is-collapsed .hamburger-icon,
+.sidebar-toggle.is-collapsed .hamburger-icon::before,
+.sidebar-toggle.is-collapsed .hamburger-icon::after {
+  background-color: #2f7cf6;
+}
+
+.hamburger-icon::before,
+.hamburger-icon::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  width: 100%;
+}
+
+.hamburger-icon::before {
+  top: -6px;
+}
+
+.sidebar-toggle.is-collapsed .hamburger-icon::before {
+  transform: translateX(-2px);
+}
+
+.hamburger-icon::after {
+  top: 6px;
+}
+
+.sidebar-toggle.is-collapsed .hamburger-icon::after {
+  transform: translateX(-4px);
+}
+
+.topbar-divider {
+  width: 1px;
+  height: 24px;
+  margin-right: 12px;
+  background: #e5e7eb;
+}
+
+.home-crumb {
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border-radius: 4px;
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.page-tab {
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: 10px;
+  padding: 0 8px 0 14px;
+  border: 1px solid #d9e4f5;
+  border-radius: 4px;
+  background: #fff;
+  color: #344054;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.page-tab:hover {
+  border-color: #9bc2ff;
+  color: #2f7cf6;
+}
+
+.page-tab.is-active {
+  border-color: #2f7cf6;
+  background: #2f7cf6;
+  color: #fff;
+  font-weight: 600;
+}
+
+.tab-close {
+  width: 22px;
+  height: 22px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 4px;
   color: #667085;
   font-size: 13px;
 }
 
+.page-tab.is-active .tab-close {
+  color: rgba(255, 255, 255, 0.86);
+}
+
+.tab-close:hover {
+  color: #2f7cf6;
+  background: #eef5ff;
+}
+
+.page-tab.is-active .tab-close:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.16);
+}
+
 .topbar-actions {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 12px;

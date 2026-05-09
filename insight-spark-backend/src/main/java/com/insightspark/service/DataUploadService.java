@@ -22,6 +22,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -1216,6 +1217,23 @@ public class DataUploadService {
         return "`" + columnName + "`";
     }
 
+    private String blankValueCondition(String quotedColumn) {
+        String trimmed = "TRIM(" + quotedColumn + ")";
+        return quotedColumn + " IS NULL OR " + trimmed + " = '' OR UPPER(" + trimmed + ") IN ('NULL', 'N/A', 'NA', 'NAN', '--', '-') OR " +
+                trimmed + " IN ('无', '空', '缺失', '未填写', '未知')";
+    }
+
+    private String nonBlankValueCondition(String quotedColumn) {
+        return "NOT (" + blankValueCondition(quotedColumn) + ")";
+    }
+
+    private String activeUploadRowCondition(String tableName) {
+        if (columnExists(tableName, "cleaning_isolated")) {
+            return "(`cleaning_isolated` IS NULL OR `cleaning_isolated` = 0)";
+        }
+        return "1=1";
+    }
+
     private void appendCsvLine(StringBuilder csv, List<String> values) {
         for (int i = 0; i < values.size(); i++) {
             if (i > 0) {
@@ -1413,6 +1431,7 @@ public class DataUploadService {
 
     private Map<String, Object> generateCleaningStrategy(String tableName, List<Map<String, Object>> fields, long totalRows) {
         List<Map<String, Object>> actions = new ArrayList<>();
+        Map<String, String> fieldLabels = buildFieldLabels(fields);
         int totalNullCells = 0;
         int totalAnomalyRows = 0;
 
@@ -1459,6 +1478,8 @@ public class DataUploadService {
         Map<String, Object> strategy = new LinkedHashMap<>();
         strategy.put("tableName", tableName);
         strategy.put("totalRows", totalRows);
+        strategy.put("fields", fields);
+        strategy.put("fieldLabels", fieldLabels);
         strategy.put("actionCount", actions.size());
         strategy.put("totalNullCells", totalNullCells);
         strategy.put("totalAnomalyRows", totalAnomalyRows);
@@ -1470,9 +1491,24 @@ public class DataUploadService {
         return strategy;
     }
 
+    private Map<String, String> buildFieldLabels(List<Map<String, Object>> fields) {
+        Map<String, String> labels = new LinkedHashMap<>();
+        for (Map<String, Object> field : fields) {
+            String columnName = Objects.toString(field.get("columnName"), "");
+            if (columnName.isBlank()) {
+                continue;
+            }
+            String sourceFieldName = Objects.toString(field.get("sourceFieldName"), "");
+            String displayName = Objects.toString(field.get("displayName"), "");
+            labels.put(columnName, !sourceFieldName.isBlank() ? sourceFieldName : (!displayName.isBlank() ? displayName : columnName));
+        }
+        return labels;
+    }
+
     public Map<String, Object> applyCleaningStrategy(String tableName, Map<String, Object> request) {
         assertKnownTable(tableName);
         List<Map<String, Object>> actions = parseCleaningActions(tableName, request);
+        Map<String, Object> cleaningStrategy = generateCleaningStrategy(tableName);
         List<Map<String, Object>> processedActions = new ArrayList<>();
         int filledRows = 0;
         int markedRows = 0;
@@ -1489,7 +1525,7 @@ public class DataUploadService {
                 )), "");
                 String quotedColumn = quoteColumn(columnName);
                 filledRows += jdbcTemplate.update(
-                        "UPDATE `" + tableName + "` SET " + quotedColumn + " = ? WHERE " + quotedColumn + " IS NULL OR " + quotedColumn + " = ''",
+                        "UPDATE `" + tableName + "` SET " + quotedColumn + " = ? WHERE " + blankValueCondition(quotedColumn),
                         fillValue
                 );
                 processedAction.put("afterRows", findRowsByIds(tableName, rowIds, 20));
@@ -1512,7 +1548,7 @@ public class DataUploadService {
         result.put("markedAnomalyRows", markedRows);
         result.put("appliedActions", actions.size());
         result.put("processedActions", processedActions);
-        result.put("cleaningStrategy", generateCleaningStrategy(tableName));
+        result.put("cleaningStrategy", cleaningStrategy);
         return result;
     }
 
@@ -1559,7 +1595,7 @@ public class DataUploadService {
         if (datasourceService.isOfficialSource(tableName)) {
             return detectAnomaliesForOfficialSource(tableName, columnName);
         }
-        return detectAnomaliesForUploadSource(tableName, columnName);
+        return detectUploadFieldAnomalies(tableName, columnName);
     }
 
     private void appendNumericOutliers(List<Map<String, Object>> rows, List<Map<String, Object>> anomalies) {
@@ -1812,7 +1848,8 @@ public class DataUploadService {
     private List<Map<String, Object>> findNullRows(String tableName, String columnName) {
         String quotedColumn = quoteColumn(columnName);
         return jdbcTemplate.queryForList(
-                "SELECT * FROM `" + tableName + "` WHERE " + quotedColumn + " IS NULL OR " + quotedColumn + " = '' LIMIT 20"
+                "SELECT * FROM `" + tableName + "` WHERE " + activeUploadRowCondition(tableName) +
+                        " AND (" + blankValueCondition(quotedColumn) + ") LIMIT 20"
         );
     }
 
@@ -1962,7 +1999,7 @@ public class DataUploadService {
                 break;
             case "FILL_NULL":
                 String fillValue = Objects.toString(options.getOrDefault("value", ""), "");
-                updateSql = "UPDATE `" + tableName + "` SET " + quotedColumn + " = ? WHERE " + quotedColumn + " IS NULL OR " + quotedColumn + " = ''";
+                updateSql = "UPDATE `" + tableName + "` SET " + quotedColumn + " = ? WHERE " + blankValueCondition(quotedColumn);
                 break;
             default:
                 throw new IllegalArgumentException("不支持的转换类型：" + transformType);
@@ -2070,15 +2107,23 @@ public class DataUploadService {
 
     private Map<String, Object> getFieldStatisticsForUploadSource(String tableName, String columnName) {
         String quotedColumn = quoteColumn(columnName);
-        long totalCount = countRows(tableName);
+        String activeCondition = activeUploadRowCondition(tableName);
+        Long activeCount = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM `" + tableName + "` WHERE " + activeCondition,
+                Long.class
+        );
+        long totalCount = activeCount == null ? 0 : activeCount;
+
+        String nullCondition = blankValueCondition(quotedColumn);
+        String nonBlankCondition = nonBlankValueCondition(quotedColumn);
 
         Long nullCount = jdbcTemplate.queryForObject(
-            "SELECT COUNT(*) FROM `" + tableName + "` WHERE " + quotedColumn + " IS NULL OR " + quotedColumn + " = ''",
+            "SELECT COUNT(*) FROM `" + tableName + "` WHERE " + activeCondition + " AND (" + nullCondition + ")",
             Long.class
         );
 
         Long distinctCount = jdbcTemplate.queryForObject(
-            "SELECT COUNT(DISTINCT " + quotedColumn + ") FROM `" + tableName + "` WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != ''",
+            "SELECT COUNT(DISTINCT " + quotedColumn + ") FROM `" + tableName + "` WHERE " + activeCondition + " AND (" + nonBlankCondition + ")",
             Long.class
         );
 
@@ -2104,13 +2149,13 @@ public class DataUploadService {
             String fieldType = Objects.toString(fieldMeta.get(0).get("fieldType"), "TEXT");
 
             if ("NUMBER".equals(fieldType)) {
-                addNumericStatistics(stats, tableName, quotedColumn);
+                addNumericStatistics(stats, tableName, quotedColumn, activeCondition);
             } else if ("DATE".equals(fieldType)) {
                 addDateStatistics(stats, tableName, quotedColumn);
             }
         }
 
-        stats.put("anomalies", detectAnomaliesForUploadSource(tableName, columnName));
+        stats.put("anomalies", detectUploadFieldAnomalies(tableName, columnName));
         return stats;
     }
 
@@ -2179,8 +2224,9 @@ public class DataUploadService {
         }
 
         String quotedColumn = quoteColumn(columnName);
+        String activeCondition = activeUploadRowCondition(tableName);
         Map<String, Object> stats = new LinkedHashMap<>();
-        addNumericStatistics(stats, tableName, quotedColumn);
+        addNumericStatistics(stats, tableName, quotedColumn, activeCondition);
 
         Double avg = toNullableDouble(stats.get("avg"));
         Double stdDev = toNullableDouble(stats.get("stdDev"));
@@ -2195,7 +2241,8 @@ public class DataUploadService {
         String numericExpr = "CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))";
         List<Map<String, Object>> anomalies = jdbcTemplate.queryForList(
             "SELECT sys_id, " + quotedColumn + " AS value FROM `" + tableName +
-            "` WHERE " + quotedColumn + " IS NOT NULL " +
+            "` WHERE " + activeCondition + " " +
+            "AND " + quotedColumn + " IS NOT NULL " +
             "AND TRIM(" + quotedColumn + ") <> '' " +
             "AND TRIM(" + quotedColumn + ") REGEXP '^-?[0-9]+(\\\\.[0-9]+)?$' " +
             "AND (" + numericExpr + " < ? OR " + numericExpr + " > ?) " +
@@ -2212,6 +2259,106 @@ public class DataUploadService {
             anomaly.put("reason", "数值超出 3σ 范围 [" + String.format("%.2f", lowerBound) + ", " + String.format("%.2f", upperBound) + "]");
             return anomaly;
         }).toList();
+    }
+
+    private List<Map<String, Object>> detectUploadFieldAnomalies(String tableName, String columnName) {
+        List<Map<String, Object>> anomalies = new ArrayList<>(detectBusinessRuleAnomalies(tableName, columnName));
+        for (Map<String, Object> anomaly : detectAnomaliesForUploadSource(tableName, columnName)) {
+            if (anomalies.size() >= 100) {
+                break;
+            }
+            if (!hasAnomalyForRow(anomalies, anomaly.get("rowId"))) {
+                anomalies.add(anomaly);
+            }
+        }
+        return anomalies;
+    }
+
+    private List<Map<String, Object>> detectBusinessRuleAnomalies(String tableName, String columnName) {
+        List<Map<String, Object>> fieldMeta = jdbcTemplate.queryForList(
+                "SELECT source_field_name AS sourceFieldName, display_name AS displayName, field_type AS fieldType FROM is_data_field WHERE table_name = ? AND column_name = ? LIMIT 1",
+                tableName, columnName
+        );
+        if (fieldMeta.isEmpty()) {
+            return List.of();
+        }
+        Map<String, Object> meta = fieldMeta.get(0);
+        String label = (Objects.toString(meta.get("sourceFieldName"), "") + " " +
+                Objects.toString(meta.get("displayName"), "") + " " + columnName).toLowerCase(Locale.ROOT);
+        String fieldType = Objects.toString(meta.get("fieldType"), "TEXT");
+        String quotedColumn = quoteColumn(columnName);
+        String activeCondition = activeUploadRowCondition(tableName);
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+                "SELECT sys_id, " + quotedColumn + " AS value FROM `" + tableName + "` " +
+                        "WHERE " + activeCondition + " AND (" + nonBlankValueCondition(quotedColumn) + ") LIMIT 1000"
+        );
+        List<Map<String, Object>> anomalies = new ArrayList<>();
+        boolean emailField = containsAny(label, "email", "e-mail", "mail", "邮箱", "邮件");
+        boolean phoneField = containsAny(label, "phone", "mobile", "tel", "手机号", "手机", "电话");
+        boolean ageField = containsAny(label, "age", "年龄");
+        boolean amountField = containsAny(label, "amount", "price", "cost", "fee", "money", "金额", "消费", "价格", "费用", "单价");
+        boolean countField = containsAny(label, "count", "quantity", "qty", "num", "数量", "订单数量", "件数", "次数");
+        boolean rateField = containsAny(label, "rate", "percent", "比例", "率");
+        boolean levelField = containsAny(label, "level", "grade", "等级", "级别");
+
+        for (Map<String, Object> row : rows) {
+            if (anomalies.size() >= 100) {
+                break;
+            }
+            Object rowId = row.get("sys_id");
+            String value = Objects.toString(row.get("value"), "").trim();
+            if (emailField && !isValidEmail(value)) {
+                anomalies.add(anomaly(rowId, row.get("value"), "INVALID_EMAIL", "邮箱格式不合法"));
+                continue;
+            }
+            if (phoneField && !isValidPhone(value)) {
+                anomalies.add(anomaly(rowId, row.get("value"), "INVALID_PHONE", "手机号/电话格式不合法"));
+                continue;
+            }
+            if (ageField) {
+                Double number = parseNumber(value);
+                if (number == null || number < 0 || number > 120) {
+                    anomalies.add(anomaly(rowId, row.get("value"), "INVALID_AGE", "年龄应为 0 到 120 之间的数字"));
+                    continue;
+                }
+            }
+            if (amountField || countField) {
+                Double number = parseNumber(value);
+                if (number == null || number < 0) {
+                    anomalies.add(anomaly(rowId, row.get("value"), amountField ? "NEGATIVE_AMOUNT" : "NEGATIVE_COUNT",
+                            amountField ? "金额/消费类字段不能为负数" : "数量类字段不能为负数"));
+                    continue;
+                }
+            }
+            if (("NUMBER".equals(fieldType) || rateField) && rateField) {
+                Double number = parseNumber(value);
+                if (number == null || number < 0 || number > 100) {
+                    anomalies.add(anomaly(rowId, row.get("value"), "INVALID_RATE", "比例/率字段应在 0 到 100 之间"));
+                    continue;
+                }
+            }
+            if (levelField && !isValidBusinessLevelValue(value)) {
+                anomalies.add(anomaly(rowId, row.get("value"), "INVALID_LEVEL", "等级值不在允许范围内"));
+            }
+        }
+        return anomalies;
+    }
+
+    private boolean containsAny(String text, String... keywords) {
+        String safeText = Objects.toString(text, "").toLowerCase(Locale.ROOT);
+        for (String keyword : keywords) {
+            if (safeText.contains(keyword.toLowerCase(Locale.ROOT))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isValidBusinessLevelValue(String value) {
+        String normalized = value.trim().toUpperCase(Locale.ROOT);
+        return List.of("A", "B", "C", "D", "S", "VIP", "SVIP",
+                "高", "中", "低", "普通", "正常", "有效",
+                "一级", "二级", "三级", "未分级").contains(normalized);
     }
 
     private List<Map<String, Object>> detectAnomaliesForOfficialSource(String tableName, String columnName) {
@@ -2385,7 +2532,12 @@ public class DataUploadService {
     }
     
     private void addNumericStatistics(Map<String, Object> stats, String tableName, String quotedColumn) {
+        addNumericStatistics(stats, tableName, quotedColumn, "1=1");
+    }
+
+    private void addNumericStatistics(Map<String, Object> stats, String tableName, String quotedColumn, String rowCondition) {
         String numericExpr = "CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))";
+        String safeRowCondition = rowCondition == null || rowCondition.isBlank() ? "1=1" : rowCondition;
         try {
             Map<String, Object> numStats = jdbcTemplate.queryForMap(
                 "SELECT " +
@@ -2394,7 +2546,8 @@ public class DataUploadService {
                 "  AVG(" + numericExpr + ") AS avgValue, " +
                 "  STD(" + numericExpr + ") AS stdDev " +
                 "FROM `" + tableName + "` " +
-                "WHERE " + quotedColumn + " IS NOT NULL " +
+                "WHERE " + safeRowCondition + " " +
+                "AND " + quotedColumn + " IS NOT NULL " +
                 "AND TRIM(" + quotedColumn + ") <> '' " +
                 "AND TRIM(" + quotedColumn + ") REGEXP '^-?[0-9]+(\\\\.[0-9]+)?$'"
             );
