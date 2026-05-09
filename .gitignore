@@ -10,6 +10,7 @@ env/
 docker-compose.yml
 **/application-local.yml
 **/application-local.properties
+**/application-local.yaml
 insight-spark-backend/src/main/resources/application.yml
 
 # Node
