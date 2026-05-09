@@ -24,12 +24,17 @@ public class PythonAiService {
     private String aiServiceUrl;
 
     public Optional<Map<String, Object>> textToSql(String question, String tableName, List<Map<String, Object>> fields,
-                                                   List<Map<String, Object>> previewRows) {
+                                                   List<Map<String, Object>> previewRows,
+                                                   Map<String, Object> graphPath,
+                                                   Map<String, Object> graphSqlHints) {
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("question", question);
         request.put("tableName", tableName);
         request.put("fields", fields);
         request.put("previewRows", previewRows);
+        request.put("graphPath", graphPath == null ? Map.of() : graphPath);
+        request.put("graphContext", graphPath == null ? List.of() : graphPath.getOrDefault("ragContext", List.of()));
+        request.put("graphSqlHints", graphSqlHints == null ? Map.of() : graphSqlHints);
 
         try {
             Map<String, Object> response = restTemplate.postForObject(

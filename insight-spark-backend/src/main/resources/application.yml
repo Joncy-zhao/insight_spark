@@ -5,7 +5,7 @@ spring:
   datasource:
     url: jdbc:mysql://localhost:3306/insight_spark?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai
     username: root
-    password: 123456
+    password: q123456789..
     driver-class-name: com.mysql.cj.jdbc.Driver
 
 mybatis-plus:
@@ -18,4 +18,4 @@ insight:
     enabled: true
     http-url: http://localhost:7474/db/neo4j/tx/commit
     username: neo4j
-    password: 12345678
+    password: q123456789..

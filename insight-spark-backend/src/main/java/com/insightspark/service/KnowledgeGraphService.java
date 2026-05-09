@@ -170,6 +170,10 @@ public class KnowledgeGraphService {
             }
         }
 
+        Map<String, Integer> metricSync = syncBusinessMetricNodes();
+        nodeCount += metricSync.getOrDefault("node", 0);
+        edgeCount += metricSync.getOrDefault("edge", 0);
+
         return Map.of("nodeUpsertCount", nodeCount, "edgeUpsertCount", edgeCount);
     }
 
@@ -282,6 +286,42 @@ public class KnowledgeGraphService {
             }
         }
         */
+    }
+
+    public Map<String, Object> buildSqlMappingHints(String question, String tableName, List<Map<String, Object>> graphContext) {
+        List<Map<String, Object>> context = graphContext == null ? List.of() : graphContext;
+        String q = Objects.toString(question, "").trim();
+        List<String> tokens = splitQuestionTokens(q);
+
+        List<Map<String, Object>> fieldCandidates = new ArrayList<>();
+        List<Map<String, Object>> formulaCandidates = new ArrayList<>();
+
+        for (Map<String, Object> node : context) {
+            String nodeType = Objects.toString(node.get("nodeType"), "").toUpperCase();
+            if ("FIELD".equals(nodeType) || "OFFICIAL_FIELD".equals(nodeType)) {
+                fieldCandidates.add(buildFieldCandidate(node, tokens));
+            }
+            if ("BUSINESS_METRIC".equals(nodeType)) {
+                formulaCandidates.add(buildFormulaCandidate(node));
+            }
+        }
+
+        fieldCandidates.sort((a, b) -> Double.compare(readDouble(b.get("score")), readDouble(a.get("score"))));
+        formulaCandidates.sort((a, b) -> Double.compare(readDouble(b.get("weight")), readDouble(a.get("weight"))));
+
+        List<Map<String, Object>> topFields = fieldCandidates.stream().limit(8).toList();
+        List<Map<String, Object>> topFormulas = formulaCandidates.stream().limit(6).toList();
+
+        List<Map<String, Object>> ambiguities = detectAmbiguities(topFields);
+        Map<String, Object> mapping = recommendMapping(topFields, topFormulas);
+
+        return Map.of(
+                "fieldCandidates", topFields,
+                "formulaCandidates", topFormulas,
+                "ambiguities", ambiguities,
+                "recommendedMapping", mapping,
+                "graphReasoning", summarizeHints(topFields, topFormulas, ambiguities, mapping)
+        );
     }
 
     public Map<String, Object> retrieveMultiHopContext(String question, String tableName) {
@@ -426,6 +466,170 @@ public class KnowledgeGraphService {
             return result;
         }
         return List.of();
+    }
+
+    private Map<String, Integer> syncBusinessMetricNodes() {
+        int nodeCount = 0;
+        int edgeCount = 0;
+        List<Map<String, Object>> models = jdbcTemplate.queryForList("""
+                SELECT table_name AS tableName, model_json AS modelJson
+                FROM is_business_model
+                WHERE status = 'ACTIVE'
+                """);
+        for (Map<String, Object> model : models) {
+            String tableName = Objects.toString(model.get("tableName"), "").trim();
+            if (tableName.isBlank()) continue;
+            Map<String, Object> parsed = parseJsonMap(model.get("modelJson"));
+            List<Map<String, Object>> metrics = castMapList(parsed.get("metricDefinitions"));
+            for (Map<String, Object> metric : metrics) {
+                String name = Objects.toString(metric.get("name"), "").trim();
+                String field = Objects.toString(metric.get("field"), "").trim();
+                String formula = Objects.toString(metric.get("formula"), "").trim();
+                if (name.isBlank()) continue;
+                String metricKey = "metric:" + tableName + ":" + slug(name);
+                String content = "formula=" + formula + "; field=" + field;
+                nodeCount += upsertNode(metricKey, "BUSINESS_METRIC", name, "BUSINESS_MODEL", tableName, content, 2.5);
+                String tableKey = "upload_table:" + tableName;
+                edgeCount += upsertEdge(tableKey, metricKey, "HAS_METRIC", 1.5);
+                if (!field.isBlank()) {
+                    String fieldKey = tableKey + ":field:" + field;
+                    edgeCount += upsertEdge(metricKey, fieldKey, "USES_FIELD", 1.5);
+                }
+            }
+        }
+        return Map.of("node", nodeCount, "edge", edgeCount);
+    }
+
+    private Map<String, Object> buildFieldCandidate(Map<String, Object> node, List<String> tokens) {
+        String label = Objects.toString(node.get("label"), "");
+        String sourceId = Objects.toString(node.get("sourceId"), "");
+        String content = Objects.toString(node.get("content"), "");
+        double score = readDouble(node.get("weight"));
+        String bag = (label + " " + sourceId + " " + content).toLowerCase();
+        int matched = 0;
+        for (String token : tokens) {
+            if (!token.isBlank() && bag.contains(token)) {
+                score += 0.8;
+                matched++;
+            }
+        }
+        score += matched * 0.2;
+        return new LinkedHashMap<>(Map.of(
+                "label", label,
+                "sourceId", sourceId,
+                "nodeKey", Objects.toString(node.get("nodeKey"), ""),
+                "score", score
+        ));
+    }
+
+    private Map<String, Object> buildFormulaCandidate(Map<String, Object> node) {
+        return new LinkedHashMap<>(Map.of(
+                "name", Objects.toString(node.get("label"), ""),
+                "sourceId", Objects.toString(node.get("sourceId"), ""),
+                "formula", Objects.toString(node.get("content"), ""),
+                "weight", readDouble(node.get("weight"))
+        ));
+    }
+
+    private List<Map<String, Object>> detectAmbiguities(List<Map<String, Object>> fields) {
+        Map<String, List<Map<String, Object>>> grouped = new LinkedHashMap<>();
+        for (Map<String, Object> item : fields) {
+            String normalized = normalizeLabel(Objects.toString(item.get("label"), ""));
+            if (normalized.isBlank()) continue;
+            grouped.computeIfAbsent(normalized, k -> new ArrayList<>()).add(item);
+        }
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map.Entry<String, List<Map<String, Object>>> entry : grouped.entrySet()) {
+            if (entry.getValue().size() < 2) continue;
+            List<String> candidates = entry.getValue().stream()
+                    .map(item -> Objects.toString(item.get("sourceId"), ""))
+                    .filter(v -> !v.isBlank())
+                    .toList();
+            out.add(new LinkedHashMap<>(Map.of(
+                    "term", entry.getKey(),
+                    "candidates", candidates,
+                    "resolution", candidates.isEmpty() ? "manual" : candidates.get(0)
+            )));
+        }
+        return out;
+    }
+
+    private Map<String, Object> recommendMapping(List<Map<String, Object>> fields, List<Map<String, Object>> formulas) {
+        String dimensionKey = "";
+        String metricKey = "";
+        String metricFormula = "";
+        for (Map<String, Object> item : fields) {
+            String sourceId = Objects.toString(item.get("sourceId"), "");
+            if (sourceId.isBlank()) continue;
+            String lower = sourceId.toLowerCase();
+            if (dimensionKey.isBlank() && (lower.contains("name") || lower.contains("type") || lower.contains("region") || lower.contains("date"))) {
+                dimensionKey = sourceId;
+            }
+            if (metricKey.isBlank() && (lower.contains("amount") || lower.contains("sales") || lower.contains("qty") || lower.contains("count") || lower.contains("revenue") || lower.contains("profit"))) {
+                metricKey = sourceId;
+            }
+        }
+        if (!formulas.isEmpty()) {
+            metricFormula = Objects.toString(formulas.get(0).get("formula"), "");
+        }
+        return new LinkedHashMap<>(Map.of(
+                "dimensionKey", dimensionKey,
+                "metricKey", metricKey,
+                "metricFormula", metricFormula
+        ));
+    }
+
+    private List<String> splitQuestionTokens(String question) {
+        String q = Objects.toString(question, "").toLowerCase();
+        if (q.isBlank()) return List.of();
+        String[] parts = q.split("[\\s,，。；;：:/|\\-]+");
+        List<String> out = new ArrayList<>();
+        for (String part : parts) {
+            String token = part.trim();
+            if (token.length() >= 2) out.add(token);
+        }
+        return out;
+    }
+
+    private String normalizeLabel(String label) {
+        return Objects.toString(label, "").toLowerCase().replaceAll("[^a-z0-9\\u4e00-\\u9fa5]", "").trim();
+    }
+
+    private String summarizeHints(List<Map<String, Object>> fields, List<Map<String, Object>> formulas,
+                                  List<Map<String, Object>> ambiguities, Map<String, Object> mapping) {
+        return "fields=" + fields.size() + ", formulas=" + formulas.size()
+                + ", ambiguities=" + ambiguities.size() + ", mapping=" + mapping;
+    }
+
+    private double readDouble(Object value) {
+        try {
+            return Double.parseDouble(Objects.toString(value, "0"));
+        } catch (Exception e) {
+            return 0D;
+        }
+    }
+
+    private Map<String, Object> parseJsonMap(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> out = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> e : map.entrySet()) {
+                out.put(Objects.toString(e.getKey(), ""), e.getValue());
+            }
+            return out;
+        }
+        String text = Objects.toString(value, "").trim();
+        if (text.isBlank()) return Map.of();
+        try {
+            return objectMapper.readValue(text, Map.class);
+        } catch (Exception e) {
+            return Map.of();
+        }
+    }
+
+    private String slug(String text) {
+        String normalized = Objects.toString(text, "").toLowerCase().replaceAll("[^a-z0-9\\u4e00-\\u9fa5]+", "_");
+        normalized = normalized.replaceAll("^_+|_+$", "");
+        return normalized.isBlank() ? "metric" : normalized;
     }
 
     private String buildPathText(List<Map<String, Object>> nodes, List<Map<String, Object>> edges) {

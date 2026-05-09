@@ -89,8 +89,9 @@ public class ChatBiService {
         ensureNotCancelled("图谱上下文准备");
         List<Map<String, Object>> previewRows = dataUploadService.preview(activeTable, 1, 8);
         ensureNotCancelled("样例数据预览");
+        Map<String, Object> graphSqlHints = knowledgeGraphService.buildSqlMappingHints(question, activeTable, graphContext);
         Optional<Map<String, Object>> aiResult = pythonAiService.textToSql(question, queryTableName, fields,
-                previewRows);
+                previewRows, graphPath, graphSqlHints);
         ensureNotCancelled("SQL 生成");
 
         String generatedSql;
@@ -219,6 +220,8 @@ public class ChatBiService {
         response.put("fallbackUsed", engine.startsWith("java-fallback") || fallbackExecuted);
         response.put("fallbackReason", fallbackReason);
         response.put("graphContext", graphContext);
+        response.put("graphPath", graphPath);
+        response.put("graphSqlHints", graphSqlHints);
         response.put("riskLevel", auditResult.riskLevel());
         response.put("riskReason", auditResult.riskReason());
         response.put("message", "分析完成。已基于字段「" + fieldMapping.getOrDefault("dimension", "未知维度")

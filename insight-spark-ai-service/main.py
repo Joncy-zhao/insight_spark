@@ -1,8 +1,9 @@
-from collections import defaultdict
+﻿from collections import defaultdict
 from math import sqrt
 from typing import Any
 import json
 import os
+import re
 from urllib import error, request
 
 from fastapi import FastAPI, HTTPException
@@ -50,6 +51,9 @@ class TextToSqlRequest(BaseModel):
     tableName: str
     fields: list[FieldMeta]
     previewRows: list[dict[str, Any]] = []
+    graphPath: dict[str, Any] = {}
+    graphContext: list[dict[str, Any]] = []
+    graphSqlHints: dict[str, Any] = {}
 
 
 class ChartRecommendRequest(BaseModel):
@@ -106,54 +110,37 @@ def schema_index(payload: TextToSqlRequest) -> dict[str, Any]:
 @app.post("/ai/text-to-sql")
 def text_to_sql(payload: TextToSqlRequest) -> dict[str, Any]:
     if not payload.fields:
-        raise HTTPException(status_code=400, detail="当前数据表没有字段元信息，请先重新上传文件或选择有效数据表。")
+        raise HTTPException(status_code=400, detail="当前数据表没有字段元信息，请先上传有效数据表。")
+
+    graph_plan = resolve_graph_sql_plan(payload)
 
     if OPENAI_API_KEY:
         ai_result = call_openai_text_to_sql(payload)
         if ai_result:
+            if should_override_sql_with_graph_plan(str(ai_result.get("sql", "")), graph_plan, payload):
+                guided = build_graph_guided_sql_result(payload, graph_plan, str(ai_result.get("chartType", "bar")))
+                ai_result["sql"] = guided["sql"]
+                ai_result["fieldMapping"] = guided["fieldMapping"]
+                ai_result["chartType"] = guided["chartType"]
+                reasoning = ai_result.get("reasoning")
+                if isinstance(reasoning, list):
+                    reasoning.append("图谱提示与模型输出存在偏差，已按图谱映射自动纠偏")
+            ai_result["graphSqlHintsUsed"] = graph_plan["used"]
+            ai_result["graphDecision"] = graph_plan["decision"]
+            if graph_plan["used"] and isinstance(ai_result.get("reasoning"), list):
+                ai_result["reasoning"].append("图谱提示已参与字段映射与歧义纠正")
             return ai_result
 
-    dimension = choose_dimension(payload.question, payload.fields)
-    metric = choose_metric(payload.question, payload.fields)
-    chart_type = choose_chart_type(payload.question, dimension)
-
-    if metric:
-        value_expr = f"SUM(CAST(NULLIF(`{metric.columnName}`, '') AS DECIMAL(18,2)))"
-        metric_name = metric.displayName
-        metric_key = metric.columnName
-    else:
-        value_expr = "COUNT(1)"
-        metric_name = "记录数"
-        metric_key = "value"
-
-    dimension_expr = build_dimension_expression(payload.question, dimension)
-    order_expr = "dim_name ASC" if chart_type == "line" else "metric_value DESC"
-    sql = (
-        f"SELECT {dimension_expr} AS dim_name, {value_expr} AS metric_value "
-        f"FROM `{payload.tableName}` "
-        f"WHERE {build_dimension_filter(payload.question, dimension)} "
-        f"GROUP BY {dimension_expr} "
-        f"ORDER BY {order_expr} LIMIT 30"
-    )
-
+    guided = build_graph_guided_sql_result(payload, graph_plan, "")
     return {
-        "sql": sql,
-        "chartType": chart_type,
-        "fieldMapping": {
-            "dimension": dimension.displayName,
-            "metric": metric_name,
-            "dimensionKey": dimension.columnName,
-            "metricKey": metric_key,
-            "dimensionExpr": dimension_expr,
-        },
-        "reasoning": [
-            f"识别维度字段：{dimension.displayName}",
-            f"识别指标字段：{metric_name}",
-            f"推荐图表类型：{chart_type}",
-        ],
+        "sql": guided["sql"],
+        "chartType": guided["chartType"],
+        "fieldMapping": guided["fieldMapping"],
+        "reasoning": guided["reasoning"],
+        "graphSqlHintsUsed": graph_plan["used"],
+        "graphDecision": graph_plan["decision"],
         "model": "rule-based-fallback",
     }
-
 
 def build_dimension_expression(question: str, dimension: FieldMeta) -> str:
     column = f"`{dimension.columnName}`"
@@ -864,11 +851,13 @@ def build_text_to_sql_prompt(payload: TextToSqlRequest) -> str:
         f"- {json.dumps(row, ensure_ascii=False)}" for row in payload.previewRows[:5]
     ) or "暂无预览样本"
     examples = get_prompt_examples(payload.fields)
+    graph_hint_text = build_graph_hint_prompt(payload)
     return (
         f"用户问题：{payload.question}\n"
         f"目标表：{payload.tableName}\n"
         f"字段信息：\n{fields_text}\n\n"
         f"预览样本：\n{preview_text}\n\n"
+        f"图谱映射提示：\n{graph_hint_text}\n\n"
         f"历史高质量示例：\n{examples}\n\n"
         "请输出严格 JSON，格式如下：\n"
         "{\n"
@@ -882,6 +871,7 @@ def build_text_to_sql_prompt(payload: TextToSqlRequest) -> str:
         "如果用户问题里出现‘按省份/地区/城市/分类/品类/产品名/订单日期/月份’等模式，请尽量选择语义对应字段。"
         "如果预览样本中字段值明显像地区、省份、日期或金额，请优先结合样本值判断，而不是只看列名。"
         "如果是时间维度字符串，优先使用 DATE_FORMAT / STR_TO_DATE / CAST 等兼容 MySQL 的方式，并避免使用 DATE(...) 直接包裹非日期列。"
+        "如果图谱映射提示提供了推荐维度/指标/业务公式，优先按该提示生成字段映射和聚合表达式；若冲突，需要在 reasoning 说明。"
     )
 
 
@@ -909,14 +899,18 @@ def get_prompt_examples(fields: list[FieldMeta]) -> str:
     return "\n".join(examples) if examples else "暂无示例"
 
 
-def choose_dimension(question: str, fields: list[FieldMeta]) -> FieldMeta:
+def choose_dimension(question: str, fields: list[FieldMeta], preferred: FieldMeta | None = None) -> FieldMeta:
+    if preferred:
+        return preferred
     ranked = rank_fields(question, fields, preferred_type="TEXT")
     if ranked:
         return ranked[0]
     return first_by_type(fields, "TEXT") or fields[0]
 
 
-def choose_metric(question: str, fields: list[FieldMeta]) -> FieldMeta | None:
+def choose_metric(question: str, fields: list[FieldMeta], preferred: FieldMeta | None = None) -> FieldMeta | None:
+    if preferred:
+        return preferred
     ranked = rank_fields(question, fields, preferred_type="NUMBER")
     if ranked:
         return ranked[0]
@@ -1019,6 +1013,266 @@ def first_by_type(fields: list[FieldMeta], field_type: str) -> FieldMeta | None:
     return next((field for field in fields if field.fieldType == field_type), None)
 
 
+def resolve_graph_sql_plan(payload: TextToSqlRequest) -> dict[str, Any]:
+    hints = payload.graphSqlHints if isinstance(payload.graphSqlHints, dict) else {}
+    field_candidates = hints.get("fieldCandidates") if isinstance(hints.get("fieldCandidates"), list) else []
+    formula_candidates = hints.get("formulaCandidates") if isinstance(hints.get("formulaCandidates"), list) else []
+    ambiguities = hints.get("ambiguities") if isinstance(hints.get("ambiguities"), list) else []
+    mapping = hints.get("recommendedMapping") if isinstance(hints.get("recommendedMapping"), dict) else {}
+
+    dim_ref = str(mapping.get("dimensionKey", "")).strip()
+    metric_ref = str(mapping.get("metricKey", "")).strip()
+    metric_formula = str(mapping.get("metricFormula", "")).strip()
+
+    if not metric_formula and formula_candidates:
+        first = formula_candidates[0]
+        if isinstance(first, dict):
+            metric_formula = str(first.get("formula", "")).strip()
+
+    field_by_col = {field.columnName.lower(): field for field in payload.fields}
+    field_by_display = {field.displayName.lower(): field for field in payload.fields if field.displayName}
+
+    dimension_field = match_field_by_ref(dim_ref, field_by_col, field_by_display)
+    metric_field = match_field_by_ref(metric_ref, field_by_col, field_by_display)
+
+    if dimension_field is None:
+        dimension_field = select_field_from_candidates(field_candidates, payload.fields, prefer_number=False)
+    if metric_field is None:
+        metric_field = select_field_from_candidates(field_candidates, payload.fields, prefer_number=True)
+
+    resolved: list[dict[str, Any]] = []
+    for item in ambiguities:
+        if not isinstance(item, dict):
+            continue
+        resolution = str(item.get("resolution", "")).strip()
+        if not resolution:
+            continue
+        matched = match_field_by_ref(resolution, field_by_col, field_by_display)
+        if not matched:
+            continue
+        resolved.append({"term": item.get("term"), "resolution": resolution, "column": matched.columnName})
+        if matched.fieldType == "NUMBER" and metric_field is None:
+            metric_field = matched
+        if matched.fieldType != "NUMBER" and dimension_field is None:
+            dimension_field = matched
+
+    metric_name = ""
+    if formula_candidates and isinstance(formula_candidates[0], dict):
+        metric_name = str(formula_candidates[0].get("name", "")).strip()
+
+    used = bool(field_candidates or formula_candidates or ambiguities or dim_ref or metric_ref or metric_formula)
+    return {
+        "used": used,
+        "dimension_field": dimension_field,
+        "metric_field": metric_field,
+        "metric_formula": metric_formula,
+        "metric_name": metric_name,
+        "decision": {
+            "dimensionRef": dim_ref,
+            "metricRef": metric_ref,
+            "metricFormula": metric_formula,
+            "dimensionColumn": dimension_field.columnName if dimension_field else "",
+            "metricColumn": metric_field.columnName if metric_field else "",
+            "ambiguityResolution": resolved,
+        },
+    }
+
+
+def build_graph_guided_sql_result(payload: TextToSqlRequest, graph_plan: dict[str, Any], chart_type: str) -> dict[str, Any]:
+    dimension = choose_dimension(payload.question, payload.fields, graph_plan.get("dimension_field"))
+    metric = choose_metric(payload.question, payload.fields, graph_plan.get("metric_field"))
+    final_chart_type = chart_type if chart_type in {"bar", "line", "pie"} else choose_chart_type(payload.question, dimension)
+
+    if metric and graph_plan.get("metric_formula"):
+        formula_expr = build_formula_expression(str(graph_plan.get("metric_formula")), payload.fields)
+        if formula_expr:
+            value_expr = f"SUM({formula_expr})"
+            metric_name = str(graph_plan.get("metric_name") or metric.displayName)
+            metric_key = metric.columnName
+        else:
+            value_expr = f"SUM(CAST(NULLIF(`{metric.columnName}`, '') AS DECIMAL(18,2)))"
+            metric_name = metric.displayName
+            metric_key = metric.columnName
+    elif metric:
+        value_expr = f"SUM(CAST(NULLIF(`{metric.columnName}`, '') AS DECIMAL(18,2)))"
+        metric_name = metric.displayName
+        metric_key = metric.columnName
+    else:
+        value_expr = "COUNT(1)"
+        metric_name = "记录数"
+        metric_key = "value"
+
+    dimension_expr = build_dimension_expression(payload.question, dimension)
+    order_expr = "dim_name ASC" if final_chart_type == "line" else "metric_value DESC"
+    sql = (
+        f"SELECT {dimension_expr} AS dim_name, {value_expr} AS metric_value "
+        f"FROM `{payload.tableName}` "
+        f"WHERE {build_dimension_filter(payload.question, dimension)} "
+        f"GROUP BY {dimension_expr} "
+        f"ORDER BY {order_expr} LIMIT 30"
+    )
+    return {
+        "sql": sql,
+        "chartType": final_chart_type,
+        "fieldMapping": {
+            "dimension": dimension.displayName,
+            "metric": metric_name,
+            "dimensionKey": dimension.columnName,
+            "metricKey": metric_key,
+            "dimensionExpr": dimension_expr,
+        },
+        "reasoning": [
+            f"识别维度字段：{dimension.displayName}",
+            f"识别指标字段：{metric_name}",
+            "图谱候选字段已参与匹配",
+            f"推荐图表类型：{final_chart_type}",
+        ],
+    }
+
+
+def should_override_sql_with_graph_plan(sql: str, graph_plan: dict[str, Any], payload: TextToSqlRequest) -> bool:
+    if not graph_plan.get("used"):
+        return False
+    sql_lower = (sql or "").lower()
+    dimension_field = graph_plan.get("dimension_field")
+    metric_field = graph_plan.get("metric_field")
+    metric_formula = str(graph_plan.get("metric_formula") or "").strip()
+
+    if dimension_field and f"`{dimension_field.columnName.lower()}`" not in sql_lower:
+        return True
+
+    if metric_formula:
+        formula_expr = build_formula_expression(metric_formula, payload.fields)
+        if formula_expr and formula_expr.lower() not in sql_lower:
+            return True
+    elif metric_field and f"`{metric_field.columnName.lower()}`" not in sql_lower:
+        return True
+
+    return False
+
+
+def build_graph_hint_prompt(payload: TextToSqlRequest) -> str:
+    plan = resolve_graph_sql_plan(payload)
+    hints = payload.graphSqlHints if isinstance(payload.graphSqlHints, dict) else {}
+    top_fields = hints.get("fieldCandidates") if isinstance(hints.get("fieldCandidates"), list) else []
+    top_formulas = hints.get("formulaCandidates") if isinstance(hints.get("formulaCandidates"), list) else []
+    ambiguities = hints.get("ambiguities") if isinstance(hints.get("ambiguities"), list) else []
+
+    if not plan.get("used"):
+        return "无图谱提示。"
+
+    dim = plan.get("dimension_field")
+    metric = plan.get("metric_field")
+    lines = [
+        f"- 推荐维度字段: {(dim.columnName if dim else '') or '未命中'}",
+        f"- 推荐指标字段: {(metric.columnName if metric else '') or '未命中'}",
+        f"- 推荐业务公式: {plan.get('metric_formula') or '无'}",
+    ]
+    if top_fields:
+        labels = []
+        for item in top_fields[:5]:
+            if isinstance(item, dict):
+                labels.append(str(item.get("sourceId") or item.get("label") or item.get("nodeKey") or ""))
+        if labels:
+            lines.append("- 字段候选: " + ", ".join([x for x in labels if x]))
+    if top_formulas:
+        formulas = []
+        for item in top_formulas[:3]:
+            if isinstance(item, dict):
+                name = str(item.get("name") or "")
+                formula = str(item.get("formula") or "")
+                if name and formula:
+                    formulas.append(f"{name}={formula}")
+                elif formula:
+                    formulas.append(formula)
+        if formulas:
+            lines.append("- 公式候选: " + "; ".join(formulas))
+    if ambiguities:
+        resolved = []
+        for item in ambiguities[:3]:
+            if isinstance(item, dict):
+                term = str(item.get("term") or "")
+                resolution = str(item.get("resolution") or "")
+                if term and resolution:
+                    resolved.append(f"{term}->{resolution}")
+        if resolved:
+            lines.append("- 歧义消解: " + ", ".join(resolved))
+    return "\n".join(lines)
+
+
+def select_field_from_candidates(candidates: list[Any], fields: list[FieldMeta], prefer_number: bool) -> FieldMeta | None:
+    if not candidates:
+        return None
+    field_by_col = {field.columnName.lower(): field for field in fields}
+    field_by_display = {field.displayName.lower(): field for field in fields if field.displayName}
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        refs = [
+            str(item.get("sourceId", "")).strip(),
+            str(item.get("label", "")).strip(),
+            str(item.get("nodeKey", "")).strip(),
+        ]
+        for ref in refs:
+            matched = match_field_by_ref(ref, field_by_col, field_by_display)
+            if not matched:
+                continue
+            if prefer_number and matched.fieldType != "NUMBER":
+                continue
+            if not prefer_number and matched.fieldType == "NUMBER":
+                continue
+            return matched
+    return None
+
+
+def match_field_by_ref(ref: str, field_by_col: dict[str, FieldMeta], field_by_display: dict[str, FieldMeta]) -> FieldMeta | None:
+    if not ref:
+        return None
+    for token in tokenize_ref(ref):
+        matched = field_by_col.get(token.lower()) or field_by_display.get(token.lower())
+        if matched:
+            return matched
+    return None
+
+
+def tokenize_ref(ref: str) -> list[str]:
+    raw = re.split(r"[^a-zA-Z0-9_\u4e00-\u9fa5]+", ref)
+    tokens = [part.strip() for part in raw if part and part.strip()]
+    seen = set()
+    out = []
+    for token in tokens:
+        lower = token.lower()
+        if lower in seen:
+            continue
+        seen.add(lower)
+        out.append(token)
+    return out
+
+
+def build_formula_expression(formula: str, fields: list[FieldMeta]) -> str:
+    expr = str(formula or "").strip()
+    if not expr:
+        return ""
+    lower = expr.lower()
+    banned = [";", "--", "/*", "*/", "drop", "delete", "insert", "update", "alter", "truncate"]
+    if any(token in lower for token in banned):
+        return ""
+    field_by_col = {field.columnName.lower(): field for field in fields}
+    field_by_display = {field.displayName.lower(): field for field in fields if field.displayName}
+    tokens = sorted(set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expr)), key=len, reverse=True)
+    reserved = {"sum", "avg", "count", "max", "min", "cast", "nullif", "if", "case", "when", "then", "else", "end"}
+    rewritten = expr
+    for token in tokens:
+        key = token.lower()
+        if key in reserved:
+            continue
+        matched = field_by_col.get(key) or field_by_display.get(key)
+        if not matched:
+            continue
+        rewritten = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])", f"`{matched.columnName}`", rewritten)
+    return rewritten
+
+
 def normalize_ai_sql_result(parsed: dict[str, Any], payload: TextToSqlRequest) -> dict[str, Any]:
     field_mapping = parsed.get("fieldMapping") if isinstance(parsed.get("fieldMapping"), dict) else {}
     sql = str(parsed.get("sql", ""))
@@ -1028,9 +1282,18 @@ def normalize_ai_sql_result(parsed: dict[str, Any], payload: TextToSqlRequest) -
     dimension_key = str(field_mapping.get("dimensionKey") or field_mapping.get("dimension") or "")
     metric_key = str(field_mapping.get("metricKey") or field_mapping.get("metric") or "")
 
+    graph_plan = resolve_graph_sql_plan(payload)
     field_by_column = {field.columnName: field for field in payload.fields}
-    dimension_field = field_by_column.get(dimension_key) or choose_dimension(payload.question, payload.fields)
-    metric_field = field_by_column.get(metric_key) or choose_metric(payload.question, payload.fields)
+    dimension_field = (
+        field_by_column.get(dimension_key)
+        or graph_plan["dimension_field"]
+        or choose_dimension(payload.question, payload.fields)
+    )
+    metric_field = (
+        field_by_column.get(metric_key)
+        or graph_plan["metric_field"]
+        or choose_metric(payload.question, payload.fields)
+    )
 
     if dimension_field:
         dimension_key = dimension_field.columnName
@@ -1038,12 +1301,21 @@ def normalize_ai_sql_result(parsed: dict[str, Any], payload: TextToSqlRequest) -
         metric_key = metric_field.columnName
 
     if not dimension_key:
-        dimension_key = choose_dimension(payload.question, payload.fields).columnName
+        dimension_key = choose_dimension(payload.question, payload.fields, graph_plan["dimension_field"]).columnName
     if not metric_key:
-        metric_key = choose_metric(payload.question, payload.fields).columnName if choose_metric(payload.question, payload.fields) else "value"
+        fallback_metric = choose_metric(payload.question, payload.fields, graph_plan["metric_field"])
+        metric_key = fallback_metric.columnName if fallback_metric else "value"
 
     if " AS dim_name" not in sql and dimension_key:
         sql = rewrite_sql_alias(sql, dimension_key, metric_key)
+
+    if should_override_sql_with_graph_plan(sql, graph_plan, payload):
+        guided = build_graph_guided_sql_result(payload, graph_plan, chart_type)
+        sql = guided["sql"]
+        field_mapping = guided["fieldMapping"]
+        chart_type = guided["chartType"]
+        if isinstance(reasoning, list):
+            reasoning.append("图谱提示与模型输出存在偏差，已按图谱映射自动纠偏")
 
     return {
         **parsed,
@@ -1057,6 +1329,8 @@ def normalize_ai_sql_result(parsed: dict[str, Any], payload: TextToSqlRequest) -
             "dimensionExpr": field_mapping.get("dimensionExpr", dimension_key),
         },
         "reasoning": reasoning,
+        "graphSqlHintsUsed": graph_plan["used"],
+        "graphDecision": graph_plan["decision"],
     }
 
 
