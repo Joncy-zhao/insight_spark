@@ -96,6 +96,12 @@ public class SqlAuditService {
         addColumnIfMissing("is_sql_audit_log", "mask_detail", "`mask_detail` VARCHAR(1000) NULL");
         addColumnIfMissing("is_sql_audit_log", "execution_guard", "`execution_guard` VARCHAR(1000) NULL");
         addColumnIfMissing("is_sql_audit_log", "query_guard_action", "`query_guard_action` VARCHAR(32) NULL");
+        addColumnIfTableExists("is_data_field", "field_comment", "`field_comment` VARCHAR(512) NULL");
+        addColumnIfTableExists("is_data_field", "synonyms", "`synonyms` VARCHAR(1000) NULL");
+        addColumnIfTableExists("is_data_field", "sensitive", "`sensitive` TINYINT(1) NOT NULL DEFAULT 0");
+        addColumnIfTableExists("is_official_schema_field", "business_name", "`business_name` VARCHAR(255) NULL");
+        addColumnIfTableExists("is_official_schema_field", "synonyms", "`synonyms` VARCHAR(1000) NULL");
+        addColumnIfTableExists("is_official_schema_field", "sensitive", "`sensitive` TINYINT(1) NOT NULL DEFAULT 0");
 
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS `is_sql_audit_rule` (
@@ -325,20 +331,12 @@ public class SqlAuditService {
         Map<String, String> sensitiveColumns;
         if (tableName.startsWith("official:")) {
             String[] parts = tableName.split(":", 3);
-            sensitiveColumns = parts.length == 3 ? sensitiveColumnMaskTypes("""
-                    SELECT column_name AS columnName,
-                           COALESCE(NULLIF(business_name, ''), NULLIF(column_comment, ''), column_name) AS displayName,
-                           column_comment AS commentText, synonyms
-                    FROM is_official_schema_field
-                    WHERE datasource_id = ? AND table_name = ? AND sensitive = 1
-                    """, Long.parseLong(parts[1]), parts[2]) : Map.of();
+            sensitiveColumns = parts.length == 3
+                    ? sensitiveColumnMaskTypes(buildFieldMetaSql("is_official_schema_field", true, true),
+                            Long.parseLong(parts[1]), parts[2])
+                    : Map.of();
         } else {
-            sensitiveColumns = sensitiveColumnMaskTypes("""
-                    SELECT column_name AS columnName, display_name AS displayName,
-                           field_comment AS commentText, synonyms
-                    FROM is_data_field
-                    WHERE table_name = ? AND sensitive = 1
-                    """, tableName);
+            sensitiveColumns = sensitiveColumnMaskTypes(buildFieldMetaSql("is_data_field", false, true), tableName);
         }
         if (sensitiveColumns.isEmpty()) {
             return new MaskReport(rows, "");
@@ -821,7 +819,13 @@ public class SqlAuditService {
 
     private Map<String, String> sensitiveColumnMaskTypes(String sql, Object... args) {
         Map<String, String> out = new LinkedHashMap<>();
-        for (Map<String, Object> field : jdbcTemplate.queryForList(sql, args)) {
+        List<Map<String, Object>> fields;
+        try {
+            fields = jdbcTemplate.queryForList(sql, args);
+        } catch (Exception ignored) {
+            return out;
+        }
+        for (Map<String, Object> field : fields) {
             if (!fieldSensitiveByMetaOrRule(field)) {
                 continue;
             }
@@ -877,29 +881,65 @@ public class SqlAuditService {
         return "\"" + value.replace("\"", "\"\"").replace("\r", " ").replace("\n", " ") + "\"";
     }
 
+    private String buildFieldMetaSql(String tableName, boolean official, boolean onlySensitive) {
+        String columnNameExpr = columnExpr(tableName, "column_name", "''");
+        String tableNameExpr = columnExpr(tableName, "table_name", "''");
+        String datasourceIdExpr = columnExpr(tableName, "datasource_id", "0");
+        String columnCommentExpr = columnExpr(tableName, "column_comment", "''");
+        String displayExpr = official
+                ? (hasColumn(tableName, "business_name")
+                    ? "COALESCE(NULLIF(`business_name`, ''), NULLIF(" + columnCommentExpr + ", ''), " + columnNameExpr + ")"
+                    : "COALESCE(NULLIF(" + columnCommentExpr + ", ''), " + columnNameExpr + ")")
+                : columnExpr(tableName, "display_name", columnNameExpr);
+        String commentExpr = hasColumn(tableName, "field_comment") ? "`field_comment`"
+                : columnCommentExpr;
+        String synonymsExpr = columnExpr(tableName, "synonyms", "''");
+        String sensitiveExpr = columnExpr(tableName, "sensitive", "0");
+        String where = official
+                ? " WHERE " + datasourceIdExpr + " = ? AND " + tableNameExpr + " = ?"
+                : " WHERE " + tableNameExpr + " = ?";
+        if (onlySensitive && hasColumn(tableName, "sensitive")) {
+            where += " AND `sensitive` = 1";
+        }
+        return "SELECT " + columnNameExpr + " AS columnName, " + displayExpr + " AS displayName, "
+                + commentExpr + " AS commentText, " + synonymsExpr + " AS synonyms, "
+                + sensitiveExpr + " AS sensitive FROM `" + tableName + "`" + where;
+    }
+
+    private String columnExpr(String tableName, String columnName, String fallback) {
+        return hasColumn(tableName, columnName) ? "`" + columnName + "`" : fallback;
+    }
+
+    private boolean hasColumn(String tableName, String columnName) {
+        try {
+            Integer count = jdbcTemplate.queryForObject("""
+                    SELECT COUNT(*)
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?
+                    """, Integer.class, tableName, columnName);
+            return count != null && count > 0;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
     private List<String> findSensitiveFields(String tableName, String normalizedSql) {
         if (tableName == null || tableName.isBlank()) {
             return List.of();
         }
         List<Map<String, Object>> fields;
-        if (tableName.startsWith("official:")) {
-            String[] parts = tableName.split(":", 3);
-            fields = parts.length == 3
-                    ? jdbcTemplate.queryForList("""
-                        SELECT column_name AS columnName,
-                               COALESCE(NULLIF(business_name, ''), NULLIF(column_comment, ''), column_name) AS displayName,
-                               column_comment AS commentText, synonyms, sensitive
-                        FROM is_official_schema_field
-                        WHERE datasource_id = ? AND table_name = ?
-                        """, Long.parseLong(parts[1]), parts[2])
-                    : List.of();
-        } else {
-            fields = jdbcTemplate.queryForList("""
-                    SELECT column_name AS columnName, display_name AS displayName,
-                           field_comment AS commentText, synonyms, sensitive
-                    FROM is_data_field
-                    WHERE table_name = ?
-                    """, tableName);
+        try {
+            if (tableName.startsWith("official:")) {
+                String[] parts = tableName.split(":", 3);
+                fields = parts.length == 3
+                        ? jdbcTemplate.queryForList(buildFieldMetaSql("is_official_schema_field", true, false),
+                                Long.parseLong(parts[1]), parts[2])
+                        : List.of();
+            } else {
+                fields = jdbcTemplate.queryForList(buildFieldMetaSql("is_data_field", false, false), tableName);
+            }
+        } catch (Exception ignored) {
+            return List.of();
         }
         
         if (fields.isEmpty()) {
@@ -1014,6 +1054,22 @@ public class SqlAuditService {
                 """, Integer.class, tableName, columnName);
         if (count == null || count == 0) {
             jdbcTemplate.execute("ALTER TABLE `" + tableName + "` ADD COLUMN " + definition);
+        }
+    }
+
+    private void addColumnIfTableExists(String tableName, String columnName, String definition) {
+        try {
+            Integer tableCount = jdbcTemplate.queryForObject("""
+                    SELECT COUNT(*)
+                    FROM information_schema.tables
+                    WHERE table_schema = DATABASE() AND table_name = ?
+                    """, Integer.class, tableName);
+            if (tableCount == null || tableCount == 0) {
+                return;
+            }
+            addColumnIfMissing(tableName, columnName, definition);
+        } catch (Exception ignored) {
+            // Other modules may create these metadata tables later. The audit query also tolerates late creation.
         }
     }
 

@@ -76,11 +76,6 @@ public class DatasourceService {
                   UNIQUE KEY `uk_official_schema_table` (`datasource_id`, `table_name`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='官方数据源表结构';
                 """);
-        addColumnIfMissing("is_official_schema_field", "business_desc", "`business_desc` VARCHAR(1000) NULL");
-        addColumnIfMissing("is_official_schema_field", "synonyms", "`synonyms` VARCHAR(1000) NULL");
-        addColumnIfMissing("is_official_schema_field", "kg_sync_enabled", "`kg_sync_enabled` TINYINT(1) NOT NULL DEFAULT 1");
-        addColumnIfMissing("is_official_schema_field", "kg_sync_rule", "`kg_sync_rule` VARCHAR(1000) NULL");
-
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS `is_official_schema_field` (
                   `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -97,6 +92,10 @@ public class DatasourceService {
                   UNIQUE KEY `uk_official_schema_field` (`datasource_id`, `table_name`, `column_name`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='官方数据源字段结构';
                 """);
+        addColumnIfMissing("is_official_schema_field", "business_desc", "`business_desc` VARCHAR(1000) NULL");
+        addColumnIfMissing("is_official_schema_field", "synonyms", "`synonyms` VARCHAR(1000) NULL");
+        addColumnIfMissing("is_official_schema_field", "kg_sync_enabled", "`kg_sync_enabled` TINYINT(1) NOT NULL DEFAULT 1");
+        addColumnIfMissing("is_official_schema_field", "kg_sync_rule", "`kg_sync_rule` VARCHAR(1000) NULL");
 
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS `is_official_row_policy` (
@@ -985,6 +984,13 @@ public class DatasourceService {
     }
 
     private void addColumnIfMissing(String tableName, String columnName, String definition) {
+        Integer tableCount = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM information_schema.tables
+                WHERE table_schema = DATABASE() AND table_name = ?
+                """, Integer.class, tableName);
+        if (tableCount == null || tableCount == 0) {
+            return;
+        }
         Integer count = jdbcTemplate.queryForObject("""
                 SELECT COUNT(*) FROM information_schema.columns
                 WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?

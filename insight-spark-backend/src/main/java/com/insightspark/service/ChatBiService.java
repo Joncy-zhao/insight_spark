@@ -691,6 +691,20 @@ public class ChatBiService {
         ensureNotCancelled("上传表查询后");
         return rows;
     }
+    private List<Map<String, Object>> queryUploadTable(String tableName, String sql, int maxRows) {
+        ensureNotCancelled("上传表查询前");
+        Integer previousTimeout = jdbcTemplate.getQueryTimeout();
+        try {
+            jdbcTemplate.setQueryTimeout(5);
+            int safeMaxRows = Math.max(1, Math.min(maxRows, 1000));
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList(sqlAuditService.ensureLimit(sql, safeMaxRows));
+            ensureNotCancelled("上传表查询后");
+            return rows.size() <= safeMaxRows ? rows : rows.subList(0, safeMaxRows);
+        } finally {
+            jdbcTemplate.setQueryTimeout(previousTimeout);
+        }
+    }
+
     private Map<String, Object> safeFieldMapping(Object raw) {
         if (!(raw instanceof Map<?, ?> rawMap)) {
             return Map.of();
