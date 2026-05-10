@@ -2,6 +2,8 @@ package com.insightspark.service;
 
 import jakarta.annotation.PostConstruct;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
@@ -13,15 +15,19 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Service
 public class KnowledgeGraphService {
+
+    private static final Logger log = LoggerFactory.getLogger(KnowledgeGraphService.class);
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -41,6 +47,14 @@ public class KnowledgeGraphService {
     private final HttpClient httpClient = HttpClient.newHttpClient();
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    private final AtomicLong neo4jWriteSuccessCount = new AtomicLong();
+    private final AtomicLong neo4jWriteFailureCount = new AtomicLong();
+    private final AtomicLong neo4jQuerySuccessCount = new AtomicLong();
+    private final AtomicLong neo4jQueryFailureCount = new AtomicLong();
+    private volatile String lastNeo4jError = "";
+    private volatile Instant lastNeo4jSuccessAt;
+    private volatile Instant lastNeo4jFailureAt;
+
     @PostConstruct
     public void initKnowledgeGraphTables() {
         jdbcTemplate.execute("""
@@ -57,7 +71,7 @@ public class KnowledgeGraphService {
                   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                   INDEX `idx_kg_node_type` (`node_type`),
                   INDEX `idx_kg_node_label` (`label`)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='杞婚噺鐭ヨ瘑鍥捐氨鑺傜偣';
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='轻量知识图谱节点';
                 """);
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS `is_kg_edge` (
@@ -70,7 +84,24 @@ public class KnowledgeGraphService {
                   UNIQUE KEY `uk_kg_edge` (`from_key`, `to_key`, `relation_type`),
                   INDEX `idx_kg_edge_from` (`from_key`),
                   INDEX `idx_kg_edge_to` (`to_key`)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='杞婚噺鐭ヨ瘑鍥捐氨鍏崇郴';
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='轻量知识图谱关系';
+                """);
+
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS `is_neo4j_write_audit` (
+                  `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+                  `action` VARCHAR(64) NOT NULL,
+                  `entity_key` VARCHAR(255) NOT NULL,
+                  `relation_type` VARCHAR(64) NULL,
+                  `cypher` TEXT NULL,
+                  `params_json` TEXT NULL,
+                  `status` VARCHAR(32) NOT NULL,
+                  `error_message` TEXT NULL,
+                  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  INDEX `idx_neo4j_write_audit_status` (`status`),
+                  INDEX `idx_neo4j_write_audit_created_at` (`created_at`),
+                  INDEX `idx_neo4j_write_audit_entity` (`entity_key`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Neo4j write audit';
                 """);
         addColumnIfMissing("is_kg_node", "node_type", "`node_type` VARCHAR(64) NOT NULL DEFAULT 'UNKNOWN'");
         addColumnIfMissing("is_kg_node", "label", "`label` VARCHAR(255) NOT NULL DEFAULT ''");
@@ -142,7 +173,7 @@ public class KnowledgeGraphService {
             nodeCount += upsertNode(dsKey, "DATASOURCE", Objects.toString(table.get("datasourceName"), datasourceId),
                     "OFFICIAL", datasourceId, "企业官方数据源", 2.0);
             nodeCount += upsertNode(tableKey, "OFFICIAL_TABLE", tableName, "OFFICIAL", datasourceId + "." + tableName,
-                    "瀹樻柟琛細" + Objects.toString(table.get("tableComment"), "") + "锛涗及绠楄鏁帮細" + table.get("tableRows"), 2.0);
+                    "官方表：" + Objects.toString(table.get("tableComment"), "") + "；估算行数：" + table.get("tableRows"), 2.0);
             edgeCount += upsertEdge(dsKey, tableKey, "HAS_TABLE", 1.0);
             List<Map<String, Object>> fields = jdbcTemplate.queryForList("""
                     SELECT column_name AS columnName, data_type AS dataType, column_comment AS columnComment,
@@ -262,13 +293,16 @@ public class KnowledgeGraphService {
     }
 
     public Map<String, Object> multiHopSearch(String keyword, String tableName, int depth, int limit) {
-        if (!loadNeo4jRuntimeConfig().enabled()) {
-            throw new IllegalStateException("Neo4j 未启用，已禁止回退到本地 MySQL 知识图谱");
+        Neo4jRuntimeConfig config = loadNeo4jRuntimeConfig();
+        if (!config.enabled()) {
+            return fallbackMultiHopContext(keyword, tableName, "Neo4j disabled, fallback to local MySQL knowledge graph");
         }
         try {
             return neo4jMultiHopSearch(keyword, tableName, depth, limit);
         } catch (Exception e) {
-            throw new IllegalStateException("Neo4j 查询失败：" + safeErrorMessage(e), e);
+            String error = safeErrorMessage(e);
+            log.warn("Neo4j multi-hop query failed, fallback to local graph: {}", error);
+            return fallbackMultiHopContext(keyword, tableName, error);
         }
     }
 
@@ -276,7 +310,7 @@ public class KnowledgeGraphService {
         return castMapList(multiHopSearch(question, tableName, 2, 12).getOrDefault("ragContext", List.of()));
         /*
         if (question != null && !question.isBlank()) {
-            for (String token : question.split("[\\s,锛屻€傦紱;锛?]+")) {
+            for (String token : question.split("[\\s,，。；;？?]+")) {
                 if (token.length() >= 2) {
                     context.addAll(search(token, 5));
                 }
@@ -299,21 +333,21 @@ public class KnowledgeGraphService {
         for (Map<String, Object> node : context) {
             String nodeType = Objects.toString(node.get("nodeType"), "").toUpperCase();
             if ("FIELD".equals(nodeType) || "OFFICIAL_FIELD".equals(nodeType)) {
-                fieldCandidates.add(buildFieldCandidate(node, tokens));
+                fieldCandidates.add(buildFieldCandidate(node, q, tokens));
             }
             if ("BUSINESS_METRIC".equals(nodeType)) {
-                formulaCandidates.add(buildFormulaCandidate(node));
+                formulaCandidates.add(buildFormulaCandidate(node, q, tokens));
             }
         }
 
         fieldCandidates.sort((a, b) -> Double.compare(readDouble(b.get("score")), readDouble(a.get("score"))));
-        formulaCandidates.sort((a, b) -> Double.compare(readDouble(b.get("weight")), readDouble(a.get("weight"))));
+        formulaCandidates.sort((a, b) -> Double.compare(readDouble(b.get("score")), readDouble(a.get("score"))));
 
         List<Map<String, Object>> topFields = fieldCandidates.stream().limit(8).toList();
         List<Map<String, Object>> topFormulas = formulaCandidates.stream().limit(6).toList();
 
         List<Map<String, Object>> ambiguities = detectAmbiguities(topFields);
-        Map<String, Object> mapping = recommendMapping(topFields, topFormulas);
+        Map<String, Object> mapping = recommendMapping(topFields, topFormulas, q);
 
         return Map.of(
                 "fieldCandidates", topFields,
@@ -326,14 +360,121 @@ public class KnowledgeGraphService {
 
     public Map<String, Object> retrieveMultiHopContext(String question, String tableName) {
         Map<String, Object> bundle = multiHopSearch(question, tableName, 3, 16);
+        Map<String, Object> context = new LinkedHashMap<>(bundle);
+        context.put("nodes", bundle.getOrDefault("nodes", List.of()));
+        context.put("edges", bundle.getOrDefault("edges", List.of()));
+        context.put("pathText", bundle.getOrDefault("pathText", ""));
+        context.put("ragContext", bundle.getOrDefault("ragContext", List.of()));
+        context.put("depth", bundle.getOrDefault("depth", 3));
+        context.put("neo4jEnabled", bundle.getOrDefault("neo4jEnabled", neo4jEnabled));
+        return context;
+    }
+
+    public Map<String, Object> retrieveMultiHopContextSafely(String question, String tableName) {
+        try {
+            Map<String, Object> bundle = retrieveMultiHopContext(question, tableName);
+            return new LinkedHashMap<>(bundle);
+        } catch (Exception e) {
+            markNeo4jQueryFailure(e);
+            return fallbackMultiHopContext(question, tableName, safeErrorMessage(e));
+        }
+    }
+
+    public Map<String, Object> healthStatus() {
+        int mysqlNodeCount = 0;
+        int mysqlEdgeCount = 0;
+        try {
+            Integer nodes = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM is_kg_node", Integer.class);
+            Integer edges = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM is_kg_edge", Integer.class);
+            mysqlNodeCount = nodes == null ? 0 : nodes;
+            mysqlEdgeCount = edges == null ? 0 : edges;
+        } catch (Exception ignore) {
+            // keep default zero values
+        }
+
+        boolean neo4jConnected = false;
+        String probeError = "";
+        Neo4jRuntimeConfig cfg = loadNeo4jRuntimeConfig();
+        if (cfg.enabled()) {
+            try {
+                neo4jQueryRows("RETURN 1 AS ping", Map.of());
+                neo4jConnected = true;
+            } catch (Exception e) {
+                markNeo4jQueryFailure(e);
+                probeError = safeErrorMessage(e);
+            }
+        }
+
+        String status = (!cfg.enabled() || !neo4jConnected) ? "DEGRADED" : "UP";
+        String neo4jStatus = !cfg.enabled() ? "DISABLED" : (neo4jConnected ? "UP" : "DOWN");
+        String error = chooseFirstNonBlank(probeError, lastNeo4jError);
+
+        Map<String, Object> neo4j = new LinkedHashMap<>();
+        neo4j.put("enabled", cfg.enabled());
+        neo4j.put("status", neo4jStatus);
+        neo4j.put("httpUrl", cfg.httpUrl());
+        neo4j.put("writeSuccessCount", neo4jWriteSuccessCount.get());
+        neo4j.put("writeFailureCount", neo4jWriteFailureCount.get());
+        neo4j.put("querySuccessCount", neo4jQuerySuccessCount.get());
+        neo4j.put("queryFailureCount", neo4jQueryFailureCount.get());
+        neo4j.put("lastSuccessAt", lastNeo4jSuccessAt == null ? null : lastNeo4jSuccessAt.toString());
+        neo4j.put("lastFailureAt", lastNeo4jFailureAt == null ? null : lastNeo4jFailureAt.toString());
+        neo4j.put("lastError", error);
+
         return Map.of(
-                "nodes", bundle.getOrDefault("nodes", List.of()),
-                "edges", bundle.getOrDefault("edges", List.of()),
-                "pathText", bundle.getOrDefault("pathText", ""),
-                "ragContext", bundle.getOrDefault("ragContext", List.of()),
-                "depth", bundle.getOrDefault("depth", 3),
-                "neo4jEnabled", bundle.getOrDefault("neo4jEnabled", neo4jEnabled)
+                "status", status,
+                "timestamp", Instant.now().toString(),
+                "mysql", Map.of(
+                        "nodeCount", mysqlNodeCount,
+                        "edgeCount", mysqlEdgeCount,
+                        "available", true
+                ),
+                "neo4j", neo4j,
+                "degraded", !"UP".equals(status)
         );
+    }
+
+    private Map<String, Object> fallbackMultiHopContext(String question, String tableName, String error) {
+        List<Map<String, Object>> nodes = List.of();
+        List<Map<String, Object>> edges = List.of();
+        String fallbackError = Objects.toString(error, "");
+        try {
+            nodes = search(question, 20);
+        } catch (Exception e) {
+            fallbackError = chooseFirstNonBlank(fallbackError, safeErrorMessage(e));
+            log.warn("Local fallback node query failed: {}", safeErrorMessage(e));
+        }
+        try {
+            List<String> nodeKeys = nodes.stream().map(item -> Objects.toString(item.get("nodeKey"), "")).toList();
+            edges = nodeKeys.isEmpty()
+                    ? List.of()
+                    : jdbcTemplate.queryForList("""
+                            SELECT from_key AS fromKey, to_key AS toKey, relation_type AS relationType, weight
+                            FROM is_kg_edge
+                            WHERE from_key IN (%s) OR to_key IN (%s)
+                            ORDER BY weight DESC
+                            LIMIT 80
+                            """.formatted(placeholders(nodeKeys.size()), placeholders(nodeKeys.size())),
+                    doubledArgs(nodeKeys));
+        } catch (Exception e) {
+            fallbackError = chooseFirstNonBlank(fallbackError, safeErrorMessage(e));
+            log.warn("Local fallback edge query failed: {}", safeErrorMessage(e));
+        }
+
+        Map<String, Object> fallback = new LinkedHashMap<>();
+        fallback.put("nodes", nodes);
+        fallback.put("edges", edges);
+        fallback.put("pathText", buildPathText(nodes, edges));
+        fallback.put("ragContext", nodes);
+        fallback.put("depth", 1);
+        fallback.put("neo4jEnabled", loadNeo4jRuntimeConfig().enabled());
+        fallback.put("neo4jFallback", true);
+        fallback.put("neo4jError", fallbackError.isBlank() ? "neo4j unavailable" : fallbackError);
+        fallback.put("fallbackSource", "MYSQL_KG");
+        fallback.put("tableName", Objects.toString(tableName, ""));
+        fallback.put("question", Objects.toString(question, ""));
+        fallback.put("fallbackError", fallbackError);
+        return fallback;
     }
 
     private Map<String, Object> neo4jMultiHopSearch(String keyword, String tableName, int depth, int limit) throws Exception {
@@ -394,42 +535,49 @@ public class KnowledgeGraphService {
     }
 
     private List<Map<String, Object>> neo4jQueryRows(String cypher, Map<String, Object> params) throws Exception {
-        Neo4jRuntimeConfig config = loadNeo4jRuntimeConfig();
-        String payload = objectMapper.writeValueAsString(Map.of(
-                "statements", List.of(Map.of("statement", cypher, "parameters", params))
-        ));
-        String token = Base64.getEncoder().encodeToString((config.username() + ":" + config.password()).getBytes(StandardCharsets.UTF_8));
-        HttpRequest request = HttpRequest.newBuilder(URI.create(config.httpUrl()))
-                .header("Content-Type", "application/json")
-                .header("Authorization", "Basic " + token)
-                .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
-                .build();
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-        if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            throw new IllegalStateException("HTTP " + response.statusCode() + " - " + response.body());
-        }
-        Map<String, Object> body = objectMapper.readValue(response.body(), Map.class);
-        List<Map<String, Object>> errors = castMapList(body.get("errors"));
-        if (!errors.isEmpty()) {
-            throw new IllegalStateException(formatNeo4jErrors(errors));
-        }
-        List<Map<String, Object>> results = castMapList(body.get("results"));
-        if (results.isEmpty()) {
-            return List.of();
-        }
-        List<Map<String, Object>> data = castMapList(results.get(0).get("data"));
-        List<Map<String, Object>> rows = new ArrayList<>();
-        for (Map<String, Object> item : data) {
-            Object rowObj = item.get("row");
-            if (rowObj instanceof List<?> rowList && !rowList.isEmpty() && rowList.get(0) instanceof Map<?, ?> map) {
-                Map<String, Object> row = new LinkedHashMap<>();
-                for (Map.Entry<?, ?> entry : map.entrySet()) {
-                    row.put(Objects.toString(entry.getKey()), entry.getValue());
-                }
-                rows.add(row);
+        try {
+            Neo4jRuntimeConfig config = loadNeo4jRuntimeConfig();
+            String payload = objectMapper.writeValueAsString(Map.of(
+                    "statements", List.of(Map.of("statement", cypher, "parameters", params))
+            ));
+            String token = Base64.getEncoder().encodeToString((config.username() + ":" + config.password()).getBytes(StandardCharsets.UTF_8));
+            HttpRequest request = HttpRequest.newBuilder(URI.create(config.httpUrl()))
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", "Basic " + token)
+                    .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
+                    .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                throw new IllegalStateException("HTTP " + response.statusCode() + " - " + response.body());
             }
+            Map<String, Object> body = objectMapper.readValue(response.body(), Map.class);
+            List<Map<String, Object>> errors = castMapList(body.get("errors"));
+            if (!errors.isEmpty()) {
+                throw new IllegalStateException(formatNeo4jErrors(errors));
+            }
+            List<Map<String, Object>> results = castMapList(body.get("results"));
+            if (results.isEmpty()) {
+                markNeo4jQuerySuccess();
+                return List.of();
+            }
+            List<Map<String, Object>> data = castMapList(results.get(0).get("data"));
+            List<Map<String, Object>> rows = new ArrayList<>();
+            for (Map<String, Object> item : data) {
+                Object rowObj = item.get("row");
+                if (rowObj instanceof List<?> rowList && !rowList.isEmpty() && rowList.get(0) instanceof Map<?, ?> map) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    for (Map.Entry<?, ?> entry : map.entrySet()) {
+                        row.put(Objects.toString(entry.getKey()), entry.getValue());
+                    }
+                    rows.add(row);
+                }
+            }
+            markNeo4jQuerySuccess();
+            return rows;
+        } catch (Exception e) {
+            markNeo4jQueryFailure(e);
+            throw e;
         }
-        return rows;
     }
 
     private String formatNeo4jErrors(List<Map<String, Object>> errors) {
@@ -501,35 +649,66 @@ public class KnowledgeGraphService {
         return Map.of("node", nodeCount, "edge", edgeCount);
     }
 
-    private Map<String, Object> buildFieldCandidate(Map<String, Object> node, List<String> tokens) {
+    private Map<String, Object> buildFieldCandidate(Map<String, Object> node, String question, List<String> tokens) {
         String label = Objects.toString(node.get("label"), "");
         String sourceId = Objects.toString(node.get("sourceId"), "");
         String content = Objects.toString(node.get("content"), "");
         double score = readDouble(node.get("weight"));
-        String bag = (label + " " + sourceId + " " + content).toLowerCase();
+        String bag = normalizeText(label + " " + sourceId + " " + content);
+        String q = normalizeText(question);
         int matched = 0;
         for (String token : tokens) {
-            if (!token.isBlank() && bag.contains(token)) {
+            String normalizedToken = normalizeText(token);
+            if (!normalizedToken.isBlank() && bag.contains(normalizedToken)) {
                 score += 0.8;
                 matched++;
             }
         }
         score += matched * 0.2;
-        return new LinkedHashMap<>(Map.of(
-                "label", label,
-                "sourceId", sourceId,
-                "nodeKey", Objects.toString(node.get("nodeKey"), ""),
-                "score", score
-        ));
+        double dimensionScore = score + scoreDimensionBonus(q, bag, label, sourceId, content);
+        double metricScore = score + scoreMetricBonus(q, bag, label, sourceId, content);
+        Map<String, Object> candidate = new LinkedHashMap<>();
+        candidate.put("label", label);
+        candidate.put("sourceId", sourceId);
+        candidate.put("nodeKey", Objects.toString(node.get("nodeKey"), ""));
+        candidate.put("score", score);
+        candidate.put("dimensionScore", dimensionScore);
+        candidate.put("metricScore", metricScore);
+        return candidate;
     }
 
-    private Map<String, Object> buildFormulaCandidate(Map<String, Object> node) {
-        return new LinkedHashMap<>(Map.of(
-                "name", Objects.toString(node.get("label"), ""),
-                "sourceId", Objects.toString(node.get("sourceId"), ""),
-                "formula", Objects.toString(node.get("content"), ""),
-                "weight", readDouble(node.get("weight"))
-        ));
+    private Map<String, Object> buildFormulaCandidate(Map<String, Object> node, String question, List<String> tokens) {
+        String name = Objects.toString(node.get("label"), "");
+        String sourceId = Objects.toString(node.get("sourceId"), "");
+        String formula = Objects.toString(node.get("content"), "");
+        String bag = normalizeText(name + " " + sourceId + " " + formula);
+        String q = normalizeText(question);
+        double weight = readDouble(node.get("weight"));
+        double score = weight;
+        for (String token : tokens) {
+            String normalizedToken = normalizeText(token);
+            if (!normalizedToken.isBlank() && bag.contains(normalizedToken)) {
+                score += 0.6;
+            }
+        }
+        if (containsAny(q,
+                "\u589e\u957f", "\u540c\u6bd4", "\u73af\u6bd4", "\u8d8b\u52bf", "\u53d8\u5316", "\u589e\u957f\u7387", "\u5360\u6bd4", "\u5747\u503c", "\u5e73\u5747",
+                "growth", "yoy", "mom", "trend", "change", "rate", "ratio", "share", "avg")) {
+            if (containsAny(bag,
+                    "rate", "ratio", "avg", "sum", "count", "profit", "sales", "amount", "qty", "revenue", "margin", "growth", "share",
+                    "\u6bd4\u7387", "\u5360\u6bd4", "\u540c\u6bd4", "\u73af\u6bd4", "\u5e73\u5747", "\u5747\u503c")) {
+                score += 1.2;
+            } else {
+                score += 0.2;
+            }
+        }
+        Map<String, Object> candidate = new LinkedHashMap<>();
+        candidate.put("name", name);
+        candidate.put("sourceId", sourceId);
+        candidate.put("formula", formula);
+        candidate.put("weight", weight);
+        candidate.put("score", score);
+        return candidate;
     }
 
     private List<Map<String, Object>> detectAmbiguities(List<Map<String, Object>> fields) {
@@ -555,35 +734,46 @@ public class KnowledgeGraphService {
         return out;
     }
 
-    private Map<String, Object> recommendMapping(List<Map<String, Object>> fields, List<Map<String, Object>> formulas) {
+    private Map<String, Object> recommendMapping(List<Map<String, Object>> fields, List<Map<String, Object>> formulas, String question) {
         String dimensionKey = "";
         String metricKey = "";
         String metricFormula = "";
+        double bestDimensionScore = Double.NEGATIVE_INFINITY;
+        double bestMetricScore = Double.NEGATIVE_INFINITY;
+        String q = normalizeText(question);
         for (Map<String, Object> item : fields) {
             String sourceId = Objects.toString(item.get("sourceId"), "");
-            if (sourceId.isBlank()) continue;
-            String lower = sourceId.toLowerCase();
-            if (dimensionKey.isBlank() && (lower.contains("name") || lower.contains("type") || lower.contains("region") || lower.contains("date"))) {
+            if (sourceId.isBlank()) {
+                continue;
+            }
+            String bag = normalizeText(Objects.toString(item.get("label"), "") + " " + sourceId + " " + Objects.toString(item.get("nodeKey"), ""));
+            double dimensionScore = readDouble(item.get("dimensionScore"));
+            double metricScore = readDouble(item.get("metricScore"));
+            dimensionScore += scoreDimensionBonus(q, bag, Objects.toString(item.get("label"), ""), sourceId, Objects.toString(item.get("nodeKey"), ""));
+            metricScore += scoreMetricBonus(q, bag, Objects.toString(item.get("label"), ""), sourceId, Objects.toString(item.get("nodeKey"), ""));
+            if (dimensionScore > bestDimensionScore) {
+                bestDimensionScore = dimensionScore;
                 dimensionKey = sourceId;
             }
-            if (metricKey.isBlank() && (lower.contains("amount") || lower.contains("sales") || lower.contains("qty") || lower.contains("count") || lower.contains("revenue") || lower.contains("profit"))) {
+            if (metricScore > bestMetricScore) {
+                bestMetricScore = metricScore;
                 metricKey = sourceId;
             }
         }
         if (!formulas.isEmpty()) {
             metricFormula = Objects.toString(formulas.get(0).get("formula"), "");
         }
-        return new LinkedHashMap<>(Map.of(
-                "dimensionKey", dimensionKey,
-                "metricKey", metricKey,
-                "metricFormula", metricFormula
-        ));
+        Map<String, Object> mapping = new LinkedHashMap<>();
+        mapping.put("dimensionKey", dimensionKey);
+        mapping.put("metricKey", metricKey);
+        mapping.put("metricFormula", metricFormula);
+        return mapping;
     }
 
     private List<String> splitQuestionTokens(String question) {
-        String q = Objects.toString(question, "").toLowerCase();
+        String q = normalizeText(question);
         if (q.isBlank()) return List.of();
-        String[] parts = q.split("[\\s,，。；;：:/|\\-]+");
+        String[] parts = q.split("[^a-z0-9\u4e00-\u9fa5]+");
         List<String> out = new ArrayList<>();
         for (String part : parts) {
             String token = part.trim();
@@ -724,8 +914,10 @@ public class KnowledgeGraphService {
         if (!config.enabled()) {
             return;
         }
+        String action = inferNeo4jWriteAction(cypher, params);
+        String entityKey = inferNeo4jEntityKey(params);
         try {
-            String payload = new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(Map.of(
+            String payload = objectMapper.writeValueAsString(Map.of(
                     "statements", List.of(Map.of("statement", cypher, "parameters", params))
             ));
             String token = Base64.getEncoder().encodeToString((config.username() + ":" + config.password()).getBytes(StandardCharsets.UTF_8));
@@ -734,9 +926,21 @@ public class KnowledgeGraphService {
                     .header("Authorization", "Basic " + token)
                     .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
                     .build();
-            httpClient.send(request, HttpResponse.BodyHandlers.discarding());
-        } catch (Exception ignored) {
-            // Neo4j 鏄寮洪摼璺紱鍚屾澶辫触涓嶅奖鍝嶆湰鍦?MySQL 鍥捐氨涓庝富涓氬姟婕旂ず銆?
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                throw new IllegalStateException("HTTP " + response.statusCode() + " - " + response.body());
+            }
+            Map<String, Object> body = objectMapper.readValue(response.body(), Map.class);
+            List<Map<String, Object>> errors = castMapList(body.get("errors"));
+            if (!errors.isEmpty()) {
+                throw new IllegalStateException(formatNeo4jErrors(errors));
+            }
+            markNeo4jWriteSuccess();
+        } catch (Exception e) {
+            markNeo4jWriteFailure(e);
+            String error = safeErrorMessage(e);
+            log.warn("Neo4j write failed, MySQL graph remains available; action={}, entityKey={}, error={}", action, entityKey, error);
+            recordNeo4jWriteAudit(action, entityKey, params, cypher, error);
         }
     }
 
@@ -795,7 +999,167 @@ public class KnowledgeGraphService {
     private record Neo4jRuntimeConfig(String httpUrl, String username, String password, boolean enabled) {
     }
 
-    private double parseWeight(Object value) {
+    private void markNeo4jWriteSuccess() {
+        neo4jWriteSuccessCount.incrementAndGet();
+        lastNeo4jSuccessAt = Instant.now();
+        lastNeo4jError = "";
+    }
+
+    private void markNeo4jWriteFailure(Exception e) {
+        neo4jWriteFailureCount.incrementAndGet();
+        lastNeo4jFailureAt = Instant.now();
+        lastNeo4jError = safeErrorMessage(e);
+    }
+
+    private void markNeo4jQuerySuccess() {
+        neo4jQuerySuccessCount.incrementAndGet();
+        lastNeo4jSuccessAt = Instant.now();
+        lastNeo4jError = "";
+    }
+
+    private void markNeo4jQueryFailure(Exception e) {
+        neo4jQueryFailureCount.incrementAndGet();
+        lastNeo4jFailureAt = Instant.now();
+        lastNeo4jError = safeErrorMessage(e);
+    }
+
+    private String chooseFirstNonBlank(String first, String second) {
+        if (first != null && !first.isBlank()) {
+            return first;
+        }
+        return second == null ? "" : second;
+    }
+
+    private void recordNeo4jWriteAudit(String action, String entityKey, Map<String, Object> params,
+                                       String cypher, String errorMessage) {
+        try {
+            String relationType = Objects.toString(params.getOrDefault("relationType", ""), "");
+            String paramsJson = objectMapper.writeValueAsString(params);
+            jdbcTemplate.update("""
+                    INSERT INTO is_neo4j_write_audit(action, entity_key, relation_type, cypher, params_json, status, error_message)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    Objects.toString(action, "WRITE"),
+                    Objects.toString(entityKey, ""),
+                    relationType,
+                    cypher,
+                    paramsJson,
+                    "FAILED",
+                    errorMessage);
+        } catch (Exception auditError) {
+            log.warn("Neo4j write audit persist failed: {}", safeErrorMessage(auditError));
+        }
+    }
+
+    private String inferNeo4jWriteAction(String cypher, Map<String, Object> params) {
+        if (params.containsKey("nodeKey")) {
+            return "NODE_UPSERT";
+        }
+        if (params.containsKey("fromKey") && params.containsKey("toKey")) {
+            return "EDGE_UPSERT";
+        }
+        String text = Objects.toString(cypher, "").toUpperCase();
+        if (text.contains("MERGE (N:INSIGHTNODE")) {
+            return "NODE_UPSERT";
+        }
+        if (text.contains("MERGE (A)-[R:RELATED")) {
+            return "EDGE_UPSERT";
+        }
+        return "WRITE";
+    }
+
+    private String inferNeo4jEntityKey(Map<String, Object> params) {
+        if (params.containsKey("nodeKey")) {
+            return Objects.toString(params.get("nodeKey"), "");
+        }
+        if (params.containsKey("fromKey") || params.containsKey("toKey")) {
+            return Objects.toString(params.getOrDefault("fromKey", ""), "")
+                    + "->" + Objects.toString(params.getOrDefault("toKey", ""), "")
+                    + ":" + Objects.toString(params.getOrDefault("relationType", ""), "");
+        }
+        return "";
+    }
+
+    private String normalizeText(String text) {
+        return Objects.toString(text, "").toLowerCase().replaceAll("[^a-z0-9\u4e00-\u9fa5]+", " ").trim();
+    }
+
+    private boolean containsAny(String text, String... keywords) {
+        String normalized = normalizeText(text);
+        for (String keyword : keywords) {
+            String k = normalizeText(keyword);
+            if (!k.isBlank() && normalized.contains(k)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private double scoreDimensionBonus(String question, String bag, String label, String sourceId, String content) {
+        double score = 0D;
+        String q = normalizeText(question);
+        boolean timeIntent = containsAny(q,
+                "\u65f6\u95f4", "\u65e5\u671f", "\u5929", "\u5468", "\u6708", "\u5b63\u5ea6", "\u5e74",
+                "time", "date", "day", "week", "month", "quarter", "year", "trend");
+        boolean groupIntent = containsAny(q,
+                "\u5730\u533a", "\u7701", "\u5e02", "\u5206\u7c7b", "\u7c7b\u522b", "\u7c7b\u578b", "\u540d\u79f0",
+                "\u5ba2\u6237", "\u4ea7\u54c1", "\u54c1\u724c", "\u7ec4",
+                "region", "province", "city", "category", "type", "class", "name", "customer", "product", "brand", "segment", "group");
+        if (timeIntent && containsAny(bag,
+                "\u65e5\u671f", "\u65f6\u95f4", "\u5e74", "\u6708", "\u5929", "\u5b63\u5ea6", "\u5468",
+                "date", "time", "year", "month", "day", "quarter", "week")) {
+            score += 2.0;
+        }
+        if (groupIntent && containsAny(bag,
+                "\u540d\u79f0", "\u7c7b\u578b", "\u5730\u533a", "\u7701", "\u5e02", "\u5206\u7c7b", "\u7c7b\u522b",
+                "\u54c1\u724c", "\u5ba2\u6237", "\u4ea7\u54c1", "\u7ec4",
+                "name", "type", "region", "province", "city", "category", "kind", "class", "brand", "customer", "product", "segment")) {
+            score += 1.5;
+        }
+        if (containsAny(bag, "id", "code", "key", "\u7f16\u53f7", "\u7f16\u7801")
+                && !containsAny(q, "id", "code", "key", "\u7f16\u53f7", "\u7f16\u7801")) {
+            score -= 1.0;
+        }
+        if (containsAny(content, "TEXT", "VARCHAR", "CHAR")
+                && !containsAny(q, "\u8ba1\u6570", "\u6c42\u548c", "\u5e73\u5747", "\u603b\u8ba1", "\u91d1\u989d", "\u9500\u552e", "\u6536\u5165", "\u5229\u6da6", "\u6570\u91cf",
+                "count", "sum", "avg", "total", "amount", "sales", "revenue", "profit", "qty")) {
+            score += 0.3;
+        }
+        if (containsAny(label + " " + sourceId,
+                "\u65e5\u671f", "\u65f6\u95f4", "\u5e74", "\u6708",
+                "date", "time", "year", "month")) {
+            score += timeIntent ? 0.8 : 0.2;
+        }
+        return score;
+    }
+
+    private double scoreMetricBonus(String question, String bag, String label, String sourceId, String content) {
+        double score = 0D;
+        String q = normalizeText(question);
+        boolean metricIntent = containsAny(q,
+                "\u6307\u6807", "\u91d1\u989d", "\u9500\u552e", "\u6536\u5165", "\u5229\u6da6", "\u6570\u91cf", "\u8ba1\u6570", "\u6c42\u548c", "\u5e73\u5747", "\u603b\u8ba1", "\u6bd4\u7387", "\u5355\u4ef7", "\u503c", "\u589e\u957f", "\u8d8b\u52bf", "\u5360\u6bd4",
+                "metric", "amount", "sales", "revenue", "profit", "qty", "count", "sum", "avg", "total", "ratio", "rate", "price", "value", "growth", "trend", "share");
+        if (metricIntent && containsAny(bag,
+                "\u91d1\u989d", "\u9500\u552e", "\u6536\u5165", "\u5229\u6da6", "\u6570\u91cf", "\u8ba1\u6570", "\u603b\u8ba1", "\u5e73\u5747", "\u6bd4\u7387", "\u5355\u4ef7", "\u503c", "\u5f97\u5206", "\u589e\u957f", "\u5360\u6bd4",
+                "amount", "sales", "sale", "revenue", "profit", "qty", "count", "number", "total", "avg", "sum", "price", "rate", "ratio", "value", "score", "growth", "share")) {
+            score += 2.0;
+        }
+        if (containsAny(content, "NUMBER", "DECIMAL", "INT", "BIGINT", "FLOAT", "DOUBLE")) {
+            score += 1.2;
+        }
+        if (containsAny(bag, "id", "code", "key", "\u7f16\u53f7", "\u7f16\u7801")
+                && !containsAny(q, "id", "code", "key", "\u7f16\u53f7", "\u7f16\u7801")) {
+            score -= 1.5;
+        }
+        if (containsAny(label + " " + sourceId,
+                "\u91d1\u989d", "\u9500\u552e", "\u5229\u6da6", "\u6570\u91cf", "\u8ba1\u6570", "\u603b\u8ba1", "\u6536\u5165", "\u5355\u4ef7",
+                "amount", "sales", "profit", "qty", "count", "total", "revenue", "price")) {
+            score += 0.8;
+        }
+        return score;
+    }
+
+private double parseWeight(Object value) {
         try {
             return Double.parseDouble(Objects.toString(value, "0"));
         } catch (NumberFormatException e) {

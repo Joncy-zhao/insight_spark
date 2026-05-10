@@ -40,6 +40,11 @@ public class KnowledgeGraphController {
         return ApiResponse.success(knowledgeGraphService.overview());
     }
 
+    @GetMapping("/health")
+    public ApiResponse<Map<String, Object>> health() {
+        return ApiResponse.success(knowledgeGraphService.healthStatus());
+    }
+
     @GetMapping("/graph")
     public ApiResponse<Map<String, Object>> graph(@RequestParam(defaultValue = "120") int limit) {
         return ApiResponse.success(knowledgeGraphService.graph(limit));

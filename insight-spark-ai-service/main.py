@@ -899,21 +899,138 @@ def get_prompt_examples(fields: list[FieldMeta]) -> str:
     return "\n".join(examples) if examples else "暂无示例"
 
 
+def field_text_blob(field: FieldMeta) -> str:
+    return " ".join([
+        field.columnName or "",
+        field.displayName or "",
+        field.sourceFieldName or "",
+        field.fieldComment or "",
+    ]).lower()
+
+
+def has_any_term(text: str, terms: list[str]) -> bool:
+    return any(term and term in text for term in terms)
+
+
+def is_id_like_field(field: FieldMeta) -> bool:
+    blob = " ".join([
+        field.columnName or "",
+        field.displayName or "",
+        field.sourceFieldName or "",
+    ]).lower()
+    if has_any_term(blob, ["rows_id", "row_id", "order_id", "user_id", "cust_id", "uuid", "编号", "编码"]):
+        return True
+    return bool(re.search(r"(^|[_\s-])id($|[_\s-])", blob))
+
+
+def wants_region_dimension(question: str) -> bool:
+    q = question.lower()
+    return has_any_term(q, ["省份", "省市", "省区", "按省", "地区", "区域", "大区", "省"])
+
+
+def wants_amount_metric(question: str) -> bool:
+    q = question.lower()
+    return has_any_term(q, ["销售额", "销售金额", "销售", "营收", "收入", "金额", "成交额", "流水", "总额", "gmv"])
+
+
+def wants_count_metric(question: str) -> bool:
+    q = question.lower()
+    return has_any_term(q, ["数量", "销量", "件数", "订单数", "笔数", "记录数", "count", "多少单", "多少笔"])
+
+
+def wants_time_dimension(question: str) -> bool:
+    q = question.lower()
+    return has_any_term(q, ["趋势", "变化", "日期", "时间", "按月", "按年", "按周", "按天", "月份", "月度", "季度", "年度", "下单日期", "每日"])
+
+
+def region_field_match(field: FieldMeta) -> bool:
+    text = field_text_blob(field)
+    return has_any_term(text, ["province", "prov", "state", "region", "area", "省", "省份", "地区", "区域", "大区", "city", "城市"])
+
+
+def time_field_match(field: FieldMeta) -> bool:
+    text = field_text_blob(field)
+    return has_any_term(text, ["date", "time", "day", "month", "year", "quarter", "week", "日期", "时间", "下单", "订单时间", "创建时间"])
+
+
+def amount_field_match(field: FieldMeta) -> bool:
+    text = field_text_blob(field)
+    return has_any_term(text, ["sales_amt", "salesamount", "sales", "sale", "amount", "amt", "revenue", "gmv", "money", "金额", "销售额", "营收", "收入", "成交额"])
+
+
+def count_field_match(field: FieldMeta) -> bool:
+    text = field_text_blob(field)
+    return has_any_term(text, ["count", "qty", "quantity", "volume", "num", "rows", "订单数", "笔数", "数量", "销量", "件数"])
+
+
+def is_dimension_semantic_mismatch(question: str, field: FieldMeta) -> bool:
+    if wants_region_dimension(question):
+        if region_field_match(field):
+            return False
+        return True
+    return False
+
+
+def is_metric_semantic_mismatch(question: str, field: FieldMeta) -> bool:
+    if wants_amount_metric(question):
+        if field.fieldType != "NUMBER":
+            return True
+        if amount_field_match(field):
+            return False
+        if is_id_like_field(field):
+            return True
+        if count_field_match(field):
+            return True
+    return False
+
+
 def choose_dimension(question: str, fields: list[FieldMeta], preferred: FieldMeta | None = None) -> FieldMeta:
-    if preferred:
-        return preferred
-    ranked = rank_fields(question, fields, preferred_type="TEXT")
-    if ranked:
-        return ranked[0]
-    return first_by_type(fields, "TEXT") or fields[0]
+    ranked_with_score = rank_fields_with_score(question, fields, preferred_type="TEXT")
+    non_number_ranked = [(score, field) for score, field in ranked_with_score if field.fieldType != "NUMBER"]
+
+    if preferred and preferred.fieldType != "NUMBER" and not is_dimension_semantic_mismatch(question, preferred):
+        preferred_score = score_field_with_type_preference(question, preferred, "TEXT")
+        best_score = non_number_ranked[0][0] if non_number_ranked else (ranked_with_score[0][0] if ranked_with_score else -10**6)
+        if preferred_score + 10 >= best_score:
+            return preferred
+
+    if wants_time_dimension(question):
+        date_ranked = [(score, field) for score, field in non_number_ranked if field.fieldType == "DATE" or time_field_match(field)]
+        if date_ranked:
+            return date_ranked[0][1]
+        date_fallback = first_date_like_field([field for field in fields if field.fieldType != "NUMBER"])
+        if date_fallback:
+            return date_fallback
+
+    if non_number_ranked:
+        return non_number_ranked[0][1]
+    if ranked_with_score:
+        return ranked_with_score[0][1]
+    return first_by_type(fields, "TEXT") or first_by_type(fields, "DATE") or fields[0]
 
 
 def choose_metric(question: str, fields: list[FieldMeta], preferred: FieldMeta | None = None) -> FieldMeta | None:
-    if preferred:
-        return preferred
-    ranked = rank_fields(question, fields, preferred_type="NUMBER")
-    if ranked:
-        return ranked[0]
+    ranked_with_score = rank_fields_with_score(question, fields, preferred_type="NUMBER")
+    number_ranked = [(score, field) for score, field in ranked_with_score if field.fieldType == "NUMBER"]
+
+    if preferred and preferred.fieldType == "NUMBER" and not is_metric_semantic_mismatch(question, preferred):
+        preferred_score = score_field_with_type_preference(question, preferred, "NUMBER")
+        best_score = number_ranked[0][0] if number_ranked else (ranked_with_score[0][0] if ranked_with_score else -10**6)
+        if preferred_score + 10 >= best_score:
+            return preferred
+
+    if wants_amount_metric(question):
+        amount_ranked = [(score, field) for score, field in number_ranked if amount_field_match(field)]
+        if amount_ranked:
+            return amount_ranked[0][1]
+
+    if wants_count_metric(question):
+        count_ranked = [(score, field) for score, field in number_ranked if count_field_match(field) and not amount_field_match(field)]
+        if count_ranked:
+            return count_ranked[0][1]
+
+    if number_ranked:
+        return number_ranked[0][1]
     return first_by_type(fields, "NUMBER")
 
 
@@ -948,28 +1065,32 @@ def first_matched(question: str, fields: list[FieldMeta], field_type: str) -> Fi
 
 
 def rank_fields(question: str, fields: list[FieldMeta], preferred_type: str | None = None) -> list[FieldMeta]:
+    return [field for score, field in rank_fields_with_score(question, fields, preferred_type)]
+
+
+def rank_fields_with_score(question: str, fields: list[FieldMeta], preferred_type: str | None = None) -> list[tuple[int, FieldMeta]]:
     scored: list[tuple[int, FieldMeta]] = []
     for field in fields:
-        score = score_field(question, field)
-        if preferred_type and field.fieldType == preferred_type:
-            score += 25
-        elif preferred_type and preferred_type == "TEXT" and field.fieldType == "DATE":
-            score += 10
-        elif preferred_type and preferred_type == "NUMBER" and field.fieldType == "DATE":
-            score -= 10
+        score = score_field_with_type_preference(question, field, preferred_type)
         scored.append((score, field))
     scored.sort(key=lambda item: item[0], reverse=True)
-    return [field for score, field in scored if score > 0]
+    return [(score, field) for score, field in scored if score > 0]
+
+
+def score_field_with_type_preference(question: str, field: FieldMeta, preferred_type: str | None = None) -> int:
+    score = score_field(question, field)
+    if preferred_type and field.fieldType == preferred_type:
+        score += 25
+    elif preferred_type and preferred_type == "TEXT" and field.fieldType == "DATE":
+        score += 10
+    elif preferred_type and preferred_type == "NUMBER" and field.fieldType == "DATE":
+        score -= 10
+    return score
 
 
 def score_field(question: str, field: FieldMeta) -> int:
     score = 0
-    text = " ".join([
-        field.columnName or "",
-        field.displayName or "",
-        field.sourceFieldName or "",
-        field.fieldComment or "",
-    ]).lower()
+    text = field_text_blob(field)
     q = question.lower()
 
     if field.fieldType == "DATE":
@@ -979,8 +1100,24 @@ def score_field(question: str, field: FieldMeta) -> int:
     if field.fieldType == "TEXT":
         score += 10 if any(term in q for term in ["省", "地区", "城市", "分类", "品类", "产品", "名称", "客户", "门店", "渠道"]) else 0
 
+    if wants_region_dimension(question) and region_field_match(field):
+        score += 85
+    if wants_amount_metric(question) and amount_field_match(field):
+        score += 95
+    if wants_count_metric(question) and count_field_match(field):
+        score += 70
+
+    if wants_region_dimension(question) and is_id_like_field(field):
+        score -= 70
+    if wants_amount_metric(question) and field.fieldType == "NUMBER" and is_id_like_field(field):
+        score -= 80
+    if wants_amount_metric(question) and count_field_match(field):
+        score -= 35
+    if wants_count_metric(question) and amount_field_match(field):
+        score -= 35
+
     semantic_pairs = [
-        (["省份", "省", "省市", "地区"], ["province", "prov", "state", "region"]),
+        (["省份", "省", "省市", "省区", "地区", "区域"], ["province", "prov", "state", "region", "area"]),
         (["城市", "市"], ["city"]),
         (["区域", "大区"], ["region", "area"]),
         (["销售额", "销售", "金额", "营收", "收入", "流水", "成交额", "总额"], ["sales", "sale", "amount", "amt", "revenue", "gmv", "total", "sum", "money"]),
@@ -1022,12 +1159,12 @@ def resolve_graph_sql_plan(payload: TextToSqlRequest) -> dict[str, Any]:
 
     dim_ref = str(mapping.get("dimensionKey", "")).strip()
     metric_ref = str(mapping.get("metricKey", "")).strip()
-    metric_formula = str(mapping.get("metricFormula", "")).strip()
+    metric_formula = normalize_metric_formula(str(mapping.get("metricFormula", "")).strip())
 
     if not metric_formula and formula_candidates:
         first = formula_candidates[0]
         if isinstance(first, dict):
-            metric_formula = str(first.get("formula", "")).strip()
+            metric_formula = normalize_metric_formula(str(first.get("formula", "")).strip())
 
     field_by_col = {field.columnName.lower(): field for field in payload.fields}
     field_by_display = {field.displayName.lower(): field for field in payload.fields if field.displayName}
@@ -1271,6 +1408,38 @@ def build_formula_expression(formula: str, fields: list[FieldMeta]) -> str:
             continue
         rewritten = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])", f"`{matched.columnName}`", rewritten)
     return rewritten
+
+
+def normalize_metric_formula(formula: str) -> str:
+    expr = str(formula or "").strip()
+    if not expr:
+        return ""
+    if _is_wrapped_aggregate(expr):
+        inner = _strip_outer_aggregate(expr)
+        return inner.strip() if inner else expr
+    return expr
+
+
+def _is_wrapped_aggregate(expr: str) -> bool:
+    return bool(re.match(r"(?is)^\s*(sum|avg|max|min|count)\s*\(.*\)\s*$", expr))
+
+
+def _strip_outer_aggregate(expr: str) -> str:
+    text = expr.strip()
+    m = re.match(r"(?is)^\s*(sum|avg|max|min|count)\s*\(", text)
+    if not m:
+        return text
+    open_idx = m.end() - 1
+    depth = 0
+    for idx in range(open_idx, len(text)):
+        ch = text[idx]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[open_idx + 1:idx]
+    return text
 
 
 def normalize_ai_sql_result(parsed: dict[str, Any], payload: TextToSqlRequest) -> dict[str, Any]:

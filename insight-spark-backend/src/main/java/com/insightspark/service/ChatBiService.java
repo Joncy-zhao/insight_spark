@@ -92,18 +92,34 @@ public class ChatBiService {
             throw new IllegalArgumentException("当前数据表没有字段元信息，请在“数据上传”页面重新上传文件，或选择字段数大于 0 的数据表。");
         }
         ensureNotCancelled("字段元信息加载");
-        Map<String, Object> graphPath = knowledgeGraphService.retrieveMultiHopContext(question, activeTable);
+        Map<String, Object> graphPath = knowledgeGraphService.retrieveMultiHopContextSafely(question, activeTable);
         List<Map<String, Object>> graphContext = asMapList(graphPath.get("ragContext"));
         generationTrace.add("kgContextNodes=" + graphContext.size());
-        if (graphContext.isEmpty() && !knowledgeGraphService.hasGraphData()) {
+        Object neo4jFallback = graphPath.get("neo4jFallback");
+        boolean graphFallbackUsed = Boolean.TRUE.equals(neo4jFallback)
+                || "true".equalsIgnoreCase(Objects.toString(neo4jFallback, ""));
+        String graphFallbackReason = graphFallbackUsed
+                ? Objects.toString(graphPath.getOrDefault("neo4jError", ""), "")
+                : null;
+        if (!graphFallbackUsed && graphContext.isEmpty() && !knowledgeGraphService.hasGraphData()) {
             ensureNotCancelled("图谱补全同步");
             knowledgeGraphService.syncGraph();
-            graphPath = knowledgeGraphService.retrieveMultiHopContext(question, activeTable);
+            graphPath = knowledgeGraphService.retrieveMultiHopContextSafely(question, activeTable);
             graphContext = asMapList(graphPath.get("ragContext"));
             generationTrace.add("kgSync=triggered;kgContextNodes=" + graphContext.size());
+            neo4jFallback = graphPath.get("neo4jFallback");
+            graphFallbackUsed = Boolean.TRUE.equals(neo4jFallback)
+                    || "true".equalsIgnoreCase(Objects.toString(neo4jFallback, ""));
+            graphFallbackReason = graphFallbackUsed
+                    ? Objects.toString(graphPath.getOrDefault("neo4jError", ""), "")
+                    : graphFallbackReason;
         }
         if (graphContext.isEmpty()) {
             graphContext = buildLocalFieldContext(activeTable, fields);
+            if (!graphFallbackUsed) {
+                graphFallbackUsed = true;
+                graphFallbackReason = "Graph context is empty, fallback to local field context";
+            }
         }
         ensureNotCancelled("图谱上下文准备");
         List<Map<String, Object>> previewRows = dataUploadService.preview(activeTable, 1, 8);
@@ -271,6 +287,8 @@ public class ChatBiService {
         response.put("graphContext", graphContext);
         response.put("graphPath", graphPath);
         response.put("graphSqlHints", graphSqlHints);
+        response.put("graphFallbackUsed", graphFallbackUsed);
+        response.put("graphFallbackReason", graphFallbackReason);
         response.put("riskLevel", auditResult.riskLevel());
         response.put("riskReason", auditResult.riskReason());
         response.put("message", "分析完成。已基于字段「" + fieldMapping.getOrDefault("dimension", "未知维度")
