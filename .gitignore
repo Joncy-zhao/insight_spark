@@ -50,3 +50,9 @@ Thumbs.db
 AI_NEXT_STEPS_CHECKLIST.md
 technology-point.md
 list.md
+
+# Local temp/backup files (do not push)
+insight-spark-backend/src/main/java/com/insightspark/service/KnowledgeGraphService.java.bak
+insight-spark-backend/src/main/java/com/insightspark/service/KnowledgeGraphService.java.pre-utf8.bak
+temp_fix_kg.ps1
+temp_kg_preview.txt
