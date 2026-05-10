@@ -126,7 +126,18 @@
           >
             <div class="chart-card-head">
               <h4>{{ card.title || `图表${index + 1}` }}</h4>
-              <el-tag size="small">{{ chartTypeLabel(card.chartType) }}</el-tag>
+              <div class="chart-card-actions">
+                <el-tag size="small">{{ chartTypeLabel(card.chartType) }}</el-tag>
+                <el-button
+                  size="small"
+                  type="primary"
+                  :loading="diagnosisLoading"
+                  :disabled="!card.tableName"
+                  @click.stop="generateDiagnosisFromCard(card)"
+                >
+                  生成诊断报告
+                </el-button>
+              </div>
             </div>
             <div class="chart-sub">{{ card.tableName || '未指定数据表' }}</div>
             <div :ref="setChartRef('preview', card._renderKey)" class="chart-box" />
@@ -187,7 +198,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import * as echarts from 'echarts'
 import axios from 'axios'
 import { ElLoading, ElMessage, ElMessageBox } from 'element-plus'
@@ -203,6 +214,8 @@ import {
 import { buildOptionFromHistoryRow } from '../../utils/chartOptionFromSnapshot.js'
 
 const API_BASE = 'http://localhost:8080'
+const workbench = inject('workbench', null)
+const diagnosisLoading = computed(() => Boolean(workbench?.diagnosisLoading?.value))
 
 const rows = ref([])
 const loadingList = ref(false)
@@ -210,6 +223,7 @@ const previewVisible = ref(false)
 const previewTitle = ref('看板图表预览')
 const previewCards = ref([])
 const shareCards = ref([])
+const previewDashboardContext = ref(null)
 /** 当前展开「查看 SQL」的卡片 _renderKey，用于放大弹窗与压缩图表区 */
 const previewSqlOpenKey = ref(null)
 
@@ -541,6 +555,43 @@ const renderScopeCharts = async (scope, cards) => {
   }
 }
 
+const generateDiagnosisFromCard = async (card) => {
+  if (!workbench?.diagnoseFromDashboardCard) {
+    ElMessage.warning('诊断报告模块尚未就绪')
+    return
+  }
+  const key = `preview:${card?._renderKey || ''}`
+  const instance = chartInstances.get(key)
+  const imageDataUrl = instance?.getDataURL
+    ? instance.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#ffffff' })
+    : ''
+  await workbench.diagnoseFromDashboardCard({
+    ...card,
+    dashboardId: previewDashboardContext.value?.id || null,
+    dashboardName: previewDashboardContext.value?.name || '',
+    cardTitle: card?.title || ''
+  }, imageDataUrl)
+}
+
+const restoreDiagnosisDashboardTarget = async (target) => {
+  if (!target || target.route !== 'dashboard') return
+  const dashboardId = Number(target.dashboardId || 0)
+  let row = dashboardId ? rows.value.find(item => Number(item.id) === dashboardId) : null
+  if (!row && target.dashboardName) {
+    row = rows.value.find(item => item.name === target.dashboardName)
+  }
+  if (!row && !rows.value.length) {
+    await loadList()
+    row = dashboardId ? rows.value.find(item => Number(item.id) === dashboardId) : null
+  }
+  if (!row) {
+    ElMessage.warning('未找到诊断报告绑定的看板，已停留在我的看板列表')
+    return
+  }
+  await openPreview(row)
+  ElMessage.success(target.cardTitle ? `已回溯到看板图表：${target.cardTitle}` : '已回溯到诊断报告绑定的看板')
+}
+
 const handleWindowResize = () => {
   for (const instance of chartInstances.values()) {
     instance?.resize?.()
@@ -548,6 +599,7 @@ const handleWindowResize = () => {
 }
 
 const openPreview = async (row) => {
+  previewDashboardContext.value = row ? { ...row } : null
   previewTitle.value = row?.name ? `${row.name} - 图表预览` : '看板图表预览'
   const id = row?.id
   const scope = `preview-${id || 'temp'}`
@@ -780,6 +832,14 @@ watch(shareCards, async (cards) => {
   await renderScopeCharts('share', cards)
 }, { deep: true })
 
+watch(
+  () => workbench?.diagnosisRestoreTarget?.value,
+  async (target) => {
+    await restoreDiagnosisDashboardTarget(target)
+  },
+  { deep: true }
+)
+
 onMounted(async () => {
   window.addEventListener('resize', handleWindowResize)
   const shareToken = parseShareTokenFromUrl()
@@ -788,6 +848,7 @@ onMounted(async () => {
     return
   }
   await loadList()
+  await restoreDiagnosisDashboardTarget(workbench?.diagnosisRestoreTarget?.value)
 })
 
 onBeforeUnmount(() => {
@@ -898,6 +959,13 @@ onBeforeUnmount(() => {
   color: #111827;
   line-height: 1.35;
   word-break: break-word;
+}
+
+.chart-card-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .chart-sub {

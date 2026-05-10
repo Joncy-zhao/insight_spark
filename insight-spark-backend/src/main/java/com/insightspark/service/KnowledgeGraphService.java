@@ -262,7 +262,7 @@ public class KnowledgeGraphService {
     }
 
     public Map<String, Object> multiHopSearch(String keyword, String tableName, int depth, int limit) {
-        if (!neo4jEnabled) {
+        if (!loadNeo4jRuntimeConfig().enabled()) {
             throw new IllegalStateException("Neo4j 未启用，已禁止回退到本地 MySQL 知识图谱");
         }
         try {
@@ -394,11 +394,12 @@ public class KnowledgeGraphService {
     }
 
     private List<Map<String, Object>> neo4jQueryRows(String cypher, Map<String, Object> params) throws Exception {
+        Neo4jRuntimeConfig config = loadNeo4jRuntimeConfig();
         String payload = objectMapper.writeValueAsString(Map.of(
                 "statements", List.of(Map.of("statement", cypher, "parameters", params))
         ));
-        String token = Base64.getEncoder().encodeToString((neo4jUsername + ":" + neo4jPassword).getBytes(StandardCharsets.UTF_8));
-        HttpRequest request = HttpRequest.newBuilder(URI.create(neo4jHttpUrl))
+        String token = Base64.getEncoder().encodeToString((config.username() + ":" + config.password()).getBytes(StandardCharsets.UTF_8));
+        HttpRequest request = HttpRequest.newBuilder(URI.create(config.httpUrl()))
                 .header("Content-Type", "application/json")
                 .header("Authorization", "Basic " + token)
                 .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
@@ -719,15 +720,16 @@ public class KnowledgeGraphService {
     }
 
     private void syncNeo4j(String cypher, Map<String, Object> params) {
-        if (!neo4jEnabled) {
+        Neo4jRuntimeConfig config = loadNeo4jRuntimeConfig();
+        if (!config.enabled()) {
             return;
         }
         try {
             String payload = new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(Map.of(
                     "statements", List.of(Map.of("statement", cypher, "parameters", params))
             ));
-            String token = Base64.getEncoder().encodeToString((neo4jUsername + ":" + neo4jPassword).getBytes(StandardCharsets.UTF_8));
-            HttpRequest request = HttpRequest.newBuilder(URI.create(neo4jHttpUrl))
+            String token = Base64.getEncoder().encodeToString((config.username() + ":" + config.password()).getBytes(StandardCharsets.UTF_8));
+            HttpRequest request = HttpRequest.newBuilder(URI.create(config.httpUrl()))
                     .header("Content-Type", "application/json")
                     .header("Authorization", "Basic " + token)
                     .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
@@ -736,6 +738,61 @@ public class KnowledgeGraphService {
         } catch (Exception ignored) {
             // Neo4j 鏄寮洪摼璺紱鍚屾澶辫触涓嶅奖鍝嶆湰鍦?MySQL 鍥捐氨涓庝富涓氬姟婕旂ず銆?
         }
+    }
+
+    private Neo4jRuntimeConfig loadNeo4jRuntimeConfig() {
+        try {
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                    SELECT uri, username, password, database_name AS databaseName, enabled
+                    FROM is_neo4j_runtime_config
+                    WHERE id = 1
+                    """);
+            if (rows.isEmpty()) {
+                return defaultNeo4jRuntimeConfig();
+            }
+            Map<String, Object> row = rows.get(0);
+            String uri = Objects.toString(row.getOrDefault("uri", neo4jHttpUrl), neo4jHttpUrl);
+            String databaseName = Objects.toString(row.getOrDefault("databaseName", "neo4j"), "neo4j");
+            String username = Objects.toString(row.getOrDefault("username", neo4jUsername), neo4jUsername);
+            String password = Objects.toString(row.getOrDefault("password", neo4jPassword), neo4jPassword);
+            boolean enabled = parseBoolean(row.get("enabled"), neo4jEnabled);
+            return new Neo4jRuntimeConfig(toNeo4jHttpUrl(uri, databaseName), username, password, enabled);
+        } catch (Exception ignored) {
+            return defaultNeo4jRuntimeConfig();
+        }
+    }
+
+    private Neo4jRuntimeConfig defaultNeo4jRuntimeConfig() {
+        return new Neo4jRuntimeConfig(neo4jHttpUrl, neo4jUsername, neo4jPassword, neo4jEnabled);
+    }
+
+    private String toNeo4jHttpUrl(String uri, String databaseName) {
+        String text = Objects.toString(uri, "").trim();
+        if (text.startsWith("http://") || text.startsWith("https://")) {
+            return text.contains("/tx/commit") ? text : text.replaceAll("/+$", "") + "/db/" + databaseName + "/tx/commit";
+        }
+        if (text.startsWith("bolt://")) {
+            String host = text.substring("bolt://".length()).replaceAll("/+$", "").replace(":7687", ":7474");
+            return "http://" + host + "/db/" + databaseName + "/tx/commit";
+        }
+        return neo4jHttpUrl;
+    }
+
+    private boolean parseBoolean(Object value, boolean defaultValue) {
+        if (value == null) {
+            return defaultValue;
+        }
+        if (value instanceof Boolean bool) {
+            return bool;
+        }
+        if (value instanceof Number number) {
+            return number.intValue() != 0;
+        }
+        String text = Objects.toString(value, "").trim();
+        return text.isBlank() ? defaultValue : Boolean.parseBoolean(text) || "1".equals(text);
+    }
+
+    private record Neo4jRuntimeConfig(String httpUrl, String username, String password, boolean enabled) {
     }
 
     private double parseWeight(Object value) {

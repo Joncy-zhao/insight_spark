@@ -38,6 +38,14 @@
               <el-form-item label="连接超时(ms)">
                 <el-input v-model="datasourceForm.poolTimeoutMs" placeholder="30000" />
               </el-form-item>
+              <el-form-item label="知识图谱同步规则">
+                <el-input
+                  v-model="datasourceForm.kgSyncRule"
+                  type="textarea"
+                  :rows="3"
+                  placeholder="例如：同步表字段关系、业务含义、同义词、敏感标识与联邦关联"
+                />
+              </el-form-item>
             </el-form>
             <div class="datasource-actions">
               <el-button type="primary" @click="createDatasource">保存数据源</el-button>
@@ -138,6 +146,26 @@
                   <el-input v-model="row.businessName" size="small" @change="updateSchemaField(row)" />
                 </template>
               </el-table-column>
+              <el-table-column label="业务含义" min-width="220">
+                <template #default="{ row }">
+                  <el-input v-model="row.businessDesc" size="small" @change="updateSchemaField(row)" />
+                </template>
+              </el-table-column>
+              <el-table-column label="同义词" min-width="180">
+                <template #default="{ row }">
+                  <el-input v-model="row.synonyms" size="small" placeholder="逗号分隔" @change="updateSchemaField(row)" />
+                </template>
+              </el-table-column>
+              <el-table-column label="同步图谱" width="110">
+                <template #default="{ row }">
+                  <el-switch v-model="row.kgSyncEnabled" @change="updateSchemaField(row)" />
+                </template>
+              </el-table-column>
+              <el-table-column label="语义规则" min-width="220">
+                <template #default="{ row }">
+                  <el-input v-model="row.kgSyncRule" size="small" @change="updateSchemaField(row)" />
+                </template>
+              </el-table-column>
               <el-table-column label="敏感" width="90">
                 <template #default="{ row }">
                   <el-switch v-model="row.sensitive" :active-value="1" :inactive-value="0" @change="updateSchemaField(row)" />
@@ -183,6 +211,88 @@
           <div class="panel">
             <div class="panel-header">
               <div>
+                <h2>行级隔离规则</h2>
+                <p>按用户或角色追加只读查询过滤条件，后端执行 SQL 时统一强制生效。</p>
+              </div>
+            </div>
+            <el-form label-position="top" class="datasource-form">
+              <el-form-item label="表名">
+                <el-input v-model="rowPolicyForm.tableName" placeholder="留空表示当前数据源所有表" />
+              </el-form-item>
+              <el-form-item label="对象类型">
+                <el-select v-model="rowPolicyForm.principalType" class="full-width">
+                  <el-option label="用户" value="USER" />
+                  <el-option label="角色" value="ROLE" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="对象标识">
+                <el-input v-model="rowPolicyForm.principalId" placeholder="user / analyst-role" />
+              </el-form-item>
+              <el-form-item label="过滤条件">
+                <el-input v-model="rowPolicyForm.filterExpression" placeholder="region = '华东' 或 tenant_id = 1001" />
+              </el-form-item>
+              <el-form-item label="启用">
+                <el-switch v-model="rowPolicyForm.enabled" />
+              </el-form-item>
+            </el-form>
+            <div class="datasource-actions">
+              <el-button type="primary" @click="saveRowPolicy">保存行级规则</el-button>
+              <el-button @click="loadRowPolicies()">刷新</el-button>
+            </div>
+            <el-table :data="rowPolicies" height="220" empty-text="暂无行级隔离规则">
+              <el-table-column prop="tableName" label="表名" min-width="130" />
+              <el-table-column prop="principalType" label="对象类型" width="100" />
+              <el-table-column prop="principalId" label="对象" min-width="130" />
+              <el-table-column prop="filterExpression" label="过滤条件" min-width="220" show-overflow-tooltip />
+              <el-table-column label="状态" width="90">
+                <template #default="{ row }">
+                  <el-tag :type="row.enabled ? 'success' : 'info'" size="small">{{ row.enabled ? '启用' : '停用' }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="90">
+                <template #default="{ row }">
+                  <el-button size="small" type="danger" @click="deleteRowPolicy(row.id)">删除</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Neo4j 知识图谱配置</h2>
+                <p>维护图谱连接参数、同步策略与表字段关系映射规则。</p>
+              </div>
+            </div>
+            <el-form label-position="top" class="datasource-form">
+              <el-form-item label="Neo4j 地址">
+                <el-input v-model="neo4jConfig.uri" placeholder="bolt://localhost:7687" />
+              </el-form-item>
+              <el-form-item label="账号">
+                <el-input v-model="neo4jConfig.username" placeholder="neo4j" />
+              </el-form-item>
+              <el-form-item label="密码">
+                <el-input v-model="neo4jConfig.password" type="password" show-password placeholder="留空则不修改密码" />
+              </el-form-item>
+              <el-form-item label="数据库">
+                <el-input v-model="neo4jConfig.databaseName" placeholder="neo4j" />
+              </el-form-item>
+              <el-form-item label="同步规则">
+                <el-input v-model="neo4jConfig.syncRule" type="textarea" :rows="3" />
+              </el-form-item>
+              <el-form-item label="启用同步">
+                <el-switch v-model="neo4jConfig.enabled" />
+              </el-form-item>
+            </el-form>
+            <div class="datasource-actions">
+              <el-button type="primary" @click="saveNeo4jConfig">保存图谱配置</el-button>
+              <el-button @click="loadNeo4jConfig">刷新</el-button>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <div>
                 <h2>联邦跨库关联</h2>
                 <p>配置官方表字段与上传表字段的关联关系，用于 Agent 生成联合分析 SQL。</p>
               </div>
@@ -203,8 +313,18 @@
             </el-form>
             <div class="datasource-actions">
               <el-button type="primary" @click="saveFederalRelation">保存关联</el-button>
+              <el-button type="success" @click="generateFederalSql">生成联邦SQL计划</el-button>
               <el-button @click="loadFederalRelations()">刷新</el-button>
             </div>
+            <el-alert
+              v-if="federalSqlPreview"
+              title="Agent 联邦 SQL 计划"
+              type="success"
+              :closable="false"
+              class="federal-preview"
+            >
+              <pre>{{ federalSqlPreview }}</pre>
+            </el-alert>
             <el-table :data="federalRelations" height="220" empty-text="暂无联邦关联">
               <el-table-column prop="leftTable" label="官方表" min-width="130" />
               <el-table-column prop="leftField" label="官方字段" width="120" />
@@ -216,7 +336,9 @@
 </template>
 
 <script setup>
-import { inject } from 'vue'
+import { inject, onMounted, ref, watch } from 'vue'
+import axios from 'axios'
+import { ElMessage } from 'element-plus'
 
 const {
   API_BASE,
@@ -321,4 +443,113 @@ const {
   loadDatasourceHealth,
   xAxisData
 } = inject('workbench')
+
+const rowPolicies = ref([])
+const rowPolicyForm = ref({
+  tableName: '',
+  principalType: 'USER',
+  principalId: 'user',
+  filterExpression: '',
+  enabled: true
+})
+const neo4jConfig = ref({
+  uri: 'bolt://localhost:7687',
+  username: 'neo4j',
+  password: '',
+  databaseName: 'neo4j',
+  syncRule: '同步官方数据源表、字段、业务含义、同义词、敏感标识与联邦关系',
+  enabled: true
+})
+const federalSqlPreview = ref('')
+
+const loadRowPolicies = async (datasourceId = selectedDatasourceId.value) => {
+  if (!datasourceId) return
+  try {
+    rowPolicies.value = unwrap(await axios.get(`${API_BASE}/api/datasources/${datasourceId}/row-policies`))
+  } catch (error) {
+    ElMessage.error(error.message || '加载行级规则失败')
+  }
+}
+
+const saveRowPolicy = async () => {
+  if (!selectedDatasourceId.value) {
+    ElMessage.warning('请先选择数据源')
+    return
+  }
+  try {
+    await axios.post(`${API_BASE}/api/datasources/${selectedDatasourceId.value}/row-policies`, rowPolicyForm.value).then(unwrap)
+    ElMessage.success('行级规则已保存')
+    rowPolicyForm.value.filterExpression = ''
+    await loadRowPolicies()
+  } catch (error) {
+    ElMessage.error(error.message || '保存行级规则失败')
+  }
+}
+
+const deleteRowPolicy = async (policyId) => {
+  try {
+    await axios.post(`${API_BASE}/api/datasources/row-policies/${policyId}/delete`).then(unwrap)
+    ElMessage.success('行级规则已删除')
+    await loadRowPolicies()
+  } catch (error) {
+    ElMessage.error(error.message || '删除行级规则失败')
+  }
+}
+
+const loadNeo4jConfig = async () => {
+  try {
+    const config = unwrap(await axios.get(`${API_BASE}/api/datasources/neo4j-config`))
+    neo4jConfig.value = { ...neo4jConfig.value, ...config, password: '' }
+  } catch (error) {
+    ElMessage.error(error.message || '加载 Neo4j 配置失败')
+  }
+}
+
+const saveNeo4jConfig = async () => {
+  try {
+    const config = unwrap(await axios.post(`${API_BASE}/api/datasources/neo4j-config`, neo4jConfig.value))
+    neo4jConfig.value = { ...neo4jConfig.value, ...config, password: '' }
+    ElMessage.success('Neo4j 配置已保存')
+  } catch (error) {
+    ElMessage.error(error.message || '保存 Neo4j 配置失败')
+  }
+}
+
+const generateFederalSql = async () => {
+  if (!selectedDatasourceId.value) {
+    ElMessage.warning('请先选择数据源')
+    return
+  }
+  try {
+    const plan = unwrap(await axios.post(`${API_BASE}/api/datasources/${selectedDatasourceId.value}/federal-sql`, {
+      uploadTable: federalForm.value?.rightTable || '',
+      question: '联邦跨库分析'
+    }))
+    federalSqlPreview.value = JSON.stringify(plan, null, 2)
+  } catch (error) {
+    ElMessage.error(error.message || '生成联邦 SQL 计划失败')
+  }
+}
+
+watch(selectedDatasourceId, (datasourceId) => {
+  rowPolicies.value = []
+  federalSqlPreview.value = ''
+  loadRowPolicies(datasourceId)
+})
+
+onMounted(loadNeo4jConfig)
 </script>
+
+<style scoped>
+.federal-preview {
+  margin: 12px 0;
+}
+
+.federal-preview pre {
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.6;
+}
+</style>

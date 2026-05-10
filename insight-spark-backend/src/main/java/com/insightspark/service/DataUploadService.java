@@ -66,10 +66,12 @@ public class DataUploadService {
                   `owner_id` VARCHAR(64) NOT NULL DEFAULT '',
                   `row_count` INT NOT NULL DEFAULT 0,
                   `field_count` INT NOT NULL DEFAULT 0,
+                  `file_size` BIGINT NOT NULL DEFAULT 0,
                   `status` VARCHAR(32) NOT NULL DEFAULT 'ACTIVE',
                   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='上传数据表元信息';
                 """);
+        addColumnIfMissing("is_data_table", "file_size", "`file_size` BIGINT NOT NULL DEFAULT 0");
 
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS `is_data_field` (
@@ -90,7 +92,10 @@ public class DataUploadService {
                 addColumnIfMissing("is_data_field", "field_type", "`field_type` VARCHAR(32) NOT NULL DEFAULT 'TEXT'");
                 addColumnIfMissing("is_data_field", "display_name", "`display_name` VARCHAR(255) NOT NULL DEFAULT ''");
                 addColumnIfMissing("is_data_field", "field_comment", "`field_comment` VARCHAR(512) NULL");
+                addColumnIfMissing("is_data_field", "synonyms", "`synonyms` VARCHAR(1000) NULL");
                 addColumnIfMissing("is_data_field", "sensitive", "`sensitive` TINYINT(1) NOT NULL DEFAULT 0");
+                addColumnIfMissing("is_data_field", "kg_sync_enabled", "`kg_sync_enabled` TINYINT(1) NOT NULL DEFAULT 1");
+                addColumnIfMissing("is_data_field", "kg_sync_rule", "`kg_sync_rule` VARCHAR(1000) NULL");
                 addColumnIfMissing("is_data_field", "sort_order", "`sort_order` INT NOT NULL DEFAULT 0");
 
         jdbcTemplate.execute("""
@@ -286,7 +291,7 @@ public class DataUploadService {
             throw new IllegalArgumentException("解析失败：未找到表头或有效数据");
         }
 
-        return persistParsedFile(originalFilename, parsedFile, displayName, progress);
+        return persistParsedFile(originalFilename, parsedFile, displayName, file.getSize(), progress);
     }
 
     public Map<String, Object> processFiles(List<MultipartFile> files, String mergeMode, String joinKey,
@@ -311,6 +316,7 @@ public class DataUploadService {
 
         List<ParsedFile> parsedFiles = new ArrayList<>();
         List<String> sourceNames = new ArrayList<>();
+        long totalFileSize = 0L;
         for (MultipartFile file : files) {
             String originalFilename = Objects.requireNonNullElse(file.getOriginalFilename(), "未命名文件");
             ParsedFile parsedFile = parseFile(file, originalFilename, progress);
@@ -319,6 +325,7 @@ public class DataUploadService {
             }
             sourceNames.add(originalFilename);
             parsedFiles.add(parsedFile);
+            totalFileSize += Math.max(0L, file.getSize());
         }
 
         String normalizedMode = mergeMode == null || mergeMode.isBlank() ? "SAME_HEADER" : mergeMode.trim().toUpperCase();
@@ -331,7 +338,7 @@ public class DataUploadService {
                 ? removeExtension(sourceNames.get(0))
                 : "多文件合并_" + System.currentTimeMillis();
         progress.merging(merged.rows().size());
-        Map<String, Object> result = persistParsedFile(String.join(" + ", sourceNames), merged, displayName, progress);
+        Map<String, Object> result = persistParsedFile(String.join(" + ", sourceNames), merged, displayName, totalFileSize, progress);
         if (modelRequirement != null && !modelRequirement.isBlank()) {
             progress.metadata("正在按业务需求生成模型");
             result.put("businessModel", saveBusinessModel(
@@ -347,11 +354,16 @@ public class DataUploadService {
     }
 
     private Map<String, Object> persistParsedFile(String originalFilename, ParsedFile parsedFile, String displayNameOverride) {
-        return persistParsedFile(originalFilename, parsedFile, displayNameOverride, TaskProgressTracker.noop());
+        return persistParsedFile(originalFilename, parsedFile, displayNameOverride, 0L, TaskProgressTracker.noop());
     }
 
     private Map<String, Object> persistParsedFile(String originalFilename, ParsedFile parsedFile, String displayNameOverride,
                                                   TaskProgressTracker progress) {
+        return persistParsedFile(originalFilename, parsedFile, displayNameOverride, 0L, progress);
+    }
+
+    private Map<String, Object> persistParsedFile(String originalFilename, ParsedFile parsedFile, String displayNameOverride,
+                                                  long fileSize, TaskProgressTracker progress) {
         if (parsedFile.headers().isEmpty() || parsedFile.rows().isEmpty()) {
             throw new IllegalArgumentException("解析失败：未找到表头或有效数据");
         }
@@ -408,7 +420,7 @@ public class DataUploadService {
         }
 
         progress.metadata("正在保存字段元信息");
-        saveCatalog(originalFilename, displayNameOverride, tableName, fields, parsedFile.rows().size());
+        saveCatalog(originalFilename, displayNameOverride, tableName, fields, parsedFile.rows().size(), fileSize);
         try {
             progress.metadata("正在同步知识图谱");
             knowledgeGraphService.syncGraph();
@@ -424,6 +436,7 @@ public class DataUploadService {
         result.put("tableName", tableName);
         result.put("rowCount", parsedFile.rows().size());
         result.put("fieldCount", fields.size());
+        result.put("fileSize", fileSize);
         result.put("fields", fields.stream().map(FieldMeta::toMap).toList());
         Map<String, Object> cleaningStrategy = generateCleaningStrategy(tableName);
         result.put("cleaningStrategy", cleaningStrategy);
@@ -449,7 +462,9 @@ public class DataUploadService {
         assertKnownTable(tableName);
         return jdbcTemplate.queryForList("""
                 SELECT source_field_name AS sourceFieldName, column_name AS columnName, field_type AS fieldType,
-                       display_name AS displayName, field_comment AS fieldComment, `sensitive`, sort_order AS sortOrder
+                       display_name AS displayName, field_comment AS fieldComment, synonyms,
+                       `sensitive`, kg_sync_enabled AS kgSyncEnabled, kg_sync_rule AS kgSyncRule,
+                       sort_order AS sortOrder
                 FROM is_data_field
                 WHERE table_name = ?
                 ORDER BY sort_order ASC
@@ -460,7 +475,8 @@ public class DataUploadService {
         assertKnownTable(tableName);
         List<Map<String, Object>> fields = jdbcTemplate.queryForList("""
                 SELECT id, field_type AS fieldType, display_name AS displayName,
-                       field_comment AS fieldComment, `sensitive`
+                       field_comment AS fieldComment, synonyms, `sensitive`,
+                       kg_sync_enabled AS kgSyncEnabled, kg_sync_rule AS kgSyncRule
                 FROM is_data_field
                 WHERE table_name = ? AND column_name = ?
                 LIMIT 1
@@ -472,7 +488,10 @@ public class DataUploadService {
         String displayName = Objects.toString(request.getOrDefault("displayName", current.get("displayName")), "").trim();
         String fieldType = Objects.toString(request.getOrDefault("fieldType", current.get("fieldType")), "TEXT").trim().toUpperCase();
         String fieldComment = Objects.toString(request.getOrDefault("fieldComment", current.get("fieldComment")), "").trim();
+        String synonyms = Objects.toString(request.getOrDefault("synonyms", current.get("synonyms")), "").trim();
         boolean sensitive = parseBooleanFlag(request.getOrDefault("sensitive", current.get("sensitive")));
+        boolean kgSyncEnabled = parseBooleanFlag(request.getOrDefault("kgSyncEnabled", current.get("kgSyncEnabled")));
+        String kgSyncRule = Objects.toString(request.getOrDefault("kgSyncRule", current.get("kgSyncRule")), "").trim();
         if (displayName.isBlank()) {
             throw new IllegalArgumentException("字段中文名不能为空");
         }
@@ -481,16 +500,21 @@ public class DataUploadService {
         }
         jdbcTemplate.update("""
                 UPDATE is_data_field
-                SET display_name = ?, field_type = ?, field_comment = ?, `sensitive` = ?
+                SET display_name = ?, field_type = ?, field_comment = ?, synonyms = ?,
+                    `sensitive` = ?, kg_sync_enabled = ?, kg_sync_rule = ?
                 WHERE table_name = ? AND column_name = ?
-                """, displayName, fieldType, fieldComment, sensitive ? 1 : 0, tableName, columnName);
+                """, displayName, fieldType, fieldComment, synonyms, sensitive ? 1 : 0,
+                kgSyncEnabled ? 1 : 0, kgSyncRule, tableName, columnName);
         return Map.of(
                 "tableName", tableName,
                 "columnName", columnName,
                 "displayName", displayName,
                 "fieldType", fieldType,
                 "fieldComment", fieldComment,
-                "sensitive", sensitive
+                "synonyms", synonyms,
+                "sensitive", sensitive,
+                "kgSyncEnabled", kgSyncEnabled,
+                "kgSyncRule", kgSyncRule
         );
     }
 
@@ -700,6 +724,7 @@ public class DataUploadService {
 
     public void assertKnownTable(String tableName) {
         if (datasourceService.isOfficialSource(tableName)) {
+            datasourceService.assertCanAccessOfficialSource(tableName);
             return;
         }
         if (!existsTable(tableName)) {
@@ -1128,13 +1153,13 @@ public class DataUploadService {
         }
     }
 
-    private void saveCatalog(String originalFilename, String displayNameOverride, String tableName, List<FieldMeta> fields, int rowCount) {
+    private void saveCatalog(String originalFilename, String displayNameOverride, String tableName, List<FieldMeta> fields, int rowCount, long fileSize) {
         jdbcTemplate.update("""
-                INSERT INTO is_data_table(source_name, display_name, table_name, owner_id, row_count, field_count, status)
-                VALUES (?, ?, ?, ?, ?, ?, 'PENDING_CLEANING')
+                INSERT INTO is_data_table(source_name, display_name, table_name, owner_id, row_count, field_count, file_size, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING_CLEANING')
                 """, originalFilename,
                 displayNameOverride == null || displayNameOverride.isBlank() ? removeExtension(originalFilename) : displayNameOverride,
-                tableName, permissionService.currentUserId(), rowCount, fields.size());
+                tableName, permissionService.currentUserId(), rowCount, fields.size(), Math.max(0L, fileSize));
 
         jdbcTemplate.batchUpdate("""
                 INSERT INTO is_data_field(table_name, source_field_name, column_name, field_type, display_name, field_comment, `sensitive`, sort_order)

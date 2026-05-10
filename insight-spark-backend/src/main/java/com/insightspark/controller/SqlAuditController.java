@@ -43,6 +43,34 @@ public class SqlAuditController {
         return ApiResponse.success(sqlAuditService.stats());
     }
 
+    @GetMapping("/cache/overview")
+    public ApiResponse<Map<String, Object>> cacheOverview() {
+        return ApiResponse.success(sqlAuditService.cacheOverview());
+    }
+
+    @GetMapping("/sensitive-rules")
+    public ApiResponse<List<Map<String, Object>>> listSensitiveRules() {
+        return ApiResponse.success(sqlAuditService.listSensitiveRules());
+    }
+
+    @PostMapping("/sensitive-rules")
+    public ApiResponse<Map<String, Object>> saveSensitiveRule(@RequestBody Map<String, Object> request) {
+        return ApiResponse.success(sqlAuditService.saveSensitiveRule(request));
+    }
+
+    @PostMapping("/sensitive-rules/{id}/status")
+    public ApiResponse<Void> updateSensitiveRuleStatus(@PathVariable Long id, @RequestBody Map<String, Object> request) {
+        boolean enabled = Boolean.parseBoolean(String.valueOf(request.getOrDefault("enabled", "true")));
+        sqlAuditService.updateSensitiveRuleStatus(id, enabled);
+        return ApiResponse.success(null);
+    }
+
+    @PostMapping("/sensitive-rules/{id}/delete")
+    public ApiResponse<Void> deleteSensitiveRule(@PathVariable Long id) {
+        sqlAuditService.deleteSensitiveRule(id);
+        return ApiResponse.success(null);
+    }
+
     @PostMapping("/rules/{ruleCode}/status")
     public ApiResponse<Void> updateRuleStatus(@PathVariable String ruleCode, @RequestBody Map<String, Object> request) {
         boolean enabled = Boolean.parseBoolean(String.valueOf(request.getOrDefault("enabled", "true")));
@@ -65,12 +93,12 @@ public class SqlAuditController {
     public ResponseEntity<byte[]> exportSqlLogs(@RequestParam(required = false) String riskLevel,
                                                 @RequestParam(required = false) String executeStatus,
                                                 @RequestParam(defaultValue = "500") int limit) {
-        byte[] content = sqlAuditService.exportLogsCsv(riskLevel, executeStatus, limit);
+        byte[] content = sqlAuditService.exportLogsExcel(riskLevel, executeStatus, limit);
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.attachment()
-                        .filename("sql-audit-logs.csv", java.nio.charset.StandardCharsets.UTF_8)
+                        .filename("sql-audit-logs.xlsx", java.nio.charset.StandardCharsets.UTF_8)
                         .build().toString())
-                .header(HttpHeaders.CONTENT_TYPE, "text/csv; charset=UTF-8")
+                .header(HttpHeaders.CONTENT_TYPE, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 .body(content);
     }
 }

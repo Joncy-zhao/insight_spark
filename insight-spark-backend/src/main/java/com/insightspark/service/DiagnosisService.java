@@ -72,6 +72,8 @@ import java.util.Map;
 
 import java.util.Objects;
 
+import java.util.Optional;
+
 import java.util.concurrent.ThreadLocalRandom;
 
 import java.util.regex.Pattern;
@@ -245,11 +247,21 @@ public class DiagnosisService {
 
 
 
-        Map<String, Object> aiResult = pythonAiService.graphRagDiagnose(question, tableName, metricField,
+        Optional<Map<String, Object>> graphRagResult = pythonAiService.graphRagDiagnose(question, tableName, metricField,
 
                         dimensionFields, timeField, graphPath, docEvidence, rows, detailLevel, anomalyType)
 
+                ;
+
+        boolean graphRagAiUsed = graphRagResult.isPresent();
+
+        Map<String, Object> aiResult = graphRagResult
+
                 .orElseGet(() -> pythonAiService.diagnose(tableName, metricField, dimensionFields, timeField, rows));
+
+        Map<String, Object> graphRagRuntime = buildGraphRagRuntime(graphRagAiUsed, rows, graphNodes, graphEdges, docEvidence);
+
+        aiResult.put("graphRagRuntime", graphRagRuntime);
 
         aiResult.put("relatedKnowledge", graphNodes);
 
@@ -270,7 +282,7 @@ public class DiagnosisService {
         aiResult.put("graphReasoningPath", Objects.toString(graphPath.getOrDefault("pathText", buildGraphReasoningPath(graphNodes))));
 
         aiResult.put("evidenceSources", buildEvidenceSources(docEvidence, graphNodes));
-        aiResult.put("reasoningLogs", aiResult.getOrDefault("reasoningLogs", buildReasoningLogs(rows, graphNodes, graphEdges, docEvidence, aiResult, anomalyType)));
+        aiResult.put("reasoningLogs", aiResult.getOrDefault("reasoningLogs", buildReasoningLogs(rows, graphNodes, graphEdges, docEvidence, aiResult, anomalyType, graphRagRuntime)));
         aiResult.put("detailLevel", detailLevel);
         aiResult.put("anomalyType", anomalyType);
 
@@ -831,6 +843,42 @@ public class DiagnosisService {
                                                           List<Map<String, Object>> graphEdges,
                                                           List<Map<String, Object>> docEvidence,
                                                           Map<String, Object> aiResult,
+                                                          String anomalyType,
+                                                          Map<String, Object> graphRagRuntime) {
+        List<Map<String, Object>> logs = new ArrayList<>(buildReasoningLogs(rows, graphNodes, graphEdges, docEvidence, aiResult, anomalyType));
+        logs.add(Map.of(
+                "step", 6,
+                "title", "GraphRAG runtime",
+                "status", Objects.toString(graphRagRuntime.getOrDefault("mode", "")),
+                "detail", "mode=" + graphRagRuntime.getOrDefault("mode", "")
+                        + ", graphNodes=" + graphRagRuntime.getOrDefault("graphNodeCount", 0)
+                        + ", graphEdges=" + graphRagRuntime.getOrDefault("graphEdgeCount", 0)
+                        + ", docEvidence=" + graphRagRuntime.getOrDefault("docEvidenceCount", 0)
+        ));
+        return logs;
+    }
+
+    private Map<String, Object> buildGraphRagRuntime(boolean graphRagAiUsed,
+                                                     List<Map<String, Object>> rows,
+                                                     List<Map<String, Object>> graphNodes,
+                                                     List<Map<String, Object>> graphEdges,
+                                                     List<Map<String, Object>> docEvidence) {
+        Map<String, Object> runtime = new LinkedHashMap<>();
+        runtime.put("mode", graphRagAiUsed ? "PYTHON_GRAPHRAG" : "FALLBACK_DIAGNOSIS");
+        runtime.put("queryRowCount", rows.size());
+        runtime.put("graphNodeCount", graphNodes.size());
+        runtime.put("graphEdgeCount", graphEdges.size());
+        runtime.put("docEvidenceCount", docEvidence.size());
+        runtime.put("neo4jEnabled", neo4jEnabled);
+        runtime.put("completedAt", DATE_TIME_FORMATTER.format(Instant.now()));
+        return runtime;
+    }
+
+    private List<Map<String, Object>> buildReasoningLogs(List<Map<String, Object>> rows,
+                                                          List<Map<String, Object>> graphNodes,
+                                                          List<Map<String, Object>> graphEdges,
+                                                          List<Map<String, Object>> docEvidence,
+                                                          Map<String, Object> aiResult,
                                                           String anomalyType) {
         return List.of(
                 Map.of("step", 1, "title", "扫描原始异常数据", "status", "completed",
@@ -848,12 +896,16 @@ public class DiagnosisService {
 
     private String buildBindingJson(String tableName, Map<String, Object> aiResult, Map<String, Object> request) {
         Map<String, Object> binding = new LinkedHashMap<>();
-        binding.put("route", "chat");
+        binding.put("route", Objects.toString(request.getOrDefault("sourceRoute", "chat"), "chat"));
         binding.put("tableName", tableName);
         binding.put("sourceQuestion", aiResult.getOrDefault("sourceQuestion", ""));
         binding.put("sourceSql", aiResult.getOrDefault("sourceSql", ""));
         binding.put("chartSnapshot", aiResult.get("chartSnapshot"));
         binding.put("chartType", request.get("chartType"));
+        binding.put("dashboardId", request.get("dashboardId"));
+        binding.put("dashboardName", request.get("dashboardName"));
+        binding.put("cardId", request.get("cardId"));
+        binding.put("cardTitle", request.get("cardTitle"));
         return toJsonString(binding);
     }
 

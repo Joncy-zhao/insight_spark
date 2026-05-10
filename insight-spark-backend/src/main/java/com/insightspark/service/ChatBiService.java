@@ -47,6 +47,23 @@ public class ChatBiService {
 
         String activeTable = (tableName == null || tableName.isBlank()) ? dataUploadService.latestTableName()
                 : tableName;
+        List<String> generationTrace = new ArrayList<>();
+        generationTrace.add("activeTable=" + activeTable);
+        String cacheKey = sqlAuditService.semanticCacheKey(question, activeTable);
+        Map<String, Object> cachedSqlAudit = sqlAuditService.findSemanticCache(cacheKey);
+        boolean cacheHit = !cachedSqlAudit.isEmpty();
+        if (cacheHit) {
+            SqlAuditService.AuditResult cacheAuditResult = sqlAuditService.inspectCachedSql(cacheKey, activeTable);
+            if (cacheAuditResult.blocked()) {
+                cacheHit = false;
+                cachedSqlAudit = Map.of();
+                generationTrace.add("semanticCache=REJECTED;" + cacheAuditResult.riskReason());
+            } else {
+                generationTrace.add("semanticCache=HIT;cacheAudit=" + cacheAuditResult.riskLevel());
+            }
+        } else {
+            generationTrace.add("semanticCache=MISS");
+        }
         boolean officialSource = datasourceService.isOfficialSource(activeTable);
         String queryTableName = officialSource ? datasourceService.physicalTableName(activeTable) : activeTable;
         dataUploadService.assertKnownTable(activeTable);
@@ -77,11 +94,13 @@ public class ChatBiService {
         ensureNotCancelled("字段元信息加载");
         Map<String, Object> graphPath = knowledgeGraphService.retrieveMultiHopContext(question, activeTable);
         List<Map<String, Object>> graphContext = asMapList(graphPath.get("ragContext"));
+        generationTrace.add("kgContextNodes=" + graphContext.size());
         if (graphContext.isEmpty() && !knowledgeGraphService.hasGraphData()) {
             ensureNotCancelled("图谱补全同步");
             knowledgeGraphService.syncGraph();
             graphPath = knowledgeGraphService.retrieveMultiHopContext(question, activeTable);
             graphContext = asMapList(graphPath.get("ragContext"));
+            generationTrace.add("kgSync=triggered;kgContextNodes=" + graphContext.size());
         }
         if (graphContext.isEmpty()) {
             graphContext = buildLocalFieldContext(activeTable, fields);
@@ -90,7 +109,7 @@ public class ChatBiService {
         List<Map<String, Object>> previewRows = dataUploadService.preview(activeTable, 1, 8);
         ensureNotCancelled("样例数据预览");
         Map<String, Object> graphSqlHints = knowledgeGraphService.buildSqlMappingHints(question, activeTable, graphContext);
-        Optional<Map<String, Object>> aiResult = pythonAiService.textToSql(question, queryTableName, fields,
+        Optional<Map<String, Object>> aiResult = cacheHit ? Optional.empty() : pythonAiService.textToSql(question, queryTableName, fields,
                 previewRows, graphPath, graphSqlHints);
         ensureNotCancelled("SQL 生成");
 
@@ -100,7 +119,14 @@ public class ChatBiService {
         String engine;
         String fallbackReason = null;
 
-        if (aiResult.isPresent()) {
+        if (cacheHit) {
+            generatedSql = Objects.toString(cachedSqlAudit.getOrDefault("cachedSql", ""), "").trim();
+            RuleBasedNl2SqlStrategy.FieldChoice fieldChoice = ruleBasedNl2SqlStrategy.chooseFields(question, fields);
+            chartType = ruleBasedNl2SqlStrategy.chooseChartType(question, fieldChoice.dimensionType());
+            fieldMapping = fallbackFieldMapping(fieldChoice);
+            engine = "redis-semantic-cache";
+            generationTrace.add("nl2sqlEngine=redis-semantic-cache");
+        } else if (aiResult.isPresent()) {
             try {
                 Map<String, Object> ai = aiResult.get();
                 generatedSql = Objects.toString(ai.get("sql"), "").trim();
@@ -113,6 +139,7 @@ public class ChatBiService {
                     chartType = "bar";
                 }
                 engine = "python-ai-service";
+                generationTrace.add("nl2sqlEngine=python-ai-service");
             } catch (Exception parseEx) {
                 log.warn("AI 返回内容解析失败，切换 Java 兜底策略: {}", parseEx.getMessage());
                 RuleBasedNl2SqlStrategy.FieldChoice fieldChoice = ruleBasedNl2SqlStrategy.chooseFields(question, fields);
@@ -121,6 +148,7 @@ public class ChatBiService {
                 fieldMapping = fallbackFieldMapping(fieldChoice);
                 engine = "java-fallback-ai-parse";
                 fallbackReason = "AI_RESPONSE_INVALID";
+                generationTrace.add("nl2sqlEngine=java-fallback-ai-parse;reason=" + fallbackReason);
             }
         } else {
             RuleBasedNl2SqlStrategy.FieldChoice fieldChoice = ruleBasedNl2SqlStrategy.chooseFields(question, fields);
@@ -129,6 +157,7 @@ public class ChatBiService {
             fieldMapping = fallbackFieldMapping(fieldChoice);
             engine = "java-fallback";
             fallbackReason = "AI_UNAVAILABLE";
+            generationTrace.add("nl2sqlEngine=java-fallback;reason=" + fallbackReason);
         }
 
         log.info("Generated SQL: {}", generatedSql);
@@ -136,23 +165,36 @@ public class ChatBiService {
 
         SqlAuditService.AuditResult auditResult = sqlAuditService.inspect(generatedSql, activeTable);
         if (auditResult.blocked()) {
-            sqlAuditService.record(question, activeTable, engine, generatedSql, auditResult,
-                    "BLOCKED", 0L, auditResult.riskReason());
+            sqlAuditService.recordDetailed(question, activeTable, engine, generatedSql, auditResult,
+                    "BLOCKED", 0L, auditResult.riskReason(), auditDetails(generationTrace, graphContext,
+                            graphSqlHints, cacheKey, cacheHit, cachedSqlAudit, generatedSql, "",
+                            "notExecuted=true", "BLOCKED"));
             throw new IllegalArgumentException("SQL 安全审计未通过：" + auditResult.riskReason());
         }
 
-        generatedSql = sqlAuditService.ensureLimit(generatedSql, 200);
+        SqlAuditService.QueryGuardResult guard = sqlAuditService.guardSqlBeforeExecution(generatedSql, activeTable, 200);
+        generatedSql = guard.sql();
+        generationTrace.add("queryGuard=" + guard.action() + ";" + guard.detail());
+        if ("BLOCKED".equals(guard.action())) {
+            SqlAuditService.AuditResult guardAudit = SqlAuditService.AuditResult.blocked("执行前熔断：" + guard.detail(),
+                    List.of("MAX_SCAN_ROWS"), auditResult.sensitiveFields());
+            sqlAuditService.recordDetailed(question, activeTable, engine, generatedSql, guardAudit,
+                    "BLOCKED", 0L, guardAudit.riskReason(), auditDetails(generationTrace, graphContext,
+                            graphSqlHints, cacheKey, cacheHit, cachedSqlAudit, generatedSql, "",
+                            guard.detail(), guard.action()));
+            throw new IllegalArgumentException("SQL 执行前熔断：" + guard.detail());
+        }
         long startedAt = System.currentTimeMillis();
         List<Map<String, Object>> queryResult;
         boolean fallbackExecuted = false;
         Integer previousTimeout = jdbcTemplate.getQueryTimeout();
-        try {
-            jdbcTemplate.setQueryTimeout(5);
+        try (SqlAuditService.QueryPermit ignored = sqlAuditService.acquireQueryPermit("chat-bi")) {
+            jdbcTemplate.setQueryTimeout(guard.timeoutSeconds());
             try {
                 ensureNotCancelled("执行查询前");
                 queryResult = officialSource
                         ? datasourceService.executeQueryWithoutAudit(activeTable, generatedSql)
-                        : queryUploadTable(generatedSql);
+                        : queryUploadTable(activeTable, generatedSql, guard.maxRows());
                 ensureNotCancelled("执行查询后");
             } catch (RuntimeException executionError) {
                 if (engine.startsWith("java-fallback")) {
@@ -177,12 +219,13 @@ public class ChatBiService {
                 ensureNotCancelled("兜底重试执行前");
                 queryResult = officialSource
                         ? datasourceService.executeQueryWithoutAudit(activeTable, generatedSql)
-                        : queryUploadTable(generatedSql);
+                        : queryUploadTable(activeTable, generatedSql, guard.maxRows());
                 ensureNotCancelled("兜底重试执行后");
             }
             ensureNotCancelled("结果加工前");
             queryResult = attachDimensionKey(queryResult, fieldMapping);
-            queryResult = sqlAuditService.maskRows(activeTable, queryResult);
+            SqlAuditService.MaskReport maskReport = sqlAuditService.maskRowsWithReport(activeTable, queryResult);
+            queryResult = maskReport.rows();
             if (isAllNullChartRows(queryResult)) {
                 ensureNotCancelled("空结果恢复前");
                 Map<String, Object> recovery = rebuildQueryFromTableProfile(activeTable, queryTableName, question,
@@ -197,12 +240,18 @@ public class ChatBiService {
             queryResult = normalizeChartRows(queryResult, chartType, fieldMapping);
             ensureNotCancelled("结果归一化后");
             long durationMs = System.currentTimeMillis() - startedAt;
-            sqlAuditService.record(question, activeTable, engine, generatedSql, auditResult,
-                    "SUCCESS", durationMs, null);
+            generationTrace.add("executeStatus=SUCCESS;durationMs=" + durationMs);
+            sqlAuditService.recordDetailed(question, activeTable, engine, generatedSql, auditResult,
+                    "SUCCESS", durationMs, null, auditDetails(generationTrace, graphContext, graphSqlHints, cacheKey,
+                            cacheHit, cachedSqlAudit, generatedSql, maskReport.detail(),
+                            guard.detail(), guard.action()));
         } catch (RuntimeException e) {
             long durationMs = System.currentTimeMillis() - startedAt;
-            sqlAuditService.record(question, activeTable, engine, generatedSql, auditResult,
-                    "FAILED", durationMs, e.getMessage());
+            generationTrace.add("executeStatus=FAILED;durationMs=" + durationMs + ";error=" + e.getMessage());
+            sqlAuditService.recordDetailed(question, activeTable, engine, generatedSql, auditResult,
+                    "FAILED", durationMs, e.getMessage(), auditDetails(generationTrace, graphContext, graphSqlHints,
+                            cacheKey, cacheHit, cachedSqlAudit, generatedSql, "",
+                            guard.detail(), guard.action()));
             throw e;
         } finally {
             jdbcTemplate.setQueryTimeout(previousTimeout);
@@ -425,6 +474,36 @@ public class ChatBiService {
                         ? "true"
                         : "false";
     }
+
+    private Map<String, Object> auditDetails(List<String> generationTrace, List<Map<String, Object>> graphContext,
+                                             Map<String, Object> graphSqlHints, String cacheKey, boolean cacheHit,
+                                             Map<String, Object> cachedSqlAudit, String generatedSql,
+                                             String maskDetail, String executionGuard, String queryGuardAction) {
+        String kgLabels = graphContext == null ? "" : graphContext.stream()
+                .limit(12)
+                .map(node -> Objects.toString(node.getOrDefault("label", node.getOrDefault("nodeKey", "")), ""))
+                .filter(text -> !text.isBlank())
+                .reduce((a, b) -> a + " | " + b)
+                .orElse("");
+        String hintKeys = graphSqlHints == null ? "" : graphSqlHints.keySet().stream()
+                .map(Objects::toString)
+                .reduce((a, b) -> a + "," + b)
+                .orElse("");
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("generationTrace", String.join("\n", generationTrace));
+        details.put("kgMatchLog", "nodes=" + (graphContext == null ? 0 : graphContext.size())
+                + "; labels=" + kgLabels + "; hintKeys=" + hintKeys);
+        details.put("cacheKey", cacheKey);
+        details.put("cacheHit", cacheHit);
+        details.put("cacheSql", cacheHit ? Objects.toString(cachedSqlAudit.getOrDefault("cachedSql", generatedSql), generatedSql) : generatedSql);
+        details.put("cacheAuditStatus", cacheHit ? Objects.toString(cachedSqlAudit.getOrDefault("riskLevel", "HIT")) : "MISS");
+        details.put("redisStatus", cacheHit ? Objects.toString(cachedSqlAudit.getOrDefault("redisStatus", "LOCAL")) : "LOCAL");
+        details.put("maskDetail", maskDetail);
+        details.put("executionGuard", executionGuard);
+        details.put("queryGuardAction", queryGuardAction);
+        return details;
+    }
+
     private Map<String, Object> rebuildQueryFromTableProfile(String activeTable, String queryTableName, String question,
             List<Map<String, Object>> fields, String chartType) {
         List<Map<String, Object>> previewRows = queryTablePreview(queryTableName, 20);

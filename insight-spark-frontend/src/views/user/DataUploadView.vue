@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <section class="workspace-grid upload-grid">
     <div class="panel upload-panel">
       <div class="panel-header">
@@ -22,8 +22,13 @@
         :on-remove="handleFileRemove"
         :before-upload="validateFileBeforeUpload"
       >
-        <div class="upload-drop-title">拖拽文件到此处</div>
-        <div class="upload-drop-subtitle">支持 .xlsx / .xls / .csv，单文件最大 100MB，可批量上传并自动合并。</div>
+        <div class="upload-drop-content">
+          <div class="upload-drop-icon" aria-hidden="true">
+            <el-icon :size="66"><UploadFilled /></el-icon>
+          </div>
+          <div class="upload-drop-title">将文件拖拽到此处，或 <span>点击上传</span></div>
+          <div class="upload-drop-subtitle">支持 .xlsx / .xls / .csv，单文件最大 100MB</div>
+        </div>
       </el-upload>
 
       <el-alert
@@ -60,7 +65,7 @@
         <el-button @click="loadTables">刷新数据表</el-button>
       </div>
 
-      <div v-if="uploadStatusVisible && (uploadProgress.visible || uploadTask)" class="upload-progress">
+      <div v-if="uploadProgress.visible || uploadTask" class="upload-progress">
         <div v-if="uploadProgress.visible">
           <el-progress
             :percentage="Number(uploadProgress.percentage || 0)"
@@ -119,51 +124,68 @@
         </el-table-column>
         <el-table-column prop="rowCount" label="行数" width="90" />
         <el-table-column prop="fieldCount" label="字段" width="80" />
-        <el-table-column prop="createdAt" label="创建时间" min-width="170" />
-        <el-table-column label="操作" width="330" fixed="right">
+        <el-table-column label="创建时间" min-width="170">
           <template #default="{ row }">
-            <el-button size="small" @click.stop="renameDataTable(row)">保存</el-button>
-            <el-button size="small" type="warning" @click.stop="openTableEditor(row.tableName)">修改</el-button>
-            <el-button size="small" type="primary" @click.stop="quickQuery(row)">查询</el-button>
-            <el-button size="small" @click.stop="exportDataTable(row)">导出</el-button>
-            <el-button size="small" type="danger" @click.stop="deleteDataTable(row)">删除</el-button>
+            {{ formatCreatedAt(row.createdAt) }}
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="260">
+          <template #default="{ row }">
+            <div class="table-actions">
+              <el-button link type="primary" @click.stop="quickQuery(row)">查询</el-button>
+              <el-button link type="primary" @click.stop="openFieldConfigDrawer(row)">字段配置</el-button>
+              <el-dropdown trigger="click" @command="command => handleTableMoreCommand(command, row)">
+                <el-button link type="primary" @click.stop>更多</el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="preview">数据预览</el-dropdown-item>
+                    <el-dropdown-item command="export">导出</el-dropdown-item>
+                    <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
           </template>
         </el-table-column>
       </el-table>
     </div>
 
-    <div class="panel">
+    <div class="panel upload-history-panel">
       <div class="panel-header">
         <div>
-          <h2>字段语义与知识图谱绑定</h2>
-          <p>字段元信息将同步到 Neo4j 知识图谱，用于 Text-to-SQL、GraphRAG 和诊断推理。</p>
+          <h2>上传记录</h2>
+          <p>记录文件上传、解析和建表状态，方便追踪最近导入的数据。</p>
         </div>
       </div>
-      <el-table :data="fields" height="360" empty-text="请选择数据表">
-        <el-table-column label="业务字段" min-width="150">
-          <template #default="{ row }"><el-input v-model="row.displayName" size="small" /></template>
-        </el-table-column>
-        <el-table-column prop="columnName" label="物理字段" width="110" />
-        <el-table-column label="类型" width="120">
-          <template #default="{ row }">
-            <el-select v-model="row.fieldType" size="small">
-              <el-option label="文本" value="TEXT" />
-              <el-option label="数值" value="NUMBER" />
-              <el-option label="日期" value="DATE" />
-            </el-select>
+      <el-table :data="uploadRecords" empty-text="暂无上传记录" class="upload-history-table">
+        <el-table-column width="40" class-name="timeline-column">
+          <template #default>
+            <span class="record-timeline-node"></span>
           </template>
         </el-table-column>
-        <el-table-column label="字段说明" min-width="180">
-          <template #default="{ row }"><el-input v-model="row.fieldComment" size="small" placeholder="例如：订单金额、销售日期、客户地区" /></template>
-        </el-table-column>
-        <el-table-column label="敏感" width="80">
-          <template #default="{ row }"><el-switch v-model="row.sensitive" /></template>
-        </el-table-column>
-        <el-table-column label="操作" width="240" fixed="right">
+        <el-table-column label="文件名称" min-width="250">
           <template #default="{ row }">
-            <el-button size="small" type="primary" @click="updateUploadField(row)">保存</el-button>
-            <el-button size="small" @click="showFieldStatistics(row)">统计</el-button>
-            <el-button size="small" type="danger" @click="removeColumn(row)">删列</el-button>
+            <div class="file-record">
+              <span class="file-type-icon" :class="row.iconClass">{{ row.iconText }}</span>
+              <div>
+                <div class="file-record-name">{{ row.fileName }}</div>
+                <div class="file-record-sub">上传成功</div>
+              </div>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column prop="uploadStatus" label="上传状态" width="150" />
+        <el-table-column prop="parseStatus" label="解析状态" width="150" />
+        <el-table-column prop="buildStatus" label="建表状态" width="150" />
+        <el-table-column label="上传时间" width="190">
+          <template #default="{ row }">{{ formatUploadTimestamp(row.createdAt) }}</template>
+        </el-table-column>
+        <el-table-column label="文件大小" width="140">
+          <template #default="{ row }">{{ formatUploadBytes(row.fileSize) }}</template>
+        </el-table-column>
+        <el-table-column label="状态" width="140">
+          <template #default="{ row }">
+            <el-tag class="record-status-tag" type="success" effect="light">{{ row.statusText }}</el-tag>
           </template>
         </el-table-column>
       </el-table>
@@ -196,6 +218,84 @@
         <div ref="distributionChart" class="distribution-chart"></div>
       </div>
     </div>
+
+    <el-drawer
+      v-model="fieldConfigDrawerVisible"
+      append-to-body
+      direction="rtl"
+      size="72%"
+      class="field-config-drawer"
+      :with-header="false"
+    >
+      <div class="field-drawer-layout">
+        <aside class="field-drawer-intro">
+          <div class="field-drawer-icon">语</div>
+          <h3>字段语义配置</h3>
+          <p>配置字段含义、业务属性与同义词，提升自然语言查询效果。</p>
+          <el-button type="primary" @click="scrollToFieldGrid">
+            去配置
+            <span class="arrow">→</span>
+          </el-button>
+        </aside>
+
+        <div class="field-drawer-main">
+          <div class="field-drawer-header">
+            <div>
+              <h2>字段语义配置</h2>
+              <p>{{ fieldConfigTableName || '请选择数据表' }} · 维护字段中文名、类型、备注、同义词、敏感标识和知识图谱同步规则。</p>
+            </div>
+            <el-button @click="fieldConfigDrawerVisible = false">关闭</el-button>
+          </div>
+
+          <el-table ref="fieldConfigTableRef" :data="fields" height="calc(100vh - 190px)" empty-text="暂无字段">
+            <el-table-column label="字段中文名" min-width="150">
+              <template #default="{ row }">
+                <el-input v-model="row.displayName" size="small" placeholder="例如：订单金额" />
+              </template>
+            </el-table-column>
+            <el-table-column prop="columnName" label="物理字段" width="120" />
+            <el-table-column label="类型" width="116">
+              <template #default="{ row }">
+                <el-select v-model="row.fieldType" size="small">
+                  <el-option label="文本" value="TEXT" />
+                  <el-option label="数值" value="NUMBER" />
+                  <el-option label="日期" value="DATE" />
+                </el-select>
+              </template>
+            </el-table-column>
+            <el-table-column label="备注" min-width="190">
+              <template #default="{ row }">
+                <el-input v-model="row.fieldComment" size="small" placeholder="业务口径、单位、枚举说明" />
+              </template>
+            </el-table-column>
+            <el-table-column label="同义词" min-width="180">
+              <template #default="{ row }">
+                <el-input v-model="row.synonyms" size="small" placeholder="逗号分隔，如金额,消费额" />
+              </template>
+            </el-table-column>
+            <el-table-column label="敏感" width="84" align="center">
+              <template #default="{ row }">
+                <el-switch v-model="row.sensitive" />
+              </template>
+            </el-table-column>
+            <el-table-column label="图谱同步" min-width="210">
+              <template #default="{ row }">
+                <div class="kg-rule-cell">
+                  <el-switch v-model="row.kgSyncEnabled" active-text="同步" inactive-text="忽略" />
+                  <el-input v-model="row.kgSyncRule" size="small" placeholder="实体/关系/属性同步规则" />
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="160">
+              <template #default="{ row }">
+                <el-button size="small" type="primary" @click="updateUploadField(row)">保存</el-button>
+                <el-button size="small" @click="showFieldStatistics(row)">统计</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+      </div>
+    </el-drawer>
 
   </section>
 
@@ -368,6 +468,7 @@
 
 <script setup>
 import { computed, inject, nextTick, onMounted, ref, watch } from 'vue'
+import { UploadFilled } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import * as echarts from 'echarts'
 import {
@@ -452,6 +553,9 @@ const editorFields = ref([])
 const editorTotal = ref(0)
 const editorPage = ref(1)
 const editorPageSize = ref(10)
+const fieldConfigDrawerVisible = ref(false)
+const fieldConfigTableName = ref('')
+const fieldConfigTableRef = ref(null)
 let distributionChartInstance = null
 let uploadStatusHideTimer = null
 
@@ -529,6 +633,23 @@ const previewDisplayColumns = computed(() => {
 const dialogPreviewTotal = computed(() => previewMode.value === 'table-edit' ? editorTotal.value : previewTotal.value)
 const dialogPreviewPage = computed(() => previewMode.value === 'table-edit' ? editorPage.value : previewPage.value)
 const dialogPreviewPageSize = computed(() => previewMode.value === 'table-edit' ? editorPageSize.value : previewPageSize.value)
+const uploadRecords = computed(() => uploadTables.value.map(table => {
+  const fileName = table.sourceName || `${table.displayName || table.tableName}.xlsx`
+  const lowerName = fileName.toLowerCase()
+  const isCsv = lowerName.endsWith('.csv')
+  const statusText = table.status === 'PENDING_CLEANING' ? '待确认' : '建表完成'
+  return {
+    ...table,
+    fileName,
+    fileSize: Number(table.fileSize || 0),
+    uploadStatus: '上传成功',
+    parseStatus: '解析完成',
+    buildStatus: statusText,
+    statusText,
+    iconClass: isCsv ? 'csv' : 'excel',
+    iconText: isCsv ? 'CSV' : 'XLS'
+  }
+}))
 
 const statisticCards = computed(() => {
   const stats = selectedFieldStats.value
@@ -635,6 +756,22 @@ function formatUploadBytes(bytes = 0) {
   return `${(bytes / (1024 ** index)).toFixed(index === 0 ? 0 : 1)} ${units[index]}`
 }
 
+function formatCreatedAt(value) {
+  if (!value) return '-'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value)
+  const pad = n => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+function formatUploadTimestamp(value) {
+  if (!value) return '-'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value)
+  const pad = n => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
 async function loadDataQuality() {
   if (!selectedTableName.value) return
   qualityLoading.value = true
@@ -667,6 +804,57 @@ async function openQualityIssueDialog(tableName) {
   } catch (error) {
     ElMessage.error(error?.message || '加载空值与异常值处理失败')
   }
+}
+
+async function openFieldConfigDrawer(row) {
+  const targetTableName = String(row?.tableName || selectedTableName.value || '').trim()
+  if (!targetTableName) {
+    ElMessage.warning('未找到要配置的数据表')
+    return
+  }
+  selectedTableName.value = targetTableName
+  fieldConfigTableName.value = row?.displayName || targetTableName
+  try {
+    await loadFields(targetTableName)
+    fields.value.forEach(field => {
+      field.kgSyncEnabled = field.kgSyncEnabled !== false
+      field.synonyms = field.synonyms || ''
+      field.kgSyncRule = field.kgSyncRule || ''
+    })
+    fieldConfigDrawerVisible.value = true
+  } catch (error) {
+    ElMessage.error(error?.message || '加载字段配置失败')
+  }
+}
+
+async function openPreviewForTable(row) {
+  const targetTableName = String(row?.tableName || '').trim()
+  if (!targetTableName) {
+    ElMessage.warning('未找到要预览的数据表')
+    return
+  }
+  selectedTableName.value = targetTableName
+  cleaningContextTableName.value = ''
+  await openPreviewDialog('preview')
+}
+
+async function handleTableMoreCommand(command, row) {
+  if (command === 'preview') {
+    await openPreviewForTable(row)
+    return
+  }
+  if (command === 'export') {
+    await exportDataTable(row)
+    return
+  }
+  if (command === 'delete') {
+    await deleteDataTable(row)
+  }
+}
+
+async function scrollToFieldGrid() {
+  await nextTick()
+  fieldConfigTableRef.value?.$el?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
 }
 
 async function openTableEditor(tableName) {
@@ -1064,6 +1252,69 @@ async function refreshCurrentTable() {
 </script>
 
 <style scoped>
+.upload-drop-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 180px;
+  padding: 28px 18px 24px;
+  text-align: center;
+}
+
+.upload-drop-icon {
+  width: 78px;
+  height: 78px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #2f7cf6;
+  filter: drop-shadow(0 2px 10px rgba(47, 124, 246, 0.18));
+}
+
+.upload-drop-title {
+  margin-top: 10px;
+  font-size: 16px;
+  line-height: 1.6;
+  color: #4b5563;
+  font-weight: 600;
+}
+
+.upload-drop-title span {
+  color: #2f7cf6;
+  font-weight: 700;
+}
+
+.upload-drop-subtitle {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #9aa2b1;
+}
+
+:deep(.el-upload) {
+  width: 100%;
+}
+
+:deep(.el-upload-dragger) {
+  width: 100%;
+  min-height: 220px;
+  padding: 0;
+  border: 1.5px dashed #d7deea;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
+  transition: all 0.2s ease;
+}
+
+:deep(.el-upload-dragger:hover) {
+  border-color: #2f7cf6;
+  box-shadow: 0 8px 24px rgba(47, 124, 246, 0.08);
+}
+
+:deep(.el-upload-dragger .el-upload__text),
+:deep(.el-upload-dragger .el-upload__tip) {
+  display: none;
+}
+
 .file-validation {
   margin-top: 14px;
 }
@@ -1084,6 +1335,182 @@ async function refreshCurrentTable() {
 .preview-actions {
   display: flex;
   gap: 8px;
+}
+
+.table-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  white-space: nowrap;
+}
+
+.table-actions :deep(.el-button) {
+  padding: 0;
+}
+
+.field-drawer-layout {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 22px;
+  min-height: 100%;
+  padding: 8px 4px 8px 0;
+}
+
+.field-drawer-intro {
+  position: sticky;
+  top: 10px;
+  align-self: start;
+  min-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 28px 22px;
+  border: 1px solid #e5edf8;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.12);
+  text-align: center;
+}
+
+.field-drawer-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  background: #e8f0ff;
+  color: #2563eb;
+  font-size: 24px;
+  font-weight: 800;
+}
+
+.field-drawer-intro h3,
+.field-drawer-header h2 {
+  margin: 0;
+  color: #0f172a;
+}
+
+.field-drawer-intro p,
+.field-drawer-header p {
+  margin: 0;
+  color: #64748b;
+  line-height: 1.7;
+}
+
+.field-drawer-intro .arrow {
+  margin-left: 6px;
+}
+
+.field-drawer-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.field-drawer-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-right: 8px;
+}
+
+.kg-rule-cell {
+  display: grid;
+  gap: 8px;
+}
+
+.upload-history-panel {
+  grid-column: 1 / -1;
+  padding-bottom: 10px;
+}
+
+.upload-history-table {
+  position: relative;
+}
+
+.record-timeline-node {
+  position: relative;
+  z-index: 2;
+  display: block;
+  width: 10px;
+  height: 10px;
+  margin: 0 auto;
+  border-radius: 50%;
+  background: #1677ff;
+  box-shadow: 0 0 0 3px #eaf2ff;
+}
+
+.file-record {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.file-type-icon {
+  width: 30px;
+  height: 34px;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  box-shadow: 0 8px 16px rgba(15, 23, 42, 0.12);
+}
+
+.file-type-icon.excel {
+  background: #12a05c;
+}
+
+.file-type-icon.csv {
+  background: #2563eb;
+}
+
+.file-record-name {
+  color: #1f2a44;
+  font-weight: 700;
+}
+
+.file-record-sub {
+  margin-top: 4px;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.record-status-tag {
+  border: 0;
+  font-weight: 700;
+}
+
+:deep(.upload-history-table td.timeline-column) {
+  position: relative;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+:deep(.upload-history-table td.timeline-column::before) {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  transform: translateX(-50%);
+  background: #d7e6ff;
+}
+
+:deep(.upload-history-table .el-table__body tr:first-child td.timeline-column::before) {
+  top: 50%;
+}
+
+:deep(.upload-history-table .el-table__body tr:last-child td.timeline-column::before) {
+  bottom: 50%;
 }
 
 .quality-summary {

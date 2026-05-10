@@ -130,4 +130,47 @@ public class DatasourceController {
             return ApiResponse.badRequest(e.getMessage());
         }
     }
+
+    @PostMapping("/{datasourceId}/federal-sql")
+    public ApiResponse<Map<String, Object>> generateFederalSql(@PathVariable Long datasourceId, @RequestBody Map<String, Object> request) {
+        try {
+            return ApiResponse.success(datasourceService.generateFederalSql(datasourceId, request));
+        } catch (Exception e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    @GetMapping("/{datasourceId}/row-policies")
+    public ApiResponse<List<Map<String, Object>>> rowPolicies(@PathVariable Long datasourceId) {
+        return ApiResponse.success(datasourceService.listRowPolicies(datasourceId));
+    }
+
+    @PostMapping("/{datasourceId}/row-policies")
+    public ApiResponse<Map<String, Object>> saveRowPolicy(@PathVariable Long datasourceId, @RequestBody Map<String, Object> request) {
+        try {
+            return ApiResponse.success(datasourceService.saveRowPolicy(datasourceId, request));
+        } catch (Exception e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    @PostMapping("/row-policies/{policyId}/delete")
+    public ApiResponse<Void> deleteRowPolicy(@PathVariable Long policyId) {
+        datasourceService.deleteRowPolicy(policyId);
+        return ApiResponse.success(null);
+    }
+
+    @GetMapping("/neo4j-config")
+    public ApiResponse<Map<String, Object>> neo4jConfig() {
+        return ApiResponse.success(datasourceService.getNeo4jConfig());
+    }
+
+    @PostMapping("/neo4j-config")
+    public ApiResponse<Map<String, Object>> saveNeo4jConfig(@RequestBody Map<String, Object> request) {
+        try {
+            return ApiResponse.success(datasourceService.saveNeo4jConfig(request));
+        } catch (Exception e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
 }
