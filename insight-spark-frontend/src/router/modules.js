@@ -55,7 +55,7 @@ export const menuGroups = [
         index: '7',
         title: '智能诊断报告',
         subtitle: '异常数据一键生成诊断报告、GraphRAG 多跳根因链路、报告历史和 DOCX/PDF 导出。'
-      }
+      },
     ]
   },
   {

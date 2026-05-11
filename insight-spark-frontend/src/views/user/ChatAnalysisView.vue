@@ -34,6 +34,11 @@
                   />
                 </el-option-group>
               </el-select>
+              <div class="chat-datasource-actions">
+                <el-button size="small" plain @click="businessDictionaryPanelVisible = true">
+                  业务字典/公式维护
+                </el-button>
+              </div>
             </div>
 
             <div class="message-list" id="chatHistory">
@@ -254,11 +259,20 @@
               <el-button type="primary" :loading="pinning" @click="pinChartToDashboard">确认钉入</el-button>
             </template>
           </el-dialog>
+          <el-drawer
+              v-model="businessDictionaryPanelVisible"
+              title="业务字典 + 业务公式维护"
+              size="74%"
+              destroy-on-close
+          >
+            <BusinessDictionaryView :focus-model-id="businessDictionaryFocusModelId" />
+          </el-drawer>
 </section>
 </template>
 
 <script setup>
 import { inject } from 'vue'
+import BusinessDictionaryView from './BusinessDictionaryView.vue'
 
 const {
   API_BASE,
@@ -301,6 +315,8 @@ const {
   isAdminUser,
   isPermissionModule,
   isStreaming,
+  businessDictionaryPanelVisible,
+  businessDictionaryFocusModelId,
   lastAnalysis,
   loadAdminPermissionRequests,
   loadAuditLogs,
@@ -405,6 +421,9 @@ const {
 .chat-datasource-select {
   width: 320px;
   max-width: 100%;
+}
+.chat-datasource-actions {
+  margin-left: auto;
 }
 .ask-bar {
   display: flex;

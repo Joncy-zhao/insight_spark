@@ -5,6 +5,8 @@ package com.insightspark.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.springframework.beans.factory.annotation.Autowired;
 
@@ -87,6 +89,8 @@ import java.util.zip.ZipOutputStream;
 @Service
 
 public class DiagnosisService {
+
+    private static final Logger log = LoggerFactory.getLogger(DiagnosisService.class);
 
 
 
@@ -237,7 +241,7 @@ public class DiagnosisService {
         } catch (Exception ignored) {
             // 诊断阶段优先使用 Neo4j 现有图谱，自动同步失败会在推理证据中体现为图谱上下文不足。
         }
-        Map<String, Object> graphPath = knowledgeGraphService.retrieveMultiHopContext(question, tableName);
+        Map<String, Object> graphPath = knowledgeGraphService.retrieveMultiHopContextSafely(question, tableName);
 
         List<Map<String, Object>> graphNodes = castMapList(graphPath.getOrDefault("nodes", List.of()));
 
@@ -288,7 +292,29 @@ public class DiagnosisService {
 
 
 
-        Long reportId = saveReport(tableName, metricField, dimensionFields, timeField, aiResult, request);
+        Long reportId = null;
+        boolean reportPersisted = false;
+        String persistMode = "NEO4J";
+        String persistError = "";
+        try {
+            reportId = saveReport(tableName, metricField, dimensionFields, timeField, aiResult, request);
+            reportPersisted = true;
+        } catch (Exception e) {
+            persistMode = "DEGRADED_NO_PERSIST";
+            persistError = safeErrorMessage(e);
+            log.warn("Diagnosis report persistence degraded, return in-memory result only: {}", persistError);
+        }
+
+        Map<String, Object> reportPersistence = new LinkedHashMap<>();
+        reportPersistence.put("persisted", reportPersisted);
+        reportPersistence.put("mode", persistMode);
+        reportPersistence.put("error", reportPersisted ? "" : persistError);
+        reportPersistence.put("neo4jEnabled", neo4jEnabled);
+        aiResult.put("reportPersistence", reportPersistence);
+        aiResult.put("reportPersisted", reportPersisted);
+        if (!reportPersisted) {
+            aiResult.put("reportFallbackReason", persistError);
+        }
 
 
 
@@ -359,7 +385,12 @@ public class DiagnosisService {
 
                 """;
 
-        return neo4jQueryRows(cypher, Map.of("userId", com.insightspark.core.auth.AuthContext.userId()));
+        try {
+            return neo4jQueryRows(cypher, Map.of("userId", com.insightspark.core.auth.AuthContext.userId()));
+        } catch (Exception e) {
+            log.warn("List diagnosis reports degraded to empty list: {}", safeErrorMessage(e));
+            return List.of();
+        }
 
     }
 

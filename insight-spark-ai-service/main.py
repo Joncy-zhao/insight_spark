@@ -1159,6 +1159,8 @@ def resolve_graph_sql_plan(payload: TextToSqlRequest) -> dict[str, Any]:
 
     dim_ref = str(mapping.get("dimensionKey", "")).strip()
     metric_ref = str(mapping.get("metricKey", "")).strip()
+    dictionary_dim_ref = str(mapping.get("dictionaryDimensionKey", "")).strip()
+    dictionary_metric_ref = str(mapping.get("dictionaryMetricKey", "")).strip()
     metric_formula = normalize_metric_formula(str(mapping.get("metricFormula", "")).strip())
 
     if not metric_formula and formula_candidates:
@@ -1171,6 +1173,11 @@ def resolve_graph_sql_plan(payload: TextToSqlRequest) -> dict[str, Any]:
 
     dimension_field = match_field_by_ref(dim_ref, field_by_col, field_by_display)
     metric_field = match_field_by_ref(metric_ref, field_by_col, field_by_display)
+
+    if dimension_field is None and dictionary_dim_ref:
+        dimension_field = match_field_by_ref(dictionary_dim_ref, field_by_col, field_by_display)
+    if metric_field is None and dictionary_metric_ref:
+        metric_field = match_field_by_ref(dictionary_metric_ref, field_by_col, field_by_display)
 
     if dimension_field is None:
         dimension_field = select_field_from_candidates(field_candidates, payload.fields, prefer_number=False)
@@ -1207,6 +1214,8 @@ def resolve_graph_sql_plan(payload: TextToSqlRequest) -> dict[str, Any]:
         "decision": {
             "dimensionRef": dim_ref,
             "metricRef": metric_ref,
+            "dictionaryDimensionRef": dictionary_dim_ref,
+            "dictionaryMetricRef": dictionary_metric_ref,
             "metricFormula": metric_formula,
             "dimensionColumn": dimension_field.columnName if dimension_field else "",
             "metricColumn": metric_field.columnName if metric_field else "",
@@ -1342,7 +1351,16 @@ def select_field_from_candidates(candidates: list[Any], fields: list[FieldMeta],
         return None
     field_by_col = {field.columnName.lower(): field for field in fields}
     field_by_display = {field.displayName.lower(): field for field in fields if field.displayName}
-    for item in candidates:
+    items = [item for item in candidates if isinstance(item, dict)]
+    items.sort(
+        key=lambda item: (
+            1 if as_bool(item.get("dictionaryMatched")) else 0,
+            read_float(item.get("dictionaryBoost")),
+            read_float(item.get("score")),
+        ),
+        reverse=True,
+    )
+    for item in items:
         if not isinstance(item, dict):
             continue
         refs = [
@@ -1360,6 +1378,21 @@ def select_field_from_candidates(candidates: list[Any], fields: list[FieldMeta],
                 continue
             return matched
     return None
+
+
+def as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def read_float(value: Any) -> float:
+    try:
+        return float(str(value))
+    except Exception:
+        return 0.0
 
 
 def match_field_by_ref(ref: str, field_by_col: dict[str, FieldMeta], field_by_display: dict[str, FieldMeta]) -> FieldMeta | None:

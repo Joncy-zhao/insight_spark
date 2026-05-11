@@ -326,6 +326,7 @@ public class KnowledgeGraphService {
         List<Map<String, Object>> context = graphContext == null ? List.of() : graphContext;
         String q = Objects.toString(question, "").trim();
         List<String> tokens = splitQuestionTokens(q);
+        List<Map<String, Object>> dictionaryEntries = loadDictionaryEntries(tableName);
 
         List<Map<String, Object>> fieldCandidates = new ArrayList<>();
         List<Map<String, Object>> formulaCandidates = new ArrayList<>();
@@ -343,18 +344,23 @@ public class KnowledgeGraphService {
         fieldCandidates.sort((a, b) -> Double.compare(readDouble(b.get("score")), readDouble(a.get("score"))));
         formulaCandidates.sort((a, b) -> Double.compare(readDouble(b.get("score")), readDouble(a.get("score"))));
 
+        applyDictionaryBoost(q, tokens, fieldCandidates, dictionaryEntries);
+        fieldCandidates.sort((a, b) -> Double.compare(readDouble(b.get("score")), readDouble(a.get("score"))));
+
         List<Map<String, Object>> topFields = fieldCandidates.stream().limit(8).toList();
         List<Map<String, Object>> topFormulas = formulaCandidates.stream().limit(6).toList();
 
         List<Map<String, Object>> ambiguities = detectAmbiguities(topFields);
         Map<String, Object> mapping = recommendMapping(topFields, topFormulas, q);
+        applyDictionaryMappingOverride(mapping, topFields, dictionaryEntries);
 
         return Map.of(
                 "fieldCandidates", topFields,
                 "formulaCandidates", topFormulas,
+                "dictionaryMatches", collectDictionaryMatches(topFields),
                 "ambiguities", ambiguities,
                 "recommendedMapping", mapping,
-                "graphReasoning", summarizeHints(topFields, topFormulas, ambiguities, mapping)
+                "graphReasoning", summarizeHints(topFields, topFormulas, ambiguities, mapping, dictionaryEntries)
         );
     }
 
@@ -674,6 +680,10 @@ public class KnowledgeGraphService {
         candidate.put("score", score);
         candidate.put("dimensionScore", dimensionScore);
         candidate.put("metricScore", metricScore);
+        candidate.put("dictionaryMatched", false);
+        candidate.put("dictionaryHitTerm", "");
+        candidate.put("dictionaryHitSynonym", "");
+        candidate.put("dictionaryBoost", 0D);
         return candidate;
     }
 
@@ -787,9 +797,171 @@ public class KnowledgeGraphService {
     }
 
     private String summarizeHints(List<Map<String, Object>> fields, List<Map<String, Object>> formulas,
-                                  List<Map<String, Object>> ambiguities, Map<String, Object> mapping) {
+                                  List<Map<String, Object>> ambiguities, Map<String, Object> mapping,
+                                  List<Map<String, Object>> dictionaryEntries) {
+        long dictionaryHitCount = fields.stream()
+                .filter(item -> Boolean.TRUE.equals(item.get("dictionaryMatched")))
+                .count();
         return "fields=" + fields.size() + ", formulas=" + formulas.size()
-                + ", ambiguities=" + ambiguities.size() + ", mapping=" + mapping;
+                + ", ambiguities=" + ambiguities.size()
+                + ", dictionaryEntries=" + dictionaryEntries.size()
+                + ", dictionaryHits=" + dictionaryHitCount
+                + ", mapping=" + mapping;
+    }
+
+    private List<Map<String, Object>> loadDictionaryEntries(String tableName) {
+        String table = Objects.toString(tableName, "").trim();
+        if (table.isBlank()) {
+            return List.of();
+        }
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT model_json AS modelJson
+                FROM is_business_model
+                WHERE status = 'ACTIVE' AND table_name = ?
+                ORDER BY updated_at DESC
+                LIMIT 10
+                """, table);
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Map<String, Object> row : rows) {
+            Map<String, Object> parsed = parseJsonMap(row.get("modelJson"));
+            List<Map<String, Object>> entries = castMapList(parsed.get("dictionaryEntries"));
+            for (Map<String, Object> entry : entries) {
+                String term = Objects.toString(entry.get("term"), "").trim();
+                String field = Objects.toString(entry.get("field"), "").trim();
+                String synonyms = Objects.toString(entry.get("synonyms"), "").trim();
+                if (term.isBlank() && field.isBlank() && synonyms.isBlank()) {
+                    continue;
+                }
+                Map<String, Object> normalized = new LinkedHashMap<>();
+                normalized.put("term", term);
+                normalized.put("field", field);
+                normalized.put("synonyms", synonyms);
+                result.add(normalized);
+            }
+        }
+        return result;
+    }
+
+    private void applyDictionaryBoost(String question, List<String> tokens,
+                                      List<Map<String, Object>> fieldCandidates,
+                                      List<Map<String, Object>> dictionaryEntries) {
+        if (fieldCandidates.isEmpty() || dictionaryEntries.isEmpty()) {
+            return;
+        }
+        String q = normalizeText(question);
+        for (Map<String, Object> candidate : fieldCandidates) {
+            String sourceId = normalizeText(Objects.toString(candidate.get("sourceId"), ""));
+            if (sourceId.isBlank()) {
+                continue;
+            }
+            double boost = 0D;
+            String hitTerm = "";
+            String hitSynonym = "";
+            for (Map<String, Object> entry : dictionaryEntries) {
+                String field = normalizeText(Objects.toString(entry.get("field"), ""));
+                if (field.isBlank()) {
+                    continue;
+                }
+                if (!sourceId.equals(field) && !sourceId.endsWith("." + field)) {
+                    continue;
+                }
+                String term = Objects.toString(entry.get("term"), "").trim();
+                List<String> synonyms = splitSynonyms(Objects.toString(entry.get("synonyms"), ""));
+                boolean matched = false;
+                if (!term.isBlank()) {
+                    String normalizedTerm = normalizeText(term);
+                    if (!normalizedTerm.isBlank() && (q.contains(normalizedTerm) || tokens.contains(normalizedTerm))) {
+                        boost += 2.2;
+                        hitTerm = term;
+                        matched = true;
+                    }
+                }
+                if (!matched) {
+                    for (String synonym : synonyms) {
+                        String normalized = normalizeText(synonym);
+                        if (!normalized.isBlank() && (q.contains(normalized) || tokens.contains(normalized))) {
+                            boost += 1.6;
+                            hitSynonym = synonym;
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+                if (matched) {
+                    break;
+                }
+            }
+            if (boost > 0D) {
+                candidate.put("score", readDouble(candidate.get("score")) + boost);
+                candidate.put("dimensionScore", readDouble(candidate.get("dimensionScore")) + boost);
+                candidate.put("metricScore", readDouble(candidate.get("metricScore")) + boost);
+                candidate.put("dictionaryMatched", true);
+                candidate.put("dictionaryHitTerm", hitTerm);
+                candidate.put("dictionaryHitSynonym", hitSynonym);
+                candidate.put("dictionaryBoost", boost);
+            }
+        }
+    }
+
+    private void applyDictionaryMappingOverride(Map<String, Object> mapping, List<Map<String, Object>> fields,
+                                                List<Map<String, Object>> dictionaryEntries) {
+        if (mapping == null || dictionaryEntries.isEmpty() || fields.isEmpty()) {
+            return;
+        }
+        Map<String, Object> preferred = fields.stream()
+                .filter(item -> Boolean.TRUE.equals(item.get("dictionaryMatched")))
+                .max((a, b) -> Double.compare(readDouble(a.get("score")), readDouble(b.get("score"))))
+                .orElse(null);
+        if (preferred == null) {
+            return;
+        }
+        String preferredField = Objects.toString(preferred.get("sourceId"), "");
+        if (preferredField.isBlank()) {
+            return;
+        }
+        String currentDimension = Objects.toString(mapping.getOrDefault("dimensionKey", ""), "");
+        String currentMetric = Objects.toString(mapping.getOrDefault("metricKey", ""), "");
+        if (currentDimension.isBlank()) {
+            mapping.put("dimensionKey", preferredField);
+        }
+        if (currentMetric.isBlank()) {
+            mapping.put("metricKey", preferredField);
+        }
+        if (!Objects.equals(currentDimension, preferredField)) {
+            mapping.put("dictionaryDimensionKey", preferredField);
+        }
+    }
+
+    private List<Map<String, Object>> collectDictionaryMatches(List<Map<String, Object>> fields) {
+        List<Map<String, Object>> matches = new ArrayList<>();
+        for (Map<String, Object> item : fields) {
+            if (!Boolean.TRUE.equals(item.get("dictionaryMatched"))) {
+                continue;
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("sourceId", Objects.toString(item.get("sourceId"), ""));
+            row.put("label", Objects.toString(item.get("label"), ""));
+            row.put("hitTerm", Objects.toString(item.get("dictionaryHitTerm"), ""));
+            row.put("hitSynonym", Objects.toString(item.get("dictionaryHitSynonym"), ""));
+            row.put("boost", readDouble(item.get("dictionaryBoost")));
+            matches.add(row);
+        }
+        return matches;
+    }
+
+    private List<String> splitSynonyms(String text) {
+        String value = Objects.toString(text, "").trim();
+        if (value.isBlank()) {
+            return List.of();
+        }
+        List<String> result = new ArrayList<>();
+        for (String token : value.split("[,，;；\\s]+")) {
+            String item = token.trim();
+            if (!item.isBlank()) {
+                result.add(item);
+            }
+        }
+        return result;
     }
 
     private double readDouble(Object value) {

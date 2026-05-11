@@ -124,7 +124,7 @@
         <h2>报告内容</h2>
         <p>包含深度分析文本、数据波动值、异常关联因素、根因定位结论与改进建议，并支持图表快照与异常节点标注。</p>
       </div>
-      <div class="diagnosis-actions" v-if="currentDiagnosis?.id">
+      <div class="diagnosis-actions" v-if="canExportDiagnosis">
         <el-button size="small" @click="exportDiagnosisReportWithOptions('word')">导出 Word</el-button>
         <el-button size="small" type="primary" @click="exportDiagnosisReportWithOptions('pdf')">导出 PDF</el-button>
         <el-button size="small" type="success" @click="previewFullscreenVisible = true">全屏预览</el-button>
@@ -133,6 +133,14 @@
 
     <el-empty v-if="!currentDiagnosis" description="尚未生成诊断报告" />
     <template v-else>
+      <el-alert
+        v-if="!isReportPersisted"
+        type="warning"
+        :closable="false"
+        show-icon
+        :title="persistWarningTitle"
+        style="margin-bottom: 10px;"
+      />
       <el-alert type="success" :closable="false" show-icon :title="currentDiagnosis.summary" />
 
       <el-descriptions class="diagnosis-stats" :column="3" border>
@@ -300,6 +308,29 @@ const chartSnapshot = computed(() => {
     return null
   }
 })
+
+const isReportPersisted = computed(() => {
+  const report = currentDiagnosis.value
+  if (!report || typeof report !== 'object') return false
+  if (typeof report.reportPersisted === 'boolean') return report.reportPersisted
+  const persisted = report.reportPersistence?.persisted
+  if (typeof persisted === 'boolean') return persisted
+  return Boolean(report.id)
+})
+
+const persistFallbackReason = computed(() => {
+  const report = currentDiagnosis.value
+  const direct = String(report?.reportFallbackReason || '').trim()
+  if (direct) return direct
+  const nested = String(report?.reportPersistence?.error || '').trim()
+  return nested || 'Neo4j 报告写入不可用'
+})
+
+const persistWarningTitle = computed(() =>
+  `本次为降级结果：报告未写入 Neo4j，暂不支持历史回看与导出。原因：${persistFallbackReason.value}`
+)
+
+const canExportDiagnosis = computed(() => Boolean(currentDiagnosis.value?.id && isReportPersisted.value))
 
 const runDiagnosisWithDetail = async () => {
   diagnosisForm.value.detailLevel = reportGenerateForm.value.detailLevel
