@@ -76,13 +76,12 @@
         <UserWorkbenchView v-if="activeModule === 'workbench'" />
         <UserDashboardView v-if="activeModule === 'dashboard'" />
         <BusinessCollaborationView v-if="activeModule === 'collaboration'" />
-        <BusinessDictionaryView v-if="activeModule === 'businessDictionary'" />
         <AdminWorkbenchView v-if="activeModule === 'adminWorkbench'" />
         <AdminDashboardView v-if="activeModule === 'adminDashboard'" />
         <StackCSystemConfigView v-if="activeModule === 'stackCConfig'" />
         <PerformanceGovernanceView v-if="activeModule === 'performanceGovernance'" />
         <PlaceholderView
-            v-if="!['upload', 'chat', 'audit', 'permission', 'permissionAdmin', 'datasource', 'diagnosis', 'knowledgeGraph', 'workbench', 'dashboard', 'collaboration', 'businessDictionary', 'adminWorkbench', 'adminDashboard', 'stackCConfig', 'performanceGovernance'].includes(activeModule)"
+            v-if="!['upload', 'chat', 'audit', 'permission', 'permissionAdmin', 'datasource', 'diagnosis', 'knowledgeGraph', 'workbench', 'dashboard', 'collaboration', 'adminWorkbench', 'adminDashboard', 'stackCConfig', 'performanceGovernance'].includes(activeModule)"
         />
       </el-main>
     </el-container>
@@ -129,7 +128,6 @@ import AdminDashboardView from './views/admin/AdminDashboardView.vue'
 import UserWorkbenchView from './views/user/UserWorkbenchView.vue'
 import UserDashboardView from './views/user/UserDashboardView.vue'
 import BusinessCollaborationView from './views/user/BusinessCollaborationView.vue'
-import BusinessDictionaryView from './views/user/BusinessDictionaryView.vue'
 import PlaceholderView from './views/PlaceholderView.vue'
 import AuthView from './views/AuthView.vue'
 import { authToken, currentUser, isAuthenticated, clearSession, restoreSessionHeader } from './store/session'
