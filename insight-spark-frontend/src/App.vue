@@ -76,12 +76,13 @@
         <UserWorkbenchView v-if="activeModule === 'workbench'" />
         <UserDashboardView v-if="activeModule === 'dashboard'" />
         <BusinessCollaborationView v-if="activeModule === 'collaboration'" />
+        <BusinessDictionaryView v-if="activeModule === 'businessDictionary'" />
         <AdminWorkbenchView v-if="activeModule === 'adminWorkbench'" />
         <AdminDashboardView v-if="activeModule === 'adminDashboard'" />
         <StackCSystemConfigView v-if="activeModule === 'stackCConfig'" />
         <PerformanceGovernanceView v-if="activeModule === 'performanceGovernance'" />
         <PlaceholderView
-            v-if="!['upload', 'chat', 'audit', 'permission', 'permissionAdmin', 'datasource', 'diagnosis', 'knowledgeGraph', 'workbench', 'dashboard', 'collaboration', 'adminWorkbench', 'adminDashboard', 'stackCConfig', 'performanceGovernance'].includes(activeModule)"
+            v-if="!['upload', 'chat', 'audit', 'permission', 'permissionAdmin', 'datasource', 'diagnosis', 'knowledgeGraph', 'workbench', 'dashboard', 'collaboration', 'businessDictionary', 'adminWorkbench', 'adminDashboard', 'stackCConfig', 'performanceGovernance'].includes(activeModule)"
         />
       </el-main>
     </el-container>
@@ -128,6 +129,7 @@ import AdminDashboardView from './views/admin/AdminDashboardView.vue'
 import UserWorkbenchView from './views/user/UserWorkbenchView.vue'
 import UserDashboardView from './views/user/UserDashboardView.vue'
 import BusinessCollaborationView from './views/user/BusinessCollaborationView.vue'
+import BusinessDictionaryView from './views/user/BusinessDictionaryView.vue'
 import PlaceholderView from './views/PlaceholderView.vue'
 import AuthView from './views/AuthView.vue'
 import { authToken, currentUser, isAuthenticated, clearSession, restoreSessionHeader } from './store/session'
@@ -141,6 +143,7 @@ const moduleIconMap = {
   dashboard: DataBoard,
   adminDashboard: Histogram,
   collaboration: Share,
+  businessDictionary: Operation,
   upload: Upload,
   chat: ChatDotRound,
   permission: Lock,
@@ -287,6 +290,8 @@ const diagnosisProgress = ref({ percentage: 0, step: '待开始', logs: [] })
 const currentDiagnosis = ref(null)
 const diagnosisReports = ref([])
 const diagnosisRestoreTarget = ref(null)
+const businessDictionaryPanelVisible = ref(false)
+const businessDictionaryFocusModelId = ref(null)
 const pinDialogVisible = ref(false)
 const pinning = ref(false)
 const pinDashboardId = ref(null)
@@ -999,8 +1004,12 @@ const runDiagnosis = async () => {
       detailLevel: diagnosisForm.value.detailLevel || 'detailed',
       anomalyType: diagnosisForm.value.anomalyType || 'fluctuation'
     }))
-    completeDiagnosisProgressV2(currentDiagnosis.value?.reasoningLogs || [], currentDiagnosis.value?.graphRagRuntime)
-    ElMessage.success('诊断报告已生成')
+    completeDiagnosisProgressV2(
+      currentDiagnosis.value?.reasoningLogs || [],
+      currentDiagnosis.value?.graphRagRuntime,
+      currentDiagnosis.value
+    )
+    notifyDiagnosisResult(currentDiagnosis.value)
     await loadDiagnosisReports()
   } catch (error) {
     ElMessage.error(error.message || '诊断失败')
@@ -1075,9 +1084,16 @@ const diagnoseFromLastAnalysis = async () => {
       anomalyType: diagnosisForm.value.anomalyType || 'fluctuation',
       question: lastAnalysis.value.message || '基于当前对话查询结果生成智能诊断报告'
     }))
-    completeDiagnosisProgressV2(currentDiagnosis.value?.reasoningLogs || [], currentDiagnosis.value?.graphRagRuntime)
-
-    ElMessage.success('已根据当前图表生成智能诊断报告')
+    completeDiagnosisProgressV2(
+      currentDiagnosis.value?.reasoningLogs || [],
+      currentDiagnosis.value?.graphRagRuntime,
+      currentDiagnosis.value
+    )
+    notifyDiagnosisResult(
+      currentDiagnosis.value,
+      '已根据当前图表生成智能诊断报告并写入 Neo4j',
+      '已根据当前图表生成智能诊断结果（降级模式，未写入 Neo4j）'
+    )
     await loadDiagnosisReports()
     activeModule.value = 'diagnosis'
   } catch (error) {
@@ -1117,8 +1133,12 @@ const confirmDiagnosisPicker = async () => {
       detailLevel: diagnosisForm.value.detailLevel || 'detailed',
       anomalyType: diagnosisForm.value.anomalyType || 'fluctuation'
     }))
-    completeDiagnosisProgressV2(currentDiagnosis.value?.reasoningLogs || [], currentDiagnosis.value?.graphRagRuntime)
-    ElMessage.success('诊断报告已生成')
+    completeDiagnosisProgressV2(
+      currentDiagnosis.value?.reasoningLogs || [],
+      currentDiagnosis.value?.graphRagRuntime,
+      currentDiagnosis.value
+    )
+    notifyDiagnosisResult(currentDiagnosis.value)
     await loadDiagnosisReports()
     activeModule.value = 'diagnosis'
   } catch (error) {
@@ -1190,20 +1210,60 @@ const startDiagnosisProgressV2 = (context = {}) => {
   }, 900)
 }
 
-const completeDiagnosisProgressV2 = (logs = [], runtime = null) => {
+const completeDiagnosisProgressV2 = (logs = [], runtime = null, diagnosis = null) => {
+  const persisted = isDiagnosisPersisted(diagnosis)
+  const finalStepDetail = persisted
+    ? '诊断报告已生成并写入 Neo4j。'
+    : '诊断结果已生成（降级模式，未写入 Neo4j）。'
   const runtimeLog = runtime ? [{
     step: 6,
     title: 'GraphRAG 状态核验',
     status: runtime.mode === 'PYTHON_GRAPHRAG' ? 'completed' : 'fallback',
     detail: `推理模式：${runtime.mode || 'UNKNOWN'}，命中图谱节点 ${runtime.graphNodeCount || 0} 个、关系 ${runtime.graphEdgeCount || 0} 条、文档证据 ${runtime.docEvidenceCount || 0} 条。`
   }] : []
+  const persistenceLog = [{
+    step: 7,
+    title: '报告持久化',
+    status: persisted ? 'completed' : 'fallback',
+    detail: persisted
+      ? '诊断报告已写入 Neo4j，可在历史报告中查看与导出。'
+      : `诊断结果已返回，但 Neo4j 持久化降级。${resolveDiagnosisFallbackReason(diagnosis)}`
+  }]
   diagnosisProgress.value = {
     percentage: 100,
     step: '报告生成',
     logs: logs.length
-      ? [...logs, ...runtimeLog]
-      : [...diagnosisProgress.value.logs, { step: 4, title: '报告生成', status: 'completed', detail: '诊断报告已生成并写入 Neo4j。' }, ...runtimeLog]
+      ? [...logs, ...runtimeLog, ...persistenceLog]
+      : [...diagnosisProgress.value.logs, { step: 4, title: '报告生成', status: 'completed', detail: finalStepDetail }, ...runtimeLog, ...persistenceLog]
   }
+}
+
+const isDiagnosisPersisted = (diagnosis) => {
+  if (!diagnosis || typeof diagnosis !== 'object') return true
+  if (typeof diagnosis.reportPersisted === 'boolean') return diagnosis.reportPersisted
+  const persisted = diagnosis.reportPersistence?.persisted
+  if (typeof persisted === 'boolean') return persisted
+  return true
+}
+
+const resolveDiagnosisFallbackReason = (diagnosis) => {
+  const direct = String(diagnosis?.reportFallbackReason || '').trim()
+  if (direct) return `降级原因：${direct}`
+  const persistenceError = String(diagnosis?.reportPersistence?.error || '').trim()
+  if (persistenceError) return `降级原因：${persistenceError}`
+  return '降级原因：Neo4j 报告写入不可用。'
+}
+
+const notifyDiagnosisResult = (
+  diagnosis,
+  successText = '诊断报告已生成并写入 Neo4j',
+  fallbackText = '诊断结果已生成（降级模式，未写入 Neo4j）'
+) => {
+  if (isDiagnosisPersisted(diagnosis)) {
+    ElMessage.success(successText)
+    return
+  }
+  ElMessage.warning(`${fallbackText}。${resolveDiagnosisFallbackReason(diagnosis)}`)
 }
 
 const captureChartSnapshot = (analysis) => {
@@ -1322,8 +1382,16 @@ const diagnoseFromDashboardCard = async (card, imageDataUrl = '') => {
       anomalyType: diagnosisForm.value.anomalyType || 'fluctuation',
       question: `基于看板图表「${card?.title || '未命名图表'}」生成智能诊断报告`
     }))
-    completeDiagnosisProgressV2(currentDiagnosis.value?.reasoningLogs || [], currentDiagnosis.value?.graphRagRuntime)
-    ElMessage.success('已根据看板图表生成智能诊断报告')
+    completeDiagnosisProgressV2(
+      currentDiagnosis.value?.reasoningLogs || [],
+      currentDiagnosis.value?.graphRagRuntime,
+      currentDiagnosis.value
+    )
+    notifyDiagnosisResult(
+      currentDiagnosis.value,
+      '已根据看板图表生成智能诊断报告并写入 Neo4j',
+      '已根据看板图表生成智能诊断结果（降级模式，未写入 Neo4j）'
+    )
     await loadDiagnosisReports()
     activeModule.value = 'diagnosis'
   } catch (error) {
@@ -1619,15 +1687,85 @@ const createBusinessModelFromTemplate = async () => {
   await loadBusinessModels()
 }
 
-const createBusinessModel = async () => {
-  if (!selectedTableName.value || !modelRequirement.value.trim()) return ElMessage.warning('请选择数据表并填写建模需求')
+const buildSemanticModelName = (requirement, tableName) => {
+  const fallback = `模型_${tableName || 'default'}`
+  const raw = String(requirement || '').trim()
+  if (!raw) return fallback
+
+  let text = raw
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/[“”"'<>{}`]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  text = text
+    .replace(/^(请|请你|帮我|麻烦|需要|我想|想要|帮忙)+/g, '')
+    .replace(/(创建|生成|新建|建立|搭建)(一个|一份|个)?(业务)?模型/g, '')
+    .replace(/(并|然后|之后).*/g, '')
+    .trim()
+
+  if (!text) return fallback
+  if (text.length > 24) text = text.slice(0, 24).trim()
+  if (!text.endsWith('模型')) text = `${text}模型`
+  return text || fallback
+}
+
+const createBusinessModel = async (options = {}) => {
+  const tableName = String(options?.tableName || selectedTableName.value || '').trim()
+  const baseRequirement = String(options?.requirement ?? modelRequirement.value ?? '').trim()
+  if (!tableName) {
+    ElMessage.warning('请先选择数据表')
+    return null
+  }
+  const requirement = baseRequirement || `基于${tableName}的业务分析模型`
+  const modelName = String(options?.modelName || buildSemanticModelName(requirement, tableName)).trim()
+
   await axios.post(`${API_BASE}/api/data/business-models`, {
-    tableName: selectedTableName.value,
-    requirement: modelRequirement.value,
-    modelName: `模型_${selectedTableName.value}`
+    tableName,
+    requirement,
+    modelName
   }).then(unwrap)
-  ElMessage.success('业务模型已生成')
+
+  if (!options?.silentSuccess) {
+    ElMessage.success(`业务模型已生成：${modelName}`)
+  }
   await loadBusinessModels()
+  return { tableName, requirement, modelName }
+}
+
+const BUSINESS_MODEL_CREATE_HINTS = [
+  '创建业务模型', '生成业务模型', '新建业务模型', '建立业务模型', '搭建业务模型',
+  '建模', '业务模型', '模型维护', '业务字典', '业务公式', '同义词', '衍生指标', '指标公式'
+]
+
+const shouldCreateBusinessModelFromQuestion = (text) => {
+  const q = String(text || '').trim().toLowerCase()
+  if (!q) return false
+  return BUSINESS_MODEL_CREATE_HINTS.some(token => q.includes(token.toLowerCase()))
+}
+
+const openBusinessDictionaryAfterModelCreate = async (questionText, tableName) => {
+  if (!tableName) {
+    throw new Error('未选择数据表，无法创建业务模型')
+  }
+  const requirement = String(questionText || '').trim()
+  if (!requirement) {
+    throw new Error('建模需求为空，无法创建业务模型')
+  }
+
+  const beforeIds = new Set((businessModels.value || []).map(item => String(item.id)))
+  await createBusinessModel({
+    tableName,
+    requirement,
+    silentSuccess: true
+  })
+  await loadBusinessModels()
+
+  const created = (businessModels.value || []).find(item => !beforeIds.has(String(item.id)))
+    || (businessModels.value || []).find(item => String(item.tableName || '') === String(tableName || ''))
+  businessDictionaryFocusModelId.value = created?.id ?? null
+  businessDictionaryPanelVisible.value = true
+  return created
 }
 
 const publishBusinessModel = async (model, published = true) => {
@@ -1641,6 +1779,10 @@ const applyBusinessModel = async (model) => {
   await axios.post(`${API_BASE}/api/data/business-models/${model.id}/apply`, { tableName: selectedTableName.value }).then(unwrap)
   ElMessage.success('模型已套用')
   await loadBusinessModels()
+}
+
+const updateBusinessModel = async (modelId, payload) => {
+  return axios.post(`${API_BASE}/api/data/business-models/${modelId}/update`, payload).then(unwrap)
 }
 
 const renameDataTable = async (row) => {
@@ -1807,6 +1949,7 @@ const sendQuestion = async (options = {}) => {
   if (selectedTableName.value !== queryTableName) {
     selectedTableName.value = queryTableName
   }
+  const createModelIntent = shouldCreateBusinessModelFromQuestion(userQuestion) && !isRegenerate
   stopRequested.value = false
   messages.value.push({
     role: 'user',
@@ -1827,6 +1970,31 @@ const sendQuestion = async (options = {}) => {
       ...current,
       ...patch
     })
+  }
+
+  if (createModelIntent) {
+    try {
+      const createdModel = await openBusinessDictionaryAfterModelCreate(userQuestion, queryTableName)
+      updateStreamMessage({
+        content: `已根据你的指令创建业务模型${createdModel?.modelName ? `：${createdModel.modelName}` : ''}（名称按指令语义生成），已打开“业务字典 + 业务公式维护”抽屉，请继续补充词典和公式。`,
+        sql: '',
+        thinkingLogs: ['识别到“创建业务模型”意图', '已调用业务建模接口并刷新模型列表', '已自动打开业务字典维护抽屉'],
+        thinkingCollapsed: true
+      })
+    } catch (error) {
+      updateStreamMessage({
+        content: `创建业务模型失败：${error.message || '未知错误'}`,
+        sql: '',
+        thinkingLogs: ['识别到“创建业务模型”意图', '业务建模接口执行失败'],
+        thinkingCollapsed: true
+      })
+    } finally {
+      loading.value = false
+      isStreaming.value = false
+      streamAbortController.value = null
+      stopRequested.value = false
+    }
+    return
   }
 
   const applyAnalysisResult = (data) => {
@@ -2468,6 +2636,7 @@ const renderChart = (data, type) => {
 }
 
 provide('workbench', {
+  API_BASE,
   datasourceHealthMap,
   loadDatasourceHealth,
   activeModule,
@@ -2539,6 +2708,8 @@ provide('workbench', {
   question,
   loading,
   isStreaming,
+  businessDictionaryPanelVisible,
+  businessDictionaryFocusModelId,
   recentChatQueries,
   messages,
   currentChartType,
@@ -2615,6 +2786,7 @@ provide('workbench', {
   createBusinessModel,
   publishBusinessModel,
   applyBusinessModel,
+  updateBusinessModel,
   renameDataTable,
   deleteDataTable,
   sendQuestion,

@@ -681,6 +681,84 @@ public class DataUploadService {
         jdbcTemplate.update("UPDATE is_business_model SET published = ? WHERE id = ? AND status = 'ACTIVE'", published, modelId);
     }
 
+    public Map<String, Object> updateBusinessModel(Long modelId, Map<String, Object> request) {
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT id, model_name AS modelName, model_requirement AS modelRequirement,
+                       table_name AS tableName, owner_id AS ownerId, model_json AS modelJson,
+                       published, status
+                FROM is_business_model
+                WHERE id = ? AND status = 'ACTIVE'
+                """, modelId);
+        if (rows.isEmpty()) {
+            throw new IllegalArgumentException("业务模型不存在：" + modelId);
+        }
+        Map<String, Object> row = rows.get(0);
+        ensureCanOperateBusinessModel(row);
+
+        String modelName = Objects.toString(request.getOrDefault("modelName", row.get("modelName")), "").trim();
+        String requirement = Objects.toString(request.getOrDefault("modelRequirement", row.get("modelRequirement")), "").trim();
+        if (modelName.isBlank()) {
+            throw new IllegalArgumentException("模型名称不能为空");
+        }
+        String tableName = Objects.toString(row.get("tableName"), "");
+
+        Map<String, Object> modelJson = parseModelJson(row.get("modelJson"));
+        modelJson.put("tableName", tableName);
+        modelJson.put("requirement", requirement);
+
+        if (request.containsKey("dictionaryEntries")) {
+            modelJson.put("dictionaryEntries", sanitizeDictionaryEntries(request.get("dictionaryEntries")));
+        }
+        if (request.containsKey("metricDefinitions")) {
+            modelJson.put("metricDefinitions", sanitizeMetricDefinitions(request.get("metricDefinitions")));
+        }
+        if (request.containsKey("dimensionSystem")) {
+            modelJson.put("dimensionSystem", sanitizeDimensionSystem(request.get("dimensionSystem")));
+        }
+        if (request.containsKey("analysisLogic")) {
+            modelJson.put("analysisLogic", sanitizeAnalysisLogic(request.get("analysisLogic")));
+        }
+
+        String json = toJson(modelJson);
+        jdbcTemplate.update("""
+                UPDATE is_business_model
+                SET model_name = ?, model_requirement = ?, model_json = CAST(? AS JSON)
+                WHERE id = ? AND status = 'ACTIVE'
+                """, modelName, requirement, json, modelId);
+
+        try {
+            knowledgeGraphService.syncGraph();
+        } catch (Exception e) {
+            log.warn("业务模型更新已保存，但图谱同步失败：{}", e.getMessage());
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("id", modelId);
+        result.put("modelName", modelName);
+        result.put("modelRequirement", requirement);
+        result.put("tableName", tableName);
+        result.put("modelJson", json);
+        result.put("published", parseBooleanFlag(row.get("published")));
+        return result;
+    }
+
+    public void deleteBusinessModel(Long modelId) {
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT id, owner_id AS ownerId
+                FROM is_business_model
+                WHERE id = ? AND status = 'ACTIVE'
+                """, modelId);
+        if (rows.isEmpty()) {
+            throw new IllegalArgumentException("业务模型不存在：" + modelId);
+        }
+        ensureCanOperateBusinessModel(rows.get(0));
+        jdbcTemplate.update("""
+                UPDATE is_business_model
+                SET status = 'DELETED', updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND status = 'ACTIVE'
+                """, modelId);
+    }
+
     public Map<String, Object> applyBusinessModel(Long modelId, String tableName) {
         assertKnownTable(tableName);
         List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
@@ -748,6 +826,140 @@ public class DataUploadService {
                 WHERE table_name = ? AND owner_id = ? AND status IN ('ACTIVE', 'PENDING_CLEANING')
                 """, Integer.class, tableName, permissionService.currentUserId());
         return count != null && count > 0;
+    }
+
+    private void ensureCanOperateBusinessModel(Map<String, Object> modelRow) {
+        if (AuthContext.isAdmin()) {
+            return;
+        }
+        String ownerId = Objects.toString(modelRow.get("ownerId"), "");
+        if (!ownerId.equals(permissionService.currentUserId())) {
+            throw new IllegalArgumentException("无权限修改该业务模型");
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> parseModelJson(Object modelJsonObj) {
+        if (modelJsonObj instanceof Map<?, ?> map) {
+            Map<String, Object> parsed = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                parsed.put(Objects.toString(entry.getKey(), ""), entry.getValue());
+            }
+            return parsed;
+        }
+        String json = Objects.toString(modelJsonObj, "").trim();
+        if (json.isBlank()) {
+            return new LinkedHashMap<>();
+        }
+        try {
+            return new com.fasterxml.jackson.databind.ObjectMapper().readValue(json, Map.class);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("业务模型内容解析失败：" + e.getMessage());
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> sanitizeDictionaryEntries(Object value) {
+        if (!(value instanceof List<?> list)) {
+            return List.of();
+        }
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> raw)) {
+                continue;
+            }
+            String term = Objects.toString(raw.get("term"), "").trim();
+            String field = Objects.toString(raw.get("field"), "").trim();
+            String synonymsText = Objects.toString(raw.get("synonyms"), "").trim();
+            List<String> synonyms = splitAndTrim(synonymsText);
+            if (term.isBlank() && field.isBlank() && synonyms.isEmpty()) {
+                continue;
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("term", term);
+            row.put("field", field);
+            row.put("synonyms", String.join(",", synonyms));
+            result.add(row);
+        }
+        return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> sanitizeMetricDefinitions(Object value) {
+        if (!(value instanceof List<?> list)) {
+            return List.of();
+        }
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> raw)) {
+                continue;
+            }
+            String name = Objects.toString(raw.get("name"), "").trim();
+            String field = Objects.toString(raw.get("field"), "").trim();
+            String aggregation = Objects.toString(raw.get("aggregation"), "").trim();
+            String formula = Objects.toString(raw.get("formula"), "").trim();
+            if (name.isBlank()) {
+                continue;
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("name", name);
+            row.put("field", field);
+            row.put("aggregation", aggregation.isBlank() ? "SUM" : aggregation.toUpperCase());
+            row.put("formula", formula);
+            result.add(row);
+        }
+        return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> sanitizeDimensionSystem(Object value) {
+        if (!(value instanceof List<?> list)) {
+            return List.of();
+        }
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> raw)) {
+                continue;
+            }
+            String name = Objects.toString(raw.get("name"), "").trim();
+            String field = Objects.toString(raw.get("field"), "").trim();
+            if (name.isBlank() && field.isBlank()) {
+                continue;
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("name", name);
+            row.put("field", field);
+            result.add(row);
+        }
+        return result;
+    }
+
+    private List<String> sanitizeAnalysisLogic(Object value) {
+        if (!(value instanceof List<?> list)) {
+            return List.of();
+        }
+        List<String> result = new ArrayList<>();
+        for (Object item : list) {
+            String line = Objects.toString(item, "").trim();
+            if (!line.isBlank()) {
+                result.add(line);
+            }
+        }
+        return result;
+    }
+
+    private List<String> splitAndTrim(String text) {
+        if (text == null || text.isBlank()) {
+            return List.of();
+        }
+        List<String> result = new ArrayList<>();
+        for (String part : text.split("[,，;；\\s]+")) {
+            String value = part.trim();
+            if (!value.isBlank()) {
+                result.add(value);
+            }
+        }
+        return result;
     }
 
     private void assertFieldExists(String tableName, String columnName) {

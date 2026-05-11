@@ -225,6 +225,25 @@ public class DataUploadController {
         }
     }
 
+    @PostMapping("/business-models/{modelId}/update")
+    public ApiResponse<Map<String, Object>> updateBusinessModel(@PathVariable Long modelId, @RequestBody Map<String, Object> request) {
+        try {
+            return ApiResponse.success(dataUploadService.updateBusinessModel(modelId, request));
+        } catch (Exception e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    @PostMapping("/business-models/{modelId}/delete")
+    public ApiResponse<Void> deleteBusinessModel(@PathVariable Long modelId) {
+        try {
+            dataUploadService.deleteBusinessModel(modelId);
+            return ApiResponse.success(null);
+        } catch (Exception e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
     @GetMapping("/tables/{tableName}/quality")
     public ApiResponse<Map<String, Object>> getDataQuality(@PathVariable String tableName) {
         try {
