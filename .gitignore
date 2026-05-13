@@ -56,3 +56,5 @@ insight-spark-backend/src/main/java/com/insightspark/service/KnowledgeGraphServi
 insight-spark-backend/src/main/java/com/insightspark/service/KnowledgeGraphService.java.pre-utf8.bak
 temp_fix_kg.ps1
 temp_kg_preview.txt
+temp_head_app_utf8_clean
+temp_head_app_utf8_clean.vue
