@@ -172,6 +172,15 @@ public class DataUploadController {
         }
     }
 
+    @PostMapping("/tables/{tableName}/auto-apply-model")
+    public ApiResponse<Map<String, Object>> autoApplyModel(@PathVariable String tableName) {
+        try {
+            return ApiResponse.success(dataUploadService.autoApplyBestBusinessModelForTable(tableName));
+        } catch (Exception e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
     @GetMapping("/business-models")
     public ApiResponse<List<Map<String, Object>>> businessModels(@RequestParam(defaultValue = "false") boolean enterpriseOnly) {
         return ApiResponse.success(dataUploadService.listBusinessModels(enterpriseOnly));

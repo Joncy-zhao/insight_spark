@@ -36,6 +36,8 @@ public class DataUploadService {
 
     private static final Logger log = LoggerFactory.getLogger(DataUploadService.class);
     private static final Pattern SAFE_TABLE_NAME = Pattern.compile("^biz_data_\\d+$");
+    private static final double AUTO_APPLY_MODEL_MIN_SCORE = 0.52D;
+    private static final int AUTO_APPLY_MODEL_CANDIDATE_LIMIT = 200;
 
     // 注入 JdbcTemplate，它是我们在数据库里“施工”的神器
     @Autowired
@@ -446,6 +448,17 @@ public class DataUploadService {
         } else {
             result.put("cleaningStatus", "PENDING_CLEANING");
         }
+        try {
+            result.put("autoAppliedModel", autoApplyBestBusinessModelForTable(tableName));
+        } catch (Exception ex) {
+            log.warn("新表自动适配业务模型失败，table={}, error={}", tableName, ex.getMessage());
+            Map<String, Object> autoApplyError = new LinkedHashMap<>();
+            autoApplyError.put("matched", false);
+            autoApplyError.put("applied", false);
+            autoApplyError.put("tableName", tableName);
+            autoApplyError.put("error", ex.getMessage());
+            result.put("autoAppliedModel", autoApplyError);
+        }
         return result;
     }
 
@@ -626,6 +639,14 @@ public class DataUploadService {
                 .map(item -> Objects.toString(item.get("displayName"), Objects.toString(item.get("columnName"))))
                 .toList();
         Map<String, Object> modelJson = buildAcceptanceModelJson(requirement, tableName, headers, List.of());
+        modelJson.put("tableName", tableName);
+        modelJson.put("requirement", requirement);
+        if (request.containsKey("dictionaryEntries")) {
+            modelJson.put("dictionaryEntries", sanitizeDictionaryEntries(request.get("dictionaryEntries"), tableName));
+        }
+        if (request.containsKey("metricDefinitions")) {
+            modelJson.put("metricDefinitions", sanitizeMetricDefinitions(request.get("metricDefinitions"), tableName));
+        }
         return saveBusinessModel(modelName, requirement, tableName, modelJson);
     }
 
@@ -707,10 +728,10 @@ public class DataUploadService {
         modelJson.put("requirement", requirement);
 
         if (request.containsKey("dictionaryEntries")) {
-            modelJson.put("dictionaryEntries", sanitizeDictionaryEntries(request.get("dictionaryEntries")));
+            modelJson.put("dictionaryEntries", sanitizeDictionaryEntries(request.get("dictionaryEntries"), tableName));
         }
         if (request.containsKey("metricDefinitions")) {
-            modelJson.put("metricDefinitions", sanitizeMetricDefinitions(request.get("metricDefinitions")));
+            modelJson.put("metricDefinitions", sanitizeMetricDefinitions(request.get("metricDefinitions"), tableName));
         }
         if (request.containsKey("dimensionSystem")) {
             modelJson.put("dimensionSystem", sanitizeDimensionSystem(request.get("dimensionSystem")));
@@ -770,14 +791,145 @@ public class DataUploadService {
             throw new IllegalArgumentException("业务模型不存在：" + modelId);
         }
         Map<String, Object> row = rows.get(0);
+        String requirement = Objects.toString(row.get("modelRequirement"), "").trim();
+        String sourceModelName = Objects.toString(row.get("modelName"), "").trim();
+        List<String> headers = listFields(tableName).stream()
+                .map(item -> Objects.toString(item.getOrDefault("displayName", item.get("columnName")), ""))
+                .filter(name -> !name.isBlank())
+                .toList();
+        Map<String, Object> sourceModelJson = parseModelJson(row.get("modelJson"));
+        Map<String, Object> targetModelJson = buildAcceptanceModelJson(requirement, tableName, headers, List.of());
+        targetModelJson.put("tableName", tableName);
+        targetModelJson.put("requirement", requirement);
+
+        List<Map<String, Object>> dictionaryEntries = sanitizeDictionaryEntries(sourceModelJson.get("dictionaryEntries"), tableName);
+        if (!dictionaryEntries.isEmpty()) {
+            targetModelJson.put("dictionaryEntries", dictionaryEntries);
+        }
+
+        List<Map<String, Object>> metricDefinitions = sanitizeMetricDefinitions(sourceModelJson.get("metricDefinitions"), tableName);
+        if (!metricDefinitions.isEmpty()) {
+            targetModelJson.put("metricDefinitions", metricDefinitions);
+        }
+
+        List<Map<String, Object>> dimensionSystem = sanitizeDimensionSystem(sourceModelJson.get("dimensionSystem"), tableName);
+        if (!dimensionSystem.isEmpty()) {
+            targetModelJson.put("dimensionSystem", dimensionSystem);
+        }
+
+        List<String> analysisLogic = sanitizeAnalysisLogic(sourceModelJson.get("analysisLogic"));
+        if (!analysisLogic.isEmpty()) {
+            targetModelJson.put("analysisLogic", analysisLogic);
+        }
+
+        Map<String, Object> reusableParameters = sanitizeReusableParameters(sourceModelJson.get("reusableParameters"));
+        if (!reusableParameters.isEmpty()) {
+            targetModelJson.put("reusableParameters", reusableParameters);
+        }
+
+        List<Map<String, Object>> chartSuggestions = sanitizeChartSuggestions(sourceModelJson.get("chartSuggestions"), tableName);
+        if (!chartSuggestions.isEmpty()) {
+            targetModelJson.put("chartSuggestions", chartSuggestions);
+        }
+
         return saveBusinessModel(
-                Objects.toString(row.get("modelName")) + "_套用",
-                Objects.toString(row.get("modelRequirement")),
+                (sourceModelName.isBlank() ? "业务模型" : sourceModelName) + "_套用",
+                requirement,
                 tableName,
-                buildAcceptanceModelJson(Objects.toString(row.get("modelRequirement")), tableName,
-                        listFields(tableName).stream().map(item -> Objects.toString(item.get("displayName"))).toList(),
-                        List.of())
+                targetModelJson
         );
+    }
+
+    public Map<String, Object> autoApplyBestBusinessModelForTable(String tableName) {
+        assertKnownTable(tableName);
+        String normalizedTableName = Objects.toString(tableName, "").trim();
+        if (normalizedTableName.isBlank()) {
+            throw new IllegalArgumentException("数据表名不能为空");
+        }
+
+        List<Map<String, Object>> targetFields = loadTableFieldMeta(normalizedTableName);
+        Set<String> targetAliases = buildNormalizedFieldAliasSet(targetFields);
+        Map<String, Object> baseResult = new LinkedHashMap<>();
+        baseResult.put("tableName", normalizedTableName);
+        baseResult.put("targetFieldCount", targetAliases.size());
+
+        if (targetAliases.isEmpty()) {
+            baseResult.put("matched", false);
+            baseResult.put("applied", false);
+            baseResult.put("reason", "目标表无可匹配字段");
+            return baseResult;
+        }
+
+        List<Map<String, Object>> candidates = listAutoApplyModelCandidates(normalizedTableName);
+        if (candidates.isEmpty()) {
+            baseResult.put("matched", false);
+            baseResult.put("applied", false);
+            baseResult.put("reason", "暂无可用业务模型");
+            return baseResult;
+        }
+
+        AutoApplyMatch best = null;
+        for (Map<String, Object> candidate : candidates) {
+            Long modelId = toLong(candidate.get("id"));
+            if (modelId == null || modelId <= 0) {
+                continue;
+            }
+            String sourceTable = Objects.toString(candidate.get("tableName"), "").trim();
+            if (sourceTable.isBlank() || normalizedTableName.equals(sourceTable)) {
+                continue;
+            }
+            Set<String> sourceAliases = buildNormalizedFieldAliasSet(loadTableFieldMeta(sourceTable));
+            if (sourceAliases.isEmpty()) {
+                continue;
+            }
+            Set<String> overlap = new HashSet<>(sourceAliases);
+            overlap.retainAll(targetAliases);
+            if (overlap.isEmpty()) {
+                continue;
+            }
+            double union = sourceAliases.size() + targetAliases.size() - overlap.size();
+            if (union <= 0) {
+                continue;
+            }
+            double jaccard = overlap.size() / union;
+            double targetCoverage = overlap.size() / (double) targetAliases.size();
+            double sourceCoverage = overlap.size() / (double) sourceAliases.size();
+            double score = 0.6D * jaccard + 0.25D * targetCoverage + 0.15D * sourceCoverage;
+            if (score < AUTO_APPLY_MODEL_MIN_SCORE) {
+                continue;
+            }
+            AutoApplyMatch current = new AutoApplyMatch(modelId, candidate, score, overlap.size(),
+                    targetCoverage, sourceCoverage, jaccard);
+            if (best == null || current.score > best.score || (
+                    Math.abs(current.score - best.score) < 1e-9
+                            && compareUpdatedAt(candidate, best.candidate) > 0
+            )) {
+                best = current;
+            }
+        }
+
+        if (best == null) {
+            baseResult.put("matched", false);
+            baseResult.put("applied", false);
+            baseResult.put("reason", "未找到字段匹配度足够高的业务模型");
+            return baseResult;
+        }
+
+        Map<String, Object> applied = applyBusinessModel(best.modelId, normalizedTableName);
+        Map<String, Object> result = new LinkedHashMap<>(baseResult);
+        result.put("matched", true);
+        result.put("applied", true);
+        result.put("score", roundDouble(best.score));
+        result.put("jaccard", roundDouble(best.jaccard));
+        result.put("targetCoverage", roundDouble(best.targetCoverage));
+        result.put("sourceCoverage", roundDouble(best.sourceCoverage));
+        result.put("overlapFieldCount", best.overlapCount);
+        result.put("sourceModelId", best.modelId);
+        result.put("sourceModelName", Objects.toString(best.candidate.get("modelName"), ""));
+        result.put("sourceModelTable", Objects.toString(best.candidate.get("tableName"), ""));
+        result.put("appliedModelId", applied.get("id"));
+        result.put("appliedModelName", applied.get("modelName"));
+        return result;
     }
 
     public boolean existsTable(String tableName) {
@@ -860,18 +1012,29 @@ public class DataUploadService {
 
     @SuppressWarnings("unchecked")
     private List<Map<String, Object>> sanitizeDictionaryEntries(Object value) {
+        return sanitizeDictionaryEntries(value, null);
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> sanitizeDictionaryEntries(Object value, String tableName) {
         if (!(value instanceof List<?> list)) {
             return List.of();
         }
+        List<Map<String, Object>> tableFields = loadTableFieldMeta(tableName);
         List<Map<String, Object>> result = new ArrayList<>();
         for (Object item : list) {
             if (!(item instanceof Map<?, ?> raw)) {
                 continue;
             }
             String term = Objects.toString(raw.get("term"), "").trim();
-            String field = Objects.toString(raw.get("field"), "").trim();
+            String rawField = Objects.toString(raw.get("field"), "").trim();
             String synonymsText = Objects.toString(raw.get("synonyms"), "").trim();
             List<String> synonyms = splitAndTrim(synonymsText);
+            String inferredField = resolveFieldBindingByCandidates(
+                    tableFields,
+                    joinNonBlank(List.of(term, synonymsText, String.join(" ", synonyms)))
+            );
+            String field = ensureResolvedFieldBinding(tableFields, rawField, inferredField, false);
             if (term.isBlank() && field.isBlank() && synonyms.isEmpty()) {
                 continue;
             }
@@ -886,21 +1049,32 @@ public class DataUploadService {
 
     @SuppressWarnings("unchecked")
     private List<Map<String, Object>> sanitizeMetricDefinitions(Object value) {
+        return sanitizeMetricDefinitions(value, null);
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> sanitizeMetricDefinitions(Object value, String tableName) {
         if (!(value instanceof List<?> list)) {
             return List.of();
         }
+        List<Map<String, Object>> tableFields = loadTableFieldMeta(tableName);
         List<Map<String, Object>> result = new ArrayList<>();
         for (Object item : list) {
             if (!(item instanceof Map<?, ?> raw)) {
                 continue;
             }
             String name = Objects.toString(raw.get("name"), "").trim();
-            String field = Objects.toString(raw.get("field"), "").trim();
+            String rawField = Objects.toString(raw.get("field"), "").trim();
             String aggregation = Objects.toString(raw.get("aggregation"), "").trim();
             String formula = Objects.toString(raw.get("formula"), "").trim();
             if (name.isBlank()) {
                 continue;
             }
+            String inferredField = resolveFieldBindingByCandidates(
+                    tableFields,
+                    joinNonBlank(List.of(name, formula, String.join(" ", extractFormulaTokens(formula))))
+            );
+            String field = ensureResolvedFieldBinding(tableFields, rawField, inferredField, true);
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("name", name);
             row.put("field", field);
@@ -913,16 +1087,27 @@ public class DataUploadService {
 
     @SuppressWarnings("unchecked")
     private List<Map<String, Object>> sanitizeDimensionSystem(Object value) {
+        return sanitizeDimensionSystem(value, null);
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> sanitizeDimensionSystem(Object value, String tableName) {
         if (!(value instanceof List<?> list)) {
             return List.of();
         }
+        List<Map<String, Object>> tableFields = loadTableFieldMeta(tableName);
         List<Map<String, Object>> result = new ArrayList<>();
         for (Object item : list) {
             if (!(item instanceof Map<?, ?> raw)) {
                 continue;
             }
             String name = Objects.toString(raw.get("name"), "").trim();
-            String field = Objects.toString(raw.get("field"), "").trim();
+            String rawField = Objects.toString(raw.get("field"), "").trim();
+            String inferredField = resolveFieldBindingByCandidates(
+                    tableFields,
+                    joinNonBlank(List.of(name, rawField))
+            );
+            String field = ensureResolvedFieldBinding(tableFields, rawField, inferredField, false);
             if (name.isBlank() && field.isBlank()) {
                 continue;
             }
@@ -948,6 +1133,69 @@ public class DataUploadService {
         return result;
     }
 
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> sanitizeReusableParameters(Object value) {
+        if (!(value instanceof Map<?, ?> raw)) {
+            return Map.of();
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : raw.entrySet()) {
+            String key = Objects.toString(entry.getKey(), "").trim();
+            if (key.isBlank()) {
+                continue;
+            }
+            result.put(key, entry.getValue());
+        }
+        return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> sanitizeChartSuggestions(Object value, String tableName) {
+        if (!(value instanceof List<?> list)) {
+            return List.of();
+        }
+        List<Map<String, Object>> tableFields = loadTableFieldMeta(tableName);
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> raw)) {
+                continue;
+            }
+            String title = Objects.toString(raw.get("title"), "").trim();
+            String chartType = Objects.toString(raw.get("chartType"), "").trim();
+            String rawDimension = Objects.toString(raw.get("dimension"), "").trim();
+            String rawMetric = Objects.toString(raw.get("metric"), "").trim();
+            String dimension = ensureResolvedFieldBinding(
+                    tableFields,
+                    rawDimension,
+                    resolveFieldBindingByCandidates(tableFields, rawDimension),
+                    false
+            );
+            String metric = ensureResolvedFieldBinding(
+                    tableFields,
+                    rawMetric,
+                    resolveFieldBindingByCandidates(tableFields, rawMetric),
+                    true
+            );
+            Map<String, Object> row = new LinkedHashMap<>();
+            if (!title.isBlank()) {
+                row.put("title", title);
+            }
+            if (!chartType.isBlank()) {
+                row.put("chartType", chartType);
+            }
+            if (!dimension.isBlank()) {
+                row.put("dimension", dimension);
+            }
+            if (!metric.isBlank()) {
+                row.put("metric", metric);
+            }
+            if (!row.isEmpty()) {
+                result.add(row);
+            }
+        }
+        return result;
+    }
+
     private List<String> splitAndTrim(String text) {
         if (text == null || text.isBlank()) {
             return List.of();
@@ -960,6 +1208,315 @@ public class DataUploadService {
             }
         }
         return result;
+    }
+
+    private String normalizeFieldToken(String value) {
+        return Objects.toString(value, "")
+                .trim()
+                .toLowerCase(Locale.ROOT)
+                .replaceAll("[`\"'\\s_\\-()（）\\[\\]{}<>:：.,，、/\\\\]+", "");
+    }
+
+    private Set<String> buildNormalizedFieldAliasSet(List<Map<String, Object>> fields) {
+        Set<String> aliases = new HashSet<>();
+        if (fields == null || fields.isEmpty()) {
+            return aliases;
+        }
+        for (Map<String, Object> field : fields) {
+            if (field == null) {
+                continue;
+            }
+            addFieldAlias(aliases, field.get("columnName"));
+            addFieldAlias(aliases, field.get("displayName"));
+            addFieldAlias(aliases, field.get("sourceFieldName"));
+            addFieldAlias(aliases, field.get("fieldComment"));
+            String synonyms = Objects.toString(field.get("synonyms"), "");
+            for (String token : splitAndTrim(synonyms)) {
+                addFieldAlias(aliases, token);
+            }
+        }
+        return aliases;
+    }
+
+    private void addFieldAlias(Set<String> aliases, Object rawValue) {
+        if (aliases == null) {
+            return;
+        }
+        String normalized = normalizeFieldToken(Objects.toString(rawValue, ""));
+        if (!normalized.isBlank()) {
+            aliases.add(normalized);
+        }
+    }
+
+    private List<Map<String, Object>> listAutoApplyModelCandidates(String targetTableName) {
+        String normalizedTarget = Objects.toString(targetTableName, "").trim();
+        String sql = """
+                SELECT id,
+                       model_name AS modelName,
+                       table_name AS tableName,
+                       owner_id AS ownerId,
+                       published,
+                       updated_at AS updatedAt
+                FROM is_business_model
+                WHERE status = 'ACTIVE'
+                  AND table_name <> ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """;
+        return jdbcTemplate.queryForList(sql, normalizedTarget, AUTO_APPLY_MODEL_CANDIDATE_LIMIT);
+    }
+
+    private Long toLong(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        String text = Objects.toString(value, "").trim();
+        if (text.isBlank()) {
+            return null;
+        }
+        try {
+            return Long.parseLong(text);
+        } catch (NumberFormatException ex) {
+            return null;
+        }
+    }
+
+    private int compareUpdatedAt(Map<String, Object> left, Map<String, Object> right) {
+        long leftMs = parseDateTimeMs(left == null ? null : left.get("updatedAt"));
+        long rightMs = parseDateTimeMs(right == null ? null : right.get("updatedAt"));
+        return Long.compare(leftMs, rightMs);
+    }
+
+    private long parseDateTimeMs(Object value) {
+        if (value == null) {
+            return Long.MIN_VALUE;
+        }
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        if (value instanceof java.util.Date date) {
+            return date.getTime();
+        }
+        if (value instanceof java.time.LocalDateTime localDateTime) {
+            return localDateTime.atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli();
+        }
+        if (value instanceof java.time.OffsetDateTime offsetDateTime) {
+            return offsetDateTime.toInstant().toEpochMilli();
+        }
+        if (value instanceof java.time.Instant instant) {
+            return instant.toEpochMilli();
+        }
+        String text = Objects.toString(value, "").trim();
+        if (text.isBlank()) {
+            return Long.MIN_VALUE;
+        }
+        try {
+            return java.time.Instant.parse(text).toEpochMilli();
+        } catch (Exception ignored) {
+            // fallback
+        }
+        try {
+            String normalized = text.replace('T', ' ').replace("Z", "");
+            return java.sql.Timestamp.valueOf(normalized).getTime();
+        } catch (Exception ignored) {
+            return Long.MIN_VALUE;
+        }
+    }
+
+    private double roundDouble(double value) {
+        return Math.round(value * 10000D) / 10000D;
+    }
+
+    private List<Map<String, Object>> loadTableFieldMeta(String tableName) {
+        String table = Objects.toString(tableName, "").trim();
+        if (table.isBlank()) {
+            return List.of();
+        }
+        try {
+            return listFields(table);
+        } catch (Exception ex) {
+            log.debug("加载字段元信息失败，table={}, error={}", table, ex.getMessage());
+            return List.of();
+        }
+    }
+
+    private boolean isNumericFieldType(String value) {
+        String type = Objects.toString(value, "").trim().toUpperCase(Locale.ROOT);
+        if (type.isBlank()) {
+            return false;
+        }
+        return type.contains("NUMBER")
+                || type.contains("INT")
+                || type.contains("DECIMAL")
+                || type.contains("DOUBLE")
+                || type.contains("FLOAT")
+                || type.contains("REAL")
+                || type.contains("NUMERIC")
+                || type.contains("LONG")
+                || type.contains("SHORT");
+    }
+
+    private String joinNonBlank(List<String> values) {
+        List<String> parts = new ArrayList<>();
+        for (String value : values) {
+            String line = Objects.toString(value, "").trim();
+            if (!line.isBlank()) {
+                parts.add(line);
+            }
+        }
+        return String.join(" ", parts);
+    }
+
+    private String resolveFieldBindingByCandidates(List<Map<String, Object>> tableFields, String rawCandidates) {
+        if (tableFields == null || tableFields.isEmpty()) {
+            return "";
+        }
+        List<String> candidates = splitAndTrim(rawCandidates);
+        if (candidates.isEmpty()) {
+            return "";
+        }
+        List<String> normalizedCandidates = new ArrayList<>();
+        for (String candidate : candidates) {
+            String normalized = normalizeFieldToken(candidate);
+            if (!normalized.isBlank() && !normalizedCandidates.contains(normalized)) {
+                normalizedCandidates.add(normalized);
+            }
+        }
+        if (normalizedCandidates.isEmpty()) {
+            return "";
+        }
+
+        Map<String, String> exactAlias = new LinkedHashMap<>();
+        List<Map<String, Object>> aliasRows = new ArrayList<>();
+        for (Map<String, Object> field : tableFields) {
+            String columnName = Objects.toString(field.get("columnName"), "").trim();
+            if (columnName.isBlank()) {
+                continue;
+            }
+            List<String> aliases = new ArrayList<>();
+            aliases.add(normalizeFieldToken(columnName));
+            aliases.add(normalizeFieldToken(Objects.toString(field.get("displayName"), "")));
+            aliases.add(normalizeFieldToken(Objects.toString(field.get("sourceFieldName"), "")));
+            List<String> merged = aliases.stream().filter(item -> !item.isBlank()).distinct().toList();
+            if (merged.isEmpty()) {
+                continue;
+            }
+            for (String alias : merged) {
+                exactAlias.putIfAbsent(alias, columnName);
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("columnName", columnName);
+            row.put("aliases", merged);
+            aliasRows.add(row);
+        }
+
+        for (String candidate : normalizedCandidates) {
+            String matched = exactAlias.get(candidate);
+            if (matched != null && !matched.isBlank()) {
+                return matched;
+            }
+        }
+
+        String bestColumn = "";
+        double bestScore = 0D;
+        for (String candidate : normalizedCandidates) {
+            for (Map<String, Object> row : aliasRows) {
+                String column = Objects.toString(row.get("columnName"), "").trim();
+                @SuppressWarnings("unchecked")
+                List<String> aliases = (List<String>) row.getOrDefault("aliases", List.of());
+                for (String alias : aliases) {
+                    if (alias.length() < 2 || candidate.length() < 2) {
+                        continue;
+                    }
+                    if (!alias.contains(candidate) && !candidate.contains(alias)) {
+                        continue;
+                    }
+                    double overlap = (double) Math.min(alias.length(), candidate.length()) /
+                            (double) Math.max(alias.length(), candidate.length());
+                    if (overlap > bestScore) {
+                        bestScore = overlap;
+                        bestColumn = column;
+                    }
+                }
+            }
+        }
+        if (bestScore >= 0.65D) {
+            return bestColumn;
+        }
+        return "";
+    }
+
+    private String ensureResolvedFieldBinding(List<Map<String, Object>> tableFields,
+                                              String rawField,
+                                              String inferredField,
+                                              boolean preferNumeric) {
+        Set<String> allowedColumns = new HashSet<>();
+        for (Map<String, Object> field : tableFields) {
+            String column = Objects.toString(field.get("columnName"), "").trim();
+            if (!column.isBlank()) {
+                allowedColumns.add(column);
+            }
+        }
+
+        String candidate = Objects.toString(rawField, "").trim();
+        if (!candidate.isBlank()) {
+            if (allowedColumns.contains(candidate)) {
+                return candidate;
+            }
+            String aliasHit = resolveFieldBindingByCandidates(tableFields, candidate);
+            if (!aliasHit.isBlank()) {
+                return aliasHit;
+            }
+        }
+
+        String inferred = Objects.toString(inferredField, "").trim();
+        if (!inferred.isBlank()) {
+            if (allowedColumns.contains(inferred)) {
+                return inferred;
+            }
+            String aliasHit = resolveFieldBindingByCandidates(tableFields, inferred);
+            if (!aliasHit.isBlank()) {
+                return aliasHit;
+            }
+        }
+
+        if (preferNumeric) {
+            for (Map<String, Object> field : tableFields) {
+                String column = Objects.toString(field.get("columnName"), "").trim();
+                if (column.isBlank()) {
+                    continue;
+                }
+                String type = Objects.toString(field.getOrDefault("fieldType", field.get("dataType")), "");
+                if (isNumericFieldType(type)) {
+                    return column;
+                }
+            }
+        }
+
+        for (Map<String, Object> field : tableFields) {
+            String column = Objects.toString(field.get("columnName"), "").trim();
+            if (!column.isBlank()) {
+                return column;
+            }
+        }
+        return "";
+    }
+
+    private List<String> extractFormulaTokens(String formula) {
+        String normalized = Objects.toString(formula, "")
+                .replaceAll("[`\"'\\[\\]]", " ")
+                .replaceAll("[+\\-*/%(),=<>!?;:]", " ");
+        List<String> tokens = new ArrayList<>();
+        for (String part : normalized.split("\\s+")) {
+            String value = part.trim();
+            if (value.length() > 1) {
+                tokens.add(value);
+            }
+        }
+        return tokens;
     }
 
     private void assertFieldExists(String tableName, String columnName) {
@@ -1596,6 +2153,32 @@ public class DataUploadService {
             int safeProgress = Math.max(lastProgress, Math.max(0, Math.min(progress, 99)));
             lastProgress = safeProgress;
             updateTask(taskId, status, safeProgress, message, null);
+        }
+    }
+
+    private static final class AutoApplyMatch {
+        private final Long modelId;
+        private final Map<String, Object> candidate;
+        private final double score;
+        private final int overlapCount;
+        private final double targetCoverage;
+        private final double sourceCoverage;
+        private final double jaccard;
+
+        private AutoApplyMatch(Long modelId,
+                               Map<String, Object> candidate,
+                               double score,
+                               int overlapCount,
+                               double targetCoverage,
+                               double sourceCoverage,
+                               double jaccard) {
+            this.modelId = modelId;
+            this.candidate = candidate;
+            this.score = score;
+            this.overlapCount = overlapCount;
+            this.targetCoverage = targetCoverage;
+            this.sourceCoverage = sourceCoverage;
+            this.jaccard = jaccard;
         }
     }
 

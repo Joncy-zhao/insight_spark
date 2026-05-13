@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <section class="workspace-grid upload-grid">
     <div class="panel upload-panel">
       <div class="panel-header">
@@ -97,6 +97,29 @@
         :title="`已生成数据表：${uploadResult.displayName || uploadResult.tableName}`"
         :description="`物理表 ${uploadResult.tableName}，共 ${uploadResult.rowCount || 0} 行、${uploadResult.fieldCount || 0} 个字段。`"
       />
+
+      <el-alert
+        v-if="uploadStatusVisible && autoAppliedModelMessage"
+        class="result-alert auto-model-alert"
+        :type="autoAppliedModelSuccess ? 'success' : 'info'"
+        show-icon
+        :closable="false"
+        title="语义模型自动适配"
+      >
+        <template #default>
+          <div class="auto-model-alert__body">
+            <span>{{ autoAppliedModelMessage }}</span>
+            <el-button
+              v-if="canOpenAppliedModel"
+              type="primary"
+              link
+              @click="openAppliedModelDictionary"
+            >
+              打开业务字典
+            </el-button>
+          </div>
+        </template>
+      </el-alert>
 
       <div v-if="uploadStatusVisible && uploadResult" class="post-upload-actions">
         <el-button v-if="cleaningActions.length" type="warning" @click="openQualityIssueDialog(uploadResult.tableName)">
@@ -515,6 +538,7 @@ const {
   onBatchFileChange,
   onFileRemove,
   submitUpload,
+  openBusinessDictionaryByModelId,
   renameDataTable,
   deleteDataTable,
   loadPreview,
@@ -633,6 +657,37 @@ const previewDisplayColumns = computed(() => {
 const dialogPreviewTotal = computed(() => previewMode.value === 'table-edit' ? editorTotal.value : previewTotal.value)
 const dialogPreviewPage = computed(() => previewMode.value === 'table-edit' ? editorPage.value : previewPage.value)
 const dialogPreviewPageSize = computed(() => previewMode.value === 'table-edit' ? editorPageSize.value : previewPageSize.value)
+const autoAppliedModel = computed(() => {
+  const candidate = uploadResult.value?.autoAppliedModel
+  return candidate && typeof candidate === 'object' ? candidate : null
+})
+const autoAppliedModelSuccess = computed(() => Boolean(autoAppliedModel.value?.applied))
+const appliedModelId = computed(() => {
+  const raw = autoAppliedModel.value?.appliedModelId ?? autoAppliedModel.value?.sourceModelId
+  const text = String(raw ?? '').trim()
+  return text || null
+})
+const canOpenAppliedModel = computed(() => Boolean(appliedModelId.value && typeof openBusinessDictionaryByModelId === 'function'))
+const autoAppliedModelMessage = computed(() => {
+  const candidate = autoAppliedModel.value
+  if (!candidate) {
+    return ''
+  }
+  if (candidate.applied) {
+    const name = String(candidate.appliedModelName || candidate.sourceModelName || '').trim()
+    if (name) {
+      return `已自动套用业务模型「${name}」并完成字段重绑定。`
+    }
+    return '已自动套用业务模型并完成字段重绑定。'
+  }
+  if (candidate.error) {
+    return `自动套用业务模型失败：${candidate.error}`
+  }
+  if (candidate.matched === false) {
+    return `未匹配到可自动套用的业务模型${candidate.reason ? `：${candidate.reason}` : ''}`
+  }
+  return ''
+})
 const uploadRecords = computed(() => uploadTables.value.map(table => {
   const fileName = table.sourceName || `${table.displayName || table.tableName}.xlsx`
   const lowerName = fileName.toLowerCase()
@@ -715,6 +770,17 @@ watch(uploadResult, async (result) => {
     cleaningResolved.value = true
   }
 })
+
+async function openAppliedModelDictionary() {
+  if (!canOpenAppliedModel.value) {
+    return
+  }
+  try {
+    await openBusinessDictionaryByModelId(appliedModelId.value)
+  } catch (error) {
+    ElMessage.error(error?.message || '打开业务字典失败')
+  }
+}
 
 function validateFileBeforeUpload(file) {
   const lowerName = file.name.toLowerCase()
@@ -1603,6 +1669,18 @@ async function refreshCurrentTable() {
 .post-upload-actions {
   margin-top: 12px;
   display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.auto-model-alert :deep(.el-alert__content) {
+  width: 100%;
+}
+
+.auto-model-alert__body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 10px;
   flex-wrap: wrap;
 }

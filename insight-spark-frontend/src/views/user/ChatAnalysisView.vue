@@ -265,14 +265,19 @@
               size="74%"
               destroy-on-close
           >
-            <BusinessDictionaryView :focus-model-id="businessDictionaryFocusModelId" />
+            <BusinessDictionaryView
+              :focus-model-id="businessDictionaryFocusModelId"
+              :show-title="false"
+              :auto-rename-on-duplicate-create="true"
+              :use-create-dialog="true"
+            />
           </el-drawer>
 </section>
 </template>
 
 <script setup>
 import { inject } from 'vue'
-import BusinessDictionaryView from './BusinessDictionaryView.vue'
+import BusinessDictionaryView from '../../components/BusinessDictionaryView.vue'
 
 const {
   API_BASE,
