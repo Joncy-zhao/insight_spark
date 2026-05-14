@@ -72,6 +72,9 @@ export const publishBusinessModelById = (modelId, published) =>
 export const applyBusinessModelById = (modelId, tableName) =>
   http.post(`/api/data/business-models/${modelId}/apply`, { tableName }).then(unwrap)
 
+export const autoApplyModelByTable = (tableName) =>
+  http.post(`/api/data/tables/${tableName}/auto-apply-model`).then(unwrap)
+
 export const uploadTemplate = (formData) => http.post('/api/data/templates/upload', formData, multipart).then(unwrap)
 export const fetchTemplates = () => http.get('/api/data/templates').then(unwrap)
 
