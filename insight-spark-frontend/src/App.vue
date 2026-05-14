@@ -1556,6 +1556,60 @@ const onFileRemove = (file, fileList = []) => {
   uploadFile.value = uploadFiles.value[0] || null
 }
 
+const parseTaskResultJson = (raw) => {
+  if (!raw) return {}
+  if (typeof raw === 'object') return raw
+  if (typeof raw !== 'string') return {}
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return {}
+  }
+}
+
+const resolveUploadTaskId = (task) => {
+  const candidates = [
+    task?.taskId,
+    task?.task_id,
+    task?.id,
+    task?.task?.taskId,
+    task?.task?.task_id,
+    task?.data?.taskId,
+    task?.data?.task_id
+  ]
+  for (const candidate of candidates) {
+    const value = String(candidate ?? '').trim()
+    if (value) return value
+  }
+  return ''
+}
+
+const finalizeUploadResult = async (resultCandidate = {}, uploadedTableName = '') => {
+  const result = resultCandidate && typeof resultCandidate === 'object' ? { ...resultCandidate } : {}
+  uploadDisplayName.value = ''
+  const resolvedTableName = String(result.tableName || uploadedTableName || selectedTableName.value || '').trim()
+  if (resolvedTableName) {
+    selectedTableName.value = resolvedTableName
+  }
+
+  const hasAutoApply = result.autoAppliedModel && typeof result.autoAppliedModel === 'object'
+  if (!hasAutoApply && resolvedTableName) {
+    try {
+      result.autoAppliedModel = unwrap(await axios.post(`${API_BASE}/api/data/tables/${resolvedTableName}/auto-apply-model`))
+    } catch (error) {
+      result.autoAppliedModel = {
+        matched: false,
+        applied: false,
+        tableName: resolvedTableName,
+        error: error?.message || '自动套用业务模型失败'
+      }
+    }
+  }
+
+  uploadResult.value = result
+  await Promise.all([loadTables({ preferredTableName: resolvedTableName, keepCurrentSelection: true }), loadBusinessModels()])
+}
+
 const submitUpload = async () => {
   if (!uploadFile.value && !uploadFiles.value.length) return
   uploading.value = true
@@ -1601,8 +1655,18 @@ const submitUpload = async () => {
       percentage: 100,
       status: 'SUCCESS'
     }
-    uploadTask.value = task
-    await pollUploadTask(task.taskId, uploadedTableName)
+    uploadTask.value = task && typeof task === 'object' ? task : null
+    const taskId = resolveUploadTaskId(task)
+    if (taskId) {
+      await pollUploadTask(taskId, uploadedTableName)
+    } else {
+      // 兼容后端直返结果或网关丢 taskId 的场景
+      const directResult = parseTaskResultJson(task?.resultJson)
+      await finalizeUploadResult({
+        ...directResult,
+        ...(task?.tableName ? { tableName: task.tableName } : {})
+      }, uploadedTableName)
+    }
     ElMessage.success('文件已解析入库')
   } catch (error) {
     uploadProgress.value = {
@@ -1629,14 +1693,8 @@ const pollUploadTask = async (taskId, uploadedTableName = '') => {
     await new Promise(resolve => setTimeout(resolve, 1000))
     await refreshUploadTask(taskId)
     if (uploadTask.value?.status === 'SUCCESS') {
-      const result = uploadTask.value.resultJson ? JSON.parse(uploadTask.value.resultJson) : {}
-      uploadResult.value = result
-      uploadDisplayName.value = ''
-      const resolvedTableName = String(result.tableName || uploadedTableName || selectedTableName.value || '').trim()
-      if (resolvedTableName) {
-        selectedTableName.value = resolvedTableName
-      }
-      await Promise.all([loadTables({ preferredTableName: resolvedTableName, keepCurrentSelection: true }), loadBusinessModels()])
+      const result = parseTaskResultJson(uploadTask.value.resultJson)
+      await finalizeUploadResult(result, uploadedTableName)
       return
     }
     if (uploadTask.value?.status === 'FAILED') {
@@ -1685,6 +1743,234 @@ const createBusinessModelFromTemplate = async () => {
   await loadBusinessModels()
 }
 
+const SEMANTIC_DICT_MARKER = /同义词\s*[：:]/i
+const SEMANTIC_FORMULA_MARKER = /(?:新增|增加|添加)?(?:指标公式|业务公式|公式)\s*[：:]/i
+
+const splitTopLevelSegments = (text, separators = [';', '；', '\n']) => {
+  const result = []
+  let buffer = ''
+  const stack = []
+  const openChars = new Set(['(', '（', '[', '{'])
+  const closeToOpen = {
+    ')': '(',
+    '）': '（',
+    ']': '[',
+    '}': '{'
+  }
+  for (const ch of String(text || '')) {
+    if (openChars.has(ch)) {
+      stack.push(ch)
+      buffer += ch
+      continue
+    }
+    if (closeToOpen[ch]) {
+      if (stack.length && stack[stack.length - 1] === closeToOpen[ch]) {
+        stack.pop()
+      }
+      buffer += ch
+      continue
+    }
+    if (separators.includes(ch) && stack.length === 0) {
+      const value = buffer.trim()
+      if (value) result.push(value)
+      buffer = ''
+      continue
+    }
+    buffer += ch
+  }
+  const tail = buffer.trim()
+  if (tail) result.push(tail)
+  return result
+}
+
+const findFirstMatchIndexAfter = (text, regex, minIndex) => {
+  const flags = regex.flags.includes('g') ? regex.flags : `${regex.flags}g`
+  const globalRegex = new RegExp(regex.source, flags)
+  let match
+  while ((match = globalRegex.exec(text)) !== null) {
+    if (match.index > minIndex) {
+      return match.index
+    }
+    if (globalRegex.lastIndex === match.index) {
+      globalRegex.lastIndex += 1
+    }
+  }
+  return -1
+}
+
+const extractSemanticSection = (text, markerRegex, allMarkers = []) => {
+  const source = String(text || '')
+  const marker = new RegExp(markerRegex.source, markerRegex.flags)
+  const match = marker.exec(source)
+  if (!match) return ''
+  const start = match.index + match[0].length
+  let end = source.length
+  allMarkers.forEach((nextMarker) => {
+    const idx = findFirstMatchIndexAfter(source, nextMarker, start - 1)
+    if (idx !== -1 && idx < end) {
+      end = idx
+    }
+  })
+  return source.slice(start, end).trim()
+}
+
+const removeSemanticSection = (text, markerRegex, allMarkers = []) => {
+  const source = String(text || '')
+  const marker = new RegExp(markerRegex.source, markerRegex.flags)
+  const match = marker.exec(source)
+  if (!match) return source
+  const start = match.index
+  const contentStart = match.index + match[0].length
+  let end = source.length
+  allMarkers.forEach((nextMarker) => {
+    const idx = findFirstMatchIndexAfter(source, nextMarker, contentStart - 1)
+    if (idx !== -1 && idx < end) {
+      end = idx
+    }
+  })
+  return `${source.slice(0, start)} ${source.slice(end)}`
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+const splitTermAliases = (text) => String(text || '')
+  .split(/[，,、|/]+/)
+  .map(item => item.trim())
+  .filter(Boolean)
+
+const parseDictionaryInstructionEntries = (sectionText) => {
+  const rows = []
+  const seen = new Set()
+  splitTopLevelSegments(sectionText).forEach((rawItem) => {
+    const item = String(rawItem || '')
+      .replace(/^(同义词|词典|字典)\s*[：:]/i, '')
+      .replace(/^[,，;；。:：\s-]+/, '')
+      .trim()
+    if (!item) return
+
+    let term = ''
+    let field = ''
+    let synonymsText = ''
+
+    let match = item.match(/^([^=:=（(]+?)\s*[=:：]\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:[（(]([^()（）]+)[）)])?$/)
+    if (match) {
+      term = String(match[1] || '').trim()
+      field = String(match[2] || '').trim()
+      synonymsText = String(match[3] || '').trim()
+    } else {
+      match = item.match(/^([^=:=（(]+?)\s*[（(]([^()（）]+)[）)]\s*[=:：]\s*([A-Za-z_][A-Za-z0-9_]*)$/)
+      if (!match) return
+      term = String(match[1] || '').trim()
+      synonymsText = String(match[2] || '').trim()
+      field = String(match[3] || '').trim()
+    }
+
+    if (!term && !field) return
+    const key = `${term.toLowerCase()}@@${field.toLowerCase()}`
+    if (seen.has(key)) return
+    seen.add(key)
+    rows.push({
+      term,
+      field,
+      synonyms: splitTermAliases(synonymsText).join(',')
+    })
+  })
+  return rows
+}
+
+const splitByFirstTopLevelDelimiter = (text, delimiters = ['=', '：', ':']) => {
+  const source = String(text || '')
+  const stack = []
+  const openChars = new Set(['(', '（', '[', '{'])
+  const closeToOpen = {
+    ')': '(',
+    '）': '（',
+    ']': '[',
+    '}': '{'
+  }
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i]
+    if (openChars.has(ch)) {
+      stack.push(ch)
+      continue
+    }
+    if (closeToOpen[ch]) {
+      if (stack.length && stack[stack.length - 1] === closeToOpen[ch]) {
+        stack.pop()
+      }
+      continue
+    }
+    if (stack.length === 0 && delimiters.includes(ch)) {
+      return [source.slice(0, i), source.slice(i + 1)]
+    }
+  }
+  return null
+}
+
+const inferPrimaryFieldFromFormula = (formula) => {
+  const tokens = String(formula || '').match(/[A-Za-z_][A-Za-z0-9_]*/g) || []
+  const stopWords = new Set([
+    'sum', 'avg', 'count', 'min', 'max', 'distinct', 'case', 'when', 'then', 'else', 'end',
+    'if', 'ifnull', 'coalesce', 'nullif', 'cast', 'as', 'and', 'or', 'not', 'is', 'in',
+    'like', 'over', 'partition', 'by', 'order', 'desc', 'asc', 'round', 'floor', 'ceil', 'abs', 'mod'
+  ])
+  for (const token of tokens) {
+    const lower = token.toLowerCase()
+    if (!stopWords.has(lower)) {
+      return token
+    }
+  }
+  return ''
+}
+
+const parseMetricInstructionEntries = (sectionText) => {
+  const rows = []
+  const seen = new Set()
+  splitTopLevelSegments(sectionText).forEach((rawItem) => {
+    const item = String(rawItem || '')
+      .replace(/^(新增|增加|添加)?(指标公式|业务公式|公式)\s*[：:]/i, '')
+      .replace(/^[,，;；。:：\s-]+/, '')
+      .trim()
+    if (!item) return
+
+    const pair = splitByFirstTopLevelDelimiter(item)
+    if (!pair) return
+    const name = String(pair[0] || '').trim()
+    const formula = String(pair[1] || '').trim().replace(/^=\s*/, '')
+    if (!name || !formula) return
+
+    const dedupeKey = name.toLowerCase()
+    if (seen.has(dedupeKey)) return
+    seen.add(dedupeKey)
+    rows.push({
+      name,
+      field: inferPrimaryFieldFromFormula(formula),
+      aggregation: 'SUM',
+      formula
+    })
+  })
+  return rows
+}
+
+const parseSemanticModelInstruction = (questionText) => {
+  const source = String(questionText || '').trim()
+  const markers = [SEMANTIC_DICT_MARKER, SEMANTIC_FORMULA_MARKER]
+  const dictionaryEntries = parseDictionaryInstructionEntries(
+    extractSemanticSection(source, SEMANTIC_DICT_MARKER, markers)
+  )
+  const metricDefinitions = parseMetricInstructionEntries(
+    extractSemanticSection(source, SEMANTIC_FORMULA_MARKER, markers)
+  )
+  let requirement = removeSemanticSection(source, SEMANTIC_DICT_MARKER, markers)
+  requirement = removeSemanticSection(requirement, SEMANTIC_FORMULA_MARKER, markers)
+  requirement = requirement.replace(/[，,;；。]+$/g, '').trim()
+  return {
+    requirement: requirement || source,
+    dictionaryEntries,
+    metricDefinitions
+  }
+}
+
 const buildSemanticModelName = (requirement, tableName) => {
   const fallback = `模型_${tableName || 'default'}`
   const raw = String(requirement || '').trim()
@@ -1699,7 +1985,9 @@ const buildSemanticModelName = (requirement, tableName) => {
   text = text
     .replace(/^(请|请你|帮我|麻烦|需要|我想|想要|帮忙)+/g, '')
     .replace(/(创建|生成|新建|建立|搭建)(一个|一份|个)?(业务)?模型/g, '')
+    .replace(/(同义词|词典|字典|新增指标公式|增加指标公式|添加指标公式|指标公式|业务公式|公式)\s*[：:].*/g, '')
     .replace(/(并|然后|之后).*/g, '')
+    .replace(/^[,，;；。:：\s-]+/, '')
     .trim()
 
   if (!text) return fallback
@@ -1717,18 +2005,30 @@ const createBusinessModel = async (options = {}) => {
   }
   const requirement = baseRequirement || `基于${tableName}的业务分析模型`
   const modelName = String(options?.modelName || buildSemanticModelName(requirement, tableName)).trim()
-
-  await axios.post(`${API_BASE}/api/data/business-models`, {
+  const payload = {
     tableName,
     requirement,
     modelName
-  }).then(unwrap)
+  }
+  if ('dictionaryEntries' in (options || {})) {
+    payload.dictionaryEntries = Array.isArray(options?.dictionaryEntries) ? options.dictionaryEntries : []
+  }
+  if ('metricDefinitions' in (options || {})) {
+    payload.metricDefinitions = Array.isArray(options?.metricDefinitions) ? options.metricDefinitions : []
+  }
+
+  const created = await axios.post(`${API_BASE}/api/data/business-models`, payload).then(unwrap)
 
   if (!options?.silentSuccess) {
     ElMessage.success(`业务模型已生成：${modelName}`)
   }
   await loadBusinessModels()
-  return { tableName, requirement, modelName }
+  return {
+    id: created?.id ?? null,
+    tableName,
+    requirement,
+    modelName: String(created?.modelName || modelName).trim()
+  }
 }
 
 const BUSINESS_MODEL_CREATE_HINTS = [
@@ -1736,34 +2036,52 @@ const BUSINESS_MODEL_CREATE_HINTS = [
   '建模', '业务模型', '模型维护', '业务字典', '业务公式', '同义词', '衍生指标', '指标公式'
 ]
 
+const BUSINESS_MODEL_CREATE_PATTERNS = [
+  /(?:创建|新建|生成|建立|搭建|构建|做一个|建一个)[^。！？\n]{0,48}模型/i,
+  /模型[^。！？\n]{0,24}(?:创建|新建|生成|建立|搭建|构建)/i
+]
+
 const shouldCreateBusinessModelFromQuestion = (text) => {
-  const q = String(text || '').trim().toLowerCase()
+  const q = String(text || '').trim()
   if (!q) return false
-  return BUSINESS_MODEL_CREATE_HINTS.some(token => q.includes(token.toLowerCase()))
+  const lower = q.toLowerCase()
+  if (BUSINESS_MODEL_CREATE_HINTS.some(token => lower.includes(token.toLowerCase()))) {
+    return true
+  }
+  return BUSINESS_MODEL_CREATE_PATTERNS.some(pattern => pattern.test(q))
 }
 
 const openBusinessDictionaryAfterModelCreate = async (questionText, tableName) => {
   if (!tableName) {
     throw new Error('未选择数据表，无法创建业务模型')
   }
-  const requirement = String(questionText || '').trim()
+  const semanticDraft = parseSemanticModelInstruction(questionText)
+  const requirement = String(semanticDraft.requirement || questionText || '').trim()
   if (!requirement) {
     throw new Error('建模需求为空，无法创建业务模型')
   }
 
   const beforeIds = new Set((businessModels.value || []).map(item => String(item.id)))
-  await createBusinessModel({
+  const createdResult = await createBusinessModel({
     tableName,
     requirement,
+    dictionaryEntries: semanticDraft.dictionaryEntries,
+    metricDefinitions: semanticDraft.metricDefinitions,
     silentSuccess: true
   })
   await loadBusinessModels()
 
-  const created = (businessModels.value || []).find(item => !beforeIds.has(String(item.id)))
+  const createdId = createdResult?.id == null ? '' : String(createdResult.id)
+  const created = (createdId ? (businessModels.value || []).find(item => String(item.id) === createdId) : null)
+    || (businessModels.value || []).find(item => !beforeIds.has(String(item.id)))
     || (businessModels.value || []).find(item => String(item.tableName || '') === String(tableName || ''))
   businessDictionaryFocusModelId.value = created?.id ?? null
   businessDictionaryPanelVisible.value = true
-  return created
+  return {
+    ...(created || createdResult || {}),
+    parsedDictionaryCount: semanticDraft.dictionaryEntries.length,
+    parsedMetricCount: semanticDraft.metricDefinitions.length
+  }
 }
 
 const publishBusinessModel = async (model, published = true) => {

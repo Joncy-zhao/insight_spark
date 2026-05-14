@@ -496,6 +496,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import * as echarts from 'echarts'
 import {
   activateCleanedTable,
+  autoApplyModelByTable,
   batchReplace,
   applyCleaningStrategy,
   deleteColumn,
@@ -755,6 +756,29 @@ watch(uploadResult, async (result) => {
   cleaningSnapshotFields.value = []
   frozenCleaningStrategy.value = null
   if (!result?.tableName) return
+  if (!result?.autoAppliedModel) {
+    try {
+      const autoAppliedModel = await autoApplyModelByTable(result.tableName)
+      if (uploadResult.value?.tableName === result.tableName) {
+        uploadResult.value = {
+          ...uploadResult.value,
+          autoAppliedModel
+        }
+      }
+    } catch (error) {
+      if (uploadResult.value?.tableName === result.tableName) {
+        uploadResult.value = {
+          ...uploadResult.value,
+          autoAppliedModel: {
+            matched: false,
+            applied: false,
+            tableName: result.tableName,
+            error: error?.message || '自动套用业务模型失败'
+          }
+        }
+      }
+    }
+  }
   selectedTableName.value = result.tableName
   await Promise.all([loadFields(result.tableName), loadPreview(result.tableName), loadDataQuality()])
   cleaningContextTableName.value = result.tableName
