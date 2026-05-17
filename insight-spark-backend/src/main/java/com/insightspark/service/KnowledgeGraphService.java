@@ -1130,7 +1130,10 @@ public class KnowledgeGraphService {
             String uri = Objects.toString(row.getOrDefault("uri", neo4jHttpUrl), neo4jHttpUrl);
             String databaseName = Objects.toString(row.getOrDefault("databaseName", "neo4j"), "neo4j");
             String username = Objects.toString(row.getOrDefault("username", neo4jUsername), neo4jUsername);
-            String password = Objects.toString(row.getOrDefault("password", neo4jPassword), neo4jPassword);
+            String password = Objects.toString(row.getOrDefault("password", ""), "");
+            if (password.isBlank()) {
+                password = neo4jPassword;
+            }
             boolean enabled = parseBoolean(row.get("enabled"), neo4jEnabled);
             return new Neo4jRuntimeConfig(toNeo4jHttpUrl(uri, databaseName), username, password, enabled);
         } catch (Exception ignored) {

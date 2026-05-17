@@ -324,6 +324,17 @@ public class SqlAuditService {
         return maskRowsWithReport(tableName, rows).rows();
     }
 
+    public List<Map<String, Object>> maskRowsByFields(List<Map<String, Object>> rows, List<Map<String, Object>> fields) {
+        if (rows == null || rows.isEmpty() || fields == null || fields.isEmpty()) {
+            return rows;
+        }
+        Map<String, String> sensitiveColumns = sensitiveColumnMaskTypes(fields);
+        if (sensitiveColumns.isEmpty()) {
+            return rows;
+        }
+        return maskRowsByColumns(rows, sensitiveColumns).rows();
+    }
+
     public MaskReport maskRowsWithReport(String tableName, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty() || tableName == null || tableName.isBlank()) {
             return new MaskReport(rows, "");
@@ -332,15 +343,19 @@ public class SqlAuditService {
         if (tableName.startsWith("official:")) {
             String[] parts = tableName.split(":", 3);
             sensitiveColumns = parts.length == 3
-                    ? sensitiveColumnMaskTypes(buildFieldMetaSql("is_official_schema_field", true, true),
+                    ? sensitiveColumnMaskTypes(buildFieldMetaSql("is_official_schema_field", true, false),
                             Long.parseLong(parts[1]), parts[2])
                     : Map.of();
         } else {
-            sensitiveColumns = sensitiveColumnMaskTypes(buildFieldMetaSql("is_data_field", false, true), tableName);
+            sensitiveColumns = sensitiveColumnMaskTypes(buildFieldMetaSql("is_data_field", false, false), tableName);
         }
         if (sensitiveColumns.isEmpty()) {
             return new MaskReport(rows, "");
         }
+        return maskRowsByColumns(rows, sensitiveColumns);
+    }
+
+    private MaskReport maskRowsByColumns(List<Map<String, Object>> rows, Map<String, String> sensitiveColumns) {
         List<Map<String, Object>> masked = new ArrayList<>();
         Map<String, Integer> hits = new LinkedHashMap<>();
         List<String> samples = new ArrayList<>();
@@ -348,10 +363,11 @@ public class SqlAuditService {
             Map<String, Object> copy = new LinkedHashMap<>(row);
             for (Map.Entry<String, String> rule : sensitiveColumns.entrySet()) {
                 String column = rule.getKey();
-                if (copy.containsKey(column)) {
-                    Object before = copy.get(column);
+                String rowKey = findRowKey(copy, column);
+                if (rowKey != null) {
+                    Object before = copy.get(rowKey);
                     String after = maskValue(before, rule.getValue());
-                    copy.put(column, after);
+                    copy.put(rowKey, after);
                     hits.put(column, hits.getOrDefault(column, 0) + 1);
                     if (samples.size() < 5) {
                         samples.add(column + ": " + previewRawValue(before) + " -> " + after);
@@ -368,6 +384,22 @@ public class SqlAuditService {
             detail = detail + "; samples=[" + String.join(" | ", samples) + "]";
         }
         return new MaskReport(masked, detail);
+    }
+
+    private String findRowKey(Map<String, Object> row, String column) {
+        if (row.containsKey(column)) {
+            return column;
+        }
+        String normalizedColumn = Objects.toString(column, "").trim();
+        if (normalizedColumn.isBlank()) {
+            return null;
+        }
+        for (String key : row.keySet()) {
+            if (normalizedColumn.equalsIgnoreCase(key)) {
+                return key;
+            }
+        }
+        return null;
     }
 
     public List<Map<String, Object>> listLogs(String riskLevel, String executeStatus, int limit) {
@@ -822,9 +854,15 @@ public class SqlAuditService {
         List<Map<String, Object>> fields;
         try {
             fields = jdbcTemplate.queryForList(sql, args);
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            log.warn("加载敏感字段元数据失败，tableSql={}, args={}, error={}", sql, List.of(args), e.getMessage());
             return out;
         }
+        return sensitiveColumnMaskTypes(fields);
+    }
+
+    private Map<String, String> sensitiveColumnMaskTypes(List<Map<String, Object>> fields) {
+        Map<String, String> out = new LinkedHashMap<>();
         for (Map<String, Object> field : fields) {
             if (!fieldSensitiveByMetaOrRule(field)) {
                 continue;
@@ -845,6 +883,11 @@ public class SqlAuditService {
         if (sensitive instanceof Boolean flag && flag) {
             return true;
         }
+        String sensitiveText = Objects.toString(sensitive, "").trim();
+        if ("1".equals(sensitiveText) || "true".equalsIgnoreCase(sensitiveText)
+                || "yes".equalsIgnoreCase(sensitiveText) || "on".equalsIgnoreCase(sensitiveText)) {
+            return true;
+        }
         return !matchingSensitiveRules(field).isEmpty();
     }
 
@@ -855,6 +898,7 @@ public class SqlAuditService {
 
     private List<Map<String, Object>> matchingSensitiveRules(Map<String, Object> field) {
         String haystack = (Objects.toString(field.get("columnName"), "") + " "
+                + Objects.toString(field.get("sourceFieldName"), "") + " "
                 + Objects.toString(field.get("displayName"), "") + " "
                 + Objects.toString(field.get("commentText"), "") + " "
                 + Objects.toString(field.get("synonyms"), "")).toLowerCase(Locale.ROOT);
@@ -883,6 +927,7 @@ public class SqlAuditService {
 
     private String buildFieldMetaSql(String tableName, boolean official, boolean onlySensitive) {
         String columnNameExpr = columnExpr(tableName, "column_name", "''");
+        String sourceFieldNameExpr = columnExpr(tableName, "source_field_name", columnNameExpr);
         String tableNameExpr = columnExpr(tableName, "table_name", "''");
         String datasourceIdExpr = columnExpr(tableName, "datasource_id", "0");
         String columnCommentExpr = columnExpr(tableName, "column_comment", "''");
@@ -901,7 +946,8 @@ public class SqlAuditService {
         if (onlySensitive && hasColumn(tableName, "sensitive")) {
             where += " AND `sensitive` = 1";
         }
-        return "SELECT " + columnNameExpr + " AS columnName, " + displayExpr + " AS displayName, "
+        return "SELECT " + columnNameExpr + " AS columnName, " + sourceFieldNameExpr + " AS sourceFieldName, "
+                + displayExpr + " AS displayName, "
                 + commentExpr + " AS commentText, " + synonymsExpr + " AS synonyms, "
                 + sensitiveExpr + " AS sensitive FROM `" + tableName + "`" + where;
     }

@@ -74,6 +74,7 @@ class GraphRagDiagnoseRequest(BaseModel):
     question: str
     tableName: str
     metricField: str
+    fieldLabels: dict[str, str] = {}
     dimensionFields: list[str] = []
     timeField: str | None = None
     rows: list[dict[str, Any]] = []
@@ -304,16 +305,26 @@ def graphrag_diagnose(payload: GraphRagDiagnoseRequest) -> dict[str, Any]:
         {"nodeType": item.get("nodeType"), "label": item.get("label"), "sourceId": item.get("sourceId")}
         for item in graph_nodes[:8]
     ]
-    base["rootCauses"] = enrich_root_causes(base.get("rootCauses", []), doc_evidence, graph_nodes, graph_edges, payload.metricField)
+    graph_chain = build_graphrag_chain(payload, base, graph_nodes, graph_edges, doc_evidence)
+    base["rootCauses"] = enrich_root_causes(
+        base.get("rootCauses", []),
+        doc_evidence,
+        graph_nodes,
+        graph_edges,
+        payload.metricField,
+        payload.fieldLabels,
+        graph_chain,
+    )
     base["summary"] = f"{base.get('summary', '')} 已结合 {len(doc_evidence)} 条文档证据和 {len(graph_nodes)} 个图谱节点进行 GraphRAG 根因推理。"
     base["evidence"] = doc_evidence
     base["docEvidence"] = doc_evidence
+    base["graphRagEvidenceChain"] = graph_chain
     base["reasoningPath"] = graph_path
     base["graphPath"] = {"nodes": graph_nodes[:16], "edges": graph_edges[:32], "pathText": path_text}
     base["graphReasoningPath"] = path_text or " -> ".join(str(item.get("label") or item.get("sourceId") or item.get("nodeType")) for item in graph_path)
     base["confidence"] = round(max((cause.get("confidence", 0) for cause in base["rootCauses"]), default=0), 2)
     base["reasoningLogs"] = build_graphrag_reasoning_logs(
-        base.get("reasoningLogs", []), graph_nodes, graph_edges, doc_evidence, base["rootCauses"], payload.anomalyType
+        base.get("reasoningLogs", []), graph_nodes, graph_edges, doc_evidence, graph_chain, base["rootCauses"], payload.anomalyType
     )
     evidence_lines = [f"- {item['source']}：{item['text']}" for item in doc_evidence]
     if base["graphReasoningPath"]:
@@ -324,7 +335,7 @@ def graphrag_diagnose(payload: GraphRagDiagnoseRequest) -> dict[str, Any]:
         base["reportMarkdown"] = (
             f"{base.get('reportMarkdown', '')}\n\n"
             "## GraphRAG 根因推理\n\n"
-            + build_graphrag_markdown(base["rootCauses"], base["graphReasoningPath"], doc_evidence, base["reasoningLogs"])
+            + build_graphrag_markdown(base["rootCauses"], base["graphReasoningPath"], doc_evidence, base["reasoningLogs"], graph_chain)
             + "\n\n## 关联证据\n\n"
             + ("\n".join(evidence_lines) if evidence_lines else "- 暂未检索到外部证据，建议先上传知识文档并同步知识图谱。")
         )
@@ -373,17 +384,20 @@ def enrich_root_causes(
     graph_nodes: list[dict[str, Any]],
     graph_edges: list[dict[str, Any]],
     metric_field: str,
+    field_labels: dict[str, str] | None = None,
+    graph_chain: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     enriched = list(base_causes or [])
+    metric_label = business_label(metric_field, field_labels or {})
     graph_confidence = min(0.92, 0.45 + len(graph_nodes) * 0.03 + len(graph_edges) * 0.01)
     doc_confidence = min(0.9, 0.5 + len(doc_evidence) * 0.07)
     if graph_nodes:
         labels = " -> ".join(str(node.get("label") or node.get("sourceId") or node.get("nodeType")) for node in graph_nodes[:5])
         enriched.append({
             "level": "MEDIUM" if graph_confidence < 0.75 else "HIGH",
-            "causeType": "图谱路径关联根因",
-            "impactField": metric_field,
-            "evidence": f"图谱路径显示指标与相关表、字段、标签或历史报告存在关联：{labels}",
+            "causeType": "Neo4j 多跳路径关联根因",
+            "impactField": metric_label,
+            "evidence": f"Neo4j 图谱从「{metric_label}」扩展到相关表、字段、标签或历史报告节点：{labels}",
             "confidence": round(graph_confidence, 2),
         })
     if doc_evidence:
@@ -391,9 +405,18 @@ def enrich_root_causes(
         enriched.append({
             "level": "MEDIUM" if doc_confidence < 0.75 else "HIGH",
             "causeType": "文档证据支持根因",
-            "impactField": metric_field,
+            "impactField": metric_label,
             "evidence": f"{top_doc.get('source')} 提到：{top_doc.get('text')}",
             "confidence": round(doc_confidence, 2),
+        })
+    if graph_chain:
+        chain_text = " -> ".join(str(item.get("label") or item.get("hopType")) for item in graph_chain[:6])
+        enriched.append({
+            "level": "HIGH" if len(graph_chain) >= 5 else "MEDIUM",
+            "causeType": "GraphRAG 多跳证据链融合根因",
+            "impactField": metric_label,
+            "evidence": f"证据链按异常指标、业务维度、Neo4j 图谱、文档证据和根因结论逐跳融合：{chain_text}",
+            "confidence": min(0.91, 0.58 + len(graph_chain) * 0.045),
         })
     if not enriched:
         enriched.append({
@@ -404,6 +427,90 @@ def enrich_root_causes(
             "confidence": 0.42,
         })
     return sorted(enriched, key=lambda item: item.get("confidence", 0), reverse=True)[:8]
+
+
+def business_label(field: str | None, field_labels: dict[str, str]) -> str:
+    if not field:
+        return ""
+    return str(field_labels.get(field) or field)
+
+
+def build_graphrag_chain(
+    payload: GraphRagDiagnoseRequest,
+    base: dict[str, Any],
+    graph_nodes: list[dict[str, Any]],
+    graph_edges: list[dict[str, Any]],
+    doc_evidence: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    chain: list[dict[str, Any]] = []
+    field_labels = payload.fieldLabels or {}
+    metric_label = business_label(payload.metricField, field_labels)
+    anomalies = base.get("anomalies") or []
+    contributions = base.get("dimensionContributions") or []
+
+    chain.append(make_chain_hop(
+        1,
+        "异常指标定位",
+        metric_label,
+        f"围绕「{metric_label}」扫描 {len(payload.queryRows or payload.rows)} 条记录，识别异常节点 {len(anomalies)} 个。",
+        1.0,
+    ))
+    step = 2
+    for contribution in contributions[:3]:
+        dimension = business_label(str(contribution.get("dimensionField", "")), field_labels)
+        top_items = contribution.get("topItems") or []
+        top_text = "；".join(f"{item.get('name')}={item.get('value')}，占比{item.get('share')}%" for item in top_items[:3])
+        chain.append(make_chain_hop(
+            step,
+            "业务维度下钻",
+            dimension,
+            top_text or f"对「{dimension}」完成贡献拆解。",
+            0.86,
+        ))
+        step += 1
+    if payload.timeField:
+        time_label = business_label(payload.timeField, field_labels)
+        chain.append(make_chain_hop(step, "时间窗口回溯", time_label, f"沿「{time_label}」对异常前后窗口进行回溯。", 0.82))
+        step += 1
+    if graph_nodes:
+        graph_labels = " -> ".join(str(node.get("label") or node.get("sourceId") or node.get("nodeType")) for node in graph_nodes[:5])
+        relation_types = "、".join(sorted({str(edge.get("relationType") or "RELATED") for edge in graph_edges[:8]}))
+        chain.append(make_chain_hop(
+            step,
+            "Neo4j 图谱扩展",
+            "图谱节点/关系",
+            f"命中 {len(graph_nodes)} 个节点、{len(graph_edges)} 条关系；节点链路：{graph_labels}；关系类型：{relation_types or 'RELATED'}。",
+            0.84 if graph_edges else 0.72,
+        ))
+        step += 1
+    for evidence in doc_evidence[:3]:
+        score = to_float(evidence.get("score")) or 0
+        chain.append(make_chain_hop(
+            step,
+            "文档证据召回",
+            str(evidence.get("source") or "知识文档"),
+            str(evidence.get("text") or ""),
+            min(0.88, 0.62 + score * 0.03) if score else 0.62,
+        ))
+        step += 1
+    chain.append(make_chain_hop(
+        step,
+        "根因结论生成",
+        "根因假设",
+        f"融合 {len(graph_nodes)} 个图谱节点、{len(graph_edges)} 条关系、{len(doc_evidence)} 条文档证据后生成根因假设。",
+        min(0.9, 0.58 + len(chain) * 0.04),
+    ))
+    return chain
+
+
+def make_chain_hop(step: int, hop_type: str, label: str, detail: str, confidence: float) -> dict[str, Any]:
+    return {
+        "step": step,
+        "hopType": hop_type,
+        "label": label,
+        "detail": detail,
+        "confidence": round(confidence, 2),
+    }
 
 
 def build_base_reasoning_logs(
@@ -440,6 +547,7 @@ def build_graphrag_reasoning_logs(
     graph_nodes: list[dict[str, Any]],
     graph_edges: list[dict[str, Any]],
     doc_evidence: list[dict[str, Any]],
+    graph_chain: list[dict[str, Any]],
     root_causes: list[dict[str, Any]],
     anomaly_type: str,
 ) -> list[dict[str, Any]]:
@@ -459,6 +567,12 @@ def build_graphrag_reasoning_logs(
         },
         {
             "step": 6,
+            "title": "融合 GraphRAG 多跳证据链",
+            "status": "completed",
+            "detail": f"将异常指标、业务维度、Neo4j 图谱、文档证据融合为 {len(graph_chain)} 跳证据链。",
+        },
+        {
+            "step": 7,
             "title": "输出根因定位与改进建议",
             "status": "completed",
             "detail": f"生成 {len(root_causes)} 条根因假设，按置信度排序输出决策建议。",
@@ -495,6 +609,7 @@ def build_graphrag_markdown(
     graph_path_text: str,
     doc_evidence: list[dict[str, Any]],
     reasoning_logs: list[dict[str, Any]],
+    graph_chain: list[dict[str, Any]] | None = None,
 ) -> str:
     lines = []
     lines.append("### 可能根因")
@@ -505,6 +620,15 @@ def build_graphrag_markdown(
     lines.append("")
     lines.append("### 图谱推理路径")
     lines.append(graph_path_text or "暂无图谱路径。")
+    lines.append("")
+    lines.append("### GraphRAG 多跳证据链")
+    if graph_chain:
+        for item in graph_chain:
+            lines.append(
+                f"- Step {item.get('step')} {item.get('hopType')}：{item.get('label')}。{item.get('detail')} 置信度 {item.get('confidence')}"
+            )
+    else:
+        lines.append("- 暂无多跳证据链。")
     lines.append("")
     lines.append("### 文档证据来源")
     if doc_evidence:

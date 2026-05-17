@@ -570,6 +570,7 @@ const cleaningSkipped = ref(false)
 const savingCellKey = ref('')
 const cleaningContextTableName = ref('')
 const cleaningSnapshotFields = ref([])
+const previewDialogFields = ref([])
 const frozenCleaningStrategy = ref(null)
 const uploadStatusVisible = ref(false)
 const editorTableName = ref('')
@@ -653,7 +654,14 @@ const previewDisplayRows = computed(() => {
 const previewDisplayColumns = computed(() => {
   if (previewMode.value === 'cleaning') return issueColumns.value
   if (previewMode.value === 'table-edit') return editorVisibleColumns.value
-  return visiblePreviewColumns.value
+  const availableColumns = new Set(visiblePreviewColumns.value)
+  const orderedColumns = previewDialogFields.value
+    .map(field => field.columnName)
+    .filter(column => column && availableColumns.has(column))
+  visiblePreviewColumns.value.forEach(column => {
+    if (!orderedColumns.includes(column)) orderedColumns.push(column)
+  })
+  return orderedColumns
 })
 const dialogPreviewTotal = computed(() => previewMode.value === 'table-edit' ? editorTotal.value : previewTotal.value)
 const dialogPreviewPage = computed(() => previewMode.value === 'table-edit' ? editorPage.value : previewPage.value)
@@ -907,6 +915,7 @@ async function openFieldConfigDrawer(row) {
   try {
     await loadFields(targetTableName)
     fields.value.forEach(field => {
+      field.sensitive = field.sensitive === true || field.sensitive === 1 || field.sensitive === '1'
       field.kgSyncEnabled = field.kgSyncEnabled !== false
       field.synonyms = field.synonyms || ''
       field.kgSyncRule = field.kgSyncRule || ''
@@ -1094,11 +1103,15 @@ async function openPreviewDialog(mode = 'preview') {
   selectedTableName.value = tableName
   cleaningContextTableName.value = tableName
   previewMode.value = mode
+  previewPage.value = 1
+  selectedRows.value = []
   qualityIssueDialogVisible.value = false
   try {
-    await Promise.all([loadFields(tableName), loadPreview(tableName)])
+    await loadFields(tableName)
+    previewDialogFields.value = fields.value.map(field => ({ ...field }))
+    await loadPreview(tableName)
     if (!cleaningSnapshotFields.value.length || cleaningContextTableName.value !== tableName) {
-      cleaningSnapshotFields.value = fields.value.map(field => ({ ...field }))
+      cleaningSnapshotFields.value = previewDialogFields.value.map(field => ({ ...field }))
     }
     previewDialogVisible.value = true
   } catch (error) {
@@ -1228,8 +1241,8 @@ function getDisplayNameForColumn(column) {
     const editorField = editorFields.value.find(item => item.columnName === column)
     return editorField?.displayName || editorField?.sourceFieldName || column
   }
-  const field = cleaningSnapshotFields.value.find(item => item.columnName === column)
-    || fields.value.find(item => item.columnName === column)
+  const sourceFields = previewMode.value === 'cleaning' ? cleaningSnapshotFields.value : previewDialogFields.value
+  const field = sourceFields.find(item => item.columnName === column)
   return field?.displayName || field?.sourceFieldName || column
 }
 

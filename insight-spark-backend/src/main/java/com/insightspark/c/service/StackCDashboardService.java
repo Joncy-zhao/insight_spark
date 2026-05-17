@@ -57,10 +57,20 @@ public class StackCDashboardService {
                        created_at AS createdAt, updated_at AS updatedAt
                 FROM is_dashboard
                 WHERE status = 'ACTIVE'
-                  AND (owner_user_id = ? OR is_public = 1)
+                  AND (
+                    owner_user_id = ?
+                    OR is_public = 1
+                    OR EXISTS (
+                      SELECT 1 FROM is_dashboard_permission p
+                      WHERE p.dashboard_id = is_dashboard.id
+                        AND p.user_id = ?
+                        AND p.permission_type IN ('READ', 'EDIT')
+                        AND (p.expire_at IS NULL OR p.expire_at > NOW())
+                    )
+                  )
                 ORDER BY updated_at DESC
                 LIMIT 100
-                """, uid);
+                """, uid, uid);
     }
 
     public Map<String, Object> getById(long id) {
@@ -94,12 +104,13 @@ public class StackCDashboardService {
 
     public Map<String, Object> update(long id, Map<String, Object> body) {
         Map<String, Object> existing = getById(id);
-        assertOwnerOrAdmin(existing);
+        assertEditorOrAdmin(existing);
+        boolean ownerOrAdmin = isOwnerOrAdmin(existing);
         String name = body.containsKey("name") ? requireText(body, "name") : Objects.toString(existing.get("name"));
         String description = body.containsKey("description") ? Objects.toString(body.get("description"), null) : Objects.toString(existing.get("description"), null);
         String layoutJson = body.containsKey("layoutJson") ? Objects.toString(body.get("layoutJson")) : Objects.toString(existing.get("layoutJson"));
-        int isPublic = body.containsKey("isPublic") ? parseTinyInt(body.get("isPublic"), 0) : parseTinyInt(existing.get("isPublic"), 0);
-        String status = body.containsKey("status") ? Objects.toString(body.get("status"), "ACTIVE") : Objects.toString(existing.get("status"), "ACTIVE");
+        int isPublic = ownerOrAdmin && body.containsKey("isPublic") ? parseTinyInt(body.get("isPublic"), 0) : parseTinyInt(existing.get("isPublic"), 0);
+        String status = ownerOrAdmin && body.containsKey("status") ? Objects.toString(body.get("status"), "ACTIVE") : Objects.toString(existing.get("status"), "ACTIVE");
         jdbcTemplate.update("""
                 UPDATE is_dashboard SET name = ?, description = ?, layout_json = ?, is_public = ?, status = ?, updated_at = NOW()
                 WHERE id = ?
@@ -170,7 +181,7 @@ public class StackCDashboardService {
 
     public Map<String, Object> pinChart(long id, Map<String, Object> body) {
         Map<String, Object> dashboard = getById(id);
-        assertOwnerOrAdmin(dashboard);
+        assertEditorOrAdmin(dashboard);
 
         Object chartIdRaw = body == null ? null : body.get("chartId");
         if (chartIdRaw == null) {
@@ -235,7 +246,7 @@ public class StackCDashboardService {
      */
     public Map<String, Object> removeDashboardComponent(long dashboardId, long componentId) {
         Map<String, Object> dashboard = getById(dashboardId);
-        assertOwnerOrAdmin(dashboard);
+        assertEditorOrAdmin(dashboard);
         Long cnt = jdbcTemplate.queryForObject("""
                 SELECT COUNT(*) FROM is_dashboard_component WHERE id = ? AND dashboard_id = ?
                 """, Long.class, componentId, dashboardId);
@@ -304,11 +315,21 @@ public class StackCDashboardService {
                 FROM is_dashboard_component dc
                 INNER JOIN is_dashboard d ON d.id = dc.dashboard_id
                 WHERE d.status != 'ARCHIVED'
-                  AND (d.owner_user_id = ? OR d.is_public = 1)
+                  AND (
+                    d.owner_user_id = ?
+                    OR d.is_public = 1
+                    OR EXISTS (
+                      SELECT 1 FROM is_dashboard_permission p
+                      WHERE p.dashboard_id = d.id
+                        AND p.user_id = ?
+                        AND p.permission_type IN ('READ', 'EDIT')
+                        AND (p.expire_at IS NULL OR p.expire_at > NOW())
+                    )
+                  )
                 GROUP BY dc.chart_id
                 ORDER BY MAX(dc.id) DESC
                 LIMIT 300
-                """, uid);
+                """, uid, uid);
     }
 
     private void assertCanAccess(Map<String, Object> row) {
@@ -320,17 +341,53 @@ public class StackCDashboardService {
         }
         String owner = Objects.toString(row.get("ownerUserId"));
         int isPublic = parseTinyInt(row.get("isPublic"), 0);
-        if (!AuthContext.userId().equals(owner) && isPublic != 1) {
+        long dashboardId = dashboardId(row);
+        if (!AuthContext.userId().equals(owner)
+                && isPublic != 1
+                && !hasDashboardPermission(dashboardId, "READ")
+                && !hasDashboardPermission(dashboardId, "EDIT")) {
             throw new IllegalArgumentException("无权访问该看板");
         }
     }
 
     private void assertOwnerOrAdmin(Map<String, Object> row) {
-        if (AuthContext.isAdmin()) {
+        if (!isOwnerOrAdmin(row)) {
+            throw new IllegalArgumentException("仅所有者可修改或删除");
+        }
+    }
+
+    private void assertEditorOrAdmin(Map<String, Object> row) {
+        if (isOwnerOrAdmin(row) || hasDashboardPermission(dashboardId(row), "EDIT")) {
             return;
         }
-        if (!AuthContext.userId().equals(Objects.toString(row.get("ownerUserId")))) {
-            throw new IllegalArgumentException("仅所有者可修改或删除");
+        throw new IllegalArgumentException("当前用户无看板编辑权限");
+    }
+
+    private boolean isOwnerOrAdmin(Map<String, Object> row) {
+        return AuthContext.isAdmin() || AuthContext.userId().equals(Objects.toString(row.get("ownerUserId")));
+    }
+
+    private boolean hasDashboardPermission(long dashboardId, String permissionType) {
+        if (dashboardId <= 0) {
+            return false;
+        }
+        Integer count = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM is_dashboard_permission
+                WHERE dashboard_id = ? AND user_id = ? AND permission_type = ?
+                  AND (expire_at IS NULL OR expire_at > NOW())
+                """, Integer.class, dashboardId, AuthContext.userId(), permissionType);
+        return count != null && count > 0;
+    }
+
+    private long dashboardId(Map<String, Object> row) {
+        Object value = row.get("id");
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        try {
+            return Long.parseLong(Objects.toString(value, "0"));
+        } catch (NumberFormatException e) {
+            return 0L;
         }
     }
 

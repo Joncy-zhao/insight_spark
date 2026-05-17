@@ -48,6 +48,24 @@ public class DiagnosisController {
         }
     }
 
+    @PostMapping("/reports/{reportId}/delete")
+    public ApiResponse<Map<String, Object>> deleteReport(@PathVariable Long reportId) {
+        try {
+            return ApiResponse.success("诊断报告已删除", diagnosisService.deleteReport(reportId));
+        } catch (Exception e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    @PostMapping("/reports/delete")
+    public ApiResponse<Map<String, Object>> deleteReports(@RequestBody Map<String, Object> request) {
+        try {
+            return ApiResponse.success("诊断报告已删除", diagnosisService.deleteReports(request.get("ids")));
+        } catch (Exception e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
     public ResponseEntity<byte[]> exportReport(@PathVariable Long reportId,
                                                @org.springframework.web.bind.annotation.RequestParam(defaultValue = "markdown") String format) {
         return buildExportResponse(diagnosisService.exportReport(reportId, format));

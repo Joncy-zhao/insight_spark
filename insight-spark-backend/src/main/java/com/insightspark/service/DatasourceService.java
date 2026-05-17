@@ -125,7 +125,7 @@ public class DatasourceService {
                 """);
         jdbcTemplate.update("""
                 INSERT INTO is_neo4j_runtime_config(id, uri, username, password, database_name, sync_rule, enabled)
-                VALUES (1, 'http://localhost:7474', 'neo4j', '', 'neo4j', '同步官方数据源表、字段、业务含义、同义词和联邦关系', 1)
+                VALUES (1, 'http://localhost:7474', 'neo4j', 'nisibusisa250', 'neo4j', '同步官方数据源表、字段、业务含义、同义词和联邦关系', 1)
                 ON DUPLICATE KEY UPDATE id = id
                 """);
 

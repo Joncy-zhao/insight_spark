@@ -546,7 +546,7 @@ public class DataUploadService {
             int offset = (safePage - 1) * safeLimit;
             rows = jdbcTemplate.queryForList("SELECT * FROM `" + tableName + "` LIMIT " + safeLimit + " OFFSET " + offset);
         }
-        return sqlAuditService.maskRows(tableName, rows);
+        return sqlAuditService.maskRowsByFields(rows, listFields(tableName));
     }
 
     public Map<String, Object> previewPage(String tableName, int page, int pageSize) {

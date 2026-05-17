@@ -7,6 +7,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.text.PDFTextStripper;
+import org.apache.poi.xwpf.usermodel.XWPFDocument;
+import org.apache.poi.xwpf.usermodel.XWPFParagraph;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -57,12 +59,12 @@ public class KnowledgeDocumentService {
     public Map<String, Object> upload(MultipartFile file) throws IOException {
         String fileName = Objects.requireNonNullElse(file.getOriginalFilename(), "knowledge.txt");
         String lowerName = fileName.toLowerCase();
-        if (!lowerName.endsWith(".txt") && !lowerName.endsWith(".md") && !lowerName.endsWith(".pdf")) {
-            throw new IllegalArgumentException("知识文档当前支持 .txt / .md / .pdf 文件，DOCX 文本抽取后续扩展");
+        if (!lowerName.endsWith(".txt") && !lowerName.endsWith(".md") && !lowerName.endsWith(".pdf") && !lowerName.endsWith(".docx")) {
+            throw new IllegalArgumentException("知识文档当前支持 .txt / .md / .pdf / .docx 文件");
         }
         String content = extractText(file, lowerName);
         String title = removeExtension(fileName);
-        String docType = lowerName.endsWith(".pdf") ? "PDF" : lowerName.endsWith(".md") ? "MARKDOWN" : "TEXT";
+        String docType = lowerName.endsWith(".pdf") ? "PDF" : lowerName.endsWith(".docx") ? "WORD" : lowerName.endsWith(".md") ? "MARKDOWN" : "TEXT";
         jdbcTemplate.update("""
                 INSERT INTO is_knowledge_doc(title, file_name, doc_type, content, created_by)
                 VALUES (?, ?, ?, ?, ?)
@@ -121,47 +123,34 @@ public class KnowledgeDocumentService {
     public List<Map<String, Object>> search(String question, int limit) {
         List<String> terms = extractSearchTerms(question);
         int safeLimit = Math.max(1, Math.min(limit, 20));
-        if (!terms.isEmpty()) {
-            List<Map<String, Object>> candidates = jdbcTemplate.queryForList("""
-                    SELECT c.doc_id AS docId, d.title, d.file_name AS fileName, d.doc_type AS docType,
-                           c.chunk_index AS chunkIndex, c.chunk_text AS chunkText, c.keywords,
-                           CONCAT('《', d.title, '》第', c.chunk_index, '段') AS source
-                    FROM is_knowledge_chunk c
-                    JOIN is_knowledge_doc d ON d.id = c.doc_id
-                    ORDER BY c.created_at DESC
-                    LIMIT 500
-                    """);
-            for (Map<String, Object> row : candidates) {
-                double score = scoreChunk(row, terms);
-                row.put("score", Math.round(score * 100.0) / 100.0);
-                row.put("matchedKeywords", matchedKeywords(row, terms));
-            }
-            return candidates.stream()
-                    .filter(row -> Double.parseDouble(Objects.toString(row.get("score"), "0")) > 0)
-                    .sorted(Comparator.comparingDouble((Map<String, Object> row) ->
-                            Double.parseDouble(Objects.toString(row.get("score"), "0"))).reversed())
-                    .limit(safeLimit)
-                    .toList();
+        List<Map<String, Object>> candidates = jdbcTemplate.queryForList("""
+                SELECT c.doc_id AS docId, d.title, d.file_name AS fileName, d.doc_type AS docType,
+                       c.chunk_index AS chunkIndex, c.chunk_text AS chunkText, c.keywords,
+                       CONCAT('《', d.title, '》第', c.chunk_index, '段') AS source
+                FROM is_knowledge_chunk c
+                JOIN is_knowledge_doc d ON d.id = c.doc_id
+                ORDER BY c.created_at DESC
+                LIMIT 500
+                """);
+        for (Map<String, Object> row : candidates) {
+            double score = terms.isEmpty() ? 0 : scoreChunk(row, terms);
+            row.put("score", Math.round(score * 100.0) / 100.0);
+            row.put("matchedKeywords", matchedKeywords(row, terms));
         }
-        Map<String, Map<String, Object>> dedup = new LinkedHashMap<>();
-        for (String term : terms) {
-            String like = "%" + term + "%";
-            String sql = "SELECT c.doc_id AS docId, d.title, c.chunk_index AS chunkIndex, c.chunk_text AS chunkText,\n" +
-                    "       CONCAT('《', d.title, '》 第 ', c.chunk_index, ' 段') AS source\n" +
-                    "FROM is_knowledge_chunk c\n" +
-                    "JOIN is_knowledge_doc d ON d.id = c.doc_id\n" +
-                    "WHERE c.chunk_text LIKE ? OR c.keywords LIKE ?\n" +
-                    "ORDER BY c.created_at DESC\n" +
-                    "LIMIT " + safeLimit;
-            List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, like, like);
-            for (Map<String, Object> row : rows) {
-                dedup.putIfAbsent(row.get("docId") + ":" + row.get("chunkIndex"), row);
-            }
-            if (dedup.size() >= safeLimit) {
-                break;
-            }
+
+        List<Map<String, Object>> matched = candidates.stream()
+                .filter(row -> Double.parseDouble(Objects.toString(row.get("score"), "0")) > 0)
+                .sorted(Comparator.comparingDouble((Map<String, Object> row) ->
+                        Double.parseDouble(Objects.toString(row.get("score"), "0"))).reversed())
+                .limit(safeLimit)
+                .toList();
+        if (!matched.isEmpty()) {
+            return matched;
         }
-        return dedup.values().stream().limit(safeLimit).toList();
+
+        // When the user has uploaded evidence docs but the query is still too narrow,
+        // return recent chunks instead of making GraphRAG look like it has no documents.
+        return candidates.stream().limit(safeLimit).toList();
     }
 
     private List<String> splitChunks(String content, int chunkSize, int overlap) {
@@ -188,15 +177,33 @@ public class KnowledgeDocumentService {
                 return new PDFTextStripper().getText(document);
             }
         }
+        if (lowerName.endsWith(".docx")) {
+            try (XWPFDocument document = new XWPFDocument(new ByteArrayInputStream(file.getBytes()))) {
+                StringBuilder builder = new StringBuilder();
+                for (XWPFParagraph paragraph : document.getParagraphs()) {
+                    String text = paragraph.getText();
+                    if (text != null && !text.isBlank()) {
+                        builder.append(text).append("\n");
+                    }
+                }
+                return builder.toString();
+            }
+        }
         return new String(file.getBytes(), StandardCharsets.UTF_8);
     }
 
     private double scoreChunk(Map<String, Object> row, List<String> terms) {
-        String text = Objects.toString(row.get("chunkText"), "").toLowerCase();
+        String text = (Objects.toString(row.get("chunkText"), "") + " "
+                + Objects.toString(row.get("title"), "") + " "
+                + Objects.toString(row.get("fileName"), "") + " "
+                + Objects.toString(row.get("source"), "")).toLowerCase();
         String keywords = Objects.toString(row.get("keywords"), "").toLowerCase();
         double score = 0;
         for (String term : terms) {
             String normalized = term.toLowerCase();
+            if (text.contains(normalized)) {
+                score += 1.0;
+            }
             if (keywords.contains(normalized)) {
                 score += 3.0;
             }
@@ -208,7 +215,10 @@ public class KnowledgeDocumentService {
 
     private List<String> matchedKeywords(Map<String, Object> row, List<String> terms) {
         String haystack = (Objects.toString(row.get("chunkText"), "") + " "
-                + Objects.toString(row.get("keywords"), "")).toLowerCase();
+                + Objects.toString(row.get("keywords"), "") + " "
+                + Objects.toString(row.get("title"), "") + " "
+                + Objects.toString(row.get("fileName"), "") + " "
+                + Objects.toString(row.get("source"), "")).toLowerCase();
         return terms.stream()
                 .filter(term -> haystack.contains(term.toLowerCase()))
                 .distinct()

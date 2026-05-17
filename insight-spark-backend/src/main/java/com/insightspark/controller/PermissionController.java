@@ -54,12 +54,9 @@ public class PermissionController {
     }
 
     @PostMapping("/requests")
-    public ApiResponse<Map<String, Object>> submitRequest(@RequestBody Map<String, String> request) {
+    public ApiResponse<Map<String, Object>> submitRequest(@RequestBody Map<String, Object> request) {
         try {
-            return ApiResponse.success("权限申请已提交", permissionService.submitRequest(
-                    request.get("tableName"),
-                    request.get("reason")
-            ));
+            return ApiResponse.success("权限申请已提交", permissionService.submitRequest(request));
         } catch (Exception e) {
             return ApiResponse.badRequest(e.getMessage());
         }

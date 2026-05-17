@@ -86,6 +86,43 @@
       </el-main>
     </el-container>
   </el-container>
+
+  <el-dialog v-model="diagnosisPickerVisible" title="生成诊断报告" width="560px">
+    <el-form label-position="top">
+      <el-form-item label="报告详细程度">
+        <el-radio-group v-model="diagnosisPickerForm.detailLevel">
+          <el-radio-button label="simple">简易</el-radio-button>
+          <el-radio-button label="detailed">详细</el-radio-button>
+        </el-radio-group>
+      </el-form-item>
+      <el-form-item label="异常类型">
+        <el-select v-model="diagnosisPickerForm.anomalyType" class="full-width">
+          <el-option label="波动异常" value="fluctuation" />
+          <el-option label="结构异常" value="structure" />
+          <el-option label="趋势异常" value="trend" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="指标字段">
+        <el-select v-model="diagnosisPickerForm.metricField" class="full-width" placeholder="选择数值指标">
+          <el-option v-for="field in numericFields" :key="field.columnName" :label="field.displayName" :value="field.columnName" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="维度字段">
+        <el-select v-model="diagnosisPickerForm.dimensionFields" multiple class="full-width" placeholder="选择拆解维度">
+          <el-option v-for="field in dimensionCandidateFields" :key="field.columnName" :label="field.displayName" :value="field.columnName" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="时间字段">
+        <el-select v-model="diagnosisPickerForm.timeField" clearable class="full-width" placeholder="可选">
+          <el-option v-for="field in dateFields" :key="field.columnName" :label="field.displayName" :value="field.columnName" />
+        </el-select>
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button @click="diagnosisPickerVisible = false">取消</el-button>
+      <el-button type="primary" :loading="diagnosisLoading" @click="confirmDiagnosisPicker">生成诊断报告</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup>
@@ -220,6 +257,7 @@ const uploadProgress = ref({
   computable: false,
   status: 'READY'
 })
+let uploadProgressHideTimer = null
 const previewRows = ref([])
 const previewPage = ref(1)
 const previewPageSize = ref(10)
@@ -237,6 +275,9 @@ const graphSearchKeyword = ref('')
 const graphSearchResult = ref({ nodes: [], edges: [], ragContext: [] })
 const graphLoading = ref(false)
 const knowledgeDocFile = ref(null)
+const knowledgeDocFiles = ref([])
+const knowledgeDocUploadFiles = ref([])
+const knowledgeDocUploading = ref(false)
 const knowledgeDocs = ref([])
 const auditRiskLevel = ref('')
 const auditExecuteStatus = ref('')
@@ -250,7 +291,20 @@ const sensitiveFieldPermissions = ref([])
 const myPermissionRequests = ref([])
 const adminPermissionRequests = ref([])
 const adminRequestStatus = ref('PENDING')
-const permissionForm = ref({ tableName: '', reason: '' })
+const emptyPermissionForm = () => ({
+  tableName: '',
+  resourceType: 'TABLE',
+  permissionType: 'READ',
+  scopeDesc: '',
+  expireAt: '',
+  attachmentName: '',
+  attachmentContentType: '',
+  attachmentSize: 0,
+  attachmentContent: '',
+  attachmentNote: '',
+  reason: ''
+})
+const permissionForm = ref(emptyPermissionForm())
 const datasourceForm = ref({
   name: '',
   dbType: 'MYSQL',
@@ -273,7 +327,7 @@ const schemaTables = ref([])
 const schemaFields = ref([])
 const diagnosisForm = ref({ metricField: '', dimensionFields: [], timeField: '', detailLevel: 'detailed', anomalyType: 'fluctuation' })
 const diagnosisPickerVisible = ref(false)
-const diagnosisPickerForm = ref({ metricField: '', dimensionFields: [], timeField: '' })
+const diagnosisPickerForm = ref({ metricField: '', dimensionFields: [], timeField: '', detailLevel: 'detailed', anomalyType: 'fluctuation' })
 const diagnosisLoading = ref(false)
 const streamAbortController = ref(null)
 const activeChatRequestId = ref(0)
@@ -288,6 +342,7 @@ const diagnosisProgress = ref({ percentage: 0, step: '待开始', logs: [] })
 const currentDiagnosis = ref(null)
 const diagnosisReports = ref([])
 const diagnosisRestoreTarget = ref(null)
+const diagnosisEntryContext = ref(null)
 const businessDictionaryPanelVisible = ref(false)
 const businessDictionaryFocusModelId = ref(null)
 const pinDialogVisible = ref(false)
@@ -420,6 +475,7 @@ const bootstrapWorkbench = async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', handleChartResize)
+  clearUploadProgressHideTimer()
 })
 
 const normalizeActiveModule = () => {
@@ -764,10 +820,18 @@ const loadPermissionCenter = async () => {
   myPermissionRequests.value = unwrap(myRequestsRes)
   accessibleOfficialTables.value = unwrap(await axios.get(`${API_BASE}/api/permission/accessible-official-tables`))
   sensitiveFieldPermissions.value = unwrap(await axios.get(`${API_BASE}/api/permission/sensitive-fields`))
-  await loadAdminPermissionRequests()
+  if (isAdminUser.value) {
+    await loadAdminPermissionRequests()
+  } else {
+    adminPermissionRequests.value = []
+  }
 }
 
 const loadAdminPermissionRequests = async () => {
+  if (!isAdminUser.value) {
+    adminPermissionRequests.value = []
+    return
+  }
   const data = unwrap(await axios.get(`${API_BASE}/api/permission/admin/requests`, {
     params: { status: adminRequestStatus.value || undefined }
   }))
@@ -776,16 +840,71 @@ const loadAdminPermissionRequests = async () => {
 
 const submitPermissionRequest = async () => {
   try {
+    const selectedResource = requestableTables.value.find(item => item.tableName === permissionForm.value.tableName)
     await axios.post(`${API_BASE}/api/permission/requests`, {
       tableName: permissionForm.value.tableName,
+      resourceType: permissionForm.value.resourceType || selectedResource?.resourceType || selectedResource?.sourceType || 'TABLE',
+      permissionType: permissionForm.value.permissionType,
+      scopeDesc: permissionForm.value.scopeDesc,
+      expireAt: permissionForm.value.expireAt,
+      attachmentName: permissionForm.value.attachmentName,
+      attachmentContentType: permissionForm.value.attachmentContentType,
+      attachmentSize: permissionForm.value.attachmentSize,
+      attachmentContent: permissionForm.value.attachmentContent,
+      attachmentNote: permissionForm.value.attachmentNote,
       reason: permissionForm.value.reason
     }).then(unwrap)
     ElMessage.success('权限申请已提交')
-    permissionForm.value = { tableName: '', reason: '' }
+    permissionForm.value = emptyPermissionForm()
     await loadPermissionCenter()
   } catch (error) {
     ElMessage.error(error.message || '提交失败')
   }
+}
+
+const handlePermissionResourceChange = (tableName) => {
+  const selectedResource = requestableTables.value.find(item => item.tableName === tableName)
+  permissionForm.value.resourceType = selectedResource?.resourceType || selectedResource?.sourceType || 'TABLE'
+  permissionForm.value.permissionType = selectedResource?.suggestedPermissionType || permissionForm.value.permissionType || 'READ'
+}
+
+const handlePermissionAttachmentChange = async (file) => {
+  const rawFile = file?.raw || file
+  permissionForm.value.attachmentName = rawFile?.name || file?.name || ''
+  permissionForm.value.attachmentContentType = rawFile?.type || ''
+  permissionForm.value.attachmentSize = rawFile?.size || 0
+  permissionForm.value.attachmentContent = ''
+  if (!rawFile) return
+  if (rawFile.size > 2 * 1024 * 1024) {
+    ElMessage.warning('附件超过 2MB，仅保存文件名与说明')
+    return
+  }
+  permissionForm.value.attachmentContent = await new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(reader.error)
+    reader.readAsDataURL(rawFile)
+  })
+}
+
+const prefillPermissionRequest = async (row) => {
+  permissionForm.value = {
+    tableName: row.tableName || '',
+    resourceType: row.resourceType || 'TABLE',
+    permissionType: row.permissionType || 'READ',
+    scopeDesc: row.scopeDesc || '',
+    expireAt: row.expireAt ? String(row.expireAt).slice(0, 10) : '',
+    attachmentName: row.attachmentName || '',
+    attachmentContentType: row.attachmentContentType || '',
+    attachmentSize: row.attachmentSize || 0,
+    attachmentContent: '',
+    attachmentNote: row.attachmentNote || '',
+    reason: row.reason || ''
+  }
+  activeModule.value = 'permission'
+  await nextTick()
+  document.querySelector('.permission-request-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  ElMessage.info('已带入原申请内容，可调整后重新提交')
 }
 
 const reviewPermission = async (requestId, action) => {
@@ -975,6 +1094,7 @@ const updateUploadField = async (row) => {
     }).then(unwrap)
     ElMessage.success('字段信息已更新')
     await loadFields(selectedTableName.value)
+    await loadPreview(selectedTableName.value)
   } catch (error) {
     console.error('updateUploadField error:', error)
     ElMessage.error(error.response?.data?.message || error.message || '字段信息保存失败')
@@ -1038,24 +1158,23 @@ const diagnoseFromLastAnalysis = async () => {
   const dimensionField = findAnalysisField(dimensionDisplayName, null)
 
   const timeField = fields.value.find(item => item.fieldType === 'DATE')
-
   if (metricField && !dimensionField && dimensionCandidateFields.value.length) {
-    diagnosisPickerForm.value = {
+    openDiagnosisPicker({
       metricField: metricField.columnName,
       dimensionFields: [],
-      timeField: timeField ? timeField.columnName : ''
-    }
-    diagnosisPickerVisible.value = true
+      timeField: timeField ? timeField.columnName : '',
+      context: { source: 'chat' }
+    })
     return
   }
 
   if (!metricField && numericFields.value.length) {
-    diagnosisPickerForm.value = {
+    openDiagnosisPicker({
       metricField: numericFields.value[0]?.columnName || '',
       dimensionFields: dimensionField ? [dimensionField.columnName] : [],
-      timeField: timeField ? timeField.columnName : ''
-    }
-    diagnosisPickerVisible.value = true
+      timeField: timeField ? timeField.columnName : '',
+      context: { source: 'chat' }
+    })
     return
   }
 
@@ -1064,41 +1183,12 @@ const diagnoseFromLastAnalysis = async () => {
     return
   }
 
-  diagnosisLoading.value = true
-  startDiagnosisProgressV2()
-
-  try {
-    const chartSnapshot = captureChartSnapshot(lastAnalysis.value)
-    currentDiagnosis.value = unwrap(await axios.post(`${API_BASE}/api/diagnosis/run`, {
-      tableName: selectedTableName.value,
-      metricField: metricField.columnName,
-      dimensionFields: dimensionField ? [dimensionField.columnName] : [],
-      timeField: timeField ? timeField.columnName : null,
-      sourceQuestion: lastAnalysis.value.sourceQuestion || '',
-      sourceSql: lastAnalysis.value.sql || lastAnalysis.value.sourceSql || '',
-      chartType: lastAnalysis.value.chartType,
-      chartSnapshot,
-      detailLevel: diagnosisForm.value.detailLevel || 'detailed',
-      anomalyType: diagnosisForm.value.anomalyType || 'fluctuation',
-      question: lastAnalysis.value.message || '基于当前对话查询结果生成智能诊断报告'
-    }))
-    completeDiagnosisProgressV2(
-      currentDiagnosis.value?.reasoningLogs || [],
-      currentDiagnosis.value?.graphRagRuntime,
-      currentDiagnosis.value
-    )
-    notifyDiagnosisResult(
-      currentDiagnosis.value,
-      '已根据当前图表生成智能诊断报告并写入 Neo4j',
-      '已根据当前图表生成智能诊断结果（降级模式，未写入 Neo4j）'
-    )
-    await loadDiagnosisReports()
-    activeModule.value = 'diagnosis'
-  } catch (error) {
-    ElMessage.error(error.message || '诊断报告生成失败')
-  } finally {
-    diagnosisLoading.value = false
-  }
+  openDiagnosisPicker({
+    metricField: metricField.columnName,
+    dimensionFields: dimensionField ? [dimensionField.columnName] : [],
+    timeField: timeField ? timeField.columnName : '',
+    context: { source: 'chat' }
+  })
 }
 const confirmDiagnosisPicker = async () => {
   if (!diagnosisPickerForm.value.metricField) {
@@ -1106,8 +1196,15 @@ const confirmDiagnosisPicker = async () => {
     return
   }
   diagnosisPickerVisible.value = false
+  diagnosisForm.value.detailLevel = diagnosisPickerForm.value.detailLevel || 'detailed'
+  diagnosisForm.value.anomalyType = diagnosisPickerForm.value.anomalyType || 'fluctuation'
   const metricField = fields.value.find(item => item.columnName === diagnosisPickerForm.value.metricField)
   const timeField = fields.value.find(item => item.columnName === diagnosisPickerForm.value.timeField)
+  if (diagnosisEntryContext.value?.source === 'dashboard') {
+    await runDashboardDiagnosisWithPicker(diagnosisEntryContext.value, metricField, timeField)
+    diagnosisEntryContext.value = null
+    return
+  }
   diagnosisLoading.value = true
   startDiagnosisProgressV2()
   try {
@@ -1128,8 +1225,8 @@ const confirmDiagnosisPicker = async () => {
           dimension: diagnosisPickerForm.value.dimensionFields.map(column => fieldLabel(column)).join('、')
         }
       },
-      detailLevel: diagnosisForm.value.detailLevel || 'detailed',
-      anomalyType: diagnosisForm.value.anomalyType || 'fluctuation'
+      detailLevel: diagnosisPickerForm.value.detailLevel || 'detailed',
+      anomalyType: diagnosisPickerForm.value.anomalyType || 'fluctuation'
     }))
     completeDiagnosisProgressV2(
       currentDiagnosis.value?.reasoningLogs || [],
@@ -1143,6 +1240,7 @@ const confirmDiagnosisPicker = async () => {
     ElMessage.error(error.message || '诊断报告生成失败')
   } finally {
     diagnosisLoading.value = false
+    diagnosisEntryContext.value = null
   }
 }
 
@@ -1264,6 +1362,18 @@ const notifyDiagnosisResult = (
   ElMessage.warning(`${fallbackText}。${resolveDiagnosisFallbackReason(diagnosis)}`)
 }
 
+const openDiagnosisPicker = (payload = {}) => {
+  diagnosisEntryContext.value = payload.context || null
+  diagnosisPickerForm.value = {
+    metricField: payload.metricField || '',
+    dimensionFields: payload.dimensionFields || [],
+    timeField: payload.timeField || '',
+    detailLevel: payload.detailLevel || diagnosisForm.value.detailLevel || 'detailed',
+    anomalyType: payload.anomalyType || diagnosisForm.value.anomalyType || 'fluctuation'
+  }
+  diagnosisPickerVisible.value = true
+}
+
 const captureChartSnapshot = (analysis) => {
   const instance = ensureChatChartInstance()
   return {
@@ -1272,6 +1382,9 @@ const captureChartSnapshot = (analysis) => {
   data: analysis?.data || [],
   generatedSql: analysis?.sql || analysis?.sourceSql || '',
   sourceQuestion: analysis?.sourceQuestion || '',
+  sourceRoute: 'chat',
+  sourceRecordCount: analysis?.data?.length || 0,
+  capturedAt: new Date().toISOString(),
   imageDataUrl: instance?.getDataURL
     ? instance.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#ffffff' })
     : ''
@@ -1299,6 +1412,78 @@ const resolveFieldByAnyName = (names = [], fieldType = '') => {
       .filter(Boolean)
     return wanted.some(name => localNames.includes(name))
   }) || null
+}
+
+const runDashboardDiagnosisWithPicker = async (context, metricField, timeField) => {
+  const card = context.card || {}
+  const snapshot = context.snapshot || {}
+  const tableName = context.tableName
+  const sourceData = context.sourceData || []
+  const fieldMapping = context.fieldMapping || {}
+  const dimensionField = fields.value.find(item => item.columnName === diagnosisPickerForm.value.dimensionFields?.[0])
+
+  diagnosisLoading.value = true
+  startDiagnosisProgressV2({
+    source: 'dashboard',
+    title: card?.title || '看板图表诊断'
+  })
+  try {
+    currentDiagnosis.value = unwrap(await axios.post(`${API_BASE}/api/diagnosis/run`, {
+      tableName,
+      metricField: diagnosisPickerForm.value.metricField,
+      dimensionFields: diagnosisPickerForm.value.dimensionFields || [],
+      timeField: diagnosisPickerForm.value.timeField || null,
+      sourceQuestion: card?.title || snapshot?.sourceQuestion || '',
+      sourceSql: card?.sql || snapshot?.sql || snapshot?.generatedSql || '',
+      chartType: card?.chartType || snapshot?.chartType || 'bar',
+      chartSnapshot: {
+        ...snapshot,
+        title: card?.title || snapshot?.title || '看板图表诊断',
+        chartType: card?.chartType || snapshot?.chartType || 'bar',
+        tableName,
+        data: sourceData,
+        generatedSql: card?.sql || snapshot?.sql || snapshot?.generatedSql || '',
+        sourceQuestion: card?.title || snapshot?.sourceQuestion || '',
+        imageDataUrl: context.imageDataUrl || snapshot?.imageDataUrl || '',
+        sourceRoute: 'dashboard',
+        dashboardId: card?.dashboardId || null,
+        dashboardName: card?.dashboardName || '',
+        cardId: card?.cardId || card?._renderKey || '',
+        cardTitle: card?.title || '',
+        sourceRecordCount: sourceData.length,
+        capturedAt: new Date().toISOString(),
+        fieldMapping: {
+          ...fieldMapping,
+          metric: metricField?.displayName || diagnosisPickerForm.value.metricField,
+          dimension: (diagnosisPickerForm.value.dimensionFields || []).map(column => fieldLabel(column)).join('、')
+        }
+      },
+      sourceRoute: 'dashboard',
+      dashboardId: card?.dashboardId || null,
+      dashboardName: card?.dashboardName || '',
+      cardId: card?.cardId || card?._renderKey || '',
+      cardTitle: card?.title || '',
+      detailLevel: diagnosisPickerForm.value.detailLevel || 'detailed',
+      anomalyType: diagnosisPickerForm.value.anomalyType || 'fluctuation',
+      question: `基于看板图表「${card?.title || '未命名图表'}」生成智能诊断报告`
+    }))
+    completeDiagnosisProgressV2(
+      currentDiagnosis.value?.reasoningLogs || [],
+      currentDiagnosis.value?.graphRagRuntime,
+      currentDiagnosis.value
+    )
+    notifyDiagnosisResult(
+      currentDiagnosis.value,
+      '已根据看板图表生成智能诊断报告并写入 Neo4j',
+      '已根据看板图表生成智能诊断结果（降级模式，未写入 Neo4j）'
+    )
+    await loadDiagnosisReports()
+    activeModule.value = 'diagnosis'
+  } catch (error) {
+    ElMessage.error(error.message || '看板诊断报告生成失败')
+  } finally {
+    diagnosisLoading.value = false
+  }
 }
 
 const diagnoseFromDashboardCard = async (card, imageDataUrl = '') => {
@@ -1336,67 +1521,12 @@ const diagnoseFromDashboardCard = async (card, imageDataUrl = '') => {
   const sourceData = Array.isArray(card?.data) && card.data.length
     ? card.data
     : Array.isArray(snapshot?.data) ? snapshot.data : []
-
-  diagnosisLoading.value = true
-  startDiagnosisProgressV2({
-    source: 'dashboard',
-    title: card?.title || '看板图表诊断'
+  openDiagnosisPicker({
+    metricField: metricField.columnName,
+    dimensionFields: dimensionField ? [dimensionField.columnName] : [],
+    timeField: timeField ? timeField.columnName : '',
+    context: { source: 'dashboard', card, snapshot, tableName, fieldMapping, sourceData, imageDataUrl }
   })
-  try {
-    currentDiagnosis.value = unwrap(await axios.post(`${API_BASE}/api/diagnosis/run`, {
-      tableName,
-      metricField: metricField.columnName,
-      dimensionFields: dimensionField ? [dimensionField.columnName] : [],
-      timeField: timeField ? timeField.columnName : null,
-      sourceQuestion: card?.title || snapshot?.sourceQuestion || '',
-      sourceSql: card?.sql || snapshot?.sql || snapshot?.generatedSql || '',
-      chartType: card?.chartType || snapshot?.chartType || 'bar',
-      chartSnapshot: {
-        ...snapshot,
-        title: card?.title || snapshot?.title || '看板图表诊断',
-        chartType: card?.chartType || snapshot?.chartType || 'bar',
-        tableName,
-        data: sourceData,
-        generatedSql: card?.sql || snapshot?.sql || snapshot?.generatedSql || '',
-        sourceQuestion: card?.title || snapshot?.sourceQuestion || '',
-        imageDataUrl: imageDataUrl || snapshot?.imageDataUrl || '',
-        sourceRoute: 'dashboard',
-        dashboardId: card?.dashboardId || null,
-        dashboardName: card?.dashboardName || '',
-        cardId: card?.cardId || card?._renderKey || '',
-        cardTitle: card?.title || '',
-        fieldMapping: {
-          ...fieldMapping,
-          metric: metricField.displayName || metricField.columnName,
-          dimension: dimensionField?.displayName || dimensionField?.columnName || ''
-        }
-      },
-      sourceRoute: 'dashboard',
-      dashboardId: card?.dashboardId || null,
-      dashboardName: card?.dashboardName || '',
-      cardId: card?.cardId || card?._renderKey || '',
-      cardTitle: card?.title || '',
-      detailLevel: diagnosisForm.value.detailLevel || 'detailed',
-      anomalyType: diagnosisForm.value.anomalyType || 'fluctuation',
-      question: `基于看板图表「${card?.title || '未命名图表'}」生成智能诊断报告`
-    }))
-    completeDiagnosisProgressV2(
-      currentDiagnosis.value?.reasoningLogs || [],
-      currentDiagnosis.value?.graphRagRuntime,
-      currentDiagnosis.value
-    )
-    notifyDiagnosisResult(
-      currentDiagnosis.value,
-      '已根据看板图表生成智能诊断报告并写入 Neo4j',
-      '已根据看板图表生成智能诊断结果（降级模式，未写入 Neo4j）'
-    )
-    await loadDiagnosisReports()
-    activeModule.value = 'diagnosis'
-  } catch (error) {
-    ElMessage.error(error.message || '看板诊断报告生成失败')
-  } finally {
-    diagnosisLoading.value = false
-  }
 }
 
 const findAnalysisField = (displayName, fieldType) => {
@@ -1416,10 +1546,38 @@ const loadDiagnosisReportDetail = async (row) => {
   const detail = unwrap(await axios.get(`${API_BASE}/api/diagnosis/reports/${row.id}`))
   if (detail.resultJson) {
     const parsed = typeof detail.resultJson === 'string' ? JSON.parse(detail.resultJson) : detail.resultJson
-    currentDiagnosis.value = { ...parsed, id: detail.id, tableName: detail.tableName, bindingJson: detail.bindingJson, chartSnapshot: parseMaybeJson(parsed.chartSnapshot || detail.chartSnapshot) }
+    currentDiagnosis.value = {
+      ...parsed,
+      id: detail.id,
+      tableName: detail.tableName,
+      metricField: detail.metricField,
+      metricFieldLabel: detail.metricFieldLabel || parsed.metricFieldLabel,
+      dimensionFields: detail.dimensionFields,
+      dimensionFieldLabels: detail.dimensionFieldLabels || parsed.dimensionFieldLabels,
+      timeField: detail.timeField,
+      timeFieldLabel: detail.timeFieldLabel || parsed.timeFieldLabel,
+      sourceQuestion: detail.sourceQuestion,
+      sourceSql: detail.sourceSql,
+      bindingJson: detail.bindingJson,
+      chartSnapshot: parseMaybeJson(parsed.chartSnapshot || detail.chartSnapshot)
+    }
   } else {
     currentDiagnosis.value = { ...detail, chartSnapshot: parseMaybeJson(detail.chartSnapshot) }
   }
+}
+
+const deleteDiagnosisReports = async (ids = []) => {
+  const normalizedIds = (Array.isArray(ids) ? ids : [ids])
+    .map(id => Number(id))
+    .filter(id => Number.isFinite(id) && id > 0)
+  const uniqueIds = [...new Set(normalizedIds)]
+  if (!uniqueIds.length) return
+  await axios.post(`${API_BASE}/api/diagnosis/reports/delete`, { ids: uniqueIds }).then(unwrap)
+  if (currentDiagnosis.value?.id && uniqueIds.includes(Number(currentDiagnosis.value.id))) {
+    currentDiagnosis.value = null
+  }
+  ElMessage.success(uniqueIds.length > 1 ? `已删除 ${uniqueIds.length} 份诊断报告` : '诊断报告已删除')
+  await loadDiagnosisReports()
 }
 
 const parseMaybeJson = (value) => {
@@ -1466,6 +1624,56 @@ const restoreDiagnosisBinding = async (report) => {
     }
     renderChart(source.data, source.chartType || 'bar')
     messages.value.push({ role: 'system', content: `已回溯诊断报告《${report?.title || report?.id}》绑定的原始图表。`, sql: lastAnalysis.value.sql })
+  }
+}
+
+const regenerateDiagnosisReport = async (report, overrides = {}) => {
+  const detail = report?.resultJson ? report : unwrap(await axios.get(`${API_BASE}/api/diagnosis/reports/${report.id}`))
+  const parsed = detail.resultJson ? parseMaybeJson(detail.resultJson) : detail
+  const snapshot = parseMaybeJson(parsed?.chartSnapshot || detail?.chartSnapshot)
+  const binding = parseMaybeJson(detail?.bindingJson || parsed?.bindingJson)
+  const tableName = detail?.tableName || parsed?.tableName || binding?.tableName
+  const metricField = detail?.metricField || parsed?.metricField
+  if (!tableName || !metricField) {
+    ElMessage.warning('历史报告缺少表名或指标字段，无法重新生成')
+    return
+  }
+  selectedTableName.value = tableName
+  diagnosisLoading.value = true
+  startDiagnosisProgressV2({
+    source: binding?.route === 'dashboard' || snapshot?.sourceRoute === 'dashboard' ? 'dashboard' : 'chat',
+    title: detail?.title || parsed?.title || '历史报告重新生成'
+  })
+  try {
+    currentDiagnosis.value = unwrap(await axios.post(`${API_BASE}/api/diagnosis/run`, {
+      tableName,
+      metricField,
+      dimensionFields: parseMaybeJson(detail?.dimensionFields || parsed?.dimensionFields) || [],
+      timeField: detail?.timeField || parsed?.timeField || null,
+      sourceQuestion: detail?.sourceQuestion || parsed?.sourceQuestion || binding?.sourceQuestion || '',
+      sourceSql: detail?.sourceSql || parsed?.sourceSql || binding?.sourceSql || '',
+      chartType: snapshot?.chartType || binding?.chartType || 'bar',
+      chartSnapshot: snapshot || binding?.chartSnapshot || null,
+      sourceRoute: binding?.route || snapshot?.sourceRoute || 'chat',
+      dashboardId: binding?.dashboardId || snapshot?.dashboardId || null,
+      dashboardName: binding?.dashboardName || snapshot?.dashboardName || '',
+      cardId: binding?.cardId || snapshot?.cardId || '',
+      cardTitle: binding?.cardTitle || snapshot?.cardTitle || '',
+      detailLevel: overrides.detailLevel || detail?.detailLevel || parsed?.detailLevel || 'detailed',
+      anomalyType: overrides.anomalyType || detail?.anomalyType || parsed?.anomalyType || 'fluctuation',
+      question: detail?.sourceQuestion || parsed?.sourceQuestion || `重新生成诊断报告：${detail?.title || parsed?.title || tableName}`
+    }))
+    completeDiagnosisProgressV2(
+      currentDiagnosis.value?.reasoningLogs || [],
+      currentDiagnosis.value?.graphRagRuntime,
+      currentDiagnosis.value
+    )
+    notifyDiagnosisResult(currentDiagnosis.value, '历史诊断报告已重新生成并写入 Neo4j')
+    await loadDiagnosisReports()
+  } catch (error) {
+    ElMessage.error(error.message || '重新生成报告失败')
+  } finally {
+    diagnosisLoading.value = false
   }
 }
 
@@ -1610,8 +1818,28 @@ const finalizeUploadResult = async (resultCandidate = {}, uploadedTableName = ''
   await Promise.all([loadTables({ preferredTableName: resolvedTableName, keepCurrentSelection: true }), loadBusinessModels()])
 }
 
+const clearUploadProgressHideTimer = () => {
+  if (uploadProgressHideTimer) {
+    clearTimeout(uploadProgressHideTimer)
+    uploadProgressHideTimer = null
+  }
+}
+
+const hideCompletedUploadProgressSoon = () => {
+  clearUploadProgressHideTimer()
+  uploadProgressHideTimer = setTimeout(() => {
+    uploadProgress.value = {
+      ...uploadProgress.value,
+      visible: false
+    }
+    uploadTask.value = null
+    uploadProgressHideTimer = null
+  }, 3000)
+}
+
 const submitUpload = async () => {
   if (!uploadFile.value && !uploadFiles.value.length) return
+  clearUploadProgressHideTimer()
   uploading.value = true
   uploadTask.value = null
   uploadProgress.value = {
@@ -1667,6 +1895,7 @@ const submitUpload = async () => {
         ...(task?.tableName ? { tableName: task.tableName } : {})
       }, uploadedTableName)
     }
+    hideCompletedUploadProgressSoon()
     ElMessage.success('文件已解析入库')
   } catch (error) {
     uploadProgress.value = {
@@ -2694,8 +2923,19 @@ const searchGraph = async () => {
   }
 }
 
-const onKnowledgeDocChange = (file) => {
-  knowledgeDocFile.value = file.raw
+const onKnowledgeDocChange = async (file, fileList = []) => {
+  knowledgeDocUploadFiles.value = fileList
+  knowledgeDocFiles.value = fileList.map(item => item.raw || item).filter(Boolean)
+  knowledgeDocFile.value = knowledgeDocFiles.value[0] || file?.raw || null
+  if (knowledgeDocFiles.value.length && !knowledgeDocUploading.value) {
+    await uploadKnowledgeDoc()
+  }
+}
+
+const onKnowledgeDocRemove = (file, fileList = []) => {
+  knowledgeDocUploadFiles.value = fileList
+  knowledgeDocFiles.value = fileList.map(item => item.raw || item).filter(Boolean)
+  knowledgeDocFile.value = knowledgeDocFiles.value[0] || null
 }
 
 const loadKnowledgeDocs = async () => {
@@ -2703,13 +2943,27 @@ const loadKnowledgeDocs = async () => {
 }
 
 const uploadKnowledgeDoc = async () => {
-  if (!knowledgeDocFile.value) return ElMessage.warning('请选择 .txt 或 .md 知识文档')
-  const formData = new FormData()
-  formData.append('file', knowledgeDocFile.value)
-  await axios.post(`${API_BASE}/api/knowledge/docs/upload`, formData).then(unwrap)
-  ElMessage.success('知识文档已上传并切片')
-  knowledgeDocFile.value = null
-  await loadKnowledgeDocs()
+  const files = knowledgeDocFiles.value.length ? knowledgeDocFiles.value : (knowledgeDocFile.value ? [knowledgeDocFile.value] : [])
+  if (!files.length) return ElMessage.warning('请选择 .txt / .md / .pdf / .docx 知识文档或行业研报')
+  knowledgeDocUploading.value = true
+  try {
+    for (const file of files) {
+      const formData = new FormData()
+      formData.append('file', file)
+      await axios.post(`${API_BASE}/api/knowledge/docs/upload`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      }).then(unwrap)
+    }
+    ElMessage.success(`已上传 ${files.length} 个知识文档并切片`)
+    knowledgeDocFile.value = null
+    knowledgeDocFiles.value = []
+    knowledgeDocUploadFiles.value = []
+    await loadKnowledgeDocs()
+  } catch (error) {
+    ElMessage.error(error.message || '知识文档上传失败')
+  } finally {
+    knowledgeDocUploading.value = false
+  }
 }
 
 const indexKnowledgeDoc = async (doc) => {
@@ -2990,6 +3244,9 @@ provide('workbench', {
   graphSearchResult,
   graphLoading,
   knowledgeDocFile,
+  knowledgeDocFiles,
+  knowledgeDocUploadFiles,
+  knowledgeDocUploading,
   knowledgeDocs,
   auditRiskLevel,
   auditExecuteStatus,
@@ -3055,6 +3312,9 @@ provide('workbench', {
   loadPermissionCenter,
   loadAdminPermissionRequests,
   submitPermissionRequest,
+  handlePermissionResourceChange,
+  handlePermissionAttachmentChange,
+  prefillPermissionRequest,
   reviewPermission,
   permissionStatusType,
   permissionStatusText,
@@ -3081,6 +3341,8 @@ provide('workbench', {
   confirmDiagnosisPicker,
   loadDiagnosisReports,
   loadDiagnosisReportDetail,
+  deleteDiagnosisReports,
+  regenerateDiagnosisReport,
   exportDiagnosisReport,
   restoreDiagnosisBinding,
   unwrap,
@@ -3135,6 +3397,7 @@ provide('workbench', {
   rebuildGraph,
   searchGraph,
   onKnowledgeDocChange,
+  onKnowledgeDocRemove,
   loadKnowledgeDocs,
   uploadKnowledgeDoc,
   indexKnowledgeDoc,
@@ -3836,6 +4099,49 @@ provide('workbench', {
   grid-column: 1 / -1;
 }
 
+.permission-info-panel,
+.compliance-panel,
+.request-history-panel {
+  grid-column: span 1;
+}
+
+.tag-section {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.section-label {
+  width: 100%;
+  color: #374151;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.compliance-list {
+  margin: 0;
+  padding-left: 18px;
+  color: #374151;
+  line-height: 1.8;
+}
+
+.compliance-doc {
+  margin-top: 12px;
+}
+
+.request-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  gap: 0 14px;
+}
+
+.attachment-name {
+  margin-top: 8px;
+  color: #6b7280;
+  font-size: 12px;
+}
+
 .full-width {
   width: 100%;
 }
@@ -3917,6 +4223,7 @@ provide('workbench', {
   .graph-result-grid,
   .datasource-layout,
   .datasource-form,
+  .request-form-grid,
   .permission-grid,
   .permission-cards {
     grid-template-columns: 1fr;

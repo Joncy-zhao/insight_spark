@@ -35,6 +35,7 @@ public class AuthInterceptor implements HandlerInterceptor {
                 || uri.startsWith("/api/audit")
                 || uri.startsWith("/api/diagnosis")
                 || uri.startsWith("/api/knowledge")
+                || uri.startsWith("/api/knowledge-graph")
                 || uri.startsWith("/api/c");
 
         if (!loginRequired) {
@@ -72,7 +73,7 @@ public class AuthInterceptor implements HandlerInterceptor {
         return uri.startsWith("/api/datasource")
                 || uri.startsWith("/api/datasources")
                 || uri.startsWith("/api/audit")
-                || uri.startsWith("/api/knowledge")
+                || uri.startsWith("/api/knowledge-graph")
                 || uri.startsWith("/api/permission/admin")
                 || uri.startsWith("/api/c/admin");
     }

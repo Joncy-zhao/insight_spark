@@ -86,12 +86,14 @@ public class PythonAiService {
                                                          Map<String, Object> graphPath,
                                                          List<Map<String, Object>> docEvidence,
                                                          List<Map<String, Object>> queryRows,
+                                                         Map<String, String> fieldLabels,
                                                          String detailLevel,
                                                          String anomalyType) {
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("question", question);
         request.put("tableName", tableName);
         request.put("metricField", metricField);
+        request.put("fieldLabels", fieldLabels == null ? Map.of() : fieldLabels);
         request.put("dimensionFields", dimensionFields);
         request.put("timeField", timeField);
         request.put("queryRows", queryRows);

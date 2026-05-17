@@ -30,6 +30,7 @@ dependency-reduced-pom.xml
 
 # Logs
 logs/
+.run/
 *.log
 
 # Python
