@@ -926,24 +926,25 @@ public class SqlAuditService {
     }
 
     private String buildFieldMetaSql(String tableName, boolean official, boolean onlySensitive) {
-        String columnNameExpr = columnExpr(tableName, "column_name", "''");
-        String sourceFieldNameExpr = columnExpr(tableName, "source_field_name", columnNameExpr);
-        String tableNameExpr = columnExpr(tableName, "table_name", "''");
-        String datasourceIdExpr = columnExpr(tableName, "datasource_id", "0");
-        String columnCommentExpr = columnExpr(tableName, "column_comment", "''");
+        Map<String, Boolean> columns = tableColumnMap(tableName);
+        String columnNameExpr = columnExpr(columns, "column_name", "''");
+        String sourceFieldNameExpr = columnExpr(columns, "source_field_name", columnNameExpr);
+        String tableNameExpr = columnExpr(columns, "table_name", "''");
+        String datasourceIdExpr = columnExpr(columns, "datasource_id", "0");
+        String columnCommentExpr = columnExpr(columns, "column_comment", "''");
         String displayExpr = official
-                ? (hasColumn(tableName, "business_name")
+                ? (hasColumn(columns, "business_name")
                     ? "COALESCE(NULLIF(`business_name`, ''), NULLIF(" + columnCommentExpr + ", ''), " + columnNameExpr + ")"
                     : "COALESCE(NULLIF(" + columnCommentExpr + ", ''), " + columnNameExpr + ")")
-                : columnExpr(tableName, "display_name", columnNameExpr);
-        String commentExpr = hasColumn(tableName, "field_comment") ? "`field_comment`"
+                : columnExpr(columns, "display_name", columnNameExpr);
+        String commentExpr = hasColumn(columns, "field_comment") ? "`field_comment`"
                 : columnCommentExpr;
-        String synonymsExpr = columnExpr(tableName, "synonyms", "''");
-        String sensitiveExpr = columnExpr(tableName, "sensitive", "0");
+        String synonymsExpr = columnExpr(columns, "synonyms", "''");
+        String sensitiveExpr = columnExpr(columns, "sensitive", "0");
         String where = official
                 ? " WHERE " + datasourceIdExpr + " = ? AND " + tableNameExpr + " = ?"
                 : " WHERE " + tableNameExpr + " = ?";
-        if (onlySensitive && hasColumn(tableName, "sensitive")) {
+        if (onlySensitive && hasColumn(columns, "sensitive")) {
             where += " AND `sensitive` = 1";
         }
         return "SELECT " + columnNameExpr + " AS columnName, " + sourceFieldNameExpr + " AS sourceFieldName, "
@@ -952,8 +953,33 @@ public class SqlAuditService {
                 + sensitiveExpr + " AS sensitive FROM `" + tableName + "`" + where;
     }
 
+    private String columnExpr(Map<String, Boolean> columns, String columnName, String fallback) {
+        return hasColumn(columns, columnName) ? "`" + columnName + "`" : fallback;
+    }
+
+    private boolean hasColumn(Map<String, Boolean> columns, String columnName) {
+        return Boolean.TRUE.equals(columns.get(columnName));
+    }
+
     private String columnExpr(String tableName, String columnName, String fallback) {
         return hasColumn(tableName, columnName) ? "`" + columnName + "`" : fallback;
+    }
+
+    private Map<String, Boolean> tableColumnMap(String tableName) {
+        Map<String, Boolean> result = new java.util.HashMap<>();
+        try {
+            List<String> columns = jdbcTemplate.queryForList("""
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE() AND table_name = ?
+                    """, String.class, tableName);
+            for (String column : columns) {
+                result.put(Objects.toString(column, ""), true);
+            }
+        } catch (Exception ignored) {
+            // callers fall back to literal defaults when metadata cannot be loaded
+        }
+        return result;
     }
 
     private boolean hasColumn(String tableName, String columnName) {

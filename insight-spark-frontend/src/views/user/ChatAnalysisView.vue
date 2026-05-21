@@ -6,38 +6,67 @@
                 <h2>✨ 智能问答助理</h2>
                 <p>随时随地，像对话一样探索您的业务数据及图表</p>
               </div>
+              <el-button size="small" plain @click="businessDictionaryPanelVisible = true">
+                业务字典/公式维护
+              </el-button>
             </div>
 
             <div class="chat-datasource-bar">
-              <div class="chat-datasource-label">数据源</div>
-              <el-select
-                  v-model="selectedTableName"
-                  placeholder="Select data source"
-                  class="chat-datasource-select"
-                  clearable
-                  filterable
-              >
-                <el-option-group v-if="uploadTables.length" label="Upload tables">
-                  <el-option
-                      v-for="table in uploadTables"
-                      :key="table.tableName"
-                      :label="table.displayName"
-                      :value="table.tableName"
-                  />
-                </el-option-group>
-                <el-option-group v-if="officialQueryTables.length" label="Official tables">
-                  <el-option
-                      v-for="table in officialQueryTables"
-                      :key="table.tableName"
-                      :label="table.displayName"
-                      :value="table.tableName"
-                  />
-                </el-option-group>
-              </el-select>
-              <div class="chat-datasource-actions">
-                <el-button size="small" plain @click="businessDictionaryPanelVisible = true">
-                  业务字典/公式维护
-                </el-button>
+              <div class="chat-filter-grid">
+                <div class="chat-filter-field">
+                  <div class="chat-datasource-label">数据源</div>
+                  <el-select
+                      v-model="selectedTableName"
+                      placeholder="请选择数据源"
+                      class="chat-toolbar-select"
+                      popper-class="chat-select-dropdown"
+                      clearable
+                      filterable
+                  >
+                    <el-option-group v-if="uploadTables.length" label="上传数据表">
+                      <el-option
+                          v-for="table in uploadTables"
+                          :key="table.tableName"
+                          :label="formatTableOptionLabel(table)"
+                          :value="table.tableName"
+                      />
+                    </el-option-group>
+                    <el-option-group v-if="officialQueryTables.length" label="官方数据表">
+                      <el-option
+                          v-for="table in officialQueryTables"
+                          :key="table.tableName"
+                          :label="formatTableOptionLabel(table)"
+                          :value="table.tableName"
+                      />
+                    </el-option-group>
+                  </el-select>
+                  <div class="chat-selection-hint" :title="selectedTableSummary || ''">
+                    {{ selectedTableSummary || '请选择要分析的数据源' }}
+                  </div>
+                </div>
+                <div class="chat-filter-field">
+                  <div class="chat-datasource-label">业务模型</div>
+                  <el-select
+                      :model-value="selectedChatBusinessModelId"
+                      placeholder="请选择业务模型"
+                      class="chat-toolbar-select"
+                      popper-class="chat-select-dropdown"
+                      clearable
+                      filterable
+                      :disabled="!selectedTableName"
+                      @change="handleChatBusinessModelChange"
+                  >
+                    <el-option
+                        v-for="model in chatBusinessModelOptions"
+                        :key="model.id"
+                        :label="formatBusinessModelLabel(model)"
+                        :value="model.id"
+                    />
+                  </el-select>
+                  <div class="chat-selection-hint" :title="selectedBusinessModelSummary || ''">
+                    {{ selectedBusinessModelSummary || businessModelEmptyHint }}
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -208,13 +237,28 @@
               </div>
             </el-card>
 
-            <div v-if="lastAnalysis?.graphContext?.length" class="graph-context">
-              <h3>GraphRAG 上下文</h3>
-              <ul class="suggestion-list">
-                <li v-for="item in lastAnalysis.graphContext" :key="item.nodeKey || item">
-                  {{ item.label || item }}：{{ item.content || item.sourceId || '' }}
-                </li>
-              </ul>
+          </div>
+          <div v-if="lastAnalysis?.graphContext?.length" class="panel graph-context-panel">
+            <div class="panel-header">
+              <div>
+                <h2>GraphRAG 上下文</h2>
+                <p>展示本次问答召回的数据表、字段、公式和知识片段。</p>
+              </div>
+            </div>
+            <div class="graph-context-list">
+              <div
+                  v-for="(item, index) in lastAnalysis.graphContext"
+                  :key="item.nodeKey || item.sourceId || index"
+                  class="graph-context-item"
+              >
+                <div class="graph-context-meta">
+                  <div class="graph-context-name">{{ formatGraphContextTitle(item) }}</div>
+                  <div v-if="formatGraphContextSource(item)" class="graph-context-sub">
+                    {{ formatGraphContextSource(item) }}
+                  </div>
+                </div>
+                <div class="graph-context-content">{{ formatGraphContextContent(item) }}</div>
+              </div>
             </div>
           </div>
           <el-dialog v-model="pinDialogVisible" title="钉入我的看板" width="520px">
@@ -252,7 +296,7 @@
 </template>
 
 <script setup>
-import { inject } from 'vue'
+import { computed, inject } from 'vue'
 import BusinessDictionaryView from '../../components/BusinessDictionaryView.vue'
 
 const {
@@ -353,6 +397,9 @@ const {
   selectTable,
   selectedDatasourceId,
   selectedTableName,
+  selectedChatBusinessModelId,
+  chatBusinessModelOptions,
+  businessModels,
   sendQuestion,
   regenerateLastAnalysis,
   openPinDialog,
@@ -372,41 +419,162 @@ const {
   toggleDatasource,
   unwrap,
   updateSchemaField,
+  handleChatBusinessModelChange,
   uploadFile,
   uploadResult,
   uploading,
   userQuestion,
   xAxisData
 } = inject('workbench')
+
+const formatTableOptionLabel = (table) => {
+  const displayName = String(table?.displayName || '').trim()
+  const tableName = String(table?.tableName || '').trim()
+  if (displayName && tableName && displayName !== tableName) {
+    return `${displayName}（${tableName}）`
+  }
+  return displayName || tableName || '未命名数据源'
+}
+
+const formatBusinessModelLabel = (model) => {
+  const modelName = String(model?.modelName || '').trim()
+  const tableName = String(model?.tableName || '').trim()
+  if (modelName && tableName) {
+    return `${modelName}（${tableName}）`
+  }
+  return modelName || `模型 ${model?.id ?? ''}`
+}
+
+const selectedTableSummary = computed(() => {
+  const matched = [...(uploadTables?.value || []), ...(officialQueryTables?.value || [])]
+    .find(item => String(item?.tableName || '') === String(selectedTableName?.value || ''))
+  return matched ? formatTableOptionLabel(matched) : ''
+})
+
+const selectedBusinessModelSummary = computed(() => {
+  const matched = (businessModels?.value || [])
+    .find(item => String(item?.id) === String(selectedChatBusinessModelId?.value ?? ''))
+  return matched ? formatBusinessModelLabel(matched) : ''
+})
+
+const businessModelEmptyHint = computed(() => {
+  if (!selectedTableName?.value) {
+    return '请先选择数据源'
+  }
+  if (!chatBusinessModelOptions?.value?.length) {
+    return '当前数据源下暂无业务模型'
+  }
+  return '请选择要修改的业务模型'
+})
+
+const formatGraphContextTitle = (item) => {
+  if (typeof item === 'string') return item
+  return String(item?.label || item?.name || item?.nodeKey || item?.sourceId || '上下文片段')
+}
+
+const formatGraphContextSource = (item) => {
+  if (!item || typeof item === 'string') return ''
+  const parts = [
+    item.type || item.nodeType,
+    item.tableName,
+    item.sourceId
+  ].filter(Boolean)
+  return parts.join(' · ')
+}
+
+const formatGraphContextContent = (item) => {
+  if (typeof item === 'string') return item
+  const content = String(item?.content || item?.description || item?.summary || '').trim()
+  if (content) return content
+  const pairs = Object.entries(item || {})
+    .filter(([key, value]) => !['label', 'name', 'nodeKey', 'sourceId', 'type', 'nodeType', 'tableName'].includes(key) && value !== null && value !== undefined && value !== '')
+    .map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(', ') : value}`)
+  return pairs.join('；') || '暂无详细内容'
+}
 </script>
 <style scoped>
 .chart-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
+  justify-content: flex-end;
+}
+.chat-panel .panel-header {
+  align-items: center;
+  margin-bottom: 10px;
+}
+.chat-panel .panel-header > div {
+  min-width: 0;
+}
+.chat-panel .panel-header :deep(.el-button) {
+  flex: 0 0 auto;
+}
+.chat-layout {
+  min-height: 0;
+}
+.chat-panel {
+  min-height: 0;
 }
 .chat-datasource-bar {
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+.chat-filter-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+.chat-filter-field {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
   align-items: center;
-  gap: 10px;
-  margin-bottom: 12px;
+  gap: 6px;
 }
 .chat-datasource-label {
-  flex: 0 0 auto;
-  color: #6b7280;
-  font-size: 13px;
+  margin: 0;
+  color: #475467;
+  font-size: 12px;
+  line-height: 1.4;
+  font-weight: 600;
 }
-.chat-datasource-select {
-  width: 320px;
-  max-width: 100%;
+.chat-toolbar-select {
+  width: 100%;
 }
-.chat-datasource-actions {
-  margin-left: auto;
+.chat-toolbar-select :deep(.el-select__wrapper) {
+  min-height: 30px;
+}
+.chat-toolbar-select :deep(.el-select__selected-item),
+.chat-toolbar-select :deep(.el-select__placeholder) {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-selection-hint {
+  grid-column: 2;
+  margin-top: -5px;
+  color: #98a2b3;
+  font-size: 11px;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .ask-bar {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-top: 10px;
 }
 .ask-bar :deep(.el-input) {
   flex: 1;
@@ -415,10 +583,16 @@ const {
   flex: 0 0 auto;
 }
 .recent-queries {
+  flex: 0 1 300px;
+  display: flex;
+  flex-direction: column;
   margin-top: 10px;
+  min-height: 0;
+  padding-top: 8px;
+  border-top: 1px solid #eef2f7;
 }
 .recent-title {
-  margin-bottom: 8px;
+  margin-bottom: 6px;
   color: #6b7280;
   font-size: 12px;
 }
@@ -426,15 +600,20 @@ const {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 .recent-toolbar :deep(.el-input) {
   flex: 1;
 }
 .recent-list {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  align-content: flex-start;
+  gap: 6px;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 .recent-empty {
   color: #9ca3af;
@@ -471,8 +650,51 @@ const {
   color: #ef4444;
 }
 .recent-pagination {
-  margin-top: 10px;
+  margin-top: 8px;
   justify-content: flex-end;
+}
+.graph-context-panel {
+  grid-column: 1 / -1;
+}
+.graph-context-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+}
+.graph-context-item {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+.graph-context-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.graph-context-name {
+  color: #1f2a44;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.graph-context-sub {
+  flex: 0 1 auto;
+  color: #64748b;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.graph-context-content {
+  color: #334155;
+  line-height: 1.6;
+  white-space: normal;
+  word-break: break-word;
 }
 .thinking-details {
   margin-top: 8px;
@@ -505,5 +727,14 @@ const {
 .sql-head .sql-title {
   padding: 0;
   border: 0;
+}
+
+@media (max-width: 900px) {
+  .recent-toolbar {
+    flex-wrap: wrap;
+  }
+  .recent-toolbar :deep(.el-input) {
+    flex-basis: 100%;
+  }
 }
 </style>

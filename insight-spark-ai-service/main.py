@@ -1,4 +1,4 @@
-﻿from collections import defaultdict
+from collections import defaultdict
 from math import sqrt
 from typing import Any
 import json
@@ -87,6 +87,25 @@ class GraphRagDiagnoseRequest(BaseModel):
     anomalyType: str = "fluctuation"
 
 
+class BusinessModelSemanticRequest(BaseModel):
+    question: str
+    requirement: str = ""
+    tableName: str
+    fields: list[FieldMeta]
+    previewRows: list[dict[str, Any]] = []
+
+
+class BusinessModelPatchRequest(BaseModel):
+    question: str
+    tableName: str
+    modelName: str = ""
+    modelRequirement: str = ""
+    dictionaryEntries: list[dict[str, Any]] = []
+    metricDefinitions: list[dict[str, Any]] = []
+    fields: list[FieldMeta]
+    previewRows: list[dict[str, Any]] = []
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -142,6 +161,38 @@ def text_to_sql(payload: TextToSqlRequest) -> dict[str, Any]:
         "graphDecision": graph_plan["decision"],
         "model": "rule-based-fallback",
     }
+
+
+@app.post("/ai/business-model-semantic")
+def business_model_semantic(payload: BusinessModelSemanticRequest) -> dict[str, Any]:
+    requirement = (payload.requirement or payload.question or "").strip()
+    if not requirement:
+        raise HTTPException(status_code=400, detail="建模需求不能为空。")
+    if not payload.fields:
+        raise HTTPException(status_code=400, detail="当前数据表没有字段元信息，请先上传有效数据表。")
+
+    if OPENAI_API_KEY:
+        ai_result = call_openai_business_model_semantic(payload)
+        if ai_result:
+            return normalize_business_model_semantic_result(ai_result, payload)
+
+    return build_rule_based_business_model_semantic_result(payload)
+
+
+@app.post("/ai/business-model-patch")
+def business_model_patch(payload: BusinessModelPatchRequest) -> dict[str, Any]:
+    question = (payload.question or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="模型修改指令不能为空。")
+    if not payload.fields:
+        raise HTTPException(status_code=400, detail="当前数据表没有字段元信息，无法执行模型修改。")
+
+    if OPENAI_API_KEY:
+        ai_result = call_openai_business_model_patch(payload)
+        if ai_result:
+            return normalize_business_model_patch_result(ai_result, payload)
+
+    return build_rule_based_business_model_patch_result(payload)
 
 def build_dimension_expression(question: str, dimension: FieldMeta) -> str:
     column = f"`{dimension.columnName}`"
@@ -966,6 +1017,343 @@ def call_openai_text_to_sql(payload: TextToSqlRequest) -> dict[str, Any] | None:
         return None
 
 
+def call_openai_business_model_semantic(payload: BusinessModelSemanticRequest) -> dict[str, Any] | None:
+    prompt = build_business_model_semantic_prompt(payload)
+    body = json.dumps({
+        "model": OPENAI_MODEL,
+        "messages": [
+            {"role": "system", "content": (
+                "你是企业级零代码业务建模专家。\n"
+                "你的任务：根据用户的建模需求、字段元信息和样本数据，判断是否需要生成业务字典与业务公式。\n"
+                "必须遵守：\n"
+                "1. 只输出严格 JSON，不要输出解释性文本。\n"
+                "2. 只有当用户语义里明确表达了字典/术语/同义词/映射需求时，才生成 dictionaryEntries。\n"
+                "3. 只有当用户语义里明确表达了公式/指标/衍生指标/比率/计算口径需求时，才生成 metricDefinitions。\n"
+                "4. 如果只是普通“创建模型”，dictionaryEntries 和 metricDefinitions 必须返回空数组。\n"
+                "5. field 必须绑定到真实字段 columnName；formula 里尽量使用真实字段 columnName。\n"
+                "6. 不确定时宁可少生成，不要臆造。"
+            )},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.1,
+    }).encode("utf-8")
+
+    req = request.Request(
+        f"{OPENAI_BASE_URL}/chat/completions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=30) as resp:
+            payload_json = json.loads(resp.read().decode("utf-8"))
+        content = payload_json["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+        if not isinstance(parsed, dict):
+            return None
+        parsed.setdefault("model", OPENAI_MODEL)
+        parsed.setdefault("reasoning", ["由大模型完成业务模型语义拆解"])
+        return parsed
+    except (error.URLError, error.HTTPError, KeyError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def call_openai_business_model_patch(payload: BusinessModelPatchRequest) -> dict[str, Any] | None:
+    prompt = build_business_model_patch_prompt(payload)
+    body = json.dumps({
+        "model": OPENAI_MODEL,
+        "messages": [
+            {"role": "system", "content": (
+                "你是企业级零代码业务建模维护专家。\n"
+                "你的任务：把用户对已有业务模型的自然语言修改要求，转换为可执行的结构化补丁。\n"
+                "必须遵守：\n"
+                "1. 只输出严格 JSON，不要输出解释性文本。\n"
+                "2. operation 只允许 targetType 为 dictionaryEntry 或 metricDefinition。\n"
+                "3. action 只允许 UPSERT 或 DELETE。\n"
+                "4. field 必须尽量绑定到真实字段 columnName，formula 尽量使用真实字段 columnName。\n"
+                "5. 如果无法识别到明确修改动作，返回空 operations，不要臆造。\n"
+                "6. 支持从一句话里识别多条字典映射和多条公式修改。"
+            )},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.1,
+    }).encode("utf-8")
+
+    req = request.Request(
+        f"{OPENAI_BASE_URL}/chat/completions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=30) as resp:
+            payload_json = json.loads(resp.read().decode("utf-8"))
+        content = payload_json["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+        if not isinstance(parsed, dict):
+            return None
+        parsed.setdefault("model", OPENAI_MODEL)
+        parsed.setdefault("reasoning", ["由大模型完成业务模型修改语义拆解"])
+        return parsed
+    except (error.URLError, error.HTTPError, KeyError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def build_business_model_semantic_prompt(payload: BusinessModelSemanticRequest) -> str:
+    fields_text = "\n".join(
+        f"- columnName={field.columnName}, displayName={field.displayName}, fieldType={field.fieldType}, fieldComment={field.fieldComment or ''}"
+        for field in payload.fields
+    )
+    preview_text = "\n".join(
+        f"- {json.dumps(row, ensure_ascii=False)}" for row in payload.previewRows[:5]
+    ) or "暂无预览样本"
+    return (
+        f"用户原始需求：{payload.question}\n"
+        f"当前建模需求：{payload.requirement or payload.question}\n"
+        f"目标表：{payload.tableName}\n"
+        f"字段信息：\n{fields_text}\n\n"
+        f"预览样本：\n{preview_text}\n\n"
+        "请输出严格 JSON，格式如下：\n"
+        "{\n"
+        '  "requirement": "",\n'
+        '  "modelName": "",\n'
+        '  "dictionaryEntries": [{"term": "", "field": "", "synonyms": ""}],\n'
+        '  "metricDefinitions": [{"name": "", "field": "", "aggregation": "SUM|COUNT|AVG|MAX|MIN", "formula": ""}],\n'
+        '  "reasoning": ["", ""],\n'
+        '  "confidence": 0.0\n'
+        "}\n"
+        "规则：\n"
+        "0. modelName 必须是根据用户真实业务主题提炼出的简短模型名，通常 6 到 14 个中文字符，不要照抄整句需求，不要包含“基于当前表”“帮我”“创建一个”等动作描述。\n"
+        "1. 如果用户明确写了“业务字典/字典/同义词/映射/术语”，就抽取 dictionaryEntries。\n"
+        "2. 如果用户明确写了“业务公式/指标公式/新增公式/利润率/转化率/同比/环比/核心指标包含”，就抽取 metricDefinitions。\n"
+        "3. 如果用户只是在描述分析目标，没有明确要求字典/公式，则对应数组返回空数组。\n"
+        "4. 支持中文逗号、顿号、分号分隔的多条词条/多条公式。\n"
+        "5. field 请尽量绑定到真实 columnName，例如 sales_amt、profit、qty、region。\n"
+        "6. formula 请使用真实 columnName，例如 profit / sales_amt。"
+    )
+
+
+def build_business_model_patch_prompt(payload: BusinessModelPatchRequest) -> str:
+    fields_text = "\n".join(
+        f"- columnName={field.columnName}, displayName={field.displayName}, fieldType={field.fieldType}, fieldComment={field.fieldComment or ''}"
+        for field in payload.fields
+    )
+    preview_text = "\n".join(
+        f"- {json.dumps(row, ensure_ascii=False)}" for row in payload.previewRows[:5]
+    ) or "暂无预览样本"
+    dictionary_text = json.dumps(payload.dictionaryEntries[:20], ensure_ascii=False)
+    metric_text = json.dumps(payload.metricDefinitions[:20], ensure_ascii=False)
+    return (
+        f"用户修改指令：{payload.question}\n"
+        f"当前模型名：{payload.modelName}\n"
+        f"当前模型需求：{payload.modelRequirement}\n"
+        f"当前模型字典：{dictionary_text}\n"
+        f"当前模型公式：{metric_text}\n"
+        f"目标表：{payload.tableName}\n"
+        f"字段信息：\n{fields_text}\n\n"
+        f"预览样本：\n{preview_text}\n\n"
+        "请输出严格 JSON，格式如下：\n"
+        "{\n"
+        '  "intent": "PATCH_MODEL",\n'
+        '  "operations": [\n'
+        '    {"targetType": "metricDefinition", "action": "UPSERT", "name": "", "field": "", "aggregation": "SUM|COUNT|AVG|MAX|MIN", "formula": ""},\n'
+        '    {"targetType": "dictionaryEntry", "action": "UPSERT", "term": "", "field": "", "synonyms": ""}\n'
+        "  ],\n"
+        '  "reasoning": ["", ""],\n'
+        '  "confidence": 0.0\n'
+        "}\n"
+        "规则：\n"
+        "1. 新增或修改指标/公式，输出 targetType=metricDefinition。\n"
+        "2. 新增或修改业务字典/术语映射，输出 targetType=dictionaryEntry。\n"
+        "3. 如果用户表达“删除/移除/去掉”，对应 action=DELETE。\n"
+        "4. 修改已有公式时，name 必须尽量对齐已有指标名。\n"
+        "5. 一句话中可能包含多条操作，要全部拆开。\n"
+        "6. 若没有可执行修改动作，operations 返回空数组。"
+    )
+
+
+def normalize_business_model_semantic_result(parsed: dict[str, Any], payload: BusinessModelSemanticRequest) -> dict[str, Any]:
+    requirement = str(parsed.get("requirement") or payload.requirement or payload.question).strip()
+    model_name = infer_business_model_name(
+        str(parsed.get("modelName") or ""),
+        requirement,
+        payload.question,
+    )
+    dictionary_entries = normalize_dictionary_entries(parsed.get("dictionaryEntries"), payload.fields)
+    metric_definitions = normalize_metric_definitions(parsed.get("metricDefinitions"), payload.fields)
+    reasoning = parsed.get("reasoning") if isinstance(parsed.get("reasoning"), list) else []
+    confidence = read_float(parsed.get("confidence"))
+    return {
+        "requirement": requirement,
+        "modelName": model_name,
+        "dictionaryEntries": dictionary_entries,
+        "metricDefinitions": metric_definitions,
+        "reasoning": [str(item) for item in reasoning if str(item).strip()][:6],
+        "confidence": confidence,
+        "model": parsed.get("model") or OPENAI_MODEL,
+    }
+
+
+def normalize_business_model_patch_result(parsed: dict[str, Any], payload: BusinessModelPatchRequest) -> dict[str, Any]:
+    operations = normalize_patch_operations(parsed.get("operations"), payload.fields)
+    reasoning = parsed.get("reasoning") if isinstance(parsed.get("reasoning"), list) else []
+    confidence = read_float(parsed.get("confidence"))
+    return {
+        "intent": "PATCH_MODEL",
+        "operations": operations,
+        "reasoning": [str(item) for item in reasoning if str(item).strip()][:8],
+        "confidence": confidence,
+        "model": parsed.get("model") or OPENAI_MODEL,
+    }
+
+
+def build_rule_based_business_model_semantic_result(payload: BusinessModelSemanticRequest) -> dict[str, Any]:
+    requirement = (payload.requirement or payload.question).strip()
+    dictionary_entries: list[dict[str, Any]] = []
+    metric_definitions: list[dict[str, Any]] = []
+    reasoning = ["AI 语义拆解不可用，已使用保守规则兜底"]
+
+    if has_dictionary_intent(payload.question):
+        dictionary_entries = build_dictionary_entries_from_question(payload.question, payload.fields)
+        if dictionary_entries:
+            reasoning.append(f"识别到 {len(dictionary_entries)} 条业务字典映射")
+
+    if has_formula_intent(payload.question):
+        metric_definitions = build_metric_entries_from_question(payload.question, payload.fields)
+        if metric_definitions:
+            reasoning.append(f"识别到 {len(metric_definitions)} 条业务公式/指标定义")
+
+    return {
+        "requirement": requirement,
+        "modelName": infer_business_model_name("", requirement, payload.question),
+        "dictionaryEntries": dictionary_entries,
+        "metricDefinitions": metric_definitions,
+        "reasoning": reasoning,
+        "confidence": 0.45 if dictionary_entries or metric_definitions else 0.35,
+        "model": "rule-based-business-model-fallback",
+    }
+
+
+def build_rule_based_business_model_patch_result(payload: BusinessModelPatchRequest) -> dict[str, Any]:
+    operations = build_patch_operations_from_question(
+        payload.question,
+        payload.fields,
+        payload.dictionaryEntries,
+        payload.metricDefinitions,
+    )
+    reasoning = ["AI 模型修改语义拆解不可用，已使用规则兜底"]
+    if operations:
+        reasoning.append(f"识别到 {len(operations)} 条模型修改操作")
+    else:
+        reasoning.append("未识别到明确的字典或公式修改动作")
+    return {
+        "intent": "PATCH_MODEL",
+        "operations": operations,
+        "reasoning": reasoning,
+        "confidence": 0.52 if operations else 0.3,
+        "model": "rule-based-business-model-patch-fallback",
+    }
+
+
+def infer_business_model_name(ai_name: str, requirement: str, question: str) -> str:
+    candidate = clean_business_model_name(ai_name)
+    if candidate:
+        return ensure_model_suffix(candidate)
+
+    for source in [requirement, question]:
+        candidate = extract_business_subject(source)
+        if candidate:
+            return ensure_model_suffix(candidate)
+
+    return "零代码业务模型"
+
+
+def extract_business_subject(text: str) -> str:
+    source = str(text or "").strip()
+    if not source:
+        return ""
+
+    source = re.sub(r"[\r\n\t]+", " ", source)
+    source = re.sub(r"[“”\"'`<>]", "", source)
+    source = re.sub(r"\s+", " ", source).strip()
+
+    if not source:
+        return ""
+
+    patterns = [
+        r"(?:创建|生成|新建|建立|搭建|构建|做一个|建一个)([^，。；;\n]*?模型)",
+        r"(?:做|建|搭建|构建)([^，。；;\n]*?分析)",
+        r"([一-龥A-Za-z0-9_]{2,18}(?:分析|画像|看板|专题|经营|运营|复购|生命周期))(?:模型)?",
+    ]
+    for pattern in patterns:
+        matched = re.search(pattern, source, re.IGNORECASE)
+        if matched:
+            candidate = clean_business_model_name(matched.group(1))
+            if candidate:
+                return candidate
+
+    candidate = clean_business_model_name(source)
+    return candidate
+
+
+def clean_business_model_name(text: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return ""
+
+    value = re.sub(r"[\r\n\t]+", " ", value)
+    value = re.sub(r"[“”\"'`<>]", "", value)
+    value = re.sub(r"\s+", " ", value).strip()
+
+    value = re.sub(r"^(请|请你|帮我|麻烦|需要|我想|想要|帮忙)+", "", value)
+    value = re.sub(r"^基于(?:当前|现有)?[^，。；;\n]*?(?:表|数据源)?", "", value)
+    value = re.sub(r"^(围绕|针对|面向)", "", value)
+    value = re.sub(r"(创建|生成|新建|建立|搭建|构建)(一个|一份|个)?", "", value)
+    value = re.sub(r"(业务字典|字典|同义词|术语|映射|新增指标公式|增加指标公式|添加指标公式|指标公式|业务公式|公式)\s*[：:].*", "", value)
+    value = re.sub(r"(并|然后|之后).*$", "", value)
+    value = re.sub(r"(需求|场景|内容|能力)$", "", value)
+    value = re.sub(r"^[,，;；。:：\\-\\s]+", "", value)
+    value = re.sub(r"[,，;；。:：\\-\\s]+$", "", value).strip()
+
+    replacements = [
+        ("当前", ""),
+        ("销售明细表", ""),
+        ("数据表", ""),
+        ("明细表", ""),
+        ("数据源", ""),
+        ("业务模型", ""),
+        ("模型搭建", ""),
+        ("进行", ""),
+        ("一个", ""),
+    ]
+    for old, new in replacements:
+        value = value.replace(old, new)
+
+    value = value.strip()
+    value = re.sub(r"^(基于|按照|按|对|将)", "", value).strip()
+
+    if value.endswith("模型模型"):
+        value = value[:-2]
+    if len(value) > 16:
+        value = value[:16].strip()
+    return value
+
+
+def ensure_model_suffix(text: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return "零代码业务模型"
+    if not value.endswith("模型"):
+        value = f"{value}模型"
+    return value[:18].strip()
+
+
 def build_text_to_sql_prompt(payload: TextToSqlRequest) -> str:
     fields_text = "\n".join(
         f"- columnName={field.columnName}, displayName={field.displayName}, fieldType={field.fieldType}, fieldComment={field.fieldComment or ''}"
@@ -1658,6 +2046,439 @@ def normalize_ai_sql_result(parsed: dict[str, Any], payload: TextToSqlRequest) -
         "graphSqlHintsUsed": graph_plan["used"],
         "graphDecision": graph_plan["decision"],
     }
+
+
+def has_dictionary_intent(question: str) -> bool:
+    q = (question or "").strip()
+    return any(token in q for token in ["业务字典", "字典", "词典", "同义词", "术语", "黑话", "映射"])
+
+
+def has_formula_intent(question: str) -> bool:
+    q = (question or "").strip()
+    return any(token in q for token in ["业务公式", "指标公式", "公式", "衍生指标", "利润率", "转化率", "同比", "环比", "核心指标包含"])
+
+
+def split_top_level_segments(text: str, separators: list[str] | None = None) -> list[str]:
+    separators = separators or [";", "；", "\n", "，", ",", "、"]
+    result: list[str] = []
+    buffer = ""
+    stack: list[str] = []
+    open_chars = {"(", "（", "[", "{"}
+    close_to_open = {")": "(", "）": "（", "]": "[", "}": "{"}
+    for ch in str(text or ""):
+        if ch in open_chars:
+            stack.append(ch)
+            buffer += ch
+            continue
+        if ch in close_to_open:
+            if stack and stack[-1] == close_to_open[ch]:
+                stack.pop()
+            buffer += ch
+            continue
+        if ch in separators and not stack:
+            value = buffer.strip()
+            if value:
+                result.append(value)
+            buffer = ""
+            continue
+        buffer += ch
+    tail = buffer.strip()
+    if tail:
+        result.append(tail)
+    return result
+
+
+def normalize_ref_token(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_\u4e00-\u9fa5]+", "", str(value or "").strip().lower())
+
+
+def resolve_field_from_ref(ref: str, fields: list[FieldMeta]) -> FieldMeta | None:
+    normalized_ref = normalize_ref_token(ref)
+    if not normalized_ref:
+        return None
+    exact_match: FieldMeta | None = None
+    best_match: tuple[int, FieldMeta] | None = None
+    for field in fields:
+        aliases = [
+            field.columnName or "",
+            field.displayName or "",
+            field.sourceFieldName or "",
+            field.fieldComment or "",
+        ]
+        normalized_aliases = [normalize_ref_token(alias) for alias in aliases if alias]
+        if normalized_ref in normalized_aliases:
+            exact_match = field
+            break
+        for alias in normalized_aliases:
+            if not alias:
+                continue
+            if normalized_ref in alias or alias in normalized_ref:
+                score = min(len(normalized_ref), len(alias))
+                if best_match is None or score > best_match[0]:
+                    best_match = (score, field)
+    return exact_match or (best_match[1] if best_match else None)
+
+
+def normalize_dictionary_entries(entries: Any, fields: list[FieldMeta]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    if not isinstance(entries, list):
+        return result
+    seen: set[str] = set()
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        term = str(item.get("term") or "").strip()
+        field_ref = str(item.get("field") or "").strip()
+        synonyms = str(item.get("synonyms") or "").strip()
+        matched = resolve_field_from_ref(field_ref or term, fields)
+        field_name = matched.columnName if matched else field_ref
+        if not term or not field_name:
+            continue
+        key = f"{term.lower()}@@{field_name.lower()}"
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({
+            "term": term,
+            "field": field_name,
+            "synonyms": synonyms,
+        })
+    return result
+
+
+def normalize_patch_operations(entries: Any, fields: list[FieldMeta]) -> list[dict[str, Any]]:
+    if not isinstance(entries, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        target_type = str(item.get("targetType") or "").strip()
+        action = str(item.get("action") or "UPSERT").strip().upper()
+        if target_type not in {"dictionaryEntry", "metricDefinition"}:
+            continue
+        if action not in {"UPSERT", "DELETE"}:
+            action = "UPSERT"
+        if target_type == "dictionaryEntry":
+            term = str(item.get("term") or "").strip()
+            field_ref = str(item.get("field") or "").strip()
+            synonyms = str(item.get("synonyms") or "").strip()
+            matched = resolve_field_from_ref(field_ref or term or synonyms, fields)
+            field_name = matched.columnName if matched else field_ref
+            if not term:
+                continue
+            result.append({
+                "targetType": "dictionaryEntry",
+                "action": action,
+                "term": term,
+                "field": field_name,
+                "synonyms": synonyms,
+            })
+            continue
+
+        name = str(item.get("name") or "").strip()
+        formula = normalize_metric_formula(str(item.get("formula") or "").strip())
+        aggregation = str(item.get("aggregation") or "SUM").strip().upper() or "SUM"
+        field_ref = str(item.get("field") or "").strip()
+        matched = resolve_field_from_ref(field_ref or formula or name, fields)
+        field_name = matched.columnName if matched else field_ref
+        if not name:
+            continue
+        result.append({
+            "targetType": "metricDefinition",
+            "action": action,
+            "name": name,
+            "field": field_name,
+            "aggregation": aggregation if aggregation in {"SUM", "COUNT", "AVG", "MAX", "MIN"} else "SUM",
+            "formula": rewrite_formula_to_column_names(formula, fields),
+        })
+    return deduplicate_patch_operations(result)
+
+
+def normalize_metric_definitions(entries: Any, fields: list[FieldMeta]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    if not isinstance(entries, list):
+        return result
+    seen: set[str] = set()
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        formula = normalize_metric_formula(str(item.get("formula") or "").strip())
+        aggregation = str(item.get("aggregation") or "SUM").strip().upper() or "SUM"
+        field_ref = str(item.get("field") or "").strip()
+        matched = resolve_field_from_ref(field_ref or formula or name, fields)
+        field_name = matched.columnName if matched else field_ref
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({
+            "name": name,
+            "field": field_name,
+            "aggregation": aggregation if aggregation in {"SUM", "COUNT", "AVG", "MAX", "MIN"} else "SUM",
+            "formula": rewrite_formula_to_column_names(formula, fields),
+        })
+    return result
+
+
+def rewrite_formula_to_column_names(formula: str, fields: list[FieldMeta]) -> str:
+    expr = str(formula or "").strip()
+    if not expr:
+        return ""
+    rewritten = expr
+    tokens = sorted(set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*|[\u4e00-\u9fa5]{2,}", expr)), key=len, reverse=True)
+    for token in tokens:
+        matched = resolve_field_from_ref(token, fields)
+        if not matched:
+            continue
+        rewritten = re.sub(rf"(?<![A-Za-z0-9_\u4e00-\u9fa5]){re.escape(token)}(?![A-Za-z0-9_\u4e00-\u9fa5])", matched.columnName, rewritten)
+    return rewritten
+
+
+def deduplicate_patch_operations(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in entries:
+        target_type = str(item.get("targetType") or "").strip()
+        key_name = str(item.get("name") or item.get("term") or "").strip().lower()
+        action = str(item.get("action") or "UPSERT").strip().upper()
+        key = f"{target_type}@@{key_name}@@{action}"
+        if not key_name or key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+def build_patch_operations_from_question(
+    question: str,
+    fields: list[FieldMeta],
+    existing_dictionary_entries: list[dict[str, Any]] | None,
+    existing_metric_definitions: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    operations: list[dict[str, Any]] = []
+    operations.extend(build_dictionary_patch_operations(question, fields))
+    operations.extend(build_metric_patch_operations(question, fields, existing_metric_definitions or []))
+    if any(token in question for token in ["删除", "移除", "去掉", "取消"]) and ((existing_dictionary_entries or []) or (existing_metric_definitions or [])):
+        operations.extend(build_delete_patch_operations(question, existing_dictionary_entries, existing_metric_definitions or []))
+    return deduplicate_patch_operations(operations)
+
+
+def build_dictionary_patch_operations(question: str, fields: list[FieldMeta]) -> list[dict[str, Any]]:
+    operations: list[dict[str, Any]] = []
+    pattern = re.compile(r"(.+?)(?:映射|对应|绑定到|绑定|关联到|关联)\s*([A-Za-z_][A-Za-z0-9_]*)")
+    for item in split_top_level_segments(question):
+        cleaned = re.sub(r"^(新增|增加|添加|创建|补充|修改|更新)?(业务字典|字典|词典|同义词|术语)\s*[:：]?", "", item).strip()
+        for segment in split_top_level_segments(cleaned, separators=["；", ";", "\n", "，", ",", "、"]):
+            matched = pattern.search(segment)
+            if not matched:
+                continue
+            term = str(matched.group(1) or "").strip().strip("：:，,；; ")
+            field_ref = str(matched.group(2) or "").strip()
+            field = resolve_field_from_ref(field_ref or term, fields)
+            if not term:
+                continue
+            operations.append({
+                "targetType": "dictionaryEntry",
+                "action": "UPSERT",
+                "term": term,
+                "field": field.columnName if field else field_ref,
+                "synonyms": "",
+            })
+    return operations
+
+
+def build_metric_patch_operations(question: str, fields: list[FieldMeta], existing_metric_definitions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    operations: list[dict[str, Any]] = []
+    segments = split_top_level_segments(question, separators=["；", ";", "\n"])
+    for item in segments:
+        cleaned = re.sub(r"^(新增|增加|添加|创建|补充|修改|更新)?(指标公式|业务公式|公式)\s*[:：]?", "", item).strip()
+        parts = split_top_level_segments(cleaned, separators=["，", ",", "、"])
+        if not parts:
+            parts = [cleaned]
+        for part in parts:
+            metric_op = parse_metric_operation_segment(part, fields, existing_metric_definitions)
+            if metric_op:
+                operations.append(metric_op)
+    return operations
+
+
+def parse_metric_operation_segment(
+    segment: str,
+    fields: list[FieldMeta],
+    existing_metric_definitions: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    text = str(segment or "").strip()
+    if not text:
+        return None
+
+    direct_match = re.match(r"(.+?)\s*[=:：]\s*(.+)$", text)
+    if direct_match:
+        name = str(direct_match.group(1) or "").strip()
+        formula = str(direct_match.group(2) or "").strip()
+        return build_metric_patch_operation(name, formula, fields)
+
+    modify_match = re.search(r"(?:把|将)?(.+?)(?:指标|公式)?(?:改成|修改为|更新为|调整为|设为)\s*(.+)$", text)
+    if modify_match:
+        name = match_existing_metric_name(str(modify_match.group(1) or "").strip(), existing_metric_definitions)
+        formula = str(modify_match.group(2) or "").strip()
+        return build_metric_patch_operation(name, formula, fields)
+
+    add_match = re.search(r"(?:新增|增加|添加|补充)(?:一个|一条)?(.+?)(?:指标|公式)[，,:： ]*(?:公式是|为)?\s*(.+)$", text)
+    if add_match:
+        name = str(add_match.group(1) or "").strip()
+        formula = str(add_match.group(2) or "").strip()
+        return build_metric_patch_operation(name, formula, fields)
+
+    return None
+
+
+def build_metric_patch_operation(name: str, formula: str, fields: list[FieldMeta]) -> dict[str, Any] | None:
+    metric_name = str(name or "").strip().strip("：:，,；; ")
+    metric_formula = normalize_formula_phrase(str(formula or "").strip())
+    if not metric_name or not metric_formula:
+        return None
+    rewritten_formula = rewrite_formula_to_column_names(metric_formula, fields)
+    primary = ""
+    for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", rewritten_formula):
+        matched = resolve_field_from_ref(token, fields)
+        if matched:
+            primary = matched.columnName
+            break
+    return {
+        "targetType": "metricDefinition",
+        "action": "UPSERT",
+        "name": metric_name,
+        "field": primary,
+        "aggregation": infer_metric_aggregation(metric_name, rewritten_formula),
+        "formula": rewritten_formula,
+    }
+
+
+def normalize_formula_phrase(formula: str) -> str:
+    value = str(formula or "").strip()
+    if not value:
+        return ""
+    replacements = [
+        ("除以", " / "),
+        ("乘以", " * "),
+        ("加上", " + "),
+        ("减去", " - "),
+        ("加", " + "),
+        ("减", " - "),
+        ("乘", " * "),
+        ("除", " / "),
+    ]
+    for old, new in replacements:
+        value = value.replace(old, new)
+    return re.sub(r"\s+", " ", value).strip("。；;，, ")
+
+
+def infer_metric_aggregation(name: str, formula: str) -> str:
+    text = f"{name} {formula}"
+    if any(token in text for token in ["率", "均", "平均", "占比", "比例"]):
+        return "AVG"
+    if any(token in text for token in ["数", "量", "次数", "人数", "笔数"]):
+        return "COUNT" if "/" not in formula and "+" not in formula and "-" not in formula and "*" not in formula else "SUM"
+    return "SUM"
+
+
+def match_existing_metric_name(name: str, existing_metric_definitions: list[dict[str, Any]]) -> str:
+    metric_name = str(name or "").strip()
+    if not metric_name:
+        return ""
+    normalized = normalize_ref_token(metric_name)
+    for item in existing_metric_definitions:
+        existing_name = str(item.get("name") or "").strip()
+        if normalize_ref_token(existing_name) == normalized:
+            return existing_name
+    for item in existing_metric_definitions:
+        existing_name = str(item.get("name") or "").strip()
+        existing_normalized = normalize_ref_token(existing_name)
+        if normalized and (normalized in existing_normalized or existing_normalized in normalized):
+            return existing_name
+    return metric_name
+
+
+def build_delete_patch_operations(
+    question: str,
+    existing_dictionary_entries: list[dict[str, Any]],
+    existing_metric_definitions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    operations: list[dict[str, Any]] = []
+    normalized_question = normalize_ref_token(question)
+    for item in existing_dictionary_entries:
+        term = str(item.get("term") or "").strip()
+        if term and normalize_ref_token(term) and normalize_ref_token(term) in normalized_question:
+            operations.append({
+                "targetType": "dictionaryEntry",
+                "action": "DELETE",
+                "term": term,
+                "field": str(item.get("field") or "").strip(),
+                "synonyms": str(item.get("synonyms") or "").strip(),
+            })
+    for item in existing_metric_definitions:
+        name = str(item.get("name") or "").strip()
+        if name and normalize_ref_token(name) and normalize_ref_token(name) in normalized_question:
+            operations.append({
+                "targetType": "metricDefinition",
+                "action": "DELETE",
+                "name": name,
+                "field": str(item.get("field") or "").strip(),
+                "aggregation": str(item.get("aggregation") or "SUM").strip().upper() or "SUM",
+                "formula": str(item.get("formula") or "").strip(),
+            })
+    return operations
+
+
+def build_dictionary_entries_from_question(question: str, fields: list[FieldMeta]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    pattern = re.compile(r"(.+?)(?:映射|对应|绑定|关联到|关联)\s*([A-Za-z_][A-Za-z0-9_]*)")
+    for item in split_top_level_segments(question):
+        cleaned = re.sub(r"^(新增|增加|添加|创建)?(业务字典|字典|词典|同义词)\s*[:：]?", "", item).strip()
+        match = pattern.search(cleaned)
+        if not match:
+            continue
+        term = str(match.group(1) or "").strip().strip("：:，,；; ")
+        field_ref = str(match.group(2) or "").strip()
+        matched = resolve_field_from_ref(field_ref, fields)
+        if term and matched:
+            entries.append({"term": term, "field": matched.columnName, "synonyms": ""})
+    return normalize_dictionary_entries(entries, fields)
+
+
+def build_metric_entries_from_question(question: str, fields: list[FieldMeta]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for item in split_top_level_segments(question):
+        cleaned = re.sub(r"^(新增|增加|添加)?(指标公式|业务公式|公式|核心指标包含)\s*[:：]?", "", item).strip()
+        segments = split_top_level_segments(cleaned, separators=[";", "；", "\n", "，", ",", "、"])
+        if not segments:
+            segments = [cleaned]
+        for segment in segments:
+            match = re.match(r"(.+?)\s*[=:：]\s*(.+)$", segment.strip())
+            if not match:
+                continue
+            name = str(match.group(1) or "").strip()
+            formula = str(match.group(2) or "").strip()
+            if not name or not formula:
+                continue
+            normalized_formula = rewrite_formula_to_column_names(formula, fields)
+            primary = ""
+            for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", normalized_formula):
+                matched = resolve_field_from_ref(token, fields)
+                if matched:
+                    primary = matched.columnName
+                    break
+            entries.append({
+                "name": name,
+                "field": primary,
+                "aggregation": "AVG" if any(token in name for token in ["率", "均", "平均"]) else "SUM",
+                "formula": normalized_formula,
+            })
+    return normalize_metric_definitions(entries, fields)
 
 
 def rewrite_sql_alias(sql: str, dimension_key: str, metric_key: str) -> str:

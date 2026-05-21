@@ -9,6 +9,14 @@
         <div class="header-actions">
           <el-button @click="refreshModels">刷新模型</el-button>
           <el-button type="primary" :disabled="!editingModel" @click="saveModel">保存当前模型</el-button>
+          <el-button
+            v-if="editingModel"
+            :type="isCurrentModelPublished ? 'warning' : 'success'"
+            plain
+            @click="toggleCurrentModelPublish"
+          >
+            {{ isCurrentModelPublished ? '取消发布' : '发布到企业模型库' }}
+          </el-button>
         </div>
       </div>
 
@@ -162,7 +170,22 @@
               </el-table-column>
               <el-table-column label="目标字段" min-width="110">
                 <template #default="{ row }">
-                  <el-input v-model="row.field" size="small" placeholder="例如：sales_amt、customer_id" />
+                  <el-select
+                    v-model="row.field"
+                    size="small"
+                    class="full-width"
+                    filterable
+                    clearable
+                    default-first-option
+                    placeholder="请选择字段"
+                  >
+                    <el-option
+                      v-for="field in createDialogFieldOptions"
+                      :key="field.columnName"
+                      :label="field.optionLabel"
+                      :value="field.columnName"
+                    />
+                  </el-select>
                 </template>
               </el-table-column>
               <el-table-column label="同义词" min-width="140">
@@ -195,7 +218,22 @@
               </el-table-column>
               <el-table-column label="字段绑定" min-width="110">
                 <template #default="{ row }">
-                  <el-input v-model="row.field" size="small" placeholder="例如：profit" />
+                  <el-select
+                    v-model="row.field"
+                    size="small"
+                    class="full-width"
+                    filterable
+                    clearable
+                    default-first-option
+                    placeholder="请选择字段"
+                  >
+                    <el-option
+                      v-for="field in createDialogFieldOptions"
+                      :key="field.columnName"
+                      :label="field.optionLabel"
+                      :value="field.columnName"
+                    />
+                  </el-select>
                 </template>
               </el-table-column>
               <el-table-column label="聚合方式" width="100">
@@ -248,7 +286,22 @@
           </el-table-column>
           <el-table-column label="目标字段" min-width="110">
             <template #default="{ row }">
-              <el-input v-model="row.field" size="small" placeholder="例如：sales_amt、customer_id" />
+              <el-select
+                v-model="row.field"
+                size="small"
+                class="full-width"
+                filterable
+                clearable
+                default-first-option
+                placeholder="请选择字段"
+              >
+                <el-option
+                  v-for="field in editorFieldOptions"
+                  :key="field.columnName"
+                  :label="field.optionLabel"
+                  :value="field.columnName"
+                />
+              </el-select>
             </template>
           </el-table-column>
           <el-table-column label="同义词（逗号分隔）" min-width="180">
@@ -281,7 +334,22 @@
           </el-table-column>
           <el-table-column label="字段绑定" min-width="110">
             <template #default="{ row }">
-              <el-input v-model="row.field" size="small" placeholder="例如：profit" />
+              <el-select
+                v-model="row.field"
+                size="small"
+                class="full-width"
+                filterable
+                clearable
+                default-first-option
+                placeholder="请选择字段"
+              >
+                <el-option
+                  v-for="field in editorFieldOptions"
+                  :key="field.columnName"
+                  :label="field.optionLabel"
+                  :value="field.columnName"
+                />
+              </el-select>
             </template>
           </el-table-column>
           <el-table-column label="聚合方式" width="110">
@@ -311,6 +379,53 @@
 
     <div v-else class="panel">
       <el-empty description="请先选择或创建业务模型开始维护" />
+    </div>
+
+    <div class="panel enterprise-panel">
+      <div class="panel-header">
+        <div>
+          <h3>企业模型库</h3>
+          <p>已发布模型可被其他用户直接套用到当前数据源，再继续调整业务字典、公式和参数。</p>
+        </div>
+      </div>
+      <div class="enterprise-toolbar">
+        <el-input
+          v-model.trim="enterpriseKeyword"
+          class="full-width"
+          placeholder="按模型名称或来源数据源搜索企业模型"
+          clearable
+        />
+      </div>
+      <el-table
+        :data="filteredEnterpriseModels"
+        height="260"
+        empty-text="暂无已发布的企业模型"
+        table-layout="fixed"
+      >
+        <el-table-column label="模型名称" min-width="170">
+          <template #default="{ row }">
+            <div class="enterprise-model-name">{{ row.modelName }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="来源数据源" min-width="170">
+          <template #default="{ row }">
+            <span>{{ resolveTableLabel(row.tableName) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="更新时间" width="170">
+          <template #default="{ row }">
+            <span>{{ formatModelTime(row.updatedAt) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="250">
+          <template #default="{ row }">
+            <div class="enterprise-actions">
+              <el-button size="small" @click="previewEnterpriseModel(row)">查看</el-button>
+              <el-button size="small" type="primary" @click="applyEnterpriseModelToCurrentTable(row)">套用到当前数据源</el-button>
+            </div>
+          </template>
+        </el-table-column>
+      </el-table>
     </div>
   </section>
 </template>
@@ -342,11 +457,15 @@ const props = defineProps({
 const {
   API_BASE,
   tables,
+  fields,
   loadTables,
   selectedTableName,
   businessModels,
+  enterpriseModels,
   createBusinessModel,
   loadBusinessModels,
+  publishBusinessModel,
+  applyBusinessModel,
   updateBusinessModel,
   unwrap
 } = inject('workbench')
@@ -361,11 +480,13 @@ const deletingModel = ref(false)
 const modelSearchInput = ref('')
 const modelSearchKeyword = ref('')
 const modelSortBy = ref('updated_desc')
+const enterpriseKeyword = ref('')
 const dictionaryEntries = ref([])
 const metricDefinitions = ref([])
 const createDialogVisible = ref(false)
 const createDialogLoading = ref(false)
 const pendingFocusModelId = ref(null)
+const tableFieldOptionsMap = ref({})
 const createForm = reactive({
   tableName: '',
   modelName: '',
@@ -375,6 +496,57 @@ const createForm = reactive({
 
 const sourceOptions = computed(() => Array.isArray(tables.value) ? tables.value : [])
 const modelOptions = computed(() => Array.isArray(businessModels.value) ? businessModels.value : [])
+const enterpriseModelOptions = computed(() => Array.isArray(enterpriseModels?.value) ? enterpriseModels.value : [])
+
+const normalizeFieldOptionLabel = (field) => {
+  const columnName = String(field?.columnName || '').trim()
+  const displayName = String(field?.displayName || '').trim()
+  const sourceFieldName = String(field?.sourceFieldName || '').trim()
+  const preferredName = displayName || sourceFieldName || columnName
+  if (!preferredName) return ''
+  if (!columnName || preferredName === columnName) {
+    return preferredName
+  }
+  return `${preferredName}（${columnName}）`
+}
+
+const normalizeFieldOptions = (items) => {
+  if (!Array.isArray(items)) return []
+  return items
+    .map((item) => {
+      const columnName = String(item?.columnName || '').trim()
+      if (!columnName) return null
+      return {
+        columnName,
+        displayName: String(item?.displayName || '').trim(),
+        sourceFieldName: String(item?.sourceFieldName || '').trim(),
+        optionLabel: normalizeFieldOptionLabel(item)
+      }
+    })
+    .filter(Boolean)
+}
+
+const cacheFieldOptions = (tableName, items) => {
+  const name = String(tableName || '').trim()
+  if (!name) return
+  tableFieldOptionsMap.value = {
+    ...tableFieldOptionsMap.value,
+    [name]: normalizeFieldOptions(items)
+  }
+}
+
+const resolveFieldOptions = (tableName) => {
+  const name = String(tableName || '').trim()
+  if (!name) return []
+  return Array.isArray(tableFieldOptionsMap.value[name]) ? tableFieldOptionsMap.value[name] : []
+}
+
+const editorFieldOptions = computed(() => {
+  const tableName = String(editingModel.value?.tableName || selectedSourceTable.value || '').trim()
+  return resolveFieldOptions(tableName)
+})
+
+const createDialogFieldOptions = computed(() => resolveFieldOptions(createForm.tableName))
 
 const toMillis = (value) => {
   const time = Date.parse(String(value || ''))
@@ -457,6 +629,23 @@ const latestModelForCurrentSource = computed(() => {
   return rows[0] || null
 })
 
+const isCurrentModelPublished = computed(() => Boolean(editingModel.value?.published))
+
+const filteredEnterpriseModels = computed(() => {
+  const keyword = String(enterpriseKeyword.value || '').trim().toLowerCase()
+  const currentUserModelId = String(editingModel.value?.id || '')
+  return sortModelsByUpdated(
+    enterpriseModelOptions.value
+      .filter(item => String(item.status || '').toUpperCase() === 'ACTIVE')
+      .filter(item => !currentUserModelId || String(item.id) !== currentUserModelId || Boolean(item.published))
+      .filter((item) => {
+        if (!keyword) return true
+        const tableLabel = resolveTableLabel(item.tableName).toLowerCase()
+        return String(item.modelName || '').toLowerCase().includes(keyword) || tableLabel.includes(keyword)
+      })
+  )
+})
+
 const formatModelTime = (value) => {
   if (!value) return '--'
   const date = new Date(value)
@@ -490,8 +679,44 @@ const normalizeMetricDefinitions = (entries) => {
     name: String(item?.name || '').trim(),
     field: String(item?.field || '').trim(),
     aggregation: String(item?.aggregation || 'SUM').trim().toUpperCase() || 'SUM',
-    formula: String(item?.formula || '').trim()
+    formula: formatFormulaForDisplay(item?.formula)
   }))
+}
+
+const resolveFieldLabel = (columnName) => {
+  const name = String(columnName || '').trim()
+  if (!name) return ''
+  const matched = editorFieldOptions.value.find(item => String(item.columnName || '').trim() === name)
+  if (!matched) return name
+  return String(matched.displayName || matched.sourceFieldName || matched.columnName || '').trim() || name
+}
+
+const formatFormulaForDisplay = (formula) => {
+  const source = String(formula || '').trim()
+  if (!source) return ''
+  return source.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, (token) => resolveFieldLabel(token) || token)
+}
+
+const rewriteFormulaToColumnNames = (formula) => {
+  const source = String(formula || '').trim()
+  if (!source) return ''
+  const options = [...editorFieldOptions.value].sort((a, b) => {
+    const left = String(a.displayName || a.sourceFieldName || a.columnName || '').length
+    const right = String(b.displayName || b.sourceFieldName || b.columnName || '').length
+    return right - left
+  })
+  let result = source
+  options.forEach((field) => {
+    const aliases = [
+      String(field.displayName || '').trim(),
+      String(field.sourceFieldName || '').trim(),
+      String(field.columnName || '').trim()
+    ].filter(Boolean)
+    aliases.forEach((alias) => {
+      result = result.replace(new RegExp(`(?<![A-Za-z0-9_\\u4e00-\\u9fa5])${alias.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}(?![A-Za-z0-9_\\u4e00-\\u9fa5])`, 'g'), field.columnName)
+    })
+  })
+  return result
 }
 
 const clearEditor = () => {
@@ -515,6 +740,15 @@ const applyModel = (model) => {
   const json = parseMaybeJson(model.modelJson)
   dictionaryEntries.value = normalizeDictionaryEntries(json.dictionaryEntries)
   metricDefinitions.value = normalizeMetricDefinitions(json.metricDefinitions)
+}
+
+const ensureFieldOptionsLoaded = async (tableName) => {
+  const name = String(tableName || '').trim()
+  if (!name || resolveFieldOptions(name).length > 0) {
+    return
+  }
+  const result = unwrap(await axios.get(`${API_BASE}/api/data/tables/${name}/fields`))
+  cacheFieldOptions(name, result)
 }
 
 const selectLatestModel = () => {
@@ -742,12 +976,57 @@ const saveModel = async () => {
     modelName,
     modelRequirement: String(editingRequirement.value || '').trim(),
     dictionaryEntries: dictionaryEntries.value,
-    metricDefinitions: metricDefinitions.value
+    metricDefinitions: metricDefinitions.value.map(item => ({
+      ...item,
+      formula: rewriteFormulaToColumnNames(item.formula)
+    }))
   }
   await updateBusinessModel(editingModel.value.id, payload)
   ElMessage.success('业务字典与业务公式已保存')
   await loadBusinessModels()
   loadModelById(editingModel.value.id)
+}
+
+const toggleCurrentModelPublish = async () => {
+  if (!editingModel.value?.id) {
+    ElMessage.warning('请先选择业务模型')
+    return
+  }
+  await publishBusinessModel(editingModel.value, !isCurrentModelPublished.value)
+  await loadBusinessModels()
+  loadModelById(editingModel.value.id)
+}
+
+const previewEnterpriseModel = (model) => {
+  if (!model?.id) {
+    return
+  }
+  loadBusinessModelDetail(model.id)
+}
+
+const applyEnterpriseModelToCurrentTable = async (model) => {
+  if (!model?.id) {
+    return
+  }
+  const targetTableName = String(selectedSourceTable.value || selectedTableName.value || '').trim()
+  if (!targetTableName) {
+    ElMessage.warning('请先选择要套用模型的数据源')
+    return
+  }
+  await applyBusinessModel(model, targetTableName)
+  selectedSourceTable.value = targetTableName
+}
+
+const loadBusinessModelDetail = async (modelId) => {
+  const detail = unwrap(await axios.get(`${API_BASE}/api/data/business-models/${modelId}`))
+  if (!detail?.id) {
+    throw new Error('未找到业务模型')
+  }
+  const merged = {
+    ...detail,
+    modelJson: detail.modelJson
+  }
+  applyModel(merged)
 }
 
 const createModelAndSelect = async ({ tableName, modelName, dictionaryEntries, metricDefinitions }) => {
@@ -922,7 +1201,11 @@ onMounted(async () => {
   if (!Array.isArray(businessModels.value) || businessModels.value.length === 0) {
     await loadBusinessModels()
   }
+  cacheFieldOptions(selectedTableName.value, fields?.value)
   selectedSourceTable.value = String(selectedTableName.value || sourceOptions.value[0]?.tableName || '').trim()
+  if (selectedSourceTable.value) {
+    await ensureFieldOptionsLoaded(selectedSourceTable.value)
+  }
   if (props.focusModelId == null || props.focusModelId === '') {
     selectLatestModel()
   } else {
@@ -930,7 +1213,11 @@ onMounted(async () => {
   }
 })
 
-watch(selectedSourceTable, (tableName) => {
+watch(() => fields?.value, (nextFields) => {
+  cacheFieldOptions(selectedTableName.value, nextFields)
+}, { deep: true, immediate: true })
+
+watch(selectedSourceTable, async (tableName) => {
   const next = String(tableName || '').trim()
   if (!next) {
     clearEditor()
@@ -939,6 +1226,7 @@ watch(selectedSourceTable, (tableName) => {
   if (selectedTableName.value !== next) {
     selectedTableName.value = next
   }
+  await ensureFieldOptionsLoaded(next)
   const currentInSource = editingModel.value && String(editingModel.value.tableName || '') === next
   if (!currentInSource) {
     selectLatestModel()
@@ -973,6 +1261,25 @@ watch(modelOptions, () => {
 
 .tips-row {
   margin-top: 10px;
+}
+
+.enterprise-panel {
+  margin-top: 14px;
+}
+
+.enterprise-toolbar {
+  margin: 10px 0 12px;
+}
+
+.enterprise-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.enterprise-model-name {
+  font-weight: 600;
+  color: #172033;
 }
 
 .manage-actions {

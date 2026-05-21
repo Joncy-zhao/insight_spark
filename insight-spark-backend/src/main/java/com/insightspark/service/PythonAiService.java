@@ -55,6 +55,66 @@ public class PythonAiService {
         }
     }
 
+    public Optional<Map<String, Object>> businessModelSemantic(String question, String requirement, String tableName,
+                                                               List<Map<String, Object>> fields,
+                                                               List<Map<String, Object>> previewRows) {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("question", question);
+        request.put("requirement", requirement);
+        request.put("tableName", tableName);
+        request.put("fields", fields);
+        request.put("previewRows", previewRows == null ? List.of() : previewRows);
+
+        try {
+            Map<String, Object> response = restTemplate.postForObject(
+                    aiServiceUrl + "/ai/business-model-semantic",
+                    request,
+                    Map.class
+            );
+            return response == null ? Optional.empty() : Optional.of(response);
+        } catch (HttpClientErrorException e) {
+            log.warn("Python AI 业务模型语义拆解拒绝本次请求：{}", e.getResponseBodyAsString());
+            return Optional.empty();
+        } catch (RestClientException e) {
+            log.warn("Python AI 业务模型语义拆解不可用：{}", e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    public Optional<Map<String, Object>> businessModelPatch(String question,
+                                                            String tableName,
+                                                            String modelName,
+                                                            String modelRequirement,
+                                                            List<Map<String, Object>> dictionaryEntries,
+                                                            List<Map<String, Object>> metricDefinitions,
+                                                            List<Map<String, Object>> fields,
+                                                            List<Map<String, Object>> previewRows) {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("question", question);
+        request.put("tableName", tableName);
+        request.put("modelName", modelName);
+        request.put("modelRequirement", modelRequirement);
+        request.put("dictionaryEntries", dictionaryEntries == null ? List.of() : dictionaryEntries);
+        request.put("metricDefinitions", metricDefinitions == null ? List.of() : metricDefinitions);
+        request.put("fields", fields == null ? List.of() : fields);
+        request.put("previewRows", previewRows == null ? List.of() : previewRows);
+
+        try {
+            Map<String, Object> response = restTemplate.postForObject(
+                    aiServiceUrl + "/ai/business-model-patch",
+                    request,
+                    Map.class
+            );
+            return response == null ? Optional.empty() : Optional.of(response);
+        } catch (HttpClientErrorException e) {
+            log.warn("Python AI 业务模型修改语义拆解拒绝本次请求：{}", e.getResponseBodyAsString());
+            return Optional.empty();
+        } catch (RestClientException e) {
+            log.warn("Python AI 业务模型修改语义拆解不可用：{}", e.getMessage());
+            return Optional.empty();
+        }
+    }
+
     public Map<String, Object> diagnose(String tableName, String metricField, List<String> dimensionFields,
                                         String timeField, List<Map<String, Object>> rows) {
         Map<String, Object> request = new LinkedHashMap<>();

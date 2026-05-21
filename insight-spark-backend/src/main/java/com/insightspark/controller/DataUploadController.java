@@ -186,6 +186,15 @@ public class DataUploadController {
         return ApiResponse.success(dataUploadService.listBusinessModels(enterpriseOnly));
     }
 
+    @GetMapping("/business-models/{modelId}")
+    public ApiResponse<Map<String, Object>> businessModelDetail(@PathVariable Long modelId) {
+        try {
+            return ApiResponse.success(dataUploadService.getBusinessModelDetail(modelId));
+        } catch (Exception e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
     @PostMapping("/templates/upload")
     public ApiResponse<Map<String, Object>> uploadTemplate(@RequestParam("file") MultipartFile file) {
         try {

@@ -345,6 +345,10 @@ const diagnosisRestoreTarget = ref(null)
 const diagnosisEntryContext = ref(null)
 const businessDictionaryPanelVisible = ref(false)
 const businessDictionaryFocusModelId = ref(null)
+const activeBusinessModelId = ref(null)
+const selectedChatBusinessModelId = ref(null)
+const lastCreatedBusinessModelId = ref(null)
+const lastAppliedBusinessModelId = ref(null)
 const pinDialogVisible = ref(false)
 const pinning = ref(false)
 const pinDashboardId = ref(null)
@@ -396,6 +400,99 @@ const dimensionCandidateFields = computed(() => fields.value.filter(field => fie
 const canDiagnoseLastAnalysis = computed(() => Boolean(lastAnalysis.value && numericFields.value.length))
 const canRegenerateLastAnalysis = computed(() => Boolean(String(lastAnalysis.value?.sourceQuestion || '').trim()))
 const canPinLastAnalysis = computed(() => Boolean(lastAnalysis.value?.data?.length))
+
+const normalizeBusinessModelOptionId = (value) => {
+  if (value === null || value === undefined || value === '') {
+    return null
+  }
+  const numeric = Number(value)
+  return Number.isNaN(numeric) ? String(value).trim() : numeric
+}
+
+const isBusinessModelOnTable = (model, tableName) => String(model?.tableName || '').trim() === String(tableName || '').trim()
+
+const findBusinessModelById = (modelId) => {
+  const normalizedId = normalizeBusinessModelOptionId(modelId)
+  if (normalizedId === null) return null
+  return (businessModels.value || []).find(item => String(item?.id) === String(normalizedId)) || null
+}
+
+const filteredBusinessModelsByTable = (tableName) => {
+  const normalizedTableName = String(tableName || '').trim()
+  if (!normalizedTableName) return []
+  return (businessModels.value || [])
+    .filter(item => isBusinessModelOnTable(item, normalizedTableName))
+    .sort((a, b) => {
+      const updatedDiff = new Date(b?.updatedAt || b?.createdAt || 0).getTime() - new Date(a?.updatedAt || a?.createdAt || 0).getTime()
+      if (updatedDiff !== 0) return updatedDiff
+      return Number(b?.id || 0) - Number(a?.id || 0)
+    })
+}
+
+const chatBusinessModelOptions = computed(() => filteredBusinessModelsByTable(selectedTableName.value))
+
+const applyChatBusinessModelSelection = (modelId) => {
+  const normalizedId = normalizeBusinessModelOptionId(modelId)
+  selectedChatBusinessModelId.value = normalizedId
+  activeBusinessModelId.value = normalizedId
+}
+
+const syncChatBusinessModelSelection = (preferredModelId = null) => {
+  const currentTableName = String(selectedTableName.value || '').trim()
+  if (!currentTableName) {
+    selectedChatBusinessModelId.value = null
+    activeBusinessModelId.value = null
+    return null
+  }
+
+  const preferredIds = [
+    preferredModelId,
+    selectedChatBusinessModelId.value,
+    activeBusinessModelId.value,
+    lastCreatedBusinessModelId.value,
+    lastAppliedBusinessModelId.value
+  ]
+    .map(normalizeBusinessModelOptionId)
+    .filter(value => value !== null)
+
+  for (const candidateId of preferredIds) {
+    const matched = findBusinessModelById(candidateId)
+    if (matched && isBusinessModelOnTable(matched, currentTableName)) {
+      applyChatBusinessModelSelection(matched.id)
+      return matched.id
+    }
+  }
+
+  const latestModel = filteredBusinessModelsByTable(currentTableName)[0] || null
+  if (latestModel?.id != null) {
+    applyChatBusinessModelSelection(latestModel.id)
+    return latestModel.id
+  }
+
+  selectedChatBusinessModelId.value = null
+  activeBusinessModelId.value = null
+  return null
+}
+
+const handleChatBusinessModelChange = (modelId) => {
+  const normalizedId = normalizeBusinessModelOptionId(modelId)
+  if (normalizedId === null) {
+    selectedChatBusinessModelId.value = null
+    activeBusinessModelId.value = null
+    return
+  }
+  const matched = findBusinessModelById(normalizedId)
+  if (!matched) {
+    selectedChatBusinessModelId.value = null
+    activeBusinessModelId.value = null
+    return
+  }
+  if (selectedTableName.value && !isBusinessModelOnTable(matched, selectedTableName.value)) {
+    syncChatBusinessModelSelection()
+    return
+  }
+  applyChatBusinessModelSelection(matched.id)
+}
 
 const getChatChartContainer = () => document.getElementById('echarts-container')
 
@@ -731,8 +828,11 @@ watch(selectedTableName, async (tableName, prevTableName) => {
   if (!tableName) {
     previewRows.value = []
     fields.value = []
+    selectedChatBusinessModelId.value = null
+    activeBusinessModelId.value = null
     return
   }
+  syncChatBusinessModelSelection()
   if (tableName === prevTableName) return
   await Promise.all([loadPreview(tableName), loadFields(tableName)])
 })
@@ -1936,6 +2036,7 @@ const pollUploadTask = async (taskId, uploadedTableName = '') => {
 const loadBusinessModels = async () => {
   businessModels.value = unwrap(await axios.get(`${API_BASE}/api/data/business-models`))
   enterpriseModels.value = unwrap(await axios.get(`${API_BASE}/api/data/business-models`, { params: { enterpriseOnly: true } }))
+  syncChatBusinessModelSelection()
 }
 
 const onTemplateFileChange = (file) => {
@@ -1972,10 +2073,10 @@ const createBusinessModelFromTemplate = async () => {
   await loadBusinessModels()
 }
 
-const SEMANTIC_DICT_MARKER = /同义词\s*[：:]/i
+const SEMANTIC_DICT_MARKER = /(?:新增|增加|添加|创建)?(?:业务字典|字典|词典|同义词|业务术语|黑话映射)\s*[：:]/i
 const SEMANTIC_FORMULA_MARKER = /(?:新增|增加|添加)?(?:指标公式|业务公式|公式)\s*[：:]/i
 
-const splitTopLevelSegments = (text, separators = [';', '；', '\n']) => {
+const splitTopLevelSegments = (text, separators = [';', '；', '\n', '，', ',', '、']) => {
   const result = []
   let buffer = ''
   const stack = []
@@ -2072,7 +2173,7 @@ const parseDictionaryInstructionEntries = (sectionText) => {
   const seen = new Set()
   splitTopLevelSegments(sectionText).forEach((rawItem) => {
     const item = String(rawItem || '')
-      .replace(/^(同义词|词典|字典)\s*[：:]/i, '')
+      .replace(/^(同义词|词典|字典|业务字典|业务术语|黑话映射)\s*[：:]/i, '')
       .replace(/^[,，;；。:：\s-]+/, '')
       .trim()
     if (!item) return
@@ -2088,10 +2189,16 @@ const parseDictionaryInstructionEntries = (sectionText) => {
       synonymsText = String(match[3] || '').trim()
     } else {
       match = item.match(/^([^=:=（(]+?)\s*[（(]([^()（）]+)[）)]\s*[=:：]\s*([A-Za-z_][A-Za-z0-9_]*)$/)
-      if (!match) return
-      term = String(match[1] || '').trim()
-      synonymsText = String(match[2] || '').trim()
-      field = String(match[3] || '').trim()
+      if (match) {
+        term = String(match[1] || '').trim()
+        synonymsText = String(match[2] || '').trim()
+        field = String(match[3] || '').trim()
+      } else {
+        match = item.match(/^(.+?)(?:映射|对应|绑定|关联到|关联)\s*([A-Za-z_][A-Za-z0-9_]*)$/)
+        if (!match) return
+        term = String(match[1] || '').trim()
+        field = String(match[2] || '').trim()
+      }
     }
 
     if (!term && !field) return
@@ -2200,6 +2307,28 @@ const parseSemanticModelInstruction = (questionText) => {
   }
 }
 
+const hasSemanticBusinessDictionaryIntent = (text) => {
+  const q = String(text || '').trim()
+  if (!q) return false
+  return ['字典', '同义词', '黑话', '别名', '映射', '术语', '业务术语'].some(token => q.includes(token))
+}
+
+const hasSemanticBusinessFormulaIntent = (text) => {
+  const q = String(text || '').trim()
+  if (!q) return false
+  return ['公式', '指标', '衍生', '计算', '聚合', '利润率', '转化率', '同比', '环比'].some(token => q.includes(token))
+}
+
+const resolveSemanticBusinessDraft = (questionText) => {
+  const draft = parseSemanticModelInstruction(questionText)
+  const source = String(questionText || '').trim()
+  return {
+    requirement: String(draft.requirement || source).trim(),
+    dictionaryEntries: hasSemanticBusinessDictionaryIntent(source) ? draft.dictionaryEntries : [],
+    metricDefinitions: hasSemanticBusinessFormulaIntent(source) ? draft.metricDefinitions : []
+  }
+}
+
 const buildSemanticModelName = (requirement, tableName) => {
   const fallback = `模型_${tableName || 'default'}`
   const raw = String(requirement || '').trim()
@@ -2213,14 +2342,31 @@ const buildSemanticModelName = (requirement, tableName) => {
 
   text = text
     .replace(/^(请|请你|帮我|麻烦|需要|我想|想要|帮忙)+/g, '')
-    .replace(/(创建|生成|新建|建立|搭建)(一个|一份|个)?(业务)?模型/g, '')
+    .replace(/^基于(?:当前|现有)?[^，。；;\n]*?(?:表|数据源)?/g, '')
+    .replace(/^(围绕|针对|面向)/g, '')
+    .replace(/(创建|生成|新建|建立|搭建|构建)(一个|一份|个)?/g, '')
     .replace(/(同义词|词典|字典|新增指标公式|增加指标公式|添加指标公式|指标公式|业务公式|公式)\s*[：:].*/g, '')
     .replace(/(并|然后|之后).*/g, '')
     .replace(/^[,，;；。:：\s-]+/, '')
+    .replace(/[,，;；。:：\s-]+$/, '')
+    .trim()
+
+  text = text
+    .replace(/当前/g, '')
+    .replace(/销售明细表/g, '')
+    .replace(/数据表/g, '')
+    .replace(/明细表/g, '')
+    .replace(/数据源/g, '')
+    .replace(/业务模型/g, '')
+    .replace(/模型搭建/g, '')
+    .replace(/进行/g, '')
+    .replace(/一个/g, '')
+    .replace(/^(基于|按照|按|对|将)/g, '')
     .trim()
 
   if (!text) return fallback
-  if (text.length > 24) text = text.slice(0, 24).trim()
+  if (text.endsWith('模型模型')) text = text.slice(0, -2)
+  if (text.length > 16) text = text.slice(0, 16).trim()
   if (!text.endsWith('模型')) text = `${text}模型`
   return text || fallback
 }
@@ -2239,14 +2385,17 @@ const createBusinessModel = async (options = {}) => {
     requirement,
     modelName
   }
-  if ('dictionaryEntries' in (options || {})) {
-    payload.dictionaryEntries = Array.isArray(options?.dictionaryEntries) ? options.dictionaryEntries : []
+  if (Array.isArray(options?.dictionaryEntries) && options.dictionaryEntries.length > 0) {
+    payload.dictionaryEntries = options.dictionaryEntries
   }
-  if ('metricDefinitions' in (options || {})) {
-    payload.metricDefinitions = Array.isArray(options?.metricDefinitions) ? options.metricDefinitions : []
+  if (Array.isArray(options?.metricDefinitions) && options.metricDefinitions.length > 0) {
+    payload.metricDefinitions = options.metricDefinitions
   }
 
   const created = await axios.post(`${API_BASE}/api/data/business-models`, payload).then(unwrap)
+  activeBusinessModelId.value = created?.id ?? null
+  selectedChatBusinessModelId.value = created?.id ?? null
+  lastCreatedBusinessModelId.value = created?.id ?? null
 
   if (!options?.silentSuccess) {
     ElMessage.success(`业务模型已生成：${modelName}`)
@@ -2284,7 +2433,7 @@ const openBusinessDictionaryAfterModelCreate = async (questionText, tableName) =
   if (!tableName) {
     throw new Error('未选择数据表，无法创建业务模型')
   }
-  const semanticDraft = parseSemanticModelInstruction(questionText)
+  const semanticDraft = resolveSemanticBusinessDraft(questionText)
   const requirement = String(semanticDraft.requirement || questionText || '').trim()
   if (!requirement) {
     throw new Error('建模需求为空，无法创建业务模型')
@@ -2304,6 +2453,10 @@ const openBusinessDictionaryAfterModelCreate = async (questionText, tableName) =
   const created = (createdId ? (businessModels.value || []).find(item => String(item.id) === createdId) : null)
     || (businessModels.value || []).find(item => !beforeIds.has(String(item.id)))
     || (businessModels.value || []).find(item => String(item.tableName || '') === String(tableName || ''))
+  if (created?.id != null) {
+    applyChatBusinessModelSelection(created.id)
+    lastCreatedBusinessModelId.value = created.id
+  }
   businessDictionaryFocusModelId.value = created?.id ?? null
   businessDictionaryPanelVisible.value = true
   return {
@@ -2315,15 +2468,185 @@ const openBusinessDictionaryAfterModelCreate = async (questionText, tableName) =
 
 const publishBusinessModel = async (model, published = true) => {
   await axios.post(`${API_BASE}/api/data/business-models/${model.id}/publish`, { published }).then(unwrap)
+  if (model?.id != null) {
+    applyChatBusinessModelSelection(model.id)
+  }
   ElMessage.success(published ? '已发布到企业模型库' : '已取消发布')
   await loadBusinessModels()
 }
 
-const applyBusinessModel = async (model) => {
-  if (!selectedTableName.value) return ElMessage.warning('请先选择要套用模型的数据表')
-  await axios.post(`${API_BASE}/api/data/business-models/${model.id}/apply`, { tableName: selectedTableName.value }).then(unwrap)
+const applyBusinessModel = async (model, tableName = '') => {
+  const targetTableName = String(tableName || selectedTableName.value || '').trim()
+  if (!targetTableName) return ElMessage.warning('请先选择要套用模型的数据源')
+  const applied = await axios.post(`${API_BASE}/api/data/business-models/${model.id}/apply`, { tableName: targetTableName }).then(unwrap)
+  applyChatBusinessModelSelection(applied?.id ?? model?.id ?? null)
+  lastAppliedBusinessModelId.value = applied?.id ?? null
   ElMessage.success('模型已套用')
   await loadBusinessModels()
+  return {
+    targetTableName,
+    appliedModel: applied
+  }
+}
+
+const openBusinessDictionaryByModelId = async (modelId) => {
+  const normalizedId = String(modelId || '').trim()
+  if (!normalizedId) {
+    throw new Error('业务模型标识不能为空')
+  }
+  await loadBusinessModels()
+  const resolvedId = Number.isNaN(Number(normalizedId)) ? normalizedId : Number(normalizedId)
+  applyChatBusinessModelSelection(resolvedId)
+  businessDictionaryFocusModelId.value = resolvedId
+  businessDictionaryPanelVisible.value = true
+}
+
+const BUSINESS_MODEL_AGENT_HINTS = [
+  ...BUSINESS_MODEL_CREATE_HINTS,
+  '发布', '取消发布', '套用', '复用', '应用', '迁移', '复制', '模型', '企业模型库', '企业模型', '当前模型', '刚创建',
+  '删除', '移除', '去掉', '业务公式', '指标公式', '字典映射'
+]
+
+const shouldUseBusinessModelAgent = (text) => {
+  const q = String(text || '').trim()
+  if (!q) return false
+  const lower = q.toLowerCase()
+  const hasDeleteIntent = ['删除', '移除', '去掉'].some(token => q.includes(token))
+  const hasBusinessModelTarget = ['模型', '业务字典', '业务公式', '指标公式', '公式', '字典', '指标', '维度', '企业模型库', '当前模型', '这个模型'].some(token => q.includes(token))
+  if (hasDeleteIntent && hasBusinessModelTarget) {
+    return true
+  }
+  if (BUSINESS_MODEL_AGENT_HINTS.some(token => lower.includes(token.toLowerCase()))) {
+    return true
+  }
+  const fallbackKeywords = ['创建', '新建', '生成', '搭建', '建模', '发布', '套用', '复用', '模型', '业务字典', '业务公式', '企业模型库']
+  return fallbackKeywords.some(keyword => q.includes(keyword)) && Boolean(activeBusinessModelId.value)
+}
+
+const normalizeBusinessModelContextId = (value) => {
+  if (value === null || value === undefined || value === '') {
+    return null
+  }
+  const numeric = Number(value)
+  return Number.isNaN(numeric) ? String(value).trim() : numeric
+}
+
+const syncBusinessModelContext = (result = {}) => {
+  const activeId = normalizeBusinessModelContextId(result.activeBusinessModelId ?? result.focusModelId ?? result.modelId)
+  const createdId = normalizeBusinessModelContextId(result.lastCreatedBusinessModelId ?? (result.intent === 'CREATE_MODEL' ? result.modelId : null))
+  const appliedId = normalizeBusinessModelContextId(result.lastAppliedBusinessModelId ?? (result.intent === 'APPLY_ENTERPRISE_MODEL' ? result.appliedModelId : null))
+  if (activeId !== null) {
+    applyChatBusinessModelSelection(activeId)
+  }
+  if (createdId !== null) {
+    lastCreatedBusinessModelId.value = createdId
+  }
+  if (appliedId !== null) {
+    lastAppliedBusinessModelId.value = appliedId
+  }
+  const targetTableName = String(result.targetTableName || result.tableName || '').trim()
+  if (targetTableName) {
+    selectedTableName.value = targetTableName
+  }
+  syncChatBusinessModelSelection(activeId ?? createdId ?? appliedId)
+}
+
+const handleBusinessModelAgentQuestion = async ({ question, tableName, semanticDraft }) => {
+  const payload = {
+    question,
+    tableName,
+    selectedTableName: selectedTableName.value,
+    activeBusinessModelId: activeBusinessModelId.value,
+    lastCreatedBusinessModelId: lastCreatedBusinessModelId.value,
+    lastAppliedBusinessModelId: lastAppliedBusinessModelId.value
+  }
+  if (semanticDraft) {
+    payload.requirement = semanticDraft.requirement
+    if (Array.isArray(semanticDraft.dictionaryEntries) && semanticDraft.dictionaryEntries.length > 0) {
+      payload.dictionaryEntries = semanticDraft.dictionaryEntries
+    }
+    if (Array.isArray(semanticDraft.metricDefinitions) && semanticDraft.metricDefinitions.length > 0) {
+      payload.metricDefinitions = semanticDraft.metricDefinitions
+    }
+  }
+  return axios.post(`${API_BASE}/api/chat/business-model-agent`, payload).then(unwrap)
+}
+
+const streamBusinessModelAgentQuestion = async ({ question, tableName, onThinking }) => {
+  const token = authToken.value || localStorage.getItem('token') || ''
+  if (!token) {
+    throw new Error('登录状态缺失，请重新登录')
+  }
+  const controller = new AbortController()
+  streamAbortController.value = controller
+  const params = new URLSearchParams({
+    question: String(question || ''),
+    tableName: String(tableName || ''),
+    selectedTableName: String(selectedTableName.value || ''),
+    activeBusinessModelId: activeBusinessModelId.value == null ? '' : String(activeBusinessModelId.value),
+    lastCreatedBusinessModelId: lastCreatedBusinessModelId.value == null ? '' : String(lastCreatedBusinessModelId.value),
+    lastAppliedBusinessModelId: lastAppliedBusinessModelId.value == null ? '' : String(lastAppliedBusinessModelId.value)
+  })
+  const response = await fetch(`${API_BASE}/api/chat/business-model-agent-stream?${params.toString()}`, {
+    method: 'GET',
+    headers: {
+      Accept: 'text/event-stream',
+      Authorization: `Bearer ${token}`
+    },
+    cache: 'no-store',
+    signal: controller.signal
+  })
+  if (!response.ok || !response.body) {
+    throw new Error(`业务模型流式通道不可用（${response.status}）`)
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  let finalResult = null
+
+  const handleSseChunk = (rawChunk) => {
+    const lines = rawChunk.split(/\r?\n/)
+    let eventName = 'message'
+    let dataText = ''
+    lines.forEach((line) => {
+      if (line.startsWith('event:')) {
+        eventName = line.slice(6).trim()
+      } else if (line.startsWith('data:')) {
+        dataText += line.slice(5).trim()
+      }
+    })
+    if (!dataText) return
+    const payload = JSON.parse(dataText)
+    if (eventName === 'thinking') {
+      onThinking?.(payload)
+      return
+    }
+    if (eventName === 'error') {
+      throw new Error(payload?.message || '业务模型处理失败')
+    }
+    if (eventName === 'result') {
+      finalResult = payload
+    }
+  }
+
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const chunks = buffer.split('\n\n')
+    buffer = chunks.pop() || ''
+    for (const chunk of chunks) {
+      if (!chunk.trim()) continue
+      handleSseChunk(chunk)
+    }
+  }
+  if (buffer.trim()) {
+    handleSseChunk(buffer)
+  }
+  if (streamAbortController.value === controller) {
+    streamAbortController.value = null
+  }
+  return finalResult
 }
 
 const updateBusinessModel = async (modelId, payload) => {
@@ -2483,8 +2806,8 @@ const sendQuestion = async (options = {}) => {
   const isRegenerate = Boolean(options?.regenerate)
 
   if (!userQuestion) return
-  if (!queryTableName) {
-    ElMessage.warning('请先选择一个数据表')
+  if (!queryTableName && !shouldUseBusinessModelAgent(userQuestion)) {
+    ElMessage.warning('请先选择数据表再发起分析')
     return
   }
   if (requestedTableName && !isAccessibleTable(requestedTableName)) {
@@ -2494,7 +2817,8 @@ const sendQuestion = async (options = {}) => {
   if (selectedTableName.value !== queryTableName) {
     selectedTableName.value = queryTableName
   }
-  const createModelIntent = shouldCreateBusinessModelFromQuestion(userQuestion) && !isRegenerate
+  const semanticDraft = shouldCreateBusinessModelFromQuestion(userQuestion) ? resolveSemanticBusinessDraft(userQuestion) : null
+  const businessModelIntent = shouldUseBusinessModelAgent(userQuestion) && !isRegenerate
   stopRequested.value = false
   messages.value.push({
     role: 'user',
@@ -2517,29 +2841,93 @@ const sendQuestion = async (options = {}) => {
     })
   }
 
-  if (createModelIntent) {
+  if (businessModelIntent) {
     try {
-      const createdModel = await openBusinessDictionaryAfterModelCreate(userQuestion, queryTableName)
-      updateStreamMessage({
-        content: `已根据你的指令创建业务模型${createdModel?.modelName ? `：${createdModel.modelName}` : ''}（名称按指令语义生成），已打开“业务字典 + 业务公式维护”抽屉，请继续补充词典和公式。`,
-        sql: '',
-        thinkingLogs: ['识别到“创建业务模型”意图', '已调用业务建模接口并刷新模型列表', '已自动打开业务字典维护抽屉'],
-        thinkingCollapsed: true
-      })
+      isStreaming.value = true
+      const seenBusinessThinking = new Set()
+      const pushBusinessThinking = (payload) => {
+        const title = String(payload?.title || '').trim()
+        const detail = String(payload?.detail || '').trim()
+        const line = [title, detail].filter(Boolean).join('：')
+        if (!line || seenBusinessThinking.has(line)) return
+        seenBusinessThinking.add(line)
+        thinkingLogs.push(line)
+        updateStreamMessage({
+          content: `业务模型处理中（${thinkingLogs.length}步）· 当前：${line}`,
+          sql: '',
+          thinkingLogs: thinkingLogs.slice(0, 8),
+          thinkingCollapsed: true
+        })
+        nextTick(() => {
+          const chatDom = document.getElementById('chatHistory')
+          if (chatDom) chatDom.scrollTop = chatDom.scrollHeight
+        })
+      }
+      let agentResult = null
+      try {
+        agentResult = await streamBusinessModelAgentQuestion({
+          question: userQuestion,
+          tableName: queryTableName,
+          onThinking: pushBusinessThinking
+        })
+      } catch (streamError) {
+        isStreaming.value = false
+        const fallbackLine = `业务模型流式通道失败，已切换普通模式：${streamError.message || '未知错误'}`
+        thinkingLogs.push(fallbackLine)
+        updateStreamMessage({
+          content: fallbackLine,
+          sql: '',
+          thinkingLogs: thinkingLogs.slice(0, 8),
+          thinkingCollapsed: true
+        })
+        agentResult = await handleBusinessModelAgentQuestion({
+          question: userQuestion,
+          tableName: queryTableName,
+          semanticDraft
+        })
+      }
+      if (agentResult?.handled) {
+        syncBusinessModelContext(agentResult)
+        if (agentResult.refreshBusinessModels) {
+          await loadBusinessModels()
+        }
+        if (agentResult.openBusinessDictionary) {
+          const focusId = agentResult.focusModelId ?? agentResult.modelId ?? agentResult.appliedModelId ?? activeBusinessModelId.value
+          if (focusId != null && focusId !== '') {
+            businessDictionaryFocusModelId.value = focusId
+            businessDictionaryPanelVisible.value = true
+          }
+        }
+        updateStreamMessage({
+          content: agentResult.message || '业务模型处理完成',
+          sql: '',
+          thinkingLogs: [
+            ...thinkingLogs,
+            `业务模型智能体意图：${agentResult.intent || 'UNKNOWN'}`,
+            ...(Array.isArray(agentResult.reasoning) ? agentResult.reasoning.filter(Boolean).slice(0, 4) : []),
+            agentResult.message || '业务模型处理完成'
+          ].filter(Boolean).slice(0, 10),
+          thinkingCollapsed: true
+        })
+        loading.value = false
+        isStreaming.value = false
+        streamAbortController.value = null
+        stopRequested.value = false
+        return
+      }
     } catch (error) {
       updateStreamMessage({
-        content: `创建业务模型失败：${error.message || '未知错误'}`,
+        content: `业务模型处理失败：${error.message || '未知错误'}`,
         sql: '',
-        thinkingLogs: ['识别到“创建业务模型”意图', '业务建模接口执行失败'],
+        thinkingLogs: ['业务模型智能体执行失败', '请检查输入语义或后端 AI 服务状态'],
         thinkingCollapsed: true
       })
-    } finally {
       loading.value = false
       isStreaming.value = false
       streamAbortController.value = null
       stopRequested.value = false
+      return
     }
-    return
   }
 
   const applyAnalysisResult = (data) => {
@@ -3283,6 +3671,8 @@ provide('workbench', {
   isStreaming,
   businessDictionaryPanelVisible,
   businessDictionaryFocusModelId,
+  selectedChatBusinessModelId,
+  chatBusinessModelOptions,
   recentChatQueries,
   messages,
   currentChartType,
@@ -3362,6 +3752,8 @@ provide('workbench', {
   uploadAnalysisTemplate,
   createBusinessModelFromTemplate,
   createBusinessModel,
+  handleChatBusinessModelChange,
+  openBusinessDictionaryByModelId,
   publishBusinessModel,
   applyBusinessModel,
   updateBusinessModel,
@@ -3812,21 +4204,37 @@ provide('workbench', {
 }
 
 .chat-layout {
+  --chat-panel-height: max(900px, calc(100vh - 48px));
   display: grid;
   grid-template-columns: 420px minmax(520px, 1fr);
   gap: 16px;
-  min-height: calc(100vh - 132px);
+  align-items: stretch;
+  min-height: var(--chat-panel-height);
 }
 
 .chat-panel,
 .chart-panel {
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: var(--chat-panel-height);
+  min-height: var(--chat-panel-height);
+}
+
+.chat-panel {
+  overflow: hidden;
+}
+
+.chart-panel {
+  overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .message-list {
-  flex: 1;
-  min-height: 480px;
+  flex: 1 1 auto;
+  min-height: 260px;
   overflow-y: auto;
   padding: 12px;
   background: #f8fafc;
@@ -3944,13 +4352,22 @@ provide('workbench', {
   margin-top: 16px;
 }
 
-.graph-context {
-  margin-top: 16px;
+.chat-select-dropdown {
+  min-width: 360px !important;
+  max-width: 520px;
 }
 
-.graph-context h3 {
-  margin: 0 0 10px;
-  font-size: 15px;
+.chat-select-dropdown .el-select-dropdown__item,
+.chat-select-dropdown .el-select-dropdown__item.is-hovering,
+.chat-select-dropdown .el-select-dropdown__item.is-selected {
+  height: auto;
+  min-height: 34px;
+  line-height: 1.5;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+  padding-top: 8px;
+  padding-bottom: 8px;
 }
 
 .audit-layout {
@@ -4224,9 +4641,17 @@ provide('workbench', {
   .datasource-layout,
   .datasource-form,
   .request-form-grid,
-  .permission-grid,
-  .permission-cards {
+    .permission-grid,
+    .permission-cards {
     grid-template-columns: 1fr;
+  }
+  .chat-panel,
+  .chart-panel {
+    height: var(--chat-panel-height);
+    min-height: var(--chat-panel-height);
+  }
+  .message-list {
+    min-height: 360px;
   }
 }
 </style>

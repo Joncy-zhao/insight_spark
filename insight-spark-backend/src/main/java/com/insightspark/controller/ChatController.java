@@ -3,6 +3,7 @@ package com.insightspark.controller;
 import com.insightspark.common.ApiResponse;
 import com.insightspark.core.auth.AuthContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.insightspark.service.BusinessModelAgentService;
 import com.insightspark.service.ChatBiService;
 import com.insightspark.service.ChatQueryHistoryService;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -37,6 +38,9 @@ public class ChatController {
     @Autowired
     private ChatQueryHistoryService chatQueryHistoryService;
 
+    @Autowired
+    private BusinessModelAgentService businessModelAgentService;
+
     @PostMapping("/ask")
     public ApiResponse<Map<String, Object>> askQuestion(@RequestBody Map<String, String> request) {
         return executeQuestion(request.get("question"), request.get("tableName"), false);
@@ -51,6 +55,126 @@ public class ChatController {
     @PostMapping("/ask-enhanced")
     public ApiResponse<Map<String, Object>> askQuestionEnhanced(@RequestBody Map<String, String> request) {
         return executeQuestion(request.get("question"), request.get("tableName"), true);
+    }
+
+    @PostMapping("/business-model-agent")
+    public ApiResponse<Map<String, Object>> handleBusinessModelAgent(@RequestBody Map<String, Object> request) {
+        try {
+            return ApiResponse.success(businessModelAgentService.handleQuestion(request));
+        } catch (Exception e) {
+            return ApiResponse.badRequest(rootMessage(e));
+        }
+    }
+
+    @GetMapping(value = "/business-model-agent-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public void handleBusinessModelAgentStream(@RequestParam String question,
+                                               @RequestParam(required = false) String tableName,
+                                               @RequestParam(required = false) String selectedTableName,
+                                               @RequestParam(required = false) String activeBusinessModelId,
+                                               @RequestParam(required = false) String lastCreatedBusinessModelId,
+                                               @RequestParam(required = false) String lastAppliedBusinessModelId,
+                                               HttpServletResponse response) throws IOException {
+        response.setCharacterEncoding("UTF-8");
+        response.setContentType(MediaType.TEXT_EVENT_STREAM_VALUE);
+        response.setHeader("Cache-Control", "no-cache");
+        response.setHeader("Connection", "keep-alive");
+        response.setHeader("X-Accel-Buffering", "no");
+
+        PrintWriter writer = response.getWriter();
+        if (question == null || question.isBlank()) {
+            writeSse(writer, "error", Map.of("message", "问题不能为空"));
+            return;
+        }
+
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("question", question);
+        request.put("tableName", tableName);
+        request.put("selectedTableName", selectedTableName);
+        if (activeBusinessModelId != null && !activeBusinessModelId.isBlank()) {
+            request.put("activeBusinessModelId", activeBusinessModelId);
+        }
+        if (lastCreatedBusinessModelId != null && !lastCreatedBusinessModelId.isBlank()) {
+            request.put("lastCreatedBusinessModelId", lastCreatedBusinessModelId);
+        }
+        if (lastAppliedBusinessModelId != null && !lastAppliedBusinessModelId.isBlank()) {
+            request.put("lastAppliedBusinessModelId", lastAppliedBusinessModelId);
+        }
+
+        String[] titles = {"收到指令", "定位模型", "语义拆解", "执行修改", "刷新结果"};
+        String[] details = {
+                "已接收业务模型维护指令，正在识别新增、修改或删除动作",
+                "结合当前模型上下文与数据源信息定位目标业务模型",
+                "调用语义补丁能力拆解字典映射、业务公式和删除动作",
+                "正在写回业务模型，并合并最新字典与业务公式",
+                "模型修改已完成，正在返回最新结果并刷新维护面板"
+        };
+        AuthContext.UserPrincipal principal = AuthContext.get();
+        CompletableFuture<Map<String, Object>> modelFuture = new CompletableFuture<>();
+        Thread modelThread = new Thread(() -> {
+            try {
+                AuthContext.set(principal);
+                modelFuture.complete(businessModelAgentService.handleQuestion(request));
+            } catch (Exception e) {
+                modelFuture.completeExceptionally(e);
+            } finally {
+                AuthContext.clear();
+            }
+        });
+        modelThread.setName("business-model-agent-stream");
+        modelThread.start();
+        try {
+            int stepIndex = 0;
+            writeStep(writer, titles[stepIndex], details[stepIndex]);
+            stepIndex++;
+            while (true) {
+                try {
+                    Map<String, Object> result = modelFuture.get(stepIndex < titles.length ? 450 : 1000, TimeUnit.MILLISECONDS);
+                    List<String> reasoning = new ArrayList<>();
+                    Object rawReasoning = result.get("reasoning");
+                    if (rawReasoning instanceof List<?> list) {
+                        for (Object item : list) {
+                            String line = item == null ? "" : String.valueOf(item).trim();
+                            if (!line.isBlank()) {
+                                reasoning.add(line);
+                            }
+                        }
+                    }
+                    while (stepIndex < titles.length - 1) {
+                        writeStep(writer, titles[stepIndex], details[stepIndex]);
+                        stepIndex++;
+                        pauseForSseProgress();
+                    }
+                    for (String line : reasoning.stream().limit(4).toList()) {
+                        writeStep(writer, "语义结果", line);
+                        pauseForSseProgress();
+                    }
+                    writeStep(writer, titles[titles.length - 1], details[details.length - 1]);
+                    writeSse(writer, "result", result);
+                    return;
+                } catch (TimeoutException timeout) {
+                    if (stepIndex < titles.length - 1) {
+                        writeStep(writer, titles[stepIndex], details[stepIndex]);
+                        stepIndex++;
+                    } else {
+                        writeStep(writer, "执行中", "已定位到模型，正在等待语义解析与保存结果");
+                    }
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            modelFuture.cancel(true);
+            modelThread.interrupt();
+            writeSse(writer, "error", Map.of("message", "业务模型处理已中断"));
+        } catch (ExecutionException e) {
+            writeSse(writer, "error", Map.of("message", rootMessage(e)));
+        } catch (Exception e) {
+            writeSse(writer, "error", Map.of("message", rootMessage(e)));
+        } finally {
+            if (!modelFuture.isDone()) {
+                modelFuture.cancel(true);
+                modelThread.interrupt();
+            }
+        }
     }
 
     @GetMapping("/history")
@@ -139,6 +263,11 @@ public class ChatController {
             while (true) {
                 try {
                     Map<String, Object> result = queryFuture.get(stepIndex < titles.length ? 450 : 1000, TimeUnit.MILLISECONDS);
+                    while (stepIndex < titles.length) {
+                        writeStep(writer, titles[stepIndex], details[stepIndex]);
+                        stepIndex++;
+                        pauseForSseProgress();
+                    }
                     enrichEnhancedResponse(result, question, tableName);
                     Long historyId = chatQueryHistoryService.recordSuccess(question, tableName, result,
                             System.currentTimeMillis() - startedAt);
@@ -235,6 +364,10 @@ public class ChatController {
         payload.put("detail", detail);
         payload.put("ts", System.currentTimeMillis());
         writeSse(writer, "thinking", payload);
+    }
+
+    private void pauseForSseProgress() throws InterruptedException {
+        Thread.sleep(180);
     }
 
     private void writeSse(PrintWriter writer, String eventName, Object payload) throws IOException {

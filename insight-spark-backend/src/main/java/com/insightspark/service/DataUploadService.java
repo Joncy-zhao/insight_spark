@@ -620,14 +620,22 @@ public class DataUploadService {
     }
 
     public List<Map<String, Object>> listBusinessModels(boolean enterpriseOnly) {
-        String sql = """
+        StringBuilder sql = new StringBuilder("""
                 SELECT id, model_name AS modelName, model_requirement AS modelRequirement,
                        table_name AS tableName, owner_id AS ownerId, model_json AS modelJson,
                        published, status, created_at AS createdAt, updated_at AS updatedAt
                 FROM is_business_model
                 WHERE status = 'ACTIVE'
-                """ + (enterpriseOnly ? " AND published = 1" : "") + " ORDER BY updated_at DESC";
-        return jdbcTemplate.queryForList(sql);
+                """);
+        List<Object> args = new ArrayList<>();
+        if (enterpriseOnly) {
+            sql.append(" AND published = 1");
+        } else if (!AuthContext.isAdmin()) {
+            sql.append(" AND owner_id = ?");
+            args.add(permissionService.currentUserId());
+        }
+        sql.append(" ORDER BY updated_at DESC");
+        return jdbcTemplate.queryForList(sql.toString(), args.toArray());
     }
 
     public Map<String, Object> createBusinessModel(Map<String, Object> request) {
@@ -635,10 +643,7 @@ public class DataUploadService {
         String requirement = Objects.toString(request.get("requirement"), "");
         String modelName = Objects.toString(request.getOrDefault("modelName", "业务模型_" + System.currentTimeMillis()));
         assertKnownTable(tableName);
-        List<String> headers = listFields(tableName).stream()
-                .map(item -> Objects.toString(item.get("displayName"), Objects.toString(item.get("columnName"))))
-                .toList();
-        Map<String, Object> modelJson = buildAcceptanceModelJson(requirement, tableName, headers, List.of());
+        Map<String, Object> modelJson = new LinkedHashMap<>();
         modelJson.put("tableName", tableName);
         modelJson.put("requirement", requirement);
         if (request.containsKey("dictionaryEntries")) {
@@ -647,6 +652,8 @@ public class DataUploadService {
         if (request.containsKey("metricDefinitions")) {
             modelJson.put("metricDefinitions", sanitizeMetricDefinitions(request.get("metricDefinitions"), tableName));
         }
+        modelJson.putIfAbsent("dictionaryEntries", List.of());
+        modelJson.putIfAbsent("metricDefinitions", List.of());
         return saveBusinessModel(modelName, requirement, tableName, modelJson);
     }
 
@@ -699,7 +706,32 @@ public class DataUploadService {
     }
 
     public void publishBusinessModel(Long modelId, boolean published) {
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT id, owner_id AS ownerId
+                FROM is_business_model
+                WHERE id = ? AND status = 'ACTIVE'
+                """, modelId);
+        if (rows.isEmpty()) {
+            throw new IllegalArgumentException("业务模型不存在：" + modelId);
+        }
+        ensureCanOperateBusinessModel(rows.get(0));
         jdbcTemplate.update("UPDATE is_business_model SET published = ? WHERE id = ? AND status = 'ACTIVE'", published, modelId);
+    }
+
+    public Map<String, Object> getBusinessModelDetail(Long modelId) {
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT id, model_name AS modelName, model_requirement AS modelRequirement,
+                       table_name AS tableName, owner_id AS ownerId, model_json AS modelJson,
+                       published, status, created_at AS createdAt, updated_at AS updatedAt
+                FROM is_business_model
+                WHERE id = ? AND status = 'ACTIVE'
+                """, modelId);
+        if (rows.isEmpty()) {
+            throw new IllegalArgumentException("业务模型不存在：" + modelId);
+        }
+        Map<String, Object> row = new LinkedHashMap<>(rows.get(0));
+        ensureCanReuseBusinessModel(row);
+        return row;
     }
 
     public Map<String, Object> updateBusinessModel(Long modelId, Map<String, Object> request) {
@@ -783,7 +815,8 @@ public class DataUploadService {
     public Map<String, Object> applyBusinessModel(Long modelId, String tableName) {
         assertKnownTable(tableName);
         List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
-                SELECT model_name AS modelName, model_requirement AS modelRequirement, model_json AS modelJson
+                SELECT model_name AS modelName, model_requirement AS modelRequirement, model_json AS modelJson,
+                       owner_id AS ownerId, published
                 FROM is_business_model
                 WHERE id = ? AND status = 'ACTIVE'
                 """, modelId);
@@ -791,6 +824,7 @@ public class DataUploadService {
             throw new IllegalArgumentException("业务模型不存在：" + modelId);
         }
         Map<String, Object> row = rows.get(0);
+        ensureCanReuseBusinessModel(row);
         String requirement = Objects.toString(row.get("modelRequirement"), "").trim();
         String sourceModelName = Objects.toString(row.get("modelName"), "").trim();
         List<String> headers = listFields(tableName).stream()
@@ -988,6 +1022,21 @@ public class DataUploadService {
         if (!ownerId.equals(permissionService.currentUserId())) {
             throw new IllegalArgumentException("无权限修改该业务模型");
         }
+    }
+
+    private void ensureCanReuseBusinessModel(Map<String, Object> modelRow) {
+        if (AuthContext.isAdmin()) {
+            return;
+        }
+        boolean published = parseBooleanFlag(modelRow.get("published"));
+        if (published) {
+            return;
+        }
+        String ownerId = Objects.toString(modelRow.get("ownerId"), "");
+        if (ownerId.equals(permissionService.currentUserId())) {
+            return;
+        }
+        throw new IllegalArgumentException("无权套用该业务模型，仅本人模型或已发布企业模型可复用");
     }
 
     @SuppressWarnings("unchecked")
@@ -1250,7 +1299,7 @@ public class DataUploadService {
 
     private List<Map<String, Object>> listAutoApplyModelCandidates(String targetTableName) {
         String normalizedTarget = Objects.toString(targetTableName, "").trim();
-        String sql = """
+        StringBuilder sql = new StringBuilder("""
                 SELECT id,
                        model_name AS modelName,
                        table_name AS tableName,
@@ -1260,10 +1309,19 @@ public class DataUploadService {
                 FROM is_business_model
                 WHERE status = 'ACTIVE'
                   AND table_name <> ?
+                """);
+        List<Object> args = new ArrayList<>();
+        args.add(normalizedTarget);
+        if (!AuthContext.isAdmin()) {
+            sql.append(" AND (published = 1 OR owner_id = ?)");
+            args.add(permissionService.currentUserId());
+        }
+        sql.append("""
                 ORDER BY updated_at DESC
                 LIMIT ?
-                """;
-        return jdbcTemplate.queryForList(sql, normalizedTarget, AUTO_APPLY_MODEL_CANDIDATE_LIMIT);
+                """);
+        args.add(AUTO_APPLY_MODEL_CANDIDATE_LIMIT);
+        return jdbcTemplate.queryForList(sql.toString(), args.toArray());
     }
 
     private Long toLong(Object value) {
