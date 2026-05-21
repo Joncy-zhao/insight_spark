@@ -87,6 +87,7 @@ public class PythonAiService {
                                                             String modelRequirement,
                                                             List<Map<String, Object>> dictionaryEntries,
                                                             List<Map<String, Object>> metricDefinitions,
+                                                            List<Map<String, Object>> dimensionSystem,
                                                             List<Map<String, Object>> fields,
                                                             List<Map<String, Object>> previewRows) {
         Map<String, Object> request = new LinkedHashMap<>();
@@ -96,6 +97,7 @@ public class PythonAiService {
         request.put("modelRequirement", modelRequirement);
         request.put("dictionaryEntries", dictionaryEntries == null ? List.of() : dictionaryEntries);
         request.put("metricDefinitions", metricDefinitions == null ? List.of() : metricDefinitions);
+        request.put("dimensionSystem", dimensionSystem == null ? List.of() : dimensionSystem);
         request.put("fields", fields == null ? List.of() : fields);
         request.put("previewRows", previewRows == null ? List.of() : previewRows);
 

@@ -42,6 +42,7 @@ class FieldMeta(BaseModel):
     fieldType: str = "TEXT"
     displayName: str
     fieldComment: str | None = None
+    synonyms: str | None = None
     sensitive: bool | int | None = False
     sortOrder: int | None = None
 
@@ -102,6 +103,7 @@ class BusinessModelPatchRequest(BaseModel):
     modelRequirement: str = ""
     dictionaryEntries: list[dict[str, Any]] = []
     metricDefinitions: list[dict[str, Any]] = []
+    dimensionSystem: list[dict[str, Any]] = []
     fields: list[FieldMeta]
     previewRows: list[dict[str, Any]] = []
 
@@ -1071,11 +1073,13 @@ def call_openai_business_model_patch(payload: BusinessModelPatchRequest) -> dict
                 "你的任务：把用户对已有业务模型的自然语言修改要求，转换为可执行的结构化补丁。\n"
                 "必须遵守：\n"
                 "1. 只输出严格 JSON，不要输出解释性文本。\n"
-                "2. operation 只允许 targetType 为 dictionaryEntry 或 metricDefinition。\n"
-                "3. action 只允许 UPSERT 或 DELETE。\n"
-                "4. field 必须尽量绑定到真实字段 columnName，formula 尽量使用真实字段 columnName。\n"
-                "5. 如果无法识别到明确修改动作，返回空 operations，不要臆造。\n"
-                "6. 支持从一句话里识别多条字典映射和多条公式修改。"
+                "2. intent 只允许 BIND_FIELDS 或 PATCH_MODEL。\n"
+                "3. operation 只允许 targetType 为 dictionaryEntry、metricDefinition 或 fieldBinding。\n"
+                "4. fieldBinding 用于“把某个业务名/指标名/维度名绑定到某个真实字段”的语义修正。\n"
+                "5. action 只允许 UPSERT 或 DELETE。\n"
+                "6. field 必须尽量绑定到真实字段 columnName，formula 尽量使用真实字段 columnName。\n"
+                "7. 如果无法识别到明确修改动作，返回空 operations，不要臆造。\n"
+                "8. 支持从一句话里识别多条字典映射、多条公式修改和多条字段绑定。"
             )},
             {"role": "user", "content": prompt},
         ],
@@ -1107,7 +1111,7 @@ def call_openai_business_model_patch(payload: BusinessModelPatchRequest) -> dict
 
 def build_business_model_semantic_prompt(payload: BusinessModelSemanticRequest) -> str:
     fields_text = "\n".join(
-        f"- columnName={field.columnName}, displayName={field.displayName}, fieldType={field.fieldType}, fieldComment={field.fieldComment or ''}"
+        f"- columnName={field.columnName}, displayName={field.displayName}, fieldType={field.fieldType}, fieldComment={field.fieldComment or ''}, synonyms={field.synonyms or ''}"
         for field in payload.fields
     )
     preview_text = "\n".join(
@@ -1141,7 +1145,7 @@ def build_business_model_semantic_prompt(payload: BusinessModelSemanticRequest) 
 
 def build_business_model_patch_prompt(payload: BusinessModelPatchRequest) -> str:
     fields_text = "\n".join(
-        f"- columnName={field.columnName}, displayName={field.displayName}, fieldType={field.fieldType}, fieldComment={field.fieldComment or ''}"
+        f"- columnName={field.columnName}, displayName={field.displayName}, fieldType={field.fieldType}, fieldComment={field.fieldComment or ''}, synonyms={field.synonyms or ''}"
         for field in payload.fields
     )
     preview_text = "\n".join(
@@ -1149,21 +1153,24 @@ def build_business_model_patch_prompt(payload: BusinessModelPatchRequest) -> str
     ) or "暂无预览样本"
     dictionary_text = json.dumps(payload.dictionaryEntries[:20], ensure_ascii=False)
     metric_text = json.dumps(payload.metricDefinitions[:20], ensure_ascii=False)
+    dimension_text = json.dumps(payload.dimensionSystem[:20], ensure_ascii=False)
     return (
         f"用户修改指令：{payload.question}\n"
         f"当前模型名：{payload.modelName}\n"
         f"当前模型需求：{payload.modelRequirement}\n"
         f"当前模型字典：{dictionary_text}\n"
         f"当前模型公式：{metric_text}\n"
+        f"当前模型维度：{dimension_text}\n"
         f"目标表：{payload.tableName}\n"
         f"字段信息：\n{fields_text}\n\n"
         f"预览样本：\n{preview_text}\n\n"
         "请输出严格 JSON，格式如下：\n"
         "{\n"
-        '  "intent": "PATCH_MODEL",\n'
+        '  "intent": "BIND_FIELDS | PATCH_MODEL",\n'
         '  "operations": [\n'
         '    {"targetType": "metricDefinition", "action": "UPSERT", "name": "", "field": "", "aggregation": "SUM|COUNT|AVG|MAX|MIN", "formula": ""},\n'
-        '    {"targetType": "dictionaryEntry", "action": "UPSERT", "term": "", "field": "", "synonyms": ""}\n'
+        '    {"targetType": "dictionaryEntry", "action": "UPSERT", "term": "", "field": "", "synonyms": ""},\n'
+        '    {"targetType": "fieldBinding", "action": "UPSERT", "bindingType": "AUTO|dictionaryEntry|metricDefinition|dimensionDefinition", "name": "", "field": ""}\n'
         "  ],\n"
         '  "reasoning": ["", ""],\n'
         '  "confidence": 0.0\n'
@@ -1171,10 +1178,12 @@ def build_business_model_patch_prompt(payload: BusinessModelPatchRequest) -> str
         "规则：\n"
         "1. 新增或修改指标/公式，输出 targetType=metricDefinition。\n"
         "2. 新增或修改业务字典/术语映射，输出 targetType=dictionaryEntry。\n"
-        "3. 如果用户表达“删除/移除/去掉”，对应 action=DELETE。\n"
-        "4. 修改已有公式时，name 必须尽量对齐已有指标名。\n"
-        "5. 一句话中可能包含多条操作，要全部拆开。\n"
-        "6. 若没有可执行修改动作，operations 返回空数组。"
+        "3. 如果用户是在修正字段绑定，例如“把销售额绑定到sales_amt”“将省份维度对应到province”，优先输出 targetType=fieldBinding，并把 intent 设为 BIND_FIELDS。\n"
+        "4. bindingType 用于提示目标类型，可选 dictionaryEntry、metricDefinition、dimensionDefinition，无法确定时填 AUTO。\n"
+        "5. 如果用户表达“删除/移除/去掉”，对应 action=DELETE。\n"
+        "6. 修改已有公式时，name 必须尽量对齐已有指标名。\n"
+        "7. 一句话中可能包含多条操作，要全部拆开。\n"
+        "8. 若没有可执行修改动作，operations 返回空数组。"
     )
 
 
@@ -1204,8 +1213,9 @@ def normalize_business_model_patch_result(parsed: dict[str, Any], payload: Busin
     operations = normalize_patch_operations(parsed.get("operations"), payload.fields)
     reasoning = parsed.get("reasoning") if isinstance(parsed.get("reasoning"), list) else []
     confidence = read_float(parsed.get("confidence"))
+    intent = infer_patch_intent(parsed.get("intent"), operations)
     return {
-        "intent": "PATCH_MODEL",
+        "intent": intent,
         "operations": operations,
         "reasoning": [str(item) for item in reasoning if str(item).strip()][:8],
         "confidence": confidence,
@@ -1246,19 +1256,43 @@ def build_rule_based_business_model_patch_result(payload: BusinessModelPatchRequ
         payload.fields,
         payload.dictionaryEntries,
         payload.metricDefinitions,
+        payload.dimensionSystem,
     )
     reasoning = ["AI 模型修改语义拆解不可用，已使用规则兜底"]
     if operations:
         reasoning.append(f"识别到 {len(operations)} 条模型修改操作")
     else:
         reasoning.append("未识别到明确的字典或公式修改动作")
+    intent = infer_patch_intent("BIND_FIELDS" if has_binding_intent(payload.question) else "PATCH_MODEL", operations)
     return {
-        "intent": "PATCH_MODEL",
+        "intent": intent,
         "operations": operations,
         "reasoning": reasoning,
         "confidence": 0.52 if operations else 0.3,
         "model": "rule-based-business-model-patch-fallback",
     }
+
+
+def has_binding_intent(question: str) -> bool:
+    q = (question or "").strip()
+    if not q:
+        return False
+    if any(token in q for token in ["字段绑定", "绑定字段", "字段修正", "改绑", "重新绑定"]):
+        return True
+    bind_verbs = ["绑定到", "绑定为", "映射到", "映射为", "对应到", "对应为", "改成", "改为", "修改为", "更新为"]
+    bind_targets = ["字段", "指标", "公式", "维度", "术语", "字典", "同义词", "模型"]
+    return any(token in q for token in bind_verbs) and any(token in q for token in bind_targets)
+
+
+def infer_patch_intent(raw_intent: Any, operations: list[dict[str, Any]]) -> str:
+    intent = str(raw_intent or "").strip().upper()
+    if intent == "BIND_FIELDS":
+        return "BIND_FIELDS"
+    has_field_binding = any(str(item.get("targetType") or "").strip() == "fieldBinding" for item in operations)
+    has_non_binding = any(str(item.get("targetType") or "").strip() != "fieldBinding" for item in operations)
+    if has_field_binding and not has_non_binding:
+        return "BIND_FIELDS"
+    return "PATCH_MODEL"
 
 
 def infer_business_model_name(ai_name: str, requirement: str, question: str) -> str:
@@ -2105,6 +2139,8 @@ def resolve_field_from_ref(ref: str, fields: list[FieldMeta]) -> FieldMeta | Non
             field.sourceFieldName or "",
             field.fieldComment or "",
         ]
+        if field.synonyms:
+            aliases.extend(re.split(r"[,，;；、\s]+", field.synonyms))
         normalized_aliases = [normalize_ref_token(alias) for alias in aliases if alias]
         if normalized_ref in normalized_aliases:
             exact_match = field
@@ -2155,10 +2191,26 @@ def normalize_patch_operations(entries: Any, fields: list[FieldMeta]) -> list[di
             continue
         target_type = str(item.get("targetType") or "").strip()
         action = str(item.get("action") or "UPSERT").strip().upper()
-        if target_type not in {"dictionaryEntry", "metricDefinition"}:
+        if target_type not in {"dictionaryEntry", "metricDefinition", "fieldBinding"}:
             continue
         if action not in {"UPSERT", "DELETE"}:
             action = "UPSERT"
+        if target_type == "fieldBinding":
+            name = str(item.get("name") or item.get("term") or item.get("label") or "").strip()
+            field_ref = str(item.get("field") or "").strip()
+            binding_type = normalize_binding_type(item.get("bindingType"))
+            matched = resolve_field_from_ref(field_ref or name, fields)
+            field_name = matched.columnName if matched else field_ref
+            if not name or not field_name:
+                continue
+            result.append({
+                "targetType": "fieldBinding",
+                "action": action,
+                "bindingType": binding_type,
+                "name": name,
+                "field": field_name,
+            })
+            continue
         if target_type == "dictionaryEntry":
             term = str(item.get("term") or "").strip()
             field_ref = str(item.get("field") or "").strip()
@@ -2245,7 +2297,9 @@ def deduplicate_patch_operations(entries: list[dict[str, Any]]) -> list[dict[str
         target_type = str(item.get("targetType") or "").strip()
         key_name = str(item.get("name") or item.get("term") or "").strip().lower()
         action = str(item.get("action") or "UPSERT").strip().upper()
-        key = f"{target_type}@@{key_name}@@{action}"
+        binding_type = str(item.get("bindingType") or "").strip()
+        field_name = str(item.get("field") or "").strip().lower()
+        key = f"{target_type}@@{binding_type}@@{key_name}@@{field_name}@@{action}"
         if not key_name or key in seen:
             continue
         seen.add(key)
@@ -2258,12 +2312,74 @@ def build_patch_operations_from_question(
     fields: list[FieldMeta],
     existing_dictionary_entries: list[dict[str, Any]] | None,
     existing_metric_definitions: list[dict[str, Any]] | None,
+    existing_dimensions: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
     operations: list[dict[str, Any]] = []
+    operations.extend(build_field_binding_patch_operations(
+        question,
+        fields,
+        existing_dictionary_entries or [],
+        existing_metric_definitions or [],
+        existing_dimensions or [],
+    ))
     operations.extend(build_dictionary_patch_operations(question, fields))
     operations.extend(build_metric_patch_operations(question, fields, existing_metric_definitions or []))
     if any(token in question for token in ["删除", "移除", "去掉", "取消"]) and ((existing_dictionary_entries or []) or (existing_metric_definitions or [])):
         operations.extend(build_delete_patch_operations(question, existing_dictionary_entries, existing_metric_definitions or []))
+    return deduplicate_patch_operations(operations)
+
+
+def build_field_binding_patch_operations(
+    question: str,
+    fields: list[FieldMeta],
+    existing_dictionary_entries: list[dict[str, Any]],
+    existing_metric_definitions: list[dict[str, Any]],
+    existing_dimensions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not has_binding_intent(question):
+        return []
+    operations: list[dict[str, Any]] = []
+    overall_binding_type = infer_binding_type_from_text(question)
+    patterns = [
+        re.compile(r"(?:把|将)?(.+?)(?:的)?(?:目标)?(?:绑定字段|字段绑定|字段)?(?:改成|改为|修改为|更新为|绑定到|绑定为|映射到|映射为|对应到|对应为|改绑到|关联到|关联为)\s*([^,，;；。\n]+)$"),
+        re.compile(r"(?:把|将)?(.+?)\s*(?:->|=>|→)\s*([^,，;；。\n]+)$"),
+    ]
+    for item in split_top_level_segments(question):
+        cleaned_item = str(item or "").strip().strip("。")
+        if not cleaned_item:
+            continue
+        for segment in split_top_level_segments(cleaned_item, separators=["；", ";", "\n", "，", ",", "、"]):
+            cleaned = str(segment or "").strip().strip("。")
+            if not cleaned:
+                continue
+            matched_pair = None
+            for pattern in patterns:
+                matched_pair = pattern.search(cleaned)
+                if matched_pair:
+                    break
+            if not matched_pair:
+                continue
+            subject = cleanup_binding_subject(str(matched_pair.group(1) or "").strip())
+            field_ref = str(matched_pair.group(2) or "").strip().strip("：:，,；; ")
+            matched_field = resolve_field_from_ref(field_ref, fields)
+            if not subject or not matched_field:
+                continue
+            binding_type = infer_binding_type_from_text(cleaned)
+            if binding_type == "AUTO":
+                binding_type = infer_binding_type_from_existing_name(
+                    subject,
+                    existing_dictionary_entries,
+                    existing_metric_definitions,
+                    existing_dimensions,
+                    overall_binding_type,
+                )
+            operations.append({
+                "targetType": "fieldBinding",
+                "action": "UPSERT",
+                "bindingType": binding_type,
+                "name": subject,
+                "field": matched_field.columnName,
+            })
     return deduplicate_patch_operations(operations)
 
 
@@ -2401,6 +2517,82 @@ def match_existing_metric_name(name: str, existing_metric_definitions: list[dict
         if normalized and (normalized in existing_normalized or existing_normalized in normalized):
             return existing_name
     return metric_name
+
+
+def infer_binding_type_from_text(text: str) -> str:
+    value = str(text or "").strip()
+    if any(token in value for token in ["维度"]):
+        return "dimensionDefinition"
+    if any(token in value for token in ["公式", "指标"]):
+        return "metricDefinition"
+    if any(token in value for token in ["字典", "词典", "同义词", "术语", "黑话"]):
+        return "dictionaryEntry"
+    return "AUTO"
+
+
+def infer_binding_type_from_existing_name(
+    name: str,
+    existing_dictionary_entries: list[dict[str, Any]],
+    existing_metric_definitions: list[dict[str, Any]],
+    existing_dimensions: list[dict[str, Any]],
+    fallback: str = "AUTO",
+) -> str:
+    normalized_name = normalize_ref_token(name)
+    if not normalized_name:
+        return fallback or "AUTO"
+    dictionary_hit = any(binding_name_matches(name, str(item.get("term") or ""), str(item.get("synonyms") or "")) for item in existing_dictionary_entries)
+    metric_hit = any(binding_name_matches(name, str(item.get("name") or "")) for item in existing_metric_definitions)
+    dimension_hit = any(binding_name_matches(name, str(item.get("name") or "")) for item in existing_dimensions)
+    hit_types = [kind for kind, hit in [
+        ("dictionaryEntry", dictionary_hit),
+        ("metricDefinition", metric_hit),
+        ("dimensionDefinition", dimension_hit),
+    ] if hit]
+    if len(hit_types) == 1:
+        return hit_types[0]
+    return fallback or "AUTO"
+
+
+def binding_name_matches(name: str, primary_name: str, synonyms: str = "") -> bool:
+    normalized_name = normalize_ref_token(name)
+    if not normalized_name:
+        return False
+    candidates = [primary_name]
+    if synonyms:
+        candidates.extend(re.split(r"[,，;；、\s]+", synonyms))
+    for candidate in candidates:
+        normalized_candidate = normalize_ref_token(candidate)
+        if not normalized_candidate:
+            continue
+        if normalized_name == normalized_candidate or normalized_name in normalized_candidate or normalized_candidate in normalized_name:
+            return True
+    return False
+
+
+def cleanup_binding_subject(text: str) -> str:
+    value = str(text or "").strip()
+    value = re.sub(r"^(请|请你|帮我|麻烦|把|将)+", "", value).strip()
+    value = re.sub(r"^(?:当前|这个|该)?(?:业务)?模型(?:里|中的|内的)?", "", value).strip()
+    value = re.sub(r"^(?:业务字典|字典|词典|同义词|术语|业务公式|指标公式|公式|指标|维度)(?:里|中的|内的)?", "", value).strip()
+    value = re.sub(r"(?:业务字典|字典|词典|同义词|术语|业务公式|指标公式|公式|指标|维度|字段)$", "", value).strip()
+    return value.strip("：:，,；; ")
+
+
+def normalize_binding_type(value: Any) -> str:
+    raw = str(value or "").strip()
+    mapping = {
+        "dictionary": "dictionaryEntry",
+        "dictionaryentry": "dictionaryEntry",
+        "metric": "metricDefinition",
+        "metricdefinition": "metricDefinition",
+        "dimension": "dimensionDefinition",
+        "dimensiondefinition": "dimensionDefinition",
+        "auto": "AUTO",
+    }
+    normalized = mapping.get(normalize_ref_token(raw), raw)
+    if normalized not in {"dictionaryEntry", "metricDefinition", "dimensionDefinition", "AUTO"}:
+        return "AUTO"
+    return normalized
 
 
 def build_delete_patch_operations(

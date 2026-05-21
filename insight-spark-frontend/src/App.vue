@@ -2504,7 +2504,8 @@ const openBusinessDictionaryByModelId = async (modelId) => {
 const BUSINESS_MODEL_AGENT_HINTS = [
   ...BUSINESS_MODEL_CREATE_HINTS,
   '发布', '取消发布', '套用', '复用', '应用', '迁移', '复制', '模型', '企业模型库', '企业模型', '当前模型', '刚创建',
-  '删除', '移除', '去掉', '业务公式', '指标公式', '字典映射'
+  '删除', '移除', '去掉', '业务公式', '指标公式', '字典映射', '字段绑定', '绑定字段', '字段修正', '改绑', '重新绑定',
+  '绑定到', '绑定为', '映射到', '映射为', '对应到', '对应为'
 ]
 
 const shouldUseBusinessModelAgent = (text) => {
@@ -2512,8 +2513,12 @@ const shouldUseBusinessModelAgent = (text) => {
   if (!q) return false
   const lower = q.toLowerCase()
   const hasDeleteIntent = ['删除', '移除', '去掉'].some(token => q.includes(token))
+  const hasBindingIntent = ['字段绑定', '绑定字段', '字段修正', '改绑', '重新绑定', '绑定到', '绑定为', '映射到', '映射为', '对应到', '对应为'].some(token => q.includes(token))
   const hasBusinessModelTarget = ['模型', '业务字典', '业务公式', '指标公式', '公式', '字典', '指标', '维度', '企业模型库', '当前模型', '这个模型'].some(token => q.includes(token))
   if (hasDeleteIntent && hasBusinessModelTarget) {
+    return true
+  }
+  if (hasBindingIntent && ['字段', '指标', '公式', '维度', '字典', '术语', '同义词', '模型'].some(token => q.includes(token))) {
     return true
   }
   if (BUSINESS_MODEL_AGENT_HINTS.some(token => lower.includes(token.toLowerCase()))) {
@@ -2549,6 +2554,29 @@ const syncBusinessModelContext = (result = {}) => {
     selectedTableName.value = targetTableName
   }
   syncChatBusinessModelSelection(activeId ?? createdId ?? appliedId)
+}
+
+const normalizeFieldBindingResults = (entries) => {
+  if (!Array.isArray(entries)) return []
+  return entries
+    .map((item) => {
+      const name = String(item?.name || '').trim()
+      const field = String(item?.field || '').trim()
+      const targetType = String(item?.targetType || '').trim()
+      const label = String(item?.label || '').trim()
+      if (!name && !field) return null
+      return {
+        name,
+        field,
+        targetType,
+        label: label || (targetType === 'dictionaryEntry'
+          ? `业务字典：${name}`
+          : targetType === 'dimensionDefinition'
+            ? `业务维度：${name}`
+            : `业务指标：${name}`)
+      }
+    })
+    .filter(Boolean)
 }
 
 const handleBusinessModelAgentQuestion = async ({ question, tableName, semanticDraft }) => {
@@ -2901,6 +2929,7 @@ const sendQuestion = async (options = {}) => {
         updateStreamMessage({
           content: agentResult.message || '业务模型处理完成',
           sql: '',
+          fieldBindingResults: normalizeFieldBindingResults(agentResult.fieldBindingResults),
           thinkingLogs: [
             ...thinkingLogs,
             `业务模型智能体意图：${agentResult.intent || 'UNKNOWN'}`,
@@ -2919,6 +2948,7 @@ const sendQuestion = async (options = {}) => {
       updateStreamMessage({
         content: `业务模型处理失败：${error.message || '未知错误'}`,
         sql: '',
+        fieldBindingResults: [],
         thinkingLogs: ['业务模型智能体执行失败', '请检查输入语义或后端 AI 服务状态'],
         thinkingCollapsed: true
       })

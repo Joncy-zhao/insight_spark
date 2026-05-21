@@ -75,6 +75,18 @@
                 <div class="avatar">{{ msg.role === 'system' ? '🤖' : '👤' }}</div>
                 <div class="msg-content">
                   <div class="bubble">{{ msg.content }}</div>
+                  <div v-if="msg.fieldBindingResults?.length" class="field-binding-card">
+                    <div class="field-binding-card__header">字段修正结果</div>
+                    <div
+                      v-for="(item, bindingIndex) in msg.fieldBindingResults"
+                      :key="`${index}-binding-${bindingIndex}`"
+                      class="field-binding-card__item"
+                    >
+                      <div class="field-binding-card__label">{{ item.label || item.name }}</div>
+                      <div class="field-binding-card__arrow">→</div>
+                      <div class="field-binding-card__field">{{ item.field || '未绑定成功' }}</div>
+                    </div>
+                  </div>
                   <details v-if="msg.thinkingLogs?.length" class="thinking-details" :open="msg.thinkingCollapsed === false">
                     <summary>查看思考过程（{{ msg.thinkingLogs.length }}步）</summary>
                     <ol class="thinking-list">
@@ -702,6 +714,48 @@ const formatGraphContextContent = (item) => {
   border: 1px solid #e5e7eb;
   border-radius: 8px;
   background: #f8fafc;
+}
+.field-binding-card {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid #dbe7ff;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f8fbff 0%, #eef5ff 100%);
+}
+.field-binding-card__header {
+  margin-bottom: 8px;
+  color: #1d4ed8;
+  font-size: 13px;
+  font-weight: 700;
+}
+.field-binding-card__item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.92);
+}
+.field-binding-card__item + .field-binding-card__item {
+  margin-top: 8px;
+}
+.field-binding-card__label {
+  min-width: 0;
+  color: #1f2937;
+  font-weight: 600;
+  word-break: break-word;
+}
+.field-binding-card__arrow {
+  color: #60a5fa;
+  text-align: center;
+  font-weight: 700;
+}
+.field-binding-card__field {
+  min-width: 0;
+  color: #0f766e;
+  font-family: Consolas, 'Courier New', monospace;
+  word-break: break-word;
 }
 .thinking-details summary {
   cursor: pointer;
