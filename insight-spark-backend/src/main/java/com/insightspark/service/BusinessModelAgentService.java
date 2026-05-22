@@ -325,7 +325,10 @@ public class BusinessModelAgentService {
                 previewRows
         ).orElseGet(() -> buildBusinessModelPatchFallback(question));
 
-        List<Map<String, Object>> operations = safeListMap(patch.get("operations"));
+        List<Map<String, Object>> operations = filterPatchOperationsForQuestion(
+                question,
+                safeListMap(patch.get("operations"))
+        );
         if (operations.isEmpty()) {
             throw new IllegalArgumentException("未识别到可执行的模型修改动作，请明确说明要新增、修改或删除哪个指标、公式或业务字典映射");
         }
@@ -350,7 +353,13 @@ public class BusinessModelAgentService {
 
         Map<String, Object> updated = dataUploadService.updateBusinessModel(modelId, updateRequest);
         String resolvedIntent = inferResponseIntent(question, patch, operations, effectiveOperations);
-        List<Map<String, Object>> bindingResults = collectBindingResults(effectiveOperations, mergedDictionaryEntries, mergedMetricDefinitions, mergedDimensionDefinitions);
+        List<Map<String, Object>> bindingResults = collectBindingResults(
+                effectiveOperations,
+                mergedDictionaryEntries,
+                mergedMetricDefinitions,
+                mergedDimensionDefinitions,
+                fields
+        );
         Map<String, Object> response = baseResponse(question, resolvedTableName);
         response.put("intent", resolvedIntent);
         response.put("handled", true);
@@ -577,9 +586,13 @@ public class BusinessModelAgentService {
 
     private boolean looksLikePatch(String question) {
         boolean hasPatchVerb = containsAny(question, "修改", "更新", "编辑", "调整", "补充", "完善", "新增", "改一下", "改成", "修正",
-                "删除", "移除", "去掉", "取消", "绑定到", "绑定为", "映射到", "映射为", "对应到", "对应为", "改绑", "重新绑定");
+                "删除", "移除", "去掉", "取消",
+                "绑定到", "绑定为", "绑定至",
+                "映射到", "映射为", "映射至",
+                "对应到", "对应为", "对应至",
+                "改绑", "重新绑定");
         boolean hasPatchTarget = containsAny(question, "模型", "字典", "公式", "指标", "维度", "业务", "字段");
-        return hasPatchVerb && hasPatchTarget;
+        return hasPatchVerb && (hasPatchTarget || looksLikeExplicitFieldBindingMutation(question));
     }
 
     private boolean looksLikeExplain(String question) {
@@ -949,6 +962,65 @@ public class BusinessModelAgentService {
         return result;
     }
 
+    private List<Map<String, Object>> filterPatchOperationsForQuestion(String question, List<Map<String, Object>> operations) {
+        if (operations == null || operations.isEmpty()) {
+            return List.of();
+        }
+        boolean dictionaryMutation = looksLikeExplicitDictionaryMutation(question);
+        boolean formulaMutation = looksLikeExplicitFormulaMutation(question);
+        boolean fieldBindingMutation = looksLikeExplicitFieldBindingMutation(question);
+        List<Map<String, Object>> filtered = new ArrayList<>();
+        for (Map<String, Object> operation : operations) {
+            String targetType = trim(Objects.toString(operation.get("targetType"), ""));
+            if (dictionaryMutation && !formulaMutation) {
+                if ("dictionaryEntry".equals(targetType)) {
+                    filtered.add(operation);
+                } else if (isDictionaryFieldBinding(operation)) {
+                    filtered.add(withBindingType(operation, "dictionaryEntry"));
+                }
+                continue;
+            }
+            if (formulaMutation && !dictionaryMutation) {
+                if ("metricDefinition".equals(targetType)) {
+                    filtered.add(operation);
+                } else if (isMetricFieldBinding(operation)) {
+                    filtered.add(withBindingType(operation, "metricDefinition"));
+                }
+                continue;
+            }
+            if (fieldBindingMutation && "fieldBinding".equals(targetType)) {
+                filtered.add(operation);
+                continue;
+            }
+            if (!"fieldBinding".equals(targetType)) {
+                filtered.add(operation);
+            }
+        }
+        if (filtered.isEmpty() && (dictionaryMutation || formulaMutation || fieldBindingMutation)) {
+            return List.of();
+        }
+        return filtered.isEmpty() ? operations : filtered;
+    }
+
+    private Map<String, Object> withBindingType(Map<String, Object> operation, String bindingType) {
+        Map<String, Object> copy = new LinkedHashMap<>(operation);
+        copy.put("bindingType", bindingType);
+        return copy;
+    }
+
+    private boolean isDictionaryFieldBinding(Map<String, Object> operation) {
+        String targetType = trim(Objects.toString(operation.get("targetType"), ""));
+        String bindingType = trim(Objects.toString(operation.get("bindingType"), ""));
+        return "fieldBinding".equals(targetType)
+                && (bindingType.isBlank() || "AUTO".equalsIgnoreCase(bindingType) || "dictionaryEntry".equals(bindingType));
+    }
+
+    private boolean isMetricFieldBinding(Map<String, Object> operation) {
+        String targetType = trim(Objects.toString(operation.get("targetType"), ""));
+        String bindingType = trim(Objects.toString(operation.get("bindingType"), ""));
+        return "fieldBinding".equals(targetType) && "metricDefinition".equals(bindingType);
+    }
+
     private Map<String, Object> normalizeDictionaryEntry(Map<String, Object> raw) {
         Map<String, Object> normalized = new LinkedHashMap<>();
         String term = trim(Objects.toString(raw.get("term"), Objects.toString(raw.get("name"), "")));
@@ -1025,7 +1097,8 @@ public class BusinessModelAgentService {
     private List<Map<String, Object>> collectBindingResults(List<Map<String, Object>> operations,
                                                             List<Map<String, Object>> dictionaryEntries,
                                                             List<Map<String, Object>> metricDefinitions,
-                                                            List<Map<String, Object>> dimensionDefinitions) {
+                                                            List<Map<String, Object>> dimensionDefinitions,
+                                                            List<Map<String, Object>> fields) {
         List<Map<String, Object>> results = new ArrayList<>();
         for (Map<String, Object> operation : operations) {
             String targetType = trim(Objects.toString(operation.get("targetType"), ""));
@@ -1062,12 +1135,41 @@ public class BusinessModelAgentService {
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("name", name);
             result.put("field", field);
+            result.put("formula", trim(Objects.toString(operation.get("formula"), "")));
+            result.put("fieldDisplayName", resolveFieldDisplayName(field, fields));
             result.put("targetType", resolvedType);
             result.put("action", action);
             result.put("label", buildBindingTargetLabel(resolvedType, name));
             results.add(result);
         }
         return deduplicateBindingResults(results);
+    }
+
+    private String resolveFieldDisplayName(String field, List<Map<String, Object>> fields) {
+        String value = trim(field);
+        if (value.isBlank()) {
+            return "";
+        }
+        for (Map<String, Object> item : fields) {
+            String columnName = trim(Objects.toString(item.get("columnName"), ""));
+            String sourceFieldName = trim(Objects.toString(item.get("sourceFieldName"), ""));
+            String displayName = trim(Objects.toString(item.get("displayName"), ""));
+            if (!value.equalsIgnoreCase(columnName)
+                    && !value.equalsIgnoreCase(sourceFieldName)
+                    && !value.equalsIgnoreCase(displayName)) {
+                continue;
+            }
+            if (!displayName.isBlank() && !displayName.matches("(?i)^col_\\d+$")) {
+                return displayName;
+            }
+            if (!sourceFieldName.isBlank() && !sourceFieldName.matches("(?i)^col_\\d+$")) {
+                return sourceFieldName;
+            }
+            if (!columnName.isBlank()) {
+                return columnName;
+            }
+        }
+        return value;
     }
 
     private String buildPatchMessage(String intent, String modelName, int bindingCount, int operationCount) {
@@ -1130,7 +1232,7 @@ public class BusinessModelAgentService {
         return switch (targetType) {
             case "dictionaryEntry" -> "业务字典：" + name;
             case "dimensionDefinition" -> "业务维度：" + name;
-            default -> "业务指标：" + name;
+            default -> "业务公式：" + name;
         };
     }
 
@@ -1146,6 +1248,14 @@ public class BusinessModelAgentService {
                 "新增业务公式", "增加业务公式", "添加业务公式", "创建业务公式",
                 "新增指标公式", "增加指标公式", "添加指标公式", "创建指标公式",
                 "新增公式", "增加公式", "添加公式", "创建公式");
+    }
+
+    private boolean looksLikeExplicitFieldBindingMutation(String question) {
+        return containsAny(question,
+                "字段绑定", "绑定字段", "字段修正", "改绑", "重新绑定",
+                "绑定到", "绑定为", "绑定至",
+                "映射到", "映射为", "映射至",
+                "对应到", "对应为", "对应至");
     }
 
     private Map<String, Object> findByName(List<Map<String, Object>> entries, String keyName, String name) {
