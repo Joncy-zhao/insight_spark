@@ -14,6 +14,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 - `GET /health`
 - `POST /ai/schema-index`
 - `POST /ai/text-to-sql`
+- `POST /ai/tts`
 - `POST /ai/chart-recommend`
 - `POST /ai/diagnose`
 

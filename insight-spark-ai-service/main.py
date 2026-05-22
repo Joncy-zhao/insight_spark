@@ -1,12 +1,15 @@
 from collections import defaultdict
 from math import sqrt
 from typing import Any
+import base64
 import json
 import os
 import re
+import time
 from urllib import error, request
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 
@@ -34,6 +37,18 @@ load_local_env_file()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "qwen-plus").strip()
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1").rstrip("/")
+TTS_API_KEY = os.getenv("DASHSCOPE_API_KEY", OPENAI_API_KEY).strip()
+TTS_BASE_URL = os.getenv("DASHSCOPE_TTS_BASE_URL", "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation").strip()
+TTS_MODEL = os.getenv("DASHSCOPE_TTS_MODEL", "qwen-tts").strip()
+TTS_MALE_VOICE = os.getenv("DASHSCOPE_TTS_MALE_VOICE", "Ethan").strip()
+TTS_FEMALE_VOICE = os.getenv("DASHSCOPE_TTS_FEMALE_VOICE", "Cherry").strip()
+REALTIME_TTS_BASE_URL = os.getenv("DASHSCOPE_REALTIME_TTS_BASE_URL", "wss://dashscope.aliyuncs.com/api-ws/v1/realtime").strip()
+REALTIME_TTS_MODEL = os.getenv("DASHSCOPE_REALTIME_TTS_MODEL", "qwen3-tts-flash-realtime").strip()
+REALTIME_TTS_MALE_VOICE = os.getenv("DASHSCOPE_REALTIME_TTS_MALE_VOICE", "Neil").strip()
+REALTIME_TTS_FEMALE_VOICE = os.getenv("DASHSCOPE_REALTIME_TTS_FEMALE_VOICE", "Seren").strip()
+TTS_CACHE_TTL_SECONDS = max(0, int(os.getenv("DASHSCOPE_TTS_CACHE_TTL_SECONDS", "600").strip() or "600"))
+TTS_CACHE_MAX_SIZE = max(1, int(os.getenv("DASHSCOPE_TTS_CACHE_MAX_SIZE", "64").strip() or "64"))
+TTS_URL_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 class FieldMeta(BaseModel):
@@ -106,6 +121,14 @@ class BusinessModelPatchRequest(BaseModel):
     dimensionSystem: list[dict[str, Any]] = []
     fields: list[FieldMeta]
     previewRows: list[dict[str, Any]] = []
+
+
+class TtsRequest(BaseModel):
+    text: str
+    voiceGender: str = "female"
+    locale: str = "zh-CN"
+    rate: float = 1.0
+    volume: float = 0.85
 
 
 @app.get("/health")
@@ -195,6 +218,57 @@ def business_model_patch(payload: BusinessModelPatchRequest) -> dict[str, Any]:
             return normalize_business_model_patch_result(ai_result, payload)
 
     return build_rule_based_business_model_patch_result(payload)
+
+
+@app.post("/ai/tts")
+def synthesize_speech(payload: TtsRequest) -> dict[str, Any]:
+    text = str(payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="播报文本不能为空")
+    if not TTS_API_KEY:
+        raise HTTPException(status_code=503, detail="未配置云端 TTS API Key")
+
+    try:
+        return call_dashscope_tts(payload)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"云端 TTS 调用失败: {exc}") from exc
+
+
+@app.post("/ai/tts-url")
+def synthesize_speech_url(payload: TtsRequest) -> dict[str, Any]:
+    text = str(payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="播报文本不能为空")
+    if not TTS_API_KEY:
+        raise HTTPException(status_code=503, detail="未配置云端 TTS API Key")
+
+    try:
+        return call_dashscope_tts_url(payload)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"云端 TTS 调用失败: {exc}") from exc
+
+@app.post("/ai/tts-stream")
+def synthesize_speech_stream(payload: TtsRequest) -> StreamingResponse:
+    text = str(payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="播报文本不能为空")
+    if not TTS_API_KEY:
+        raise HTTPException(status_code=503, detail="未配置云端 TTS API Key")
+    return StreamingResponse(
+        stream_dashscope_realtime_tts(payload),
+        media_type="audio/pcm",
+        headers={
+            "X-Audio-Format": "pcm_s16le",
+            "X-Audio-Sample-Rate": "24000",
+            "X-Audio-Channels": "1",
+            "Cache-Control": "no-store",
+        },
+    )
+
 
 def build_dimension_expression(question: str, dimension: FieldMeta) -> str:
     column = f"`{dimension.columnName}`"
@@ -1279,9 +1353,11 @@ def has_binding_intent(question: str) -> bool:
         return False
     if any(token in q for token in ["字段绑定", "绑定字段", "字段修正", "改绑", "重新绑定"]):
         return True
-    bind_verbs = ["绑定到", "绑定为", "映射到", "映射为", "对应到", "对应为", "改成", "改为", "修改为", "更新为"]
+    bind_verbs = ["绑定到", "绑定为", "绑定至", "映射到", "映射为", "映射至", "对应到", "对应为", "对应至", "改成", "改为", "修改为", "更新为"]
     bind_targets = ["字段", "指标", "公式", "维度", "术语", "字典", "同义词", "模型"]
-    return any(token in q for token in bind_verbs) and any(token in q for token in bind_targets)
+    if any(token in q for token in bind_verbs) and any(token in q for token in bind_targets):
+        return True
+    return any(token in q for token in bind_verbs) and bool(re.search(r"[A-Za-z_][A-Za-z0-9_]*", q))
 
 
 def infer_patch_intent(raw_intent: Any, operations: list[dict[str, Any]]) -> str:
@@ -2341,7 +2417,7 @@ def build_field_binding_patch_operations(
     operations: list[dict[str, Any]] = []
     overall_binding_type = infer_binding_type_from_text(question)
     patterns = [
-        re.compile(r"(?:把|将)?(.+?)(?:的)?(?:目标)?(?:绑定字段|字段绑定|字段)?(?:改成|改为|修改为|更新为|绑定到|绑定为|映射到|映射为|对应到|对应为|改绑到|关联到|关联为)\s*([^,，;；。\n]+)$"),
+        re.compile(r"(?:把|将)?(.+?)(?:的)?(?:目标)?(?:绑定字段|字段绑定|字段)?(?:改成|改为|修改为|更新为|绑定到|绑定为|绑定至|映射到|映射为|映射至|对应到|对应为|对应至|改绑到|关联到|关联为)\s*([^,，;；。\n]+)$"),
         re.compile(r"(?:把|将)?(.+?)\s*(?:->|=>|→)\s*([^,，;；。\n]+)$"),
     ]
     for item in split_top_level_segments(question):
@@ -2385,14 +2461,14 @@ def build_field_binding_patch_operations(
 
 def build_dictionary_patch_operations(question: str, fields: list[FieldMeta]) -> list[dict[str, Any]]:
     operations: list[dict[str, Any]] = []
-    pattern = re.compile(r"(.+?)(?:映射|对应|绑定到|绑定|关联到|关联)\s*([A-Za-z_][A-Za-z0-9_]*)")
+    pattern = re.compile(r"(.+?)(?:映射到|映射为|映射至|映射|对应到|对应为|对应至|对应|绑定到|绑定为|绑定至|绑定|关联到|关联为|关联)\s*([A-Za-z_][A-Za-z0-9_]*)")
     for item in split_top_level_segments(question):
-        cleaned = re.sub(r"^(新增|增加|添加|创建|补充|修改|更新)?(业务字典|字典|词典|同义词|术语)\s*[:：]?", "", item).strip()
+        cleaned = strip_model_operation_prefix(item, ["业务字典", "字典", "词典", "同义词", "术语"])
         for segment in split_top_level_segments(cleaned, separators=["；", ";", "\n", "，", ",", "、"]):
             matched = pattern.search(segment)
             if not matched:
                 continue
-            term = str(matched.group(1) or "").strip().strip("：:，,；; ")
+            term = cleanup_business_item_name(str(matched.group(1) or "").strip())
             field_ref = str(matched.group(2) or "").strip()
             field = resolve_field_from_ref(field_ref or term, fields)
             if not term:
@@ -2411,7 +2487,7 @@ def build_metric_patch_operations(question: str, fields: list[FieldMeta], existi
     operations: list[dict[str, Any]] = []
     segments = split_top_level_segments(question, separators=["；", ";", "\n"])
     for item in segments:
-        cleaned = re.sub(r"^(新增|增加|添加|创建|补充|修改|更新)?(指标公式|业务公式|公式)\s*[:：]?", "", item).strip()
+        cleaned = strip_model_operation_prefix(item, ["指标公式", "业务公式", "公式"])
         parts = split_top_level_segments(cleaned, separators=["，", ",", "、"])
         if not parts:
             parts = [cleaned]
@@ -2453,7 +2529,7 @@ def parse_metric_operation_segment(
 
 
 def build_metric_patch_operation(name: str, formula: str, fields: list[FieldMeta]) -> dict[str, Any] | None:
-    metric_name = str(name or "").strip().strip("：:，,；; ")
+    metric_name = cleanup_business_item_name(name)
     metric_formula = normalize_formula_phrase(str(formula or "").strip())
     if not metric_name or not metric_formula:
         return None
@@ -2578,6 +2654,30 @@ def cleanup_binding_subject(text: str) -> str:
     return value.strip("：:，,；; ")
 
 
+def strip_model_operation_prefix(text: str, nouns: list[str]) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    noun_group = "|".join(re.escape(noun) for noun in nouns)
+    value = re.sub(r"^(请|请你|帮我|麻烦|给)?", "", value).strip()
+    value = re.sub(r"^(?:这个|该|当前)?(?:业务)?模型(?:里|中的|内的)?", "", value).strip()
+    value = re.sub(rf"^(?:新增|增加|添加|创建|补充|修改|更新)?(?:{noun_group})\s*[:：]?", "", value).strip()
+    value = re.sub(rf"^(?:新增|增加|添加|创建|补充|修改|更新)(?:一个|一条)?(?:{noun_group})\s*[:：]?", "", value).strip()
+    return value
+
+
+def cleanup_business_item_name(text: str) -> str:
+    value = str(text or "").strip().strip("：:，,；; ")
+    if not value:
+        return ""
+    value = re.sub(r"^(请|请你|帮我|麻烦|给|把|将)+", "", value).strip()
+    value = re.sub(r"^(?:这个|该|当前)?(?:业务)?模型(?:里|中的|内的)?", "", value).strip()
+    value = re.sub(r"^(?:新增|增加|添加|创建|补充|修改|更新)(?:一个|一条)?", "", value).strip()
+    value = re.sub(r"^(?:业务字典|字典|词典|同义词|术语|业务公式|指标公式|公式|指标|维度)(?:里|中的|内的)?", "", value).strip()
+    value = re.sub(r"(?:业务字典|字典|词典|同义词|术语|业务公式|指标公式|公式|指标|维度|字段)$", "", value).strip()
+    return value.strip("：:，,；; ")
+
+
 def normalize_binding_type(value: Any) -> str:
     raw = str(value or "").strip()
     mapping = {
@@ -2684,3 +2784,301 @@ def rewrite_sql_alias(sql: str, dimension_key: str, metric_key: str) -> str:
     rewritten = rewritten.replace(" AS province", " AS dim_name")
     rewritten = rewritten.replace(" AS sales_amt", " AS metric_value")
     return rewritten
+
+
+def normalize_tts_gender(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"male", "man", "m", "男", "男声"}:
+        return "male"
+    return "female"
+
+
+def select_tts_voice(gender: str, locale: str) -> str:
+    normalized_gender = normalize_tts_gender(gender)
+    normalized_locale = str(locale or "").strip().lower()
+    if normalized_gender == "male":
+        if normalized_locale.startswith("en"):
+            return os.getenv("DASHSCOPE_TTS_EN_MALE_VOICE", TTS_MALE_VOICE).strip() or TTS_MALE_VOICE
+        return TTS_MALE_VOICE
+    if normalized_locale.startswith("en"):
+        return os.getenv("DASHSCOPE_TTS_EN_FEMALE_VOICE", TTS_FEMALE_VOICE).strip() or TTS_FEMALE_VOICE
+    return TTS_FEMALE_VOICE
+
+
+def select_realtime_tts_voice(gender: str, locale: str) -> str:
+    normalized_gender = normalize_tts_gender(gender)
+    normalized_locale = str(locale or "").strip().lower()
+    if normalized_gender == "male":
+        if normalized_locale.startswith("en"):
+            return os.getenv("DASHSCOPE_REALTIME_TTS_EN_MALE_VOICE", REALTIME_TTS_MALE_VOICE).strip() or REALTIME_TTS_MALE_VOICE
+        return REALTIME_TTS_MALE_VOICE
+    if normalized_locale.startswith("en"):
+        return os.getenv("DASHSCOPE_REALTIME_TTS_EN_FEMALE_VOICE", REALTIME_TTS_FEMALE_VOICE).strip() or REALTIME_TTS_FEMALE_VOICE
+    return REALTIME_TTS_FEMALE_VOICE
+
+
+def clamp_tts_rate(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = 1.0
+    return max(0.6, min(1.4, number))
+
+
+def clamp_tts_volume(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = 0.85
+    return max(0.0, min(1.0, number))
+
+
+def map_locale_to_language_type(locale: str) -> str:
+    normalized = str(locale or "").strip().lower()
+    if normalized.startswith("en"):
+        return "English"
+    if normalized.startswith(("fr", "de", "it", "pt", "es", "ja", "ko", "ru")):
+        mapping = {
+            "fr": "French",
+            "de": "German",
+            "it": "Italian",
+            "pt": "Portuguese",
+            "es": "Spanish",
+            "ja": "Japanese",
+            "ko": "Korean",
+            "ru": "Russian",
+        }
+        return mapping.get(normalized.split("-")[0], "Auto")
+    if normalized.startswith("zh"):
+        return "Chinese"
+    return "Auto"
+
+
+def build_tts_payload(text: str, voice: str, rate: float) -> dict[str, Any]:
+    del rate
+    return {
+        "model": TTS_MODEL,
+        "input": {
+            "text": text,
+            "voice": voice,
+            "language_type": "Auto"
+        }
+    }
+
+
+def build_tts_cache_key(text: str, voice: str, locale: str, rate: float) -> str:
+    del rate
+    normalized_text = re.sub(r"\s+", " ", str(text or "").strip())
+    normalized_locale = str(locale or "").strip().lower()
+    return json.dumps(
+        {
+            "text": normalized_text,
+            "voice": str(voice or "").strip(),
+            "locale": normalized_locale,
+            "model": TTS_MODEL,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def get_cached_tts_url(cache_key: str) -> dict[str, Any] | None:
+    if TTS_CACHE_TTL_SECONDS <= 0:
+        return None
+    cached = TTS_URL_CACHE.get(cache_key)
+    if not cached:
+        return None
+    expires_at, payload = cached
+    if expires_at <= time.time():
+        TTS_URL_CACHE.pop(cache_key, None)
+        return None
+    return dict(payload)
+
+
+def set_cached_tts_url(cache_key: str, payload: dict[str, Any]) -> None:
+    if TTS_CACHE_TTL_SECONDS <= 0:
+        return
+    TTS_URL_CACHE[cache_key] = (time.time() + TTS_CACHE_TTL_SECONDS, dict(payload))
+    while len(TTS_URL_CACHE) > TTS_CACHE_MAX_SIZE:
+        oldest_key = next(iter(TTS_URL_CACHE))
+        TTS_URL_CACHE.pop(oldest_key, None)
+
+
+def read_http_json(url: str, headers: dict[str, str], body: dict[str, Any]) -> dict[str, Any]:
+    data = json.dumps(body).encode("utf-8")
+    req = request.Request(url=url, data=data, headers=headers, method="POST")
+    try:
+        with request.urlopen(req, timeout=90) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        raise HTTPException(status_code=exc.code, detail=detail or "云端 TTS 服务返回错误") from exc
+    except error.URLError as exc:
+        raise HTTPException(status_code=502, detail=f"无法连接云端 TTS 服务: {exc.reason}") from exc
+
+
+def extract_audio_payload(response: dict[str, Any]) -> tuple[str, str]:
+    output = response.get("output") if isinstance(response, dict) else None
+    if isinstance(output, dict):
+        audio = output.get("audio") or {}
+        if isinstance(audio, dict):
+            audio_base64 = str(audio.get("data") or "").strip()
+            audio_url = str(audio.get("url") or "").strip()
+            if audio_base64:
+                return audio_base64, "mp3"
+            if audio_url:
+                return download_audio_as_base64(audio_url), guess_audio_format(audio_url)
+        audio_url = str(output.get("audio_url") or output.get("url") or "").strip()
+        if audio_url:
+            return download_audio_as_base64(audio_url), guess_audio_format(audio_url)
+        audio_base64 = str(output.get("audio_base64") or output.get("audioBase64") or "").strip()
+        if audio_base64:
+            return audio_base64, "mp3"
+    raise HTTPException(status_code=502, detail="云端 TTS 未返回可播放音频")
+
+
+def extract_audio_url(response: dict[str, Any]) -> tuple[str, str]:
+    output = response.get("output") if isinstance(response, dict) else None
+    if isinstance(output, dict):
+        audio = output.get("audio") or {}
+        if isinstance(audio, dict):
+            audio_url = str(audio.get("url") or "").strip()
+            if audio_url:
+                return audio_url, guess_audio_format(audio_url)
+        audio_url = str(output.get("audio_url") or output.get("url") or "").strip()
+        if audio_url:
+            return audio_url, guess_audio_format(audio_url)
+    raise HTTPException(status_code=502, detail="云端 TTS 未返回音频地址")
+
+
+def guess_audio_format(audio_url: str) -> str:
+    value = str(audio_url or "").lower()
+    if ".wav" in value:
+        return "wav"
+    if ".pcm" in value:
+        return "pcm"
+    return "mp3"
+
+
+def download_audio_as_base64(audio_url: str) -> str:
+    try:
+        with request.urlopen(audio_url, timeout=90) as resp:
+            return base64.b64encode(resp.read()).decode("utf-8")
+    except error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        raise HTTPException(status_code=exc.code, detail=detail or "下载 TTS 音频失败") from exc
+    except error.URLError as exc:
+        raise HTTPException(status_code=502, detail=f"下载 TTS 音频失败: {exc.reason}") from exc
+
+
+def stream_dashscope_realtime_tts(payload: TtsRequest):
+    try:
+        from dashscope.audio.qwen_tts import SpeechSynthesizer
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail="缺少 DashScope 流式 TTS 依赖") from exc
+
+    text = str(payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="播报文本不能为空")
+
+    voice = select_tts_voice(payload.voiceGender, payload.locale)
+    language_type = map_locale_to_language_type(payload.locale)
+    speech_rate = clamp_tts_rate(payload.rate)
+    volume = int(round(clamp_tts_volume(payload.volume) * 100))
+    emitted = False
+
+    try:
+        responses = SpeechSynthesizer.call(
+            model=TTS_MODEL,
+            text=text,
+            api_key=TTS_API_KEY,
+            voice=voice,
+            stream=True,
+            audio_format="pcm",
+            sample_rate=24000,
+            language_type=language_type,
+            speech_rate=speech_rate,
+            volume=volume,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"云端流式 TTS 初始化失败: {exc}") from exc
+
+    try:
+        for item in responses:
+            output = item.get("output") if hasattr(item, "get") else None
+            if not isinstance(output, dict):
+                continue
+
+            audio = output.get("audio") or {}
+            audio_data = audio.get("data")
+            if not audio_data:
+                continue
+
+            try:
+                chunk = base64.b64decode(audio_data)
+            except Exception as exc:
+                if emitted:
+                    return
+                raise HTTPException(status_code=502, detail=f"云端流式 TTS 音频解码失败: {exc}") from exc
+
+            if not chunk:
+                continue
+
+            emitted = True
+            yield chunk
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if emitted:
+            return
+        raise HTTPException(status_code=502, detail=f"云端流式 TTS 失败: {exc}") from exc
+
+    if not emitted:
+        raise HTTPException(status_code=502, detail="云端流式 TTS 未返回音频数据")
+
+
+def call_dashscope_tts(payload: TtsRequest) -> dict[str, Any]:
+    voice = select_tts_voice(payload.voiceGender, payload.locale)
+    rate = clamp_tts_rate(payload.rate)
+    request_body = build_tts_payload(str(payload.text).strip(), voice, rate)
+    request_body["input"]["language_type"] = map_locale_to_language_type(payload.locale)
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {TTS_API_KEY}"
+    }
+    response = read_http_json(TTS_BASE_URL, headers, request_body)
+    audio_base64, audio_format = extract_audio_payload(response)
+    return {
+        "audioBase64": audio_base64,
+        "audioFormat": audio_format,
+        "voice": voice,
+        "model": TTS_MODEL
+    }
+
+
+def call_dashscope_tts_url(payload: TtsRequest) -> dict[str, Any]:
+    voice = select_tts_voice(payload.voiceGender, payload.locale)
+    rate = clamp_tts_rate(payload.rate)
+    text = str(payload.text).strip()
+    cache_key = build_tts_cache_key(text, voice, payload.locale, rate)
+    cached = get_cached_tts_url(cache_key)
+    if cached:
+        return cached
+
+    request_body = build_tts_payload(text, voice, rate)
+    request_body["input"]["language_type"] = map_locale_to_language_type(payload.locale)
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {TTS_API_KEY}"
+    }
+    response = read_http_json(TTS_BASE_URL, headers, request_body)
+    audio_url, audio_format = extract_audio_url(response)
+    result = {
+        "audioUrl": audio_url,
+        "audioFormat": audio_format,
+        "voice": voice,
+        "model": TTS_MODEL
+    }
+    set_cached_tts_url(cache_key, result)
+    return result

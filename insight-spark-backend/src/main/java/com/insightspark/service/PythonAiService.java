@@ -1,13 +1,26 @@
 package com.insightspark.service;
 
+import jakarta.servlet.ServletOutputStream;
+import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
+import org.springframework.http.client.ClientHttpResponse;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.RequestCallback;
+import org.springframework.web.client.ResponseExtractor;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -18,10 +31,17 @@ public class PythonAiService {
 
     private static final Logger log = LoggerFactory.getLogger(PythonAiService.class);
 
-    private final RestTemplate restTemplate = new RestTemplate();
+    private final RestTemplate restTemplate;
 
     @Value("${insight.ai-service-url:http://localhost:8000}")
     private String aiServiceUrl;
+
+    public PythonAiService() {
+        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
+        requestFactory.setConnectTimeout(5000);
+        requestFactory.setReadTimeout(120000);
+        this.restTemplate = new RestTemplate(requestFactory);
+    }
 
     public Optional<Map<String, Object>> textToSql(String question, String tableName, List<Map<String, Object>> fields,
                                                    List<Map<String, Object>> previewRows,
@@ -47,10 +67,10 @@ public class PythonAiService {
             }
             return Optional.of(response);
         } catch (HttpClientErrorException e) {
-            log.warn("Python AI 服务拒绝本次请求，使用 Java 内置 Text-to-SQL 兜底逻辑：{}", e.getResponseBodyAsString());
+            log.warn("Python AI 拒绝 Text-to-SQL 请求: {}", e.getResponseBodyAsString());
             return Optional.empty();
         } catch (RestClientException e) {
-            log.warn("Python AI 服务不可用，使用 Java 内置 Text-to-SQL 兜底逻辑：{}", e.getMessage());
+            log.warn("Python AI 不可用，回退到 Java Text-to-SQL: {}", e.getMessage());
             return Optional.empty();
         }
     }
@@ -73,10 +93,10 @@ public class PythonAiService {
             );
             return response == null ? Optional.empty() : Optional.of(response);
         } catch (HttpClientErrorException e) {
-            log.warn("Python AI 业务模型语义拆解拒绝本次请求：{}", e.getResponseBodyAsString());
+            log.warn("Python AI 业务模型语义解析失败: {}", e.getResponseBodyAsString());
             return Optional.empty();
         } catch (RestClientException e) {
-            log.warn("Python AI 业务模型语义拆解不可用：{}", e.getMessage());
+            log.warn("Python AI 业务模型语义解析不可用: {}", e.getMessage());
             return Optional.empty();
         }
     }
@@ -109,11 +129,120 @@ public class PythonAiService {
             );
             return response == null ? Optional.empty() : Optional.of(response);
         } catch (HttpClientErrorException e) {
-            log.warn("Python AI 业务模型修改语义拆解拒绝本次请求：{}", e.getResponseBodyAsString());
+            log.warn("Python AI 业务模型修改失败: {}", e.getResponseBodyAsString());
             return Optional.empty();
         } catch (RestClientException e) {
-            log.warn("Python AI 业务模型修改语义拆解不可用：{}", e.getMessage());
+            log.warn("Python AI 业务模型修改不可用: {}", e.getMessage());
             return Optional.empty();
+        }
+    }
+
+    public Optional<Map<String, Object>> textToSpeech(String text, String voiceGender, String locale, Double rate) {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("text", text);
+        request.put("voiceGender", voiceGender);
+        request.put("locale", locale);
+        request.put("rate", rate);
+
+        try {
+            Map<String, Object> response = restTemplate.postForObject(
+                    aiServiceUrl + "/ai/tts",
+                    request,
+                    Map.class
+            );
+            if (response == null || !response.containsKey("audioBase64")) {
+                throw new IllegalArgumentException("Python AI TTS 服务未返回音频数据");
+            }
+            return Optional.of(response);
+        } catch (HttpClientErrorException e) {
+            String detail = e.getResponseBodyAsString();
+            log.warn("Python AI TTS 请求失败: {}", detail);
+            if (e.getStatusCode().value() == 404) {
+                throw new IllegalArgumentException("Python AI TTS 接口不存在，请重启 AI 服务并确认 /ai/tts 已生效");
+            }
+            throw new IllegalArgumentException(extractPythonAiError(detail, "Python AI TTS 请求失败"));
+        } catch (RestClientException e) {
+            log.warn("Python AI TTS 服务不可用: {}", e.getMessage());
+            throw new IllegalArgumentException("Python AI TTS 服务不可用，请确认 8000 端口服务已启动并加载最新代码");
+        }
+    }
+
+    public Optional<Map<String, Object>> textToSpeechUrl(String text, String voiceGender, String locale, Double rate) {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("text", text);
+        request.put("voiceGender", voiceGender);
+        request.put("locale", locale);
+        request.put("rate", rate);
+
+        try {
+            Map<String, Object> response = restTemplate.postForObject(
+                    aiServiceUrl + "/ai/tts-url",
+                    request,
+                    Map.class
+            );
+            if (response == null || !response.containsKey("audioUrl")) {
+                throw new IllegalArgumentException("Python AI TTS 服务未返回音频地址");
+            }
+            return Optional.of(response);
+        } catch (HttpClientErrorException e) {
+            String detail = e.getResponseBodyAsString();
+            log.warn("Python AI TTS URL 请求失败: {}", detail);
+            if (e.getStatusCode().value() == 404) {
+                throw new IllegalArgumentException("Python AI TTS URL 接口不存在，请重启 AI 服务并确认 /ai/tts-url 已生效");
+            }
+            throw new IllegalArgumentException(extractPythonAiError(detail, "Python AI TTS URL 请求失败"));
+        } catch (RestClientException e) {
+            log.warn("Python AI TTS URL 服务不可用: {}", e.getMessage());
+            throw new IllegalArgumentException("Python AI TTS URL 服务不可用，请确认 8000 端口服务已启动并加载最新代码");
+        }
+    }
+
+    public void streamTextToSpeech(Map<String, Object> payload, HttpServletResponse response) throws IOException {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        HttpEntity<Map<String, Object>> entity = new HttpEntity<>(payload, headers);
+
+        RequestCallback requestCallback = restTemplate.httpEntityCallback(entity, Map.class);
+        ResponseExtractor<Void> responseExtractor = aiResponse -> copyAudioStream(aiResponse, response);
+
+        try {
+            restTemplate.execute(
+                    aiServiceUrl + "/ai/tts-stream",
+                    HttpMethod.POST,
+                    requestCallback,
+                    responseExtractor
+            );
+        } catch (HttpClientErrorException e) {
+            throw new IllegalArgumentException(extractPythonAiError(e.getResponseBodyAsString(), "Python AI 实时 TTS 请求失败"));
+        } catch (RestClientException e) {
+            throw new IllegalArgumentException("Python AI 实时 TTS 服务不可用，请确认 8000 端口服务已启动并加载最新代码");
+        }
+    }
+
+    private Void copyAudioStream(ClientHttpResponse aiResponse, HttpServletResponse servletResponse) throws IOException {
+        servletResponse.setStatus(aiResponse.getStatusCode().value());
+        copyHeaderIfPresent(aiResponse, servletResponse, "X-Audio-Format");
+        copyHeaderIfPresent(aiResponse, servletResponse, "X-Audio-Sample-Rate");
+        copyHeaderIfPresent(aiResponse, servletResponse, "X-Audio-Channels");
+        servletResponse.flushBuffer();
+
+        ServletOutputStream outputStream = servletResponse.getOutputStream();
+        try (InputStream inputStream = aiResponse.getBody()) {
+            byte[] buffer = new byte[8192];
+            int bytesRead;
+            while ((bytesRead = inputStream.read(buffer)) != -1) {
+                outputStream.write(buffer, 0, bytesRead);
+                outputStream.flush();
+                servletResponse.flushBuffer();
+            }
+        }
+        return null;
+    }
+
+    private void copyHeaderIfPresent(ClientHttpResponse source, HttpServletResponse target, String headerName) {
+        String value = source.getHeaders().getFirst(headerName);
+        if (value != null && !value.isBlank()) {
+            target.setHeader(headerName, value);
         }
     }
 
@@ -137,20 +266,20 @@ public class PythonAiService {
             }
             return response;
         } catch (RestClientException e) {
-            log.error("Python AI 诊断服务调用失败：{}", e.getMessage());
+            log.error("Python AI 诊断服务调用失败: {}", e.getMessage());
             throw new IllegalArgumentException("Python AI 诊断服务不可用，请确认 8000 端口服务已启动");
         }
     }
 
     public Optional<Map<String, Object>> graphRagDiagnose(String question, String tableName, String metricField,
-                                                         List<String> dimensionFields,
-                                                         String timeField,
-                                                         Map<String, Object> graphPath,
-                                                         List<Map<String, Object>> docEvidence,
-                                                         List<Map<String, Object>> queryRows,
-                                                         Map<String, String> fieldLabels,
-                                                         String detailLevel,
-                                                         String anomalyType) {
+                                                          List<String> dimensionFields,
+                                                          String timeField,
+                                                          Map<String, Object> graphPath,
+                                                          List<Map<String, Object>> docEvidence,
+                                                          List<Map<String, Object>> queryRows,
+                                                          Map<String, String> fieldLabels,
+                                                          String detailLevel,
+                                                          String anomalyType) {
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("question", question);
         request.put("tableName", tableName);
@@ -175,8 +304,38 @@ public class PythonAiService {
             );
             return response == null ? Optional.empty() : Optional.of(response);
         } catch (RestClientException e) {
-            log.warn("Python GraphRAG 璇婃柇鏈嶅姟涓嶅彲鐢紝浣跨敤甯歌璇婃柇锛歿}", e.getMessage());
+            log.warn("Python GraphRAG 诊断不可用: {}", e.getMessage());
             return Optional.empty();
         }
+    }
+
+    private String extractPythonAiError(String responseBody, String fallback) {
+        if (responseBody == null || responseBody.isBlank()) {
+            return fallback;
+        }
+        String body = responseBody.trim();
+        String detailKey = "\"detail\":";
+        int detailIndex = body.indexOf(detailKey);
+        if (detailIndex >= 0) {
+            String detail = body.substring(detailIndex + detailKey.length()).trim();
+            if (detail.startsWith("\"")) {
+                int endIndex = detail.indexOf('"', 1);
+                if (endIndex > 1) {
+                    return detail.substring(1, endIndex);
+                }
+            }
+        }
+        String messageKey = "\"message\":";
+        int messageIndex = body.indexOf(messageKey);
+        if (messageIndex >= 0) {
+            String message = body.substring(messageIndex + messageKey.length()).trim();
+            if (message.startsWith("\"")) {
+                int endIndex = message.indexOf('"', 1);
+                if (endIndex > 1) {
+                    return message.substring(1, endIndex);
+                }
+            }
+        }
+        return fallback;
     }
 }
