@@ -145,6 +145,7 @@ import {
   Management,
   Monitor,
   Operation,
+  Microphone,
   Setting,
   Share,
   Upload
@@ -169,6 +170,7 @@ import PlaceholderView from './views/PlaceholderView.vue'
 import AuthView from './views/AuthView.vue'
 import { authToken, currentUser, isAuthenticated, clearSession, restoreSessionHeader } from './store/session'
 import { logout } from './api/auth'
+import { useVoiceInteraction } from './composables/useVoiceInteraction'
 
 const API_BASE = 'http://localhost:8080'
 const LAST_SELECTED_TABLE_KEY = 'insight:lastSelectedTableName'
@@ -353,6 +355,7 @@ const pinDialogVisible = ref(false)
 const pinning = ref(false)
 const pinDashboardId = ref(null)
 const dashboardOptions = ref([])
+const voicePanelVisible = ref(false)
 const question = ref('')
 const loading = ref(false)
 const messages = ref([
@@ -361,6 +364,31 @@ const messages = ref([
 const currentChartType = ref('')
 const chartSortMode = ref('desc')
 const lastAnalysis = ref(null)
+const {
+  voiceLocaleOptions,
+  recognitionLocale,
+  selectedVoiceGender,
+  speechRate,
+  speechVolume,
+  autoSpeakConclusion,
+  autoSendAfterRecognize,
+  voiceGenderOptions,
+  recognitionSupported,
+  speechSupported,
+  voiceCapabilityText,
+  voiceStatusText,
+  listening,
+  speaking,
+  recognitionError,
+  interimTranscript,
+  finalTranscript,
+  startListening,
+  stopListening,
+  clearTranscript,
+  prefetchSpeechText,
+  speakText,
+  stopSpeaking
+} = useVoiceInteraction()
 let chartInstance = null
 const handleChartResize = () => {
   chartInstance?.resize()
@@ -400,6 +428,7 @@ const dimensionCandidateFields = computed(() => fields.value.filter(field => fie
 const canDiagnoseLastAnalysis = computed(() => Boolean(lastAnalysis.value && numericFields.value.length))
 const canRegenerateLastAnalysis = computed(() => Boolean(String(lastAnalysis.value?.sourceQuestion || '').trim()))
 const canPinLastAnalysis = computed(() => Boolean(lastAnalysis.value?.data?.length))
+const hasVoiceConclusion = computed(() => Boolean(lastAnalysis.value?.data?.length || lastAnalysis.value?.message))
 
 const normalizeBusinessModelOptionId = (value) => {
   if (value === null || value === undefined || value === '') {
@@ -1814,9 +1843,30 @@ const resolveDownloadFilename = (contentDisposition, format) => {
   return asciiMatch?.[1] || fallback
 }
 
+const isPhysicalColumnCode = (value) => /^col_\d+$/i.test(String(value || '').trim())
+
 const fieldLabel = (columnName) => {
-  const field = fields.value.find(item => item.columnName === columnName)
-  return field?.displayName || columnName
+  const rawValue = String(columnName || '').trim()
+  const field = fields.value.find(item => (
+    String(item?.columnName || '').trim() === rawValue
+      || String(item?.sourceFieldName || '').trim() === rawValue
+      || String(item?.displayName || '').trim() === rawValue
+  ))
+  if (!field) {
+    return rawValue
+  }
+  const displayName = String(field?.displayName || '').trim()
+  const sourceFieldName = String(field?.sourceFieldName || '').trim()
+  if (displayName && !isPhysicalColumnCode(displayName)) {
+    if (sourceFieldName && sourceFieldName !== displayName && !isPhysicalColumnCode(sourceFieldName)) {
+      return `${displayName}（${sourceFieldName}）`
+    }
+    return displayName
+  }
+  if (sourceFieldName) {
+    return sourceFieldName
+  }
+  return rawValue
 }
 
 const loadPreview = async (tableName) => {
@@ -2505,7 +2555,7 @@ const BUSINESS_MODEL_AGENT_HINTS = [
   ...BUSINESS_MODEL_CREATE_HINTS,
   '发布', '取消发布', '套用', '复用', '应用', '迁移', '复制', '模型', '企业模型库', '企业模型', '当前模型', '刚创建',
   '删除', '移除', '去掉', '业务公式', '指标公式', '字典映射', '字段绑定', '绑定字段', '字段修正', '改绑', '重新绑定',
-  '绑定到', '绑定为', '映射到', '映射为', '对应到', '对应为'
+  '绑定到', '绑定为', '绑定至', '映射到', '映射为', '映射至', '对应到', '对应为', '对应至'
 ]
 
 const shouldUseBusinessModelAgent = (text) => {
@@ -2513,7 +2563,7 @@ const shouldUseBusinessModelAgent = (text) => {
   if (!q) return false
   const lower = q.toLowerCase()
   const hasDeleteIntent = ['删除', '移除', '去掉'].some(token => q.includes(token))
-  const hasBindingIntent = ['字段绑定', '绑定字段', '字段修正', '改绑', '重新绑定', '绑定到', '绑定为', '映射到', '映射为', '对应到', '对应为'].some(token => q.includes(token))
+  const hasBindingIntent = ['字段绑定', '绑定字段', '字段修正', '改绑', '重新绑定', '绑定到', '绑定为', '绑定至', '映射到', '映射为', '映射至', '对应到', '对应为', '对应至'].some(token => q.includes(token))
   const hasBusinessModelTarget = ['模型', '业务字典', '业务公式', '指标公式', '公式', '字典', '指标', '维度', '企业模型库', '当前模型', '这个模型'].some(token => q.includes(token))
   if (hasDeleteIntent && hasBusinessModelTarget) {
     return true
@@ -2562,21 +2612,73 @@ const normalizeFieldBindingResults = (entries) => {
     .map((item) => {
       const name = String(item?.name || '').trim()
       const field = String(item?.field || '').trim()
+      const fieldDisplayName = String(item?.fieldDisplayName || '').trim()
+      const formula = String(item?.formula || '').trim()
+      const action = String(item?.action || 'UPSERT').trim().toUpperCase()
       const targetType = String(item?.targetType || '').trim()
       const label = String(item?.label || '').trim()
-      if (!name && !field) return null
+      if (!name || !field) return null
+      if (targetType === 'metricDefinition' && !formula && /[+\-*/()]/.test(field)) return null
       return {
         name,
         field,
+        fieldDisplayName,
+        formula,
+        action,
         targetType,
         label: label || (targetType === 'dictionaryEntry'
           ? `业务字典：${name}`
           : targetType === 'dimensionDefinition'
             ? `业务维度：${name}`
-            : `业务指标：${name}`)
+            : `业务公式：${name}`)
       }
     })
     .filter(Boolean)
+}
+
+const looksLikeExplicitDictionaryMutation = (question) => /(?:新增|增加|添加|创建|补充|修改|更新)?(?:业务字典|字典|词典|同义词|术语|映射)/.test(String(question || ''))
+const looksLikeExplicitFormulaMutation = (question) => /(?:新增|增加|添加|创建|补充|修改|更新)?(?:业务公式|指标公式|公式)/.test(String(question || ''))
+const looksLikeExplicitFieldBinding = (question) => /字段绑定|绑定字段|字段修正|改绑|重新绑定|绑定到|绑定为|绑定至|映射到|映射为|映射至|对应到|对应为|对应至/.test(String(question || ''))
+
+const resolveFieldBindingCardTitle = (question, intent, entries) => {
+  if (!Array.isArray(entries) || !entries.length) return ''
+  const q = String(question || '').trim()
+  const normalizedIntent = String(intent || '').trim().toUpperCase()
+  const hasDelete = entries.some(item => String(item?.action || '').toUpperCase() === 'DELETE')
+  const hasUpsert = entries.some(item => String(item?.action || '').toUpperCase() !== 'DELETE')
+  const targetTypes = [...new Set(entries.map(item => String(item?.targetType || '').trim()).filter(Boolean))]
+  const allDictionaryEntries = targetTypes.length === 1 && targetTypes[0] === 'dictionaryEntry'
+  const allDimensions = targetTypes.length === 1 && targetTypes[0] === 'dimensionDefinition'
+  const allMetrics = targetTypes.length === 1 && targetTypes[0] === 'metricDefinition'
+
+  if (normalizedIntent === 'BIND_FIELDS') {
+    if (looksLikeExplicitDictionaryMutation(q)) {
+      return hasDelete && !hasUpsert ? '业务字典删除结果' : '业务字典映射结果'
+    }
+    if (looksLikeExplicitFormulaMutation(q)) {
+      return hasDelete && !hasUpsert ? '业务公式删除结果' : '业务公式变更结果'
+    }
+    if (looksLikeExplicitFieldBinding(q)) {
+      return hasDelete && !hasUpsert ? '字段解绑结果' : '字段修正结果'
+    }
+    return hasDelete && !hasUpsert ? '字段解绑结果' : '字段修正结果'
+  }
+  if (allDictionaryEntries || /(业务字典|字典|词典|同义词|术语)/.test(q)) {
+    if (hasDelete && !hasUpsert) return '业务字典删除结果'
+    if (hasUpsert && !hasDelete) return '业务字典映射结果'
+    return '业务字典变更结果'
+  }
+  if (allDimensions || /维度/.test(q)) {
+    if (hasDelete && !hasUpsert) return '业务维度删除结果'
+    if (hasUpsert && !hasDelete) return '业务维度绑定结果'
+    return '业务维度变更结果'
+  }
+  if (allMetrics) {
+    if (hasDelete && !hasUpsert) return '业务公式删除结果'
+    if (hasUpsert && !hasDelete) return '业务公式变更结果'
+    return '业务公式变更结果'
+  }
+  return hasDelete && !hasUpsert ? '模型变更结果' : '字段更新结果'
 }
 
 const handleBusinessModelAgentQuestion = async ({ question, tableName, semanticDraft }) => {
@@ -2812,6 +2914,137 @@ const isAbortLikeError = (error) => {
       || message.includes('cancel')
 }
 
+const normalizeVoiceSentence = (value) => String(value || '')
+  .replace(/\s+/g, ' ')
+  .replace(/[;；]+/g, '，')
+  .replace(/[!！]+/g, '。')
+  .trim()
+
+const formatSpeechNumber = (value) => {
+  const num = toNumber(value)
+  if (Number.isNaN(num)) return String(value ?? '')
+  const abs = Math.abs(num)
+  if (abs >= 100000000) return `${(num / 100000000).toFixed(2)}亿`
+  if (abs >= 10000) return `${(num / 10000).toFixed(2)}万`
+  if (Number.isInteger(num)) return `${num}`
+  return `${num.toFixed(2)}`
+}
+
+const buildVoiceConclusion = (analysis) => {
+  if (!analysis) return ''
+  if (!Array.isArray(analysis.data) || !analysis.data.length) {
+    return normalizeVoiceSentence(analysis.message || '本次查询已完成，但暂无可播报的数据结果。')
+  }
+
+  const dimension = String(analysis.fieldMapping?.dimension || '维度').trim()
+  const metric = String(analysis.fieldMapping?.metric || '指标').trim()
+  const chartTypeName = analysis.chartType === 'pie'
+    ? '饼图'
+    : analysis.chartType === 'line'
+      ? '折线图'
+      : '柱状图'
+  const sorted = getSortedChartData(analysis.data)
+  const topItems = sorted.slice(0, 3).map(item => ({
+    name: String(item.name ?? '未命名').trim() || '未命名',
+    value: formatSpeechNumber(item.value)
+  }))
+  const intro = `查询完成，已生成${chartTypeName}。当前按${dimension}分析${metric}，共${sorted.length}项结果。`
+  if (!topItems.length) {
+    return normalizeVoiceSentence(`${intro}${analysis.message || ''}`)
+  }
+
+  if (analysis.chartType === 'pie') {
+    const summary = topItems.map(item => `${item.name}占比对应数值为${item.value}`).join('，')
+    return normalizeVoiceSentence(`${intro}主要结论如下，${summary}。`)
+  }
+
+  const [first, second, third] = topItems
+  const lines = [`最高的是${first.name}，数值为${first.value}`]
+  if (second) lines.push(`第二是${second.name}，数值为${second.value}`)
+  if (third) lines.push(`第三是${third.name}，数值为${third.value}`)
+  return normalizeVoiceSentence(`${intro}${lines.join('，')}。`)
+}
+
+const stopVoicePlayback = () => {
+  stopSpeaking()
+}
+
+const speakLatestAnalysisConclusion = async (analysis = lastAnalysis.value) => {
+  const content = buildVoiceConclusion(analysis)
+  if (!content) {
+    ElMessage.warning('暂无可播报的分析结果')
+    return
+  }
+  try {
+    await speakText(content)
+  } catch (error) {
+    if (error?.message && error.message !== '语音播报已中断') {
+      ElMessage.error(error.message || '语音播报失败')
+    }
+  }
+}
+
+const prefetchLatestAnalysisConclusion = (analysis = lastAnalysis.value) => {
+  const content = buildVoiceConclusion(analysis)
+  if (!content) return
+  prefetchSpeechText(content)
+}
+
+const prefetchChatBubbleSpeech = (content) => {
+  const text = String(content || '').trim()
+  if (!text) return
+  prefetchSpeechText(text)
+}
+
+const speakChatBubble = async (msg) => {
+  const content = String(msg?.content || '').trim()
+  if (!content) {
+    ElMessage.warning('当前气泡没有可播报内容')
+    return
+  }
+  try {
+    await speakText(content)
+  } catch (error) {
+    if (error?.message && error.message !== '语音播报已中断') {
+      ElMessage.error(error.message || '语音播报失败')
+    }
+  }
+}
+
+const stopVoiceQuestionInput = () => {
+  stopListening()
+}
+
+const startVoiceQuestionInput = () => {
+  if (loading.value || isStreaming.value) {
+    ElMessage.warning('当前正在生成分析结果，请稍后再试语音输入')
+    return
+  }
+  try {
+    startListening({
+      onStart: () => {
+        ElMessage.success('已开始语音听写，请直接说出查询问题')
+      },
+      onPartial: (committed, interim) => {
+        question.value = [committed, interim].filter(Boolean).join(' ').trim()
+      },
+      onFinal: async (committed) => {
+        question.value = committed
+        if (autoSendAfterRecognize.value && committed) {
+          await sendQuestion({ questionText: committed })
+        }
+      },
+      onError: (message) => {
+        if (message && message !== '语音识别已中止') {
+          ElMessage.error(message)
+        }
+      }
+    })
+  } catch (error) {
+    ElMessage.error(error.message || '语音识别启动失败')
+  }
+}
+
 const stopQuestionGeneration = () => {
   if (!loading.value && !isStreaming.value) {
     return
@@ -2930,6 +3163,11 @@ const sendQuestion = async (options = {}) => {
           content: agentResult.message || '业务模型处理完成',
           sql: '',
           fieldBindingResults: normalizeFieldBindingResults(agentResult.fieldBindingResults),
+          fieldBindingTitle: resolveFieldBindingCardTitle(
+            userQuestion,
+            agentResult.intent,
+            normalizeFieldBindingResults(agentResult.fieldBindingResults)
+          ),
           thinkingLogs: [
             ...thinkingLogs,
             `业务模型智能体意图：${agentResult.intent || 'UNKNOWN'}`,
@@ -2991,6 +3229,19 @@ const sendQuestion = async (options = {}) => {
     } else {
       ensureChatChartInstance()?.clear()
       ElMessage.warning('查询成功，但没有符合条件的数据')
+    }
+
+    if (activeModule.value === 'chat') {
+      nextTick(() => {
+        prefetchLatestAnalysisConclusion(data)
+        prefetchChatBubbleSpeech(`${data.message || ''}${fallbackTag}`)
+      })
+    }
+
+    if (activeModule.value === 'chat' && autoSpeakConclusion.value) {
+      nextTick(() => {
+        speakLatestAnalysisConclusion(data)
+      })
     }
   }
 
@@ -3556,6 +3807,15 @@ const exportChartAsImage = () => {
   }
 }
 
+watch(activeModule, (nextModule) => {
+  if (nextModule !== 'chat') {
+    stopVoiceQuestionInput()
+    stopVoicePlayback()
+    clearTranscript()
+    voicePanelVisible.value = false
+  }
+})
+
 const renderChart = (data, type) => {
   const instance = ensureChatChartInstance()
   if (!instance) return
@@ -3797,6 +4057,29 @@ provide('workbench', {
   pinning,
   pinDashboardId,
   dashboardOptions,
+  voicePanelVisible,
+  voiceLocaleOptions,
+  recognitionLocale,
+  selectedVoiceGender,
+  speechRate,
+  speechVolume,
+  autoSpeakConclusion,
+  autoSendAfterRecognize,
+  voiceGenderOptions,
+  recognitionSupported,
+  speechSupported,
+  voiceCapabilityText,
+  voiceStatusText,
+  listening,
+  speaking,
+  recognitionError,
+  interimTranscript,
+  finalTranscript,
+  hasVoiceConclusion,
+  startVoiceQuestionInput,
+  stopVoiceQuestionInput,
+  speakChatBubble,
+  stopVoicePlayback,
   stopQuestionGeneration,
   copySqlToClipboard,
   reuseChatQuestion,

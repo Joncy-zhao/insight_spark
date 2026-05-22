@@ -76,7 +76,7 @@
                 <div class="msg-content">
                   <div class="bubble">{{ msg.content }}</div>
                   <div v-if="msg.fieldBindingResults?.length" class="field-binding-card">
-                    <div class="field-binding-card__header">字段修正结果</div>
+                    <div class="field-binding-card__header">{{ msg.fieldBindingTitle || '字段变更结果' }}</div>
                     <div
                       v-for="(item, bindingIndex) in msg.fieldBindingResults"
                       :key="`${index}-binding-${bindingIndex}`"
@@ -84,7 +84,13 @@
                     >
                       <div class="field-binding-card__label">{{ item.label || item.name }}</div>
                       <div class="field-binding-card__arrow">→</div>
-                      <div class="field-binding-card__field">{{ item.field || '未绑定成功' }}</div>
+                      <div class="field-binding-card__field">
+                        {{
+                          item.targetType === 'metricDefinition'
+                            ? (item.formula || item.fieldDisplayName || fieldLabel(item.field) || item.field || '已更新')
+                            : (item.fieldDisplayName || fieldLabel(item.field) || item.field || '未绑定成功')
+                        }}
+                      </div>
                     </div>
                   </div>
                   <details v-if="msg.thinkingLogs?.length" class="thinking-details" :open="msg.thinkingCollapsed === false">
@@ -101,6 +107,16 @@
                       <el-button size="small" text type="primary" @click="copySqlToClipboard(msg.sql)">复制</el-button>
                     </div>
                     <pre class="sql-code">{{ msg.sql }}</pre>
+                  </div>
+                  <div v-if="speechSupported && msg.content" class="bubble-voice-action">
+                    <button
+                        type="button"
+                        class="bubble-voice-btn"
+                        :title="speaking ? '停止播报' : '播报当前气泡内容'"
+                        @click="speaking ? stopVoicePlayback() : speakChatBubble(msg)"
+                    >
+                      <span class="bubble-voice-icon" aria-hidden="true">{{ speaking ? '🔈' : '🔊' }}</span>
+                    </button>
                   </div>
                 </div>
               </div>
@@ -120,6 +136,26 @@
                   </el-button>
                 </template>
               </el-input>
+              <el-button
+                  class="voice-btn"
+                  :type="listening ? 'danger' : 'primary'"
+                  plain
+                  :disabled="loading || !recognitionSupported"
+                  :title="listening ? '停止语音输入' : '开始语音输入'"
+                  :aria-label="listening ? '停止语音输入' : '开始语音输入'"
+                  @click="listening ? stopVoiceQuestionInput() : startVoiceQuestionInput()"
+              >
+                <el-icon><Microphone /></el-icon>
+              </el-button>
+              <el-button
+                  class="voice-btn"
+                  plain
+                  title="语音设置"
+                  aria-label="语音设置"
+                  @click="voicePanelVisible = true"
+              >
+                <el-icon><Setting /></el-icon>
+              </el-button>
               <el-button v-if="loading" type="danger" plain class="stop-btn" @click="stopQuestionGeneration">
                 停止生成
               </el-button>
@@ -304,12 +340,80 @@
               :use-create-dialog="true"
             />
           </el-drawer>
+          <el-drawer
+              v-model="voicePanelVisible"
+              title="语音交互设置"
+              size="420px"
+              destroy-on-close
+          >
+            <div class="voice-settings">
+              <el-alert
+                  :title="voiceCapabilityText"
+                  :type="recognitionSupported || speechSupported ? 'success' : 'warning'"
+                  :closable="false"
+                  show-icon
+              />
+              <el-form label-position="top">
+                <el-form-item label="识别语种 / 方言适配">
+                  <el-select v-model="recognitionLocale" class="full-width">
+                    <el-option
+                        v-for="option in voiceLocaleOptions"
+                        :key="option.value"
+                        :label="option.label"
+                        :value="option.value"
+                    />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="播报音色">
+                  <el-select v-model="selectedVoiceGender" class="full-width">
+                    <el-option
+                        v-for="option in localVoiceGenderOptions"
+                        :key="option.value"
+                        :label="option.label"
+                        :value="option.value"
+                    />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="播报语速">
+                  <el-slider v-model="speechRate" :min="0.6" :max="1.4" :step="0.1" show-input />
+                </el-form-item>
+                <el-form-item label="播报音量">
+                  <el-slider v-model="speechVolume" :min="0" :max="1" :step="0.05" show-input />
+                </el-form-item>
+                <el-form-item>
+                  <el-switch
+                      v-model="autoSpeakConclusion"
+                      active-text="查询完成后自动播报结论"
+                      inactive-text="手动触发播报"
+                  />
+                </el-form-item>
+                <el-form-item>
+                  <el-switch
+                      v-model="autoSendAfterRecognize"
+                      active-text="识别结束后自动发起查询"
+                      inactive-text="识别后手动确认"
+                  />
+                </el-form-item>
+                <el-form-item label="实时听写预览">
+                  <div class="voice-preview-box">
+                    {{ [finalTranscript, interimTranscript].filter(Boolean).join(' ') || '开始语音输入后，这里会显示识别结果。' }}
+                  </div>
+                </el-form-item>
+              </el-form>
+            </div>
+          </el-drawer>
 </section>
 </template>
 
 <script setup>
 import { computed, inject } from 'vue'
+import { Microphone, Setting } from '@element-plus/icons-vue'
 import BusinessDictionaryView from '../../components/BusinessDictionaryView.vue'
+
+const localVoiceGenderOptions = [
+  { label: '男声', value: 'male' },
+  { label: '女声', value: 'female' }
+]
 
 const {
   API_BASE,
@@ -420,6 +524,27 @@ const {
   pinning,
   pinDashboardId,
   dashboardOptions,
+  voicePanelVisible,
+  voiceLocaleOptions,
+  recognitionLocale,
+  selectedVoiceGender,
+  speechRate,
+  speechVolume,
+  autoSpeakConclusion,
+  autoSendAfterRecognize,
+  recognitionSupported,
+  speechSupported,
+  voiceCapabilityText,
+  voiceStatusText,
+  listening,
+  speaking,
+  recognitionError,
+  interimTranscript,
+  finalTranscript,
+  startVoiceQuestionInput,
+  stopVoiceQuestionInput,
+  speakChatBubble,
+  stopVoicePlayback,
   stopQuestionGeneration,
   seriesData,
   statusTagType,
@@ -585,14 +710,101 @@ const formatGraphContextContent = (item) => {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   margin-top: 10px;
 }
 .ask-bar :deep(.el-input) {
   flex: 1;
+  min-width: 0;
+}
+.ask-bar :deep(.el-button + .el-button) {
+  margin-left: 0;
 }
 .stop-btn {
   flex: 0 0 auto;
+}
+.voice-btn {
+  flex: 0 0 auto;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  padding: 0;
+}
+.voice-btn :deep(.el-icon) {
+  font-size: 13px;
+}
+.voice-btn :deep(.el-button__text),
+.voice-btn :deep(.el-button__inner) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.bubble-voice-action {
+  display: flex;
+  justify-content: flex-start;
+  margin-top: 6px;
+}
+.bubble-voice-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+.bubble-voice-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+.bubble-voice-btn:hover {
+  background: #eef2ff;
+  color: #1d4ed8;
+}
+.bubble-voice-btn:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: 2px;
+}
+.voice-status-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.voice-status-text {
+  color: #64748b;
+  font-size: 12px;
+}
+.voice-transcript-preview {
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.voice-error-tip {
+  margin-top: 6px;
+  color: #dc2626;
+  font-size: 12px;
+}
+.voice-settings {
+  display: grid;
+  gap: 16px;
+}
+.voice-preview-box {
+  min-height: 84px;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #334155;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .recent-queries {
   flex: 0 1 300px;

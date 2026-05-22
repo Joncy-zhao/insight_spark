@@ -1,0 +1,101 @@
+package com.insightspark.controller;
+
+import com.insightspark.common.ApiResponse;
+import com.insightspark.service.PythonAiService;
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.CrossOrigin;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.io.IOException;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Optional;
+
+@RestController
+@RequestMapping("/api/voice")
+@CrossOrigin
+public class VoiceController {
+
+    @Autowired
+    private PythonAiService pythonAiService;
+
+    @PostMapping("/tts")
+    public ApiResponse<Map<String, Object>> textToSpeech(@RequestBody Map<String, Object> request) {
+        String text = String.valueOf(request.getOrDefault("text", "")).trim();
+        if (text.isBlank()) {
+            return ApiResponse.badRequest("播报文本不能为空");
+        }
+
+        String voiceGender = String.valueOf(request.getOrDefault("voiceGender", "female")).trim();
+        String locale = String.valueOf(request.getOrDefault("locale", "zh-CN")).trim();
+        Double rate = parseDouble(request.get("rate")).orElse(1.0D);
+
+        return pythonAiService.textToSpeech(text, voiceGender, locale, rate)
+                .map(ApiResponse::success)
+                .orElseGet(() -> ApiResponse.badRequest("云端 TTS 服务不可用或未返回音频"));
+    }
+
+    @PostMapping("/tts-url")
+    public ApiResponse<Map<String, Object>> textToSpeechUrl(@RequestBody Map<String, Object> request) {
+        String text = String.valueOf(request.getOrDefault("text", "")).trim();
+        if (text.isBlank()) {
+            return ApiResponse.badRequest("播报文本不能为空");
+        }
+
+        String voiceGender = String.valueOf(request.getOrDefault("voiceGender", "female")).trim();
+        String locale = String.valueOf(request.getOrDefault("locale", "zh-CN")).trim();
+        Double rate = parseDouble(request.get("rate")).orElse(1.0D);
+
+        return pythonAiService.textToSpeechUrl(text, voiceGender, locale, rate)
+                .map(ApiResponse::success)
+                .orElseGet(() -> ApiResponse.badRequest("云端 TTS 服务不可用或未返回音频地址"));
+    }
+
+    @PostMapping("/tts-stream")
+    public void textToSpeechStream(@RequestBody Map<String, Object> request, HttpServletResponse response) throws IOException {
+        String text = String.valueOf(request.getOrDefault("text", "")).trim();
+        if (text.isBlank()) {
+            throw new IllegalArgumentException("播报文本不能为空");
+        }
+
+        String voiceGender = String.valueOf(request.getOrDefault("voiceGender", "female")).trim();
+        String locale = String.valueOf(request.getOrDefault("locale", "zh-CN")).trim();
+        Double rate = parseDouble(request.get("rate")).orElse(1.0D);
+        Double volume = parseDouble(request.get("volume")).orElse(0.85D);
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("text", text);
+        payload.put("voiceGender", voiceGender);
+        payload.put("locale", locale);
+        payload.put("rate", rate);
+        payload.put("volume", volume);
+
+        response.setStatus(HttpServletResponse.SC_OK);
+        response.setContentType("audio/pcm");
+        response.setCharacterEncoding("UTF-8");
+        response.setHeader("Cache-Control", "no-store");
+        response.setHeader("X-Audio-Format", "pcm_s16le");
+        response.setHeader("X-Audio-Sample-Rate", "24000");
+        response.setHeader("X-Audio-Channels", "1");
+
+        pythonAiService.streamTextToSpeech(payload, response);
+    }
+
+    private Optional<Double> parseDouble(Object value) {
+        if (value == null) {
+            return Optional.empty();
+        }
+        if (value instanceof Number number) {
+            return Optional.of(number.doubleValue());
+        }
+        try {
+            return Optional.of(Double.parseDouble(String.valueOf(value).trim()));
+        } catch (NumberFormatException ex) {
+            return Optional.empty();
+        }
+    }
+}
