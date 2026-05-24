@@ -70,142 +70,227 @@
               </div>
             </div>
 
-            <div class="message-list" id="chatHistory">
-              <div v-for="(msg, index) in messages" :key="index" :class="['message-wrapper', msg.role]">
-                <div class="avatar">{{ msg.role === 'system' ? '🤖' : '👤' }}</div>
-                <div class="msg-content">
-                  <div class="bubble">{{ msg.content }}</div>
-                  <div v-if="msg.fieldBindingResults?.length" class="field-binding-card">
-                    <div class="field-binding-card__header">{{ msg.fieldBindingTitle || '字段变更结果' }}</div>
-                    <div
-                      v-for="(item, bindingIndex) in msg.fieldBindingResults"
-                      :key="`${index}-binding-${bindingIndex}`"
-                      class="field-binding-card__item"
-                    >
-                      <div class="field-binding-card__label">{{ item.label || item.name }}</div>
-                      <div class="field-binding-card__arrow">→</div>
-                      <div class="field-binding-card__field">
-                        {{
-                          item.targetType === 'metricDefinition'
-                            ? (item.formula || item.fieldDisplayName || fieldLabel(item.field) || item.field || '已更新')
-                            : (item.fieldDisplayName || fieldLabel(item.field) || item.field || '未绑定成功')
-                        }}
-                      </div>
-                    </div>
-                  </div>
-                  <details v-if="msg.thinkingLogs?.length" class="thinking-details" :open="msg.thinkingCollapsed === false">
-                    <summary>查看思考过程（{{ msg.thinkingLogs.length }}步）</summary>
-                    <ol class="thinking-list">
-                      <li v-for="(line, lineIndex) in msg.thinkingLogs" :key="`${index}-${lineIndex}`">
-                        {{ line }}
-                      </li>
-                    </ol>
-                  </details>
-                  <div v-if="msg.sql" class="sql-block">
-                    <div class="sql-head">
-                      <div class="sql-title">生成的 SQL</div>
-                      <el-button size="small" text type="primary" @click="copySqlToClipboard(msg.sql)">复制</el-button>
-                    </div>
-                    <pre class="sql-code">{{ msg.sql }}</pre>
-                  </div>
-                  <div v-if="speechSupported && msg.content" class="bubble-voice-action">
+            <div class="chat-thread-header">
+              <button
+                  type="button"
+                  class="chat-thread-toggle"
+                  :title="chatContentMode === 'messages' ? '打开会话管理' : '返回当前对话'"
+                  :aria-label="chatContentMode === 'messages' ? '打开会话管理' : '返回当前对话'"
+                  @click="toggleChatContentMode"
+              >
+                <el-icon>
+                  <component :is="chatContentMode === 'messages' ? ArrowLeftBold : ArrowRightBold" />
+                </el-icon>
+              </button>
+              <div class="chat-thread-title-wrap">
+                <div class="chat-thread-title">{{ chatContentMode === 'messages' ? currentChatSessionTitle : '连续对话' }}</div>
+                <div class="chat-thread-subtitle">
+                  {{ chatContentMode === 'messages' ? currentChatSessionSubtitle : '查看、切换和管理已有对话' }}
+                </div>
+              </div>
+              <el-tag
+                  v-if="chatContentMode === 'messages' && currentChatSession?.status === 'ARCHIVED'"
+                  size="small"
+                  effect="plain"
+              >
+                已归档
+              </el-tag>
+            </div>
+
+            <template v-if="chatContentMode === 'sessions'">
+              <div class="chat-session-manager">
+                <div class="chat-session-toolbar">
+                  <el-input
+                      v-model.trim="chatSessionKeyword"
+                      placeholder="搜索会话"
+                      clearable
+                      size="small"
+                      @keyup.enter="searchChatSessions"
+                      @clear="resetChatSessionSearch"
+                  >
+                    <template #prefix>
+                      <el-icon><Search /></el-icon>
+                    </template>
+                  </el-input>
+                  <el-select v-model="chatSessionStatus" size="small" class="chat-session-status" @change="searchChatSessions">
+                    <el-option label="进行中" value="ACTIVE" />
+                    <el-option label="已归档" value="ARCHIVED" />
+                    <el-option label="全部" value="ALL" />
+                  </el-select>
+                  <el-button size="small" text type="primary" :loading="chatSessionLoading" @click="createSessionAndOpen">
+                    新建
+                  </el-button>
+                </div>
+                <div class="chat-session-manager-list">
+                  <div
+                      v-for="session in chatSessions"
+                      :key="session.id"
+                      :class="['chat-session-card', { active: String(activeChatSessionId?.value || '') === String(session.id) }]"
+                  >
                     <button
                         type="button"
-                        class="bubble-voice-btn"
-                        :title="speaking ? '停止播报' : '播报当前气泡内容'"
-                        @click="speaking ? stopVoicePlayback() : speakChatBubble(msg)"
+                        class="chat-session-card-main"
+                        @click="selectSessionFromManager(session.id)"
                     >
-                      <span class="bubble-voice-icon" aria-hidden="true">{{ speaking ? '🔈' : '🔊' }}</span>
+                      <div class="chat-session-card-head">
+                        <span class="chat-session-card-title">{{ session.title }}</span>
+                        <el-tag v-if="session.status === 'ARCHIVED'" size="small" effect="plain">已归档</el-tag>
+                      </div>
+                      <div class="chat-session-card-meta">
+                        {{ session.turnCount || 0 }}轮 · {{ formatChatHistoryTime(session.updatedAt) }}
+                      </div>
+                      <div class="chat-session-card-summary">
+                        {{ session.summary || '暂无摘要，进入对话后可继续补充。' }}
+                      </div>
                     </button>
+                    <div class="chat-session-card-actions">
+                      <button type="button" class="chat-session-card-icon" title="刷新摘要" @click.stop="refreshSessionFromManager(session)">
+                        <el-icon><Refresh /></el-icon>
+                      </button>
+                      <button type="button" class="chat-session-card-icon" title="重命名" @click.stop="renameChatSession(session)">
+                        <el-icon><Edit /></el-icon>
+                      </button>
+                      <button
+                          type="button"
+                          class="chat-session-card-icon"
+                          :title="session.status === 'ARCHIVED' ? '恢复会话' : '归档会话'"
+                          @click.stop="updateChatSessionStatus(session, session.status === 'ARCHIVED' ? 'ACTIVE' : 'ARCHIVED')"
+                      >
+                        <el-icon><Management /></el-icon>
+                      </button>
+                      <button type="button" class="chat-session-card-icon danger" title="删除会话" @click.stop="deleteSessionFromManager(session)">
+                        <el-icon><Close /></el-icon>
+                      </button>
+                    </div>
+                  </div>
+                  <div v-if="!chatSessions?.value?.length" class="chat-session-manager-empty">
+                    <div class="chat-session-manager-empty__title">暂无会话</div>
+                    <div class="chat-session-manager-empty__text">发送问题后会自动创建，或现在新建一个空会话。</div>
+                    <el-button size="small" type="primary" @click="createSessionAndOpen">新建会话</el-button>
                   </div>
                 </div>
               </div>
-            </div>
+            </template>
 
-            <div class="ask-bar">
-              <el-input
-                  v-model="question"
-                  placeholder="试试问我：按省份统计销售额、按日期看趋势、分类占比等..."
-                  :disabled="loading"
-                  @keyup.enter="sendQuestion"
-              >
-                <template #append>
-                  <el-button type="primary" :loading="loading" @click="sendQuestion">
-                    <span v-if="!loading">🚀 发送分析</span>
-                    <span v-else>思考中...</span>
-                  </el-button>
-                </template>
-              </el-input>
-              <el-button
-                  class="voice-btn"
-                  :type="listening ? 'danger' : 'primary'"
-                  plain
-                  :disabled="loading || !recognitionSupported"
-                  :title="listening ? '停止语音输入' : '开始语音输入'"
-                  :aria-label="listening ? '停止语音输入' : '开始语音输入'"
-                  @click="listening ? stopVoiceQuestionInput() : startVoiceQuestionInput()"
-              >
-                <el-icon><Microphone /></el-icon>
-              </el-button>
-              <el-button
-                  class="voice-btn"
-                  plain
-                  title="语音设置"
-                  aria-label="语音设置"
-                  @click="voicePanelVisible = true"
-              >
-                <el-icon><Setting /></el-icon>
-              </el-button>
-              <el-button v-if="loading" type="danger" plain class="stop-btn" @click="stopQuestionGeneration">
-                停止生成
-              </el-button>
-            </div>
-            <div class="recent-queries">
-              <div class="recent-title">最近查询</div>
-              <div class="recent-toolbar">
+            <template v-else>
+              <div v-if="activeBranchParentTurnMeta" class="chat-branch-banner">
+                <span>当前将基于指定消息继续追问</span>
+                <small>{{ activeBranchParentTurnMeta.preview || `Turn #${activeBranchParentTurnMeta.turnNo || activeBranchParentTurnMeta.turnId}` }}</small>
+                <el-button size="small" text @click="clearActiveBranchParent">清除</el-button>
+              </div>
+
+              <div class="message-list" id="chatHistory">
+                <div v-for="(msg, index) in messages" :key="index" :class="['message-wrapper', msg.role]">
+                  <div class="avatar">{{ msg.role === 'system' ? '🤖' : '👤' }}</div>
+                  <div class="msg-content">
+                    <div class="bubble">{{ msg.content }}</div>
+                    <div v-if="msg.fieldBindingResults?.length" class="field-binding-card">
+                      <div class="field-binding-card__header">{{ msg.fieldBindingTitle || '字段变更结果' }}</div>
+                      <div
+                        v-for="(item, bindingIndex) in msg.fieldBindingResults"
+                        :key="`${index}-binding-${bindingIndex}`"
+                        class="field-binding-card__item"
+                      >
+                        <div class="field-binding-card__label">{{ item.label || item.name }}</div>
+                        <div class="field-binding-card__arrow">→</div>
+                        <div class="field-binding-card__field">
+                          {{
+                            item.targetType === 'metricDefinition'
+                              ? (item.formula || item.fieldDisplayName || fieldLabel(item.field) || item.field || '已更新')
+                              : (item.fieldDisplayName || fieldLabel(item.field) || item.field || '未绑定成功')
+                          }}
+                        </div>
+                      </div>
+                    </div>
+                    <details v-if="msg.thinkingLogs?.length" class="thinking-details" :open="msg.thinkingCollapsed === false">
+                      <summary>查看思考过程（{{ msg.thinkingLogs.length }}步）</summary>
+                      <ol class="thinking-list">
+                        <li v-for="(line, lineIndex) in msg.thinkingLogs" :key="`${index}-${lineIndex}`">
+                          {{ line }}
+                        </li>
+                      </ol>
+                    </details>
+                    <div v-if="msg.sql" class="sql-block">
+                      <div class="sql-head">
+                        <div class="sql-title">生成的 SQL</div>
+                        <el-button size="small" text type="primary" @click="copySqlToClipboard(msg.sql)">复制</el-button>
+                      </div>
+                      <pre class="sql-code">{{ msg.sql }}</pre>
+                    </div>
+                    <div v-if="msg.role === 'system' || (speechSupported && msg.content)" class="bubble-voice-action">
+                      <button
+                          v-if="msg.clickableChart"
+                          type="button"
+                          class="bubble-voice-btn"
+                          title="查看本轮对话图表"
+                          aria-label="查看本轮对话图表"
+                          @click="openHistoricalAnalysis(msg)"
+                      >
+                        <el-icon class="bubble-voice-graphic" aria-hidden="true"><View /></el-icon>
+                      </button>
+                      <button
+                          v-if="msg.turnId && msg.role === 'system'"
+                          type="button"
+                          class="bubble-voice-btn"
+                          title="基于此消息继续追问"
+                          aria-label="基于此消息继续追问"
+                          @click="setActiveBranchParent(msg)"
+                      >
+                        <el-icon class="bubble-voice-graphic" aria-hidden="true"><Share /></el-icon>
+                      </button>
+                      <button
+                          v-if="speechSupported && msg.content"
+                          type="button"
+                          class="bubble-voice-btn"
+                          :title="speaking && !speechPaused ? '暂停播报' : (speaking && speechPaused ? '继续播报' : '播报当前气泡内容')"
+                          @click="speaking ? toggleVoicePlayback() : speakChatBubble(msg)"
+                      >
+                        <span class="bubble-voice-icon" aria-hidden="true">{{ speaking && !speechPaused ? '⏸' : (speaking && speechPaused ? '▶' : '🔊') }}</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="ask-bar">
                 <el-input
-                    v-model.trim="recentChatQueryKeyword"
-                    placeholder="按问题关键词搜索历史"
-                    clearable
-                    size="small"
-                    @keyup.enter="searchRecentChatQueries"
-                    @clear="resetRecentChatQuerySearch"
-                />
-                <el-button size="small" type="primary" @click="searchRecentChatQueries">搜索</el-button>
-                <el-button size="small" @click="resetRecentChatQuerySearch">重置</el-button>
-              </div>
-              <div class="recent-list">
-                <el-tag
-                    v-for="item in recentChatQueries"
-                    :key="item.id"
-                    effect="plain"
-                    class="recent-tag"
-                    @click="reuseChatQuestion(item)"
+                    v-model="question"
+                    placeholder="试试问我：按省份统计销售额、按日期看趋势、分类占比等..."
+                    :disabled="loading"
+                    @keyup.enter="sendQuestion"
                 >
-                  <span class="recent-main">{{ item.question }}</span>
-                  <small>（{{ item.tableName || '未指定数据表' }} · {{ formatChatHistoryTime(item.createdAt) }}）</small>
-                  <button
-                      type="button"
-                      class="recent-delete"
-                      @click.stop="removeRecentChatQuery(item)"
-                  >
-                    ×
-                  </button>
-                </el-tag>
-                <div v-if="!recentChatQueries.length" class="recent-empty">暂无历史记录</div>
+                  <template #append>
+                    <el-button type="primary" :loading="loading" @click="sendQuestion">
+                      <span v-if="!loading">🚀 发送分析</span>
+                      <span v-else>思考中...</span>
+                    </el-button>
+                  </template>
+                </el-input>
+                <el-button
+                    class="voice-btn"
+                    :type="listening ? 'danger' : 'primary'"
+                    plain
+                    :disabled="loading || !recognitionSupported"
+                    :title="listening ? '停止语音输入' : '开始语音输入'"
+                    :aria-label="listening ? '停止语音输入' : '开始语音输入'"
+                    @click="listening ? stopVoiceQuestionInput() : startVoiceQuestionInput()"
+                >
+                  <el-icon><Microphone /></el-icon>
+                </el-button>
+                <el-button
+                    class="voice-btn"
+                    plain
+                    title="语音设置"
+                    aria-label="语音设置"
+                    @click="voicePanelVisible = true"
+                >
+                  <el-icon><Setting /></el-icon>
+                </el-button>
+                <el-button v-if="loading" type="danger" plain class="stop-btn" @click="stopQuestionGeneration">
+                  停止生成
+                </el-button>
               </div>
-              <el-pagination
-                  class="recent-pagination"
-                  layout="total, sizes, prev, pager, next"
-                  :total="recentChatQueryTotal"
-                  :current-page="recentChatQueryPage"
-                  :page-size="recentChatQueryPageSize"
-                  :page-sizes="[5, 8, 10, 20]"
-                  size="small"
-                  @current-change="handleRecentChatPageChange"
-                  @size-change="handleRecentChatPageSizeChange"
-              />
-            </div>
+            </template>
           </div>
 
           <div class="panel chart-panel">
@@ -364,6 +449,16 @@
                     />
                   </el-select>
                 </el-form-item>
+                <el-form-item label="播报语种 / 方言适配">
+                  <el-select v-model="voiceLocale" class="full-width">
+                    <el-option
+                        v-for="option in voiceLocaleOptions"
+                        :key="option.value"
+                        :label="option.label"
+                        :value="option.value"
+                    />
+                  </el-select>
+                </el-form-item>
                 <el-form-item label="播报音色">
                   <el-select v-model="selectedVoiceGender" class="full-width">
                     <el-option
@@ -400,14 +495,33 @@
                   </div>
                 </el-form-item>
               </el-form>
+              <div class="voice-history">
+                <div class="voice-history__head">
+                  <span>最近语音记录</span>
+                  <el-button text size="small" @click="clearVoiceHistory">清空</el-button>
+                </div>
+                <div v-if="voiceHistory.length" class="voice-history__list">
+                  <button
+                      v-for="item in voiceHistory"
+                      :key="`${item.createdAt}-${item.text}`"
+                      type="button"
+                      class="voice-history__item"
+                      @click="question = normalizeVoiceQuestion(item.text)"
+                  >
+                    <span class="voice-history__text">{{ item.text }}</span>
+                    <span class="voice-history__meta">{{ item.locale }} · {{ item.createdAt.slice(5, 16).replace('T', ' ') }}</span>
+                  </button>
+                </div>
+                <div v-else class="voice-history__empty">暂无语音记录</div>
+              </div>
             </div>
           </el-drawer>
 </section>
 </template>
 
 <script setup>
-import { computed, inject } from 'vue'
-import { Microphone, Setting } from '@element-plus/icons-vue'
+import { computed, inject, ref } from 'vue'
+import { ArrowLeftBold, ArrowRightBold, Close, Edit, Management, Microphone, Refresh, Search, Setting, Share, View } from '@element-plus/icons-vue'
 import BusinessDictionaryView from '../../components/BusinessDictionaryView.vue'
 
 const localVoiceGenderOptions = [
@@ -488,17 +602,22 @@ const {
   previewRows,
   question,
   copySqlToClipboard,
-  recentChatQueries,
-  recentChatQueryKeyword,
-  recentChatQueryPage,
-  recentChatQueryPageSize,
-  recentChatQueryTotal,
-  reuseChatQuestion,
-  removeRecentChatQuery,
-  searchRecentChatQueries,
-  resetRecentChatQuerySearch,
-  handleRecentChatPageChange,
-  handleRecentChatPageSizeChange,
+  chatSessions,
+  activeChatSessionId,
+  chatSessionLoading,
+  chatSessionKeyword,
+  chatSessionStatus,
+  searchChatSessions,
+  resetChatSessionSearch,
+  refreshActiveChatSessionSummary,
+  renameChatSession,
+  updateChatSessionStatus,
+  deleteChatSession,
+  createChatSession,
+  selectChatSession,
+  setActiveBranchParent,
+  clearActiveBranchParent,
+  activeBranchParentTurnMeta,
   formatChatHistoryTime,
   renderChart,
   requestableTables,
@@ -520,6 +639,7 @@ const {
   regenerateLastAnalysis,
   openPinDialog,
   pinChartToDashboard,
+  openHistoricalAnalysis,
   pinDialogVisible,
   pinning,
   pinDashboardId,
@@ -527,6 +647,7 @@ const {
   voicePanelVisible,
   voiceLocaleOptions,
   recognitionLocale,
+  voiceLocale,
   selectedVoiceGender,
   speechRate,
   speechVolume,
@@ -538,13 +659,18 @@ const {
   voiceStatusText,
   listening,
   speaking,
+  speechPaused,
   recognitionError,
   interimTranscript,
   finalTranscript,
+  voiceHistory,
   startVoiceQuestionInput,
   stopVoiceQuestionInput,
   speakChatBubble,
   stopVoicePlayback,
+  toggleVoicePlayback,
+  clearVoiceHistory,
+  normalizeVoiceQuestion,
   stopQuestionGeneration,
   seriesData,
   statusTagType,
@@ -603,6 +729,65 @@ const businessModelEmptyHint = computed(() => {
   }
   return '请选择要修改的业务模型'
 })
+
+const currentChatSession = computed(() =>
+  (chatSessions?.value || []).find(item => String(item?.id || '') === String(activeChatSessionId?.value || '')) || null
+)
+
+const chatContentMode = ref('messages')
+
+const currentChatSessionTitle = computed(() =>
+  String(currentChatSession.value?.title || '').trim() || '新对话'
+)
+
+const currentChatSessionSubtitle = computed(() => {
+  if (!currentChatSession.value) {
+    return '当前还没有激活会话，发送问题后会自动创建。'
+  }
+  const turnCount = Number(currentChatSession.value?.turnCount || 0)
+  const updatedAt = currentChatSession.value?.updatedAt
+    ? formatChatHistoryTime(currentChatSession.value.updatedAt)
+    : ''
+  const parts = [`${turnCount}轮`]
+  if (updatedAt) parts.push(updatedAt)
+  if (currentChatSession.value?.summary) {
+    parts.push(String(currentChatSession.value.summary).trim().slice(0, 32))
+  }
+  return parts.join(' · ')
+})
+
+const toggleChatContentMode = async () => {
+  const nextMode = chatContentMode.value === 'messages' ? 'sessions' : 'messages'
+  chatContentMode.value = nextMode
+  if (nextMode === 'sessions') {
+    await searchChatSessions()
+  }
+}
+
+const createSessionAndOpen = async () => {
+  await createChatSession()
+  chatContentMode.value = 'messages'
+}
+
+const selectSessionFromManager = async (sessionId) => {
+  await selectChatSession(sessionId)
+  chatContentMode.value = 'messages'
+}
+
+const refreshSessionFromManager = async (session) => {
+  if (!session?.id) return
+  if (String(activeChatSessionId?.value || '') !== String(session.id)) {
+    await selectChatSession(session.id)
+  }
+  await refreshActiveChatSessionSummary()
+}
+
+const deleteSessionFromManager = async (session) => {
+  await deleteChatSession(session)
+  if (!activeChatSessionId?.value) {
+    chatContentMode.value = 'sessions'
+  }
+}
 
 const formatGraphContextTitle = (item) => {
   if (typeof item === 'string') return item
@@ -706,6 +891,183 @@ const formatGraphContextContent = (item) => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.chat-thread-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #fff;
+}
+.chat-thread-toggle {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #dbe3f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #475467;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background-color 0.2s ease, color 0.2s ease;
+}
+.chat-thread-toggle:hover {
+  border-color: #93c5fd;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+.chat-thread-title-wrap {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 2px;
+}
+.chat-thread-title {
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-thread-subtitle {
+  color: #64748b;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-session-manager {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+.chat-session-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 110px auto;
+  gap: 6px;
+  align-items: center;
+}
+.chat-session-status {
+  width: 110px;
+}
+.chat-session-manager-list {
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  gap: 8px;
+  padding-right: 2px;
+}
+.chat-session-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: stretch;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px;
+}
+.chat-session-card.active {
+  border-color: #3b82f6;
+  background: #eff6ff;
+}
+.chat-session-card-main {
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  display: grid;
+  gap: 6px;
+}
+.chat-session-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.chat-session-card-title {
+  min-width: 0;
+  color: #1f2937;
+  font-size: 14px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-session-card-meta {
+  color: #64748b;
+  font-size: 12px;
+}
+.chat-session-card-summary {
+  color: #475467;
+  font-size: 12px;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.chat-session-card-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+.chat-session-card-icon {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #dbe3f0;
+  border-radius: 8px;
+  background: #fff;
+  color: #64748b;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background-color 0.2s ease, color 0.2s ease;
+}
+.chat-session-card-icon:hover {
+  border-color: #93c5fd;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+.chat-session-card-icon.danger:hover {
+  border-color: #fca5a5;
+  background: #fef2f2;
+  color: #dc2626;
+}
+.chat-session-manager-empty {
+  min-height: 220px;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  text-align: center;
+  border: 1px dashed #cbd5e1;
+  border-radius: 10px;
+  background: #fff;
+  padding: 20px;
+}
+.chat-session-manager-empty__title {
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 700;
+}
+.chat-session-manager-empty__text {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.6;
+}
 .ask-bar {
   flex: 0 0 auto;
   display: flex;
@@ -761,6 +1123,10 @@ const formatGraphContextContent = (item) => {
   font-size: 14px;
   line-height: 1;
 }
+.bubble-voice-graphic {
+  font-size: 13px;
+  line-height: 1;
+}
 .bubble-voice-btn:hover {
   background: #eef2ff;
   color: #1d4ed8;
@@ -806,76 +1172,50 @@ const formatGraphContextContent = (item) => {
   white-space: pre-wrap;
   word-break: break-word;
 }
-.recent-queries {
-  flex: 0 1 300px;
-  display: flex;
-  flex-direction: column;
-  margin-top: 10px;
-  min-height: 0;
-  padding-top: 8px;
-  border-top: 1px solid #eef2f7;
-}
-.recent-title {
-  margin-bottom: 6px;
-  color: #6b7280;
-  font-size: 12px;
-}
-.recent-toolbar {
-  display: flex;
-  align-items: center;
+.voice-history {
+  display: grid;
   gap: 8px;
-  margin-bottom: 6px;
 }
-.recent-toolbar :deep(.el-input) {
-  flex: 1;
-}
-.recent-list {
-  flex: 1 1 auto;
-  min-height: 0;
+.voice-history__head {
   display: flex;
-  flex-wrap: wrap;
-  align-content: flex-start;
-  gap: 6px;
-  overflow-y: auto;
-  padding-right: 4px;
+  align-items: center;
+  justify-content: space-between;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 600;
 }
-.recent-empty {
+.voice-history__list {
+  display: grid;
+  gap: 6px;
+  max-height: 180px;
+  overflow: auto;
+}
+.voice-history__item {
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.voice-history__item:hover {
+  border-color: #93c5fd;
+  background: #eff6ff;
+}
+.voice-history__text {
+  color: #0f172a;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.voice-history__meta {
+  color: #64748b;
+  font-size: 11px;
+}
+.voice-history__empty {
   color: #9ca3af;
   font-size: 12px;
-}
-.recent-tag {
-  cursor: pointer;
-  max-width: 100%;
-}
-.recent-main {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.recent-tag :deep(.el-tag__content) {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-.recent-tag small {
-  color: #9ca3af;
-}
-.recent-delete {
-  border: 0;
-  background: transparent;
-  color: #9ca3af;
-  cursor: pointer;
-  font-size: 14px;
-  line-height: 1;
-  padding: 0 2px;
-}
-.recent-delete:hover {
-  color: #ef4444;
-}
-.recent-pagination {
-  margin-top: 8px;
-  justify-content: flex-end;
 }
 .graph-context-panel {
   grid-column: 1 / -1;
@@ -974,6 +1314,20 @@ const formatGraphContextContent = (item) => {
   color: #374151;
   font-size: 13px;
 }
+.chat-branch-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 8px;
+  background: var(--el-fill-color-light);
+}
+.chat-branch-banner small {
+  flex: 1;
+  color: var(--el-text-color-secondary);
+}
 .thinking-list {
   margin: 8px 0 0 18px;
   max-height: 140px;
@@ -996,11 +1350,20 @@ const formatGraphContextContent = (item) => {
 }
 
 @media (max-width: 900px) {
-  .recent-toolbar {
-    flex-wrap: wrap;
+  .chat-session-toolbar {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
-  .recent-toolbar :deep(.el-input) {
-    flex-basis: 100%;
+  .chat-session-toolbar :deep(.el-input) {
+    grid-column: 1 / -1;
+  }
+  .chat-session-status {
+    width: 100%;
+  }
+  .chat-session-card {
+    grid-template-columns: 1fr;
+  }
+  .chat-session-card-actions {
+    justify-content: flex-end;
   }
 }
 </style>

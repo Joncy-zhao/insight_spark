@@ -61,6 +61,15 @@ public class ChatQueryHistoryService {
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='对话查询与全量历史审计表';
                 """);
         addColumnIfMissing("is_chat_query_history", "query_table_name", "`query_table_name` VARCHAR(128) NULL");
+        addColumnIfMissing("is_chat_query_history", "conversation_id", "`conversation_id` BIGINT NULL");
+        addColumnIfMissing("is_chat_query_history", "parent_history_id", "`parent_history_id` BIGINT NULL");
+        addColumnIfMissing("is_chat_query_history", "turn_no", "`turn_no` INT NULL");
+        addColumnIfMissing("is_chat_query_history", "message_role", "`message_role` VARCHAR(16) NULL DEFAULT 'ASSISTANT'");
+        addColumnIfMissing("is_chat_query_history", "intent_type", "`intent_type` VARCHAR(64) NULL");
+        addColumnIfMissing("is_chat_query_history", "context_json", "`context_json` JSON NULL");
+        addColumnIfMissing("is_chat_query_history", "scope_json", "`scope_json` JSON NULL");
+        addColumnIfMissing("is_chat_query_history", "artifact_type", "`artifact_type` VARCHAR(32) NULL DEFAULT 'CHART'");
+        addColumnIfMissing("is_chat_query_history", "summary_text", "`summary_text` TEXT NULL");
     }
 
     /**
@@ -256,7 +265,11 @@ public class ChatQueryHistoryService {
                        query_text AS queryText, generated_sql AS generatedSql, llm_model_used AS llmModelUsed,
                        chart_type AS chartType, chart_snapshot AS chartSnapshot, execution_status AS executionStatus,
                        risk_level AS riskLevel, audit_info AS auditInfo, execution_time_ms AS executionTimeMs,
-                       is_hit_cache AS isHitCache, created_at AS createdAt
+                       is_hit_cache AS isHitCache, conversation_id AS conversationId,
+                       parent_history_id AS parentHistoryId, turn_no AS turnNo,
+                       message_role AS messageRole, intent_type AS intentType,
+                       artifact_type AS artifactType, summary_text AS summaryText,
+                       created_at AS createdAt
                 """ + whereSql + """
                  ORDER BY created_at DESC
                  LIMIT ? OFFSET ?
@@ -292,6 +305,42 @@ public class ChatQueryHistoryService {
                 """, historyId, userId);
     }
 
+    public void attachConversationMetadata(Long historyId, Long conversationId, Long parentHistoryId, Integer turnNo,
+                                           String messageRole, String intentType, Map<String, Object> context,
+                                           Map<String, Object> scope, String artifactType, String summaryText) {
+        if (historyId == null || conversationId == null) {
+            return;
+        }
+        try {
+            jdbcTemplate.update("""
+                    UPDATE is_chat_query_history
+                       SET conversation_id = ?,
+                           parent_history_id = ?,
+                           turn_no = ?,
+                           message_role = ?,
+                           intent_type = ?,
+                           context_json = ?,
+                           scope_json = ?,
+                           artifact_type = ?,
+                           summary_text = ?
+                     WHERE id = ?
+                    """,
+                    conversationId,
+                    parentHistoryId,
+                    turnNo,
+                    safeText(Objects.toString(messageRole, "ASSISTANT"), 16),
+                    safeText(intentType, 64),
+                    toJson(context == null ? Map.of() : context),
+                    toJson(scope == null ? Map.of() : scope),
+                    safeText(Objects.toString(artifactType, "CHART"), 32),
+                    safeText(summaryText, MAX_AUDIT_INFO_LENGTH),
+                    historyId
+            );
+        } catch (Exception ignored) {
+            // 会话元数据是兼容增强，不应影响旧历史主链路。
+        }
+    }
+
     private Map<String, Object> mapHistoryRow(Map<String, Object> row) {
         Map<String, Object> item = new LinkedHashMap<>(row);
         Map<String, Object> snapshot = parseJsonMap(row.get("chartSnapshot"));
@@ -305,6 +354,10 @@ public class ChatQueryHistoryService {
         item.put("executionStatus", toInt(row.get("executionStatus")));
         item.put("isHitCache", toInt(row.get("isHitCache")));
         item.put("sourceType", toInt(row.get("dataSourceId")) > 0 ? "OFFICIAL" : "UPLOAD");
+        item.put("conversationId", row.get("conversationId"));
+        item.put("turnNo", row.get("turnNo"));
+        item.put("intentType", row.get("intentType"));
+        item.put("artifactType", row.get("artifactType"));
         return item;
     }
 

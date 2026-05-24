@@ -196,6 +196,8 @@
                     </div>
                     <div class="dge-card-actions">
                       <span v-if="chartIdForItem(item)" class="dge-chart-id">历史 {{ chartIdForItem(item) }}</span>
+                      <span v-if="artifactIdForItem(item)" class="dge-chart-id">Artifact {{ artifactIdForItem(item) }}</span>
+                      <span v-if="turnIdForItem(item)" class="dge-chart-id">Turn {{ turnIdForItem(item) }}</span>
                       <el-button
                         v-if="chartIdForItem(item)"
                         type="primary"
@@ -388,6 +390,8 @@
         </template>
         <el-descriptions :column="1" border size="small" class="dge-inspector-desc">
           <el-descriptions-item label="历史 ID">{{ chartIdForItem(inspectorItem) }}</el-descriptions-item>
+          <el-descriptions-item label="Artifact ID">{{ artifactIdForItem(inspectorItem) || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="Turn ID">{{ turnIdForItem(inspectorItem) || '-' }}</el-descriptions-item>
           <el-descriptions-item label="图表类型">{{ inspectorChartType }}</el-descriptions-item>
           <el-descriptions-item label="数据表">{{ inspectorTableName || '—' }}</el-descriptions-item>
           <el-descriptions-item label="结果行数">{{ inspectorDataRows }}</el-descriptions-item>
@@ -804,8 +808,7 @@ const pinnedLibraryRows = computed(() => {
     if (!idStr) continue
     const p = chartPayloadById.value[idStr]
     const snap = p ? parseChartSnapshot(p.chartSnapshot) : {}
-    const question =
-      String(p?.queryText || snap.message || '').trim() || `图表 #${idStr}`
+    const question = readableTitleFromPayload(p) || `图表 #${idStr}`
     const dnames = String(
       s.dashboardNames ?? s.dashboard_names ?? s.dashboardnames ?? ''
     ).trim()
@@ -877,10 +880,66 @@ function chartIdForItem(item) {
   return raw != null ? String(raw) : ''
 }
 
+function artifactIdForItem(item) {
+  const c = componentByItemId.value.get(String(item?.i))
+  if (!c) return ''
+  const raw = c.artifactId ?? c.artifact_id ?? c.ARTIFACT_ID
+  return raw != null && String(raw).trim() !== '' ? String(raw) : ''
+}
+
+function turnIdForItem(item) {
+  const c = componentByItemId.value.get(String(item?.i))
+  if (!c) return ''
+  const raw = c.turnId ?? c.turn_id ?? c.TURN_ID
+  return raw != null && String(raw).trim() !== '' ? String(raw) : ''
+}
+
 function payloadForItem(item) {
   const cid = chartIdForItem(item)
   if (!cid) return null
   return chartPayloadById.value[cid] || null
+}
+
+function compactReadableTitle(value, max = 80) {
+  const text = String(value || '')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^分析完成[。.:：\s]*/u, '')
+    .trim()
+  if (!text) return ''
+  return text.length > max ? text.slice(0, max).trim() : text
+}
+
+function parseFieldMappingFromPayload(payload) {
+  const snap = parseChartSnapshot(payload?.chartSnapshot)
+  const fm = snap?.fieldMapping
+  return fm && typeof fm === 'object' ? fm : {}
+}
+
+function chartTypeTitleSuffix(chartType) {
+  const text = String(chartType || '').trim().toLowerCase()
+  if (text === 'pie') return '占比'
+  if (text === 'line') return '趋势'
+  if (text === 'bar') return '统计'
+  if (text === 'scatter') return '分布'
+  return '图'
+}
+
+function readableTitleFromPayload(payload) {
+  if (!payload) return ''
+  const question = compactReadableTitle(payload.queryText)
+  if (question) return question
+  const snap = parseChartSnapshot(payload.chartSnapshot)
+  const fm = parseFieldMappingFromPayload(payload)
+  const dimension = compactReadableTitle(fm.dimension, 30)
+  const metric = compactReadableTitle(fm.metric, 30)
+  const suffix = chartTypeTitleSuffix(payload.chartType || snap.chartType)
+  if (dimension && metric) return compactReadableTitle(`${dimension}${suffix}${metric}`)
+  if (dimension) return compactReadableTitle(`${dimension}${suffix}`)
+  if (metric) return compactReadableTitle(`${metric}${suffix}`)
+  const message = compactReadableTitle(snap?.message)
+  if (message) return message
+  return ''
 }
 
 /** layout_json.items 上的展示覆盖，传给 ECharts（整图 + 分项 seriesItemStyles） */
@@ -897,18 +956,7 @@ function chartUiForItem(item) {
 
 function defaultTitleFromPayload(item) {
   const p = payloadForItem(item)
-  const snap = p?.chartSnapshot
-  let msg = ''
-  if (typeof snap === 'object' && snap?.message) msg = String(snap.message)
-  else if (typeof snap === 'string') {
-    try {
-      const o = JSON.parse(snap)
-      msg = String(o?.message || '')
-    } catch {
-      msg = ''
-    }
-  }
-  return msg.trim().slice(0, 120) || `图表 #${item.i}`
+  return readableTitleFromPayload(p) || `图表 #${item.i}`
 }
 
 function displayTitleForItem(item) {

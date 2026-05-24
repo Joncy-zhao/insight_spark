@@ -5,6 +5,38 @@ function toNumber(value) {
   return Number.isFinite(n) ? n : Number.NaN
 }
 
+function buildValueAxisRange(values) {
+  const finiteValues = (Array.isArray(values) ? values : [])
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value))
+
+  if (!finiteValues.length) {
+    return { min: 0, max: 1 }
+  }
+
+  const minValue = Math.min(...finiteValues)
+  const maxValue = Math.max(...finiteValues)
+
+  if (minValue >= 0) {
+    return {
+      min: 0,
+      max: maxValue === 0 ? 1 : undefined
+    }
+  }
+
+  if (maxValue <= 0) {
+    return {
+      min: undefined,
+      max: 0
+    }
+  }
+
+  return {
+    min: undefined,
+    max: undefined
+  }
+}
+
 function normalizeChartItem(item) {
   if (!item || typeof item !== 'object') {
     return { name: String(item ?? ''), value: 0 }
@@ -207,11 +239,12 @@ function buildOptionFromEncodeDataset(snap, chartType, ui) {
   const yKey = String(enc.y ?? 'value')
   const xi = dimensions.indexOf(xKey)
   const yi = dimensions.indexOf(yKey)
-  let numericMax = 0
+  const numericValues = []
   for (const row of source) {
     const v = yi >= 0 ? Number(row[yi]) : NaN
-    if (Number.isFinite(v)) numericMax = Math.max(numericMax, v)
+    if (Number.isFinite(v)) numericValues.push(v)
   }
+  const valueAxisRange = buildValueAxisRange(numericValues)
 
   const useZoom = n > 14
   const endPct = n ? Math.min(100, Math.ceil((14 / n) * 100)) : 100
@@ -263,8 +296,8 @@ function buildOptionFromEncodeDataset(snap, chartType, ui) {
     },
     yAxis: {
       type: 'value',
-      min: 0,
-      max: numericMax === 0 ? 1 : undefined,
+      min: valueAxisRange.min,
+      max: valueAxisRange.max,
       splitLine: { lineStyle: { color: '#eef2f7' } },
       axisLabel: { fontSize: 11 }
     },
@@ -349,7 +382,7 @@ function buildOptionLegacyFromPoints(snap, chartType, ui, itemOv) {
 
   const xAxisData = points.map((p) => p.name)
   const seriesData = points.map((p) => Number(p.value ?? 0))
-  const numericMax = Math.max(...seriesData, 0)
+  const valueAxisRange = buildValueAxisRange(seriesData)
   const useZoom = xAxisData.length > 14
   const endPct = xAxisData.length ? Math.min(100, Math.ceil((14 / xAxisData.length) * 100)) : 100
 
@@ -406,8 +439,8 @@ function buildOptionLegacyFromPoints(snap, chartType, ui, itemOv) {
     },
     yAxis: {
       type: 'value',
-      min: 0,
-      max: numericMax === 0 ? 1 : undefined,
+      min: valueAxisRange.min,
+      max: valueAxisRange.max,
       splitLine: { lineStyle: { color: '#eef2f7' } },
       axisLabel: { fontSize: 11 }
     },
