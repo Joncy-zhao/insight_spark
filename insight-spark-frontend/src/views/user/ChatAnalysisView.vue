@@ -112,10 +112,10 @@
                     <button
                         type="button"
                         class="bubble-voice-btn"
-                        :title="speaking ? '停止播报' : '播报当前气泡内容'"
-                        @click="speaking ? stopVoicePlayback() : speakChatBubble(msg)"
+                        :title="speaking && !speechPaused ? '暂停播报' : (speaking && speechPaused ? '继续播报' : '播报当前气泡内容')"
+                        @click="speaking ? toggleVoicePlayback() : speakChatBubble(msg)"
                     >
-                      <span class="bubble-voice-icon" aria-hidden="true">{{ speaking ? '🔈' : '🔊' }}</span>
+                      <span class="bubble-voice-icon" aria-hidden="true">{{ speaking && !speechPaused ? '⏸' : (speaking && speechPaused ? '▶' : '🔊') }}</span>
                     </button>
                   </div>
                 </div>
@@ -364,6 +364,16 @@
                     />
                   </el-select>
                 </el-form-item>
+                <el-form-item label="播报语种 / 方言适配">
+                  <el-select v-model="voiceLocale" class="full-width">
+                    <el-option
+                        v-for="option in voiceLocaleOptions"
+                        :key="option.value"
+                        :label="option.label"
+                        :value="option.value"
+                    />
+                  </el-select>
+                </el-form-item>
                 <el-form-item label="播报音色">
                   <el-select v-model="selectedVoiceGender" class="full-width">
                     <el-option
@@ -400,6 +410,25 @@
                   </div>
                 </el-form-item>
               </el-form>
+              <div class="voice-history">
+                <div class="voice-history__head">
+                  <span>最近语音记录</span>
+                  <el-button text size="small" @click="clearVoiceHistory">清空</el-button>
+                </div>
+                <div v-if="voiceHistory.length" class="voice-history__list">
+                  <button
+                      v-for="item in voiceHistory"
+                      :key="`${item.createdAt}-${item.text}`"
+                      type="button"
+                      class="voice-history__item"
+                      @click="question = normalizeVoiceQuestion(item.text)"
+                  >
+                    <span class="voice-history__text">{{ item.text }}</span>
+                    <span class="voice-history__meta">{{ item.locale }} · {{ item.createdAt.slice(5, 16).replace('T', ' ') }}</span>
+                  </button>
+                </div>
+                <div v-else class="voice-history__empty">暂无语音记录</div>
+              </div>
             </div>
           </el-drawer>
 </section>
@@ -527,6 +556,7 @@ const {
   voicePanelVisible,
   voiceLocaleOptions,
   recognitionLocale,
+  voiceLocale,
   selectedVoiceGender,
   speechRate,
   speechVolume,
@@ -538,13 +568,18 @@ const {
   voiceStatusText,
   listening,
   speaking,
+  speechPaused,
   recognitionError,
   interimTranscript,
   finalTranscript,
+  voiceHistory,
   startVoiceQuestionInput,
   stopVoiceQuestionInput,
   speakChatBubble,
   stopVoicePlayback,
+  toggleVoicePlayback,
+  clearVoiceHistory,
+  normalizeVoiceQuestion,
   stopQuestionGeneration,
   seriesData,
   statusTagType,
@@ -805,6 +840,51 @@ const formatGraphContextContent = (item) => {
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+}
+.voice-history {
+  display: grid;
+  gap: 8px;
+}
+.voice-history__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 600;
+}
+.voice-history__list {
+  display: grid;
+  gap: 6px;
+  max-height: 180px;
+  overflow: auto;
+}
+.voice-history__item {
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.voice-history__item:hover {
+  border-color: #93c5fd;
+  background: #eff6ff;
+}
+.voice-history__text {
+  color: #0f172a;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.voice-history__meta {
+  color: #64748b;
+  font-size: 11px;
+}
+.voice-history__empty {
+  color: #9ca3af;
+  font-size: 12px;
 }
 .recent-queries {
   flex: 0 1 300px;

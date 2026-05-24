@@ -15,11 +15,21 @@ export const voiceGenderOptions = [
 ]
 
 const STORAGE_KEY = 'insight-spark.voice-settings'
+const VOICE_HISTORY_KEY = 'insight-spark.voice-history'
 const SPEECH_CACHE_LIMIT = 16
 const SPEECH_PRELOAD_LIMIT = 8
+const VOICE_HISTORY_LIMIT = 12
 const DEFAULT_SAMPLE_RATE = 24000
+const DEFAULT_RECORDING_MIME_TYPES = [
+  'audio/webm;codecs=opus',
+  'audio/webm',
+  'audio/mp4',
+  'audio/ogg;codecs=opus',
+  'audio/ogg'
+]
 const DEFAULT_SETTINGS = {
   recognitionLocale: 'zh-CN',
+  voiceLocale: 'zh-CN',
   selectedVoiceGender: 'female',
   speechRate: 1,
   speechVolume: 0.85,
@@ -122,8 +132,37 @@ const createPcmWavBlob = (chunks, sampleRate = DEFAULT_SAMPLE_RATE) => {
   return new Blob([wavBuffer], { type: 'audio/wav' })
 }
 
+const createWavBlobFromAudioBuffer = (audioBuffer) => {
+  const sampleRate = audioBuffer.sampleRate || DEFAULT_SAMPLE_RATE
+  const channelCount = audioBuffer.numberOfChannels || 1
+  const frameLength = audioBuffer.length || 0
+  const monoData = new Float32Array(frameLength)
+
+  for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
+    const channelData = audioBuffer.getChannelData(channelIndex)
+    for (let frameIndex = 0; frameIndex < frameLength; frameIndex += 1) {
+      monoData[frameIndex] += channelData[frameIndex] || 0
+    }
+  }
+
+  for (let frameIndex = 0; frameIndex < frameLength; frameIndex += 1) {
+    monoData[frameIndex] /= channelCount
+  }
+
+  const pcmBytes = new Uint8Array(frameLength * 2)
+  for (let frameIndex = 0; frameIndex < frameLength; frameIndex += 1) {
+    const sample = Math.max(-1, Math.min(1, monoData[frameIndex] || 0))
+    const int16 = sample < 0 ? sample * 0x8000 : sample * 0x7fff
+    pcmBytes[frameIndex * 2] = int16 & 0xff
+    pcmBytes[frameIndex * 2 + 1] = (int16 >> 8) & 0xff
+  }
+
+  return createPcmWavBlob([pcmBytes.buffer], sampleRate)
+}
+
 export function useVoiceInteraction() {
   const recognitionLocale = ref(DEFAULT_SETTINGS.recognitionLocale)
+  const voiceLocale = ref(DEFAULT_SETTINGS.voiceLocale)
   const selectedVoiceGender = ref(DEFAULT_SETTINGS.selectedVoiceGender)
   const speechRate = ref(DEFAULT_SETTINGS.speechRate)
   const speechVolume = ref(DEFAULT_SETTINGS.speechVolume)
@@ -131,21 +170,33 @@ export function useVoiceInteraction() {
   const autoSendAfterRecognize = ref(DEFAULT_SETTINGS.autoSendAfterRecognize)
   const listening = ref(false)
   const speaking = ref(false)
+  const speechPaused = ref(false)
   const recognitionError = ref('')
   const interimTranscript = ref('')
   const finalTranscript = ref('')
+  const voiceHistory = ref([])
 
   let recognitionInstance = null
+  let mediaRecorder = null
+  let mediaStream = null
+  let recordingChunks = []
+  let recordingPreviewTimer = null
+  let recordingPreviewInFlight = false
+  let recordingPreviewChunkCount = 0
+  let recordingSessionToken = 0
   let currentAudio = null
   let currentAudioUrl = ''
   let currentAudioContext = null
+  let savePreferenceTimer = null
   let speakToken = 0
   const speechResponseCache = new Map()
   const inflightSpeechRequests = new Map()
   const preloadedAudioCache = new Map()
 
-  const recognitionSupported = computed(() => Boolean(getRecognitionCtor()))
   const speechSupported = computed(() => isBrowser() && typeof window.Audio !== 'undefined' && typeof window.fetch !== 'undefined')
+  const browserRecognitionSupported = computed(() => Boolean(getRecognitionCtor()))
+  const mediaRecordingSupported = computed(() => isBrowser() && typeof window.MediaRecorder !== 'undefined' && typeof navigator !== 'undefined' && Boolean(navigator.mediaDevices?.getUserMedia))
+  const recognitionSupported = computed(() => browserRecognitionSupported.value || mediaRecordingSupported.value)
   const voiceCapabilityText = computed(() => {
     if (recognitionSupported.value && speechSupported.value) return '语音识别与云端播报可用'
     if (recognitionSupported.value) return '仅支持语音识别'
@@ -154,6 +205,7 @@ export function useVoiceInteraction() {
   })
   const voiceStatusText = computed(() => {
     if (listening.value) return '正在听写'
+    if (speaking.value && speechPaused.value) return '播报已暂停'
     if (speaking.value) return '正在播报'
     return voiceCapabilityText.value
   })
@@ -163,12 +215,22 @@ export function useVoiceInteraction() {
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify({
         recognitionLocale: recognitionLocale.value,
+        voiceLocale: voiceLocale.value,
         selectedVoiceGender: selectedVoiceGender.value,
         speechRate: speechRate.value,
         speechVolume: speechVolume.value,
         autoSpeakConclusion: autoSpeakConclusion.value,
         autoSendAfterRecognize: autoSendAfterRecognize.value
       }))
+    } catch {
+      // ignore storage failures
+    }
+  }
+
+  const persistVoiceHistory = () => {
+    if (!isBrowser()) return
+    try {
+      window.localStorage.setItem(VOICE_HISTORY_KEY, JSON.stringify(voiceHistory.value.slice(0, VOICE_HISTORY_LIMIT)))
     } catch {
       // ignore storage failures
     }
@@ -181,11 +243,33 @@ export function useVoiceInteraction() {
     const parsed = safeParse(raw, null)
     if (!parsed || typeof parsed !== 'object') return
     if (typeof parsed.recognitionLocale === 'string') recognitionLocale.value = parsed.recognitionLocale
+    if (typeof parsed.voiceLocale === 'string') voiceLocale.value = parsed.voiceLocale
     if (typeof parsed.selectedVoiceGender === 'string') selectedVoiceGender.value = normalizeGender(parsed.selectedVoiceGender)
     if (parsed.speechRate !== undefined) speechRate.value = clamp(parsed.speechRate, 0.6, 1.4)
     if (parsed.speechVolume !== undefined) speechVolume.value = clamp(parsed.speechVolume, 0, 1)
     if (parsed.autoSpeakConclusion !== undefined) autoSpeakConclusion.value = Boolean(parsed.autoSpeakConclusion)
     if (parsed.autoSendAfterRecognize !== undefined) autoSendAfterRecognize.value = Boolean(parsed.autoSendAfterRecognize)
+  }
+
+  const restoreVoiceHistory = () => {
+    if (!isBrowser()) return
+    const raw = window.localStorage.getItem(VOICE_HISTORY_KEY)
+    if (!raw) return
+    const parsed = safeParse(raw, [])
+    if (!Array.isArray(parsed)) return
+    voiceHistory.value = parsed
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null
+        const text = String(item.text || '').trim()
+        if (!text) return null
+        return {
+          text,
+          locale: String(item.locale || recognitionLocale.value || 'zh-CN').trim() || 'zh-CN',
+          createdAt: String(item.createdAt || new Date().toISOString())
+        }
+      })
+      .filter(Boolean)
+      .slice(0, VOICE_HISTORY_LIMIT)
   }
 
   const clearTranscript = () => {
@@ -194,10 +278,123 @@ export function useVoiceInteraction() {
     finalTranscript.value = ''
   }
 
+  const recordVoiceHistory = (text, locale = recognitionLocale.value) => {
+    const content = String(text || '').trim()
+    if (!content) return null
+    const entry = {
+      text: content,
+      locale: String(locale || recognitionLocale.value || 'zh-CN').trim() || 'zh-CN',
+      createdAt: new Date().toISOString()
+    }
+    voiceHistory.value = [entry, ...voiceHistory.value.filter((item) => item?.text !== content)].slice(0, VOICE_HISTORY_LIMIT)
+    persistVoiceHistory()
+    return entry
+  }
+
+  const clearVoiceHistory = () => {
+    voiceHistory.value = []
+    if (!isBrowser()) return
+    try {
+      window.localStorage.removeItem(VOICE_HISTORY_KEY)
+    } catch {
+      // ignore storage failures
+    }
+  }
+
+  const stopMediaTracks = () => {
+    if (mediaStream?.getTracks) {
+      mediaStream.getTracks().forEach((track) => {
+        try {
+          track.stop()
+        } catch {
+          // ignore
+        }
+      })
+    }
+    mediaStream = null
+  }
+
+  const cleanupRecorder = () => {
+    mediaRecorder = null
+    recordingChunks = []
+    recordingPreviewChunkCount = 0
+    recordingPreviewInFlight = false
+    if (recordingPreviewTimer) {
+      window.clearInterval(recordingPreviewTimer)
+      recordingPreviewTimer = null
+    }
+    stopMediaTracks()
+  }
+
+  const resolveRecorderMimeType = () => {
+    if (!isBrowser() || typeof window.MediaRecorder === 'undefined') return ''
+    for (const mimeType of DEFAULT_RECORDING_MIME_TYPES) {
+      try {
+        if (window.MediaRecorder.isTypeSupported?.(mimeType)) return mimeType
+      } catch {
+        // ignore
+      }
+    }
+    return ''
+  }
+
+  const blobToDataUrl = (blob) => new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onloadend = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(new Error('语音录音读取失败'))
+    reader.readAsDataURL(blob)
+  })
+
+  const decodeRecordedBlobToWav = async (blob) => {
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext
+    if (!AudioContextCtor) {
+      throw new Error('当前浏览器不支持音频解码')
+    }
+
+    const arrayBuffer = await blob.arrayBuffer()
+    const audioContext = new AudioContextCtor()
+    try {
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer.slice(0))
+      if (!audioBuffer?.length) {
+        throw new Error('音频解码结果为空')
+      }
+      return createWavBlobFromAudioBuffer(audioBuffer)
+    } finally {
+      try {
+        await audioContext.close?.()
+      } catch {
+        // ignore close failures
+      }
+    }
+  }
+
+  const fetchCloudTranscript = async (audioDataUrl, locale) => {
+    const token = readToken()
+    const response = await axios.post(
+      `${API_BASE}/api/voice/asr`,
+      {
+        audioBase64: audioDataUrl,
+        locale
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      }
+    )
+    const payload = response?.data?.data ?? response?.data
+    const transcript = String(payload?.text || '').trim()
+    if (!transcript) {
+      throw new Error('云端语音识别未返回文本')
+    }
+    return transcript
+  }
+
   const resolveSpeechRequest = (text, options = {}) => ({
     text: String(text || '').trim(),
     voiceGender: normalizeGender(options.voiceGender || selectedVoiceGender.value),
-    locale: String(options.voiceLocale || options.lang || recognitionLocale.value || 'zh-CN').trim() || 'zh-CN',
+    locale: String(options.lang || recognitionLocale.value || 'zh-CN').trim() || 'zh-CN',
+    voiceLocale: String(options.voiceLocale || voiceLocale.value || recognitionLocale.value || 'zh-CN').trim() || 'zh-CN',
     rate: clamp(options.rate ?? speechRate.value, 0.6, 1.4),
     volume: clamp(options.volume ?? speechVolume.value, 0, 1)
   })
@@ -205,7 +402,8 @@ export function useVoiceInteraction() {
   const buildSpeechCacheKey = (requestPayload) => JSON.stringify({
     text: requestPayload.text,
     voiceGender: requestPayload.voiceGender,
-    locale: requestPayload.locale.toLowerCase()
+    locale: requestPayload.locale.toLowerCase(),
+    voiceLocale: requestPayload.voiceLocale.toLowerCase()
   })
 
   const isCachedStreamAudioUrl = (audioUrl) => {
@@ -304,6 +502,7 @@ export function useVoiceInteraction() {
       window.URL.revokeObjectURL(currentAudioUrl)
     }
     currentAudioUrl = ''
+    speechPaused.value = false
     disposeAudioContext()
   }
 
@@ -311,9 +510,46 @@ export function useVoiceInteraction() {
     speakToken += 1
     cleanupAudio()
     speaking.value = false
+    speechPaused.value = false
+  }
+
+  const pauseSpeaking = async () => {
+    if (!speaking.value || speechPaused.value) return
+    if (currentAudio) {
+      currentAudio.pause()
+      speechPaused.value = true
+      return
+    }
+    if (currentAudioContext?.state === 'running') {
+      await currentAudioContext.suspend?.()
+      speechPaused.value = true
+    }
+  }
+
+  const resumeSpeaking = async () => {
+    if (!speaking.value || !speechPaused.value) return
+    if (currentAudio) {
+      await currentAudio.play()
+      speechPaused.value = false
+      return
+    }
+    if (currentAudioContext?.state === 'suspended') {
+      await currentAudioContext.resume?.()
+      speechPaused.value = false
+    }
   }
 
   const stopListening = () => {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+      try {
+        mediaRecorder.stop()
+      } catch {
+        cleanupRecorder()
+      } finally {
+        listening.value = false
+      }
+      return
+    }
     if (!recognitionInstance) return
     try {
       recognitionInstance.stop()
@@ -329,7 +565,7 @@ export function useVoiceInteraction() {
     }
   }
 
-  const startListening = (handlers = {}) => {
+  const startBrowserListening = (handlers = {}) => {
     const RecognitionCtor = getRecognitionCtor()
     if (!RecognitionCtor) {
       const err = new Error('当前浏览器不支持语音识别')
@@ -387,6 +623,7 @@ export function useVoiceInteraction() {
       handlers.onEnd?.(committed)
       if (committed) {
         handlers.onFinal?.(committed)
+        recordVoiceHistory(committed, recognitionLocale.value)
       }
     }
 
@@ -398,6 +635,186 @@ export function useVoiceInteraction() {
       recognitionError.value = error?.message || '语音识别启动失败'
       throw error
     }
+  }
+
+  const startCloudListening = async (handlers = {}) => {
+    if (!mediaRecordingSupported.value) {
+      throw new Error('当前浏览器不支持录音采集')
+    }
+    if (listening.value) return
+
+    stopSpeaking()
+    clearTranscript()
+    recognitionError.value = ''
+    const sessionToken = ++recordingSessionToken
+    let finalizing = false
+
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    mediaStream = stream
+    recordingChunks = []
+
+    const mimeType = resolveRecorderMimeType()
+    const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream)
+    mediaRecorder = recorder
+
+    recorder.ondataavailable = (event) => {
+      if (event?.data?.size) {
+        recordingChunks.push(event.data)
+      }
+    }
+
+    recorder.onerror = (event) => {
+      const message = event?.error?.message || '语音录音失败'
+      recognitionError.value = message
+      handlers.onError?.(message, event)
+      cleanupRecorder()
+      listening.value = false
+    }
+
+    recorder.onstart = () => {
+      listening.value = true
+      finalTranscript.value = ''
+      interimTranscript.value = ''
+      handlers.onStart?.()
+    }
+
+    const runPreviewRecognition = async () => {
+      if (finalizing || !listening.value) return
+      if (recordingPreviewInFlight) return
+      if (recordingChunks.length < 2 || recordingChunks.length === recordingPreviewChunkCount) return
+      if (sessionToken !== recordingSessionToken) return
+
+      recordingPreviewInFlight = true
+      recordingPreviewChunkCount = recordingChunks.length
+
+      try {
+        const blob = new Blob(recordingChunks, { type: recorder.mimeType || 'audio/webm' })
+        if (!blob.size) return
+        let previewBlob = blob
+        try {
+          previewBlob = await decodeRecordedBlobToWav(blob)
+        } catch {
+          previewBlob = blob
+        }
+        const previewText = await fetchCloudTranscript(await blobToDataUrl(previewBlob), recognitionLocale.value)
+        if (finalizing || sessionToken !== recordingSessionToken || !listening.value) return
+        finalTranscript.value = previewText
+        interimTranscript.value = ''
+        handlers.onPartial?.(previewText, '', null)
+      } catch {
+        // ignore preview failures and keep the recording session alive
+      } finally {
+        recordingPreviewInFlight = false
+      }
+    }
+
+    recordingPreviewTimer = window.setInterval(() => {
+      void runPreviewRecognition()
+    }, 1800)
+
+    recorder.onstop = async () => {
+      finalizing = true
+      listening.value = false
+      try {
+        const blob = new Blob(recordingChunks, { type: recorder.mimeType || 'audio/webm' })
+        if (!blob.size) {
+          throw new Error('未录制到有效语音')
+        }
+        let uploadBlob = blob
+        try {
+          uploadBlob = await decodeRecordedBlobToWav(blob)
+        } catch {
+          uploadBlob = blob
+        }
+        const dataUrl = await blobToDataUrl(uploadBlob)
+        const transcript = await fetchCloudTranscript(dataUrl, recognitionLocale.value)
+        if (sessionToken !== recordingSessionToken) return
+        finalTranscript.value = transcript
+        interimTranscript.value = ''
+        handlers.onPartial?.(transcript, '', null)
+        handlers.onEnd?.(transcript)
+        handlers.onFinal?.(transcript)
+        recordVoiceHistory(transcript, recognitionLocale.value)
+      } catch (error) {
+        const message = error?.message || '云端语音识别失败'
+        recognitionError.value = message
+        handlers.onError?.(message, error)
+        handlers.onEnd?.('')
+      } finally {
+        cleanupRecorder()
+        finalizing = false
+      }
+    }
+
+    recorder.start(1000)
+  }
+
+  const startListening = (handlers = {}) => {
+    if (mediaRecordingSupported.value) {
+      return startCloudListening(handlers).catch((error) => {
+        cleanupRecorder()
+        if (!browserRecognitionSupported.value) {
+          recognitionError.value = error?.message || '语音识别启动失败'
+          throw error
+        }
+        return startBrowserListening(handlers)
+      })
+    }
+    return startBrowserListening(handlers)
+  }
+
+  const loadVoicePreferences = async () => {
+    const token = readToken()
+    if (!token) return
+    try {
+      const response = await axios.get(`${API_BASE}/api/voice/preferences`, {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      })
+      const payload = response?.data?.data ?? response?.data
+      if (!payload || typeof payload !== 'object') return
+      if (typeof payload.recognitionLocale === 'string') recognitionLocale.value = payload.recognitionLocale
+      if (typeof payload.voiceLocale === 'string') voiceLocale.value = payload.voiceLocale
+      if (typeof payload.selectedVoiceGender === 'string') selectedVoiceGender.value = normalizeGender(payload.selectedVoiceGender)
+      if (payload.speechRate !== undefined) speechRate.value = clamp(payload.speechRate, 0.6, 1.4)
+      if (payload.speechVolume !== undefined) speechVolume.value = clamp(payload.speechVolume, 0, 1)
+      if (payload.autoSpeakConclusion !== undefined) autoSpeakConclusion.value = Boolean(payload.autoSpeakConclusion)
+      if (payload.autoSendAfterRecognize !== undefined) autoSendAfterRecognize.value = Boolean(payload.autoSendAfterRecognize)
+    } catch {
+      // ignore remote preference load failures
+    }
+  }
+
+  const syncVoicePreferences = () => {
+    const token = readToken()
+    if (!token || !isBrowser()) return
+    if (savePreferenceTimer) {
+      window.clearTimeout(savePreferenceTimer)
+    }
+    savePreferenceTimer = window.setTimeout(async () => {
+      try {
+        await axios.post(
+          `${API_BASE}/api/voice/preferences`,
+          {
+            recognitionLocale: recognitionLocale.value,
+            voiceLocale: voiceLocale.value,
+            selectedVoiceGender: selectedVoiceGender.value,
+            speechRate: speechRate.value,
+            speechVolume: speechVolume.value,
+            autoSpeakConclusion: autoSpeakConclusion.value,
+            autoSendAfterRecognize: autoSendAfterRecognize.value
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`
+            }
+          }
+        )
+      } catch {
+        // ignore remote sync failures
+      }
+    }, 300)
   }
 
   const fetchCloudSpeech = async (text, options = {}) => {
@@ -467,11 +884,13 @@ export function useVoiceInteraction() {
     currentAudio = audio
     currentAudioUrl = ''
     speaking.value = true
+    speechPaused.value = false
 
     return new Promise((resolve, reject) => {
       const finalize = () => {
         if (token === speakToken) {
           speaking.value = false
+          speechPaused.value = false
         }
         cleanupAudio()
       }
@@ -490,8 +909,15 @@ export function useVoiceInteraction() {
         reject(new Error(message))
       }
 
+      audio.onpause = () => {
+        if (token === speakToken && !audio.ended) {
+          speechPaused.value = true
+        }
+      }
+
       audio.onplay = () => {
         speaking.value = true
+        speechPaused.value = false
         options.onStart?.()
       }
 
@@ -577,6 +1003,7 @@ export function useVoiceInteraction() {
     }
 
     speaking.value = true
+    speechPaused.value = false
     options.onStart?.()
 
     try {
@@ -607,9 +1034,14 @@ export function useVoiceInteraction() {
       throw new Error('实时语音播报未返回音频数据')
     }
 
-    const waitMs = Math.max(0, (nextTime - audioContext.currentTime) * 1000)
-    if (waitMs > 0) {
-      await new Promise((resolve) => window.setTimeout(resolve, waitMs))
+    while (token === speakToken) {
+      if (speechPaused.value || audioContext.state === 'suspended') {
+        await new Promise((resolve) => window.setTimeout(resolve, 120))
+        continue
+      }
+      const waitMs = Math.max(0, (nextTime - audioContext.currentTime) * 1000)
+      if (waitMs <= 30) break
+      await new Promise((resolve) => window.setTimeout(resolve, Math.min(waitMs, 120)))
     }
 
     const wavBlob = createPcmWavBlob(chunks, DEFAULT_SAMPLE_RATE)
@@ -624,6 +1056,7 @@ export function useVoiceInteraction() {
 
     if (token === speakToken) {
       speaking.value = false
+      speechPaused.value = false
       options.onEnd?.()
     }
   }
@@ -671,10 +1104,14 @@ export function useVoiceInteraction() {
   }
 
   restoreSettings()
+  restoreVoiceHistory()
 
   watch(
-    [recognitionLocale, selectedVoiceGender, speechRate, speechVolume, autoSpeakConclusion, autoSendAfterRecognize],
-    persistSettings,
+    [recognitionLocale, voiceLocale, selectedVoiceGender, speechRate, speechVolume, autoSpeakConclusion, autoSendAfterRecognize],
+    () => {
+      persistSettings()
+      syncVoicePreferences()
+    },
     { deep: false }
   )
 
@@ -682,11 +1119,17 @@ export function useVoiceInteraction() {
     stopListening()
     stopSpeaking()
     clearPreloadedAudio()
+    cleanupRecorder()
+    if (savePreferenceTimer) {
+      window.clearTimeout(savePreferenceTimer)
+    }
+    savePreferenceTimer = null
   })
 
   return {
     voiceLocaleOptions,
     recognitionLocale,
+    voiceLocale,
     selectedVoiceGender,
     speechRate,
     speechVolume,
@@ -699,14 +1142,21 @@ export function useVoiceInteraction() {
     voiceStatusText,
     listening,
     speaking,
+    speechPaused,
     recognitionError,
     interimTranscript,
     finalTranscript,
+    voiceHistory,
+    recordVoiceHistory,
+    clearVoiceHistory,
     startListening,
     stopListening,
     clearTranscript,
+    loadVoicePreferences,
     prefetchSpeechText,
     speakText,
-    stopSpeaking
+    stopSpeaking,
+    pauseSpeaking,
+    resumeSpeaking
   }
 }

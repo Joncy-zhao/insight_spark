@@ -137,11 +137,12 @@ public class PythonAiService {
         }
     }
 
-    public Optional<Map<String, Object>> textToSpeech(String text, String voiceGender, String locale, Double rate) {
+    public Optional<Map<String, Object>> textToSpeech(String text, String voiceGender, String locale, String voiceLocale, Double rate) {
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("text", text);
         request.put("voiceGender", voiceGender);
         request.put("locale", locale);
+        request.put("voiceLocale", voiceLocale);
         request.put("rate", rate);
 
         try {
@@ -167,11 +168,12 @@ public class PythonAiService {
         }
     }
 
-    public Optional<Map<String, Object>> textToSpeechUrl(String text, String voiceGender, String locale, Double rate) {
+    public Optional<Map<String, Object>> textToSpeechUrl(String text, String voiceGender, String locale, String voiceLocale, Double rate) {
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("text", text);
         request.put("voiceGender", voiceGender);
         request.put("locale", locale);
+        request.put("voiceLocale", voiceLocale);
         request.put("rate", rate);
 
         try {
@@ -194,6 +196,34 @@ public class PythonAiService {
         } catch (RestClientException e) {
             log.warn("Python AI TTS URL 服务不可用: {}", e.getMessage());
             throw new IllegalArgumentException("Python AI TTS URL 服务不可用，请确认 8000 端口服务已启动并加载最新代码");
+        }
+    }
+
+    public Optional<Map<String, Object>> recognizeSpeech(String audioBase64, String locale) {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("audioBase64", audioBase64);
+        request.put("locale", locale);
+
+        try {
+            Map<String, Object> response = restTemplate.postForObject(
+                    aiServiceUrl + "/ai/asr",
+                    request,
+                    Map.class
+            );
+            if (response == null || !response.containsKey("text")) {
+                throw new IllegalArgumentException("Python AI ASR 服务未返回识别文本");
+            }
+            return Optional.of(response);
+        } catch (HttpClientErrorException e) {
+            String detail = e.getResponseBodyAsString();
+            log.warn("Python AI ASR 请求失败: {}", detail);
+            if (e.getStatusCode().value() == 404) {
+                throw new IllegalArgumentException("Python AI ASR 接口不存在，请重启 AI 服务并确认 /ai/asr 已生效");
+            }
+            throw new IllegalArgumentException(extractPythonAiError(detail, "Python AI ASR 请求失败"));
+        } catch (RestClientException e) {
+            log.warn("Python AI ASR 服务不可用: {}", e.getMessage());
+            throw new IllegalArgumentException("Python AI ASR 服务不可用，请确认 8000 端口服务已启动并加载最新代码");
         }
     }
 

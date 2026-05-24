@@ -2,9 +2,11 @@ package com.insightspark.controller;
 
 import com.insightspark.common.ApiResponse;
 import com.insightspark.service.PythonAiService;
+import com.insightspark.service.VoicePreferenceService;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.CrossOrigin;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -23,6 +25,9 @@ public class VoiceController {
     @Autowired
     private PythonAiService pythonAiService;
 
+    @Autowired
+    private VoicePreferenceService voicePreferenceService;
+
     @PostMapping("/tts")
     public ApiResponse<Map<String, Object>> textToSpeech(@RequestBody Map<String, Object> request) {
         String text = String.valueOf(request.getOrDefault("text", "")).trim();
@@ -32,9 +37,10 @@ public class VoiceController {
 
         String voiceGender = String.valueOf(request.getOrDefault("voiceGender", "female")).trim();
         String locale = String.valueOf(request.getOrDefault("locale", "zh-CN")).trim();
+        String voiceLocale = String.valueOf(request.getOrDefault("voiceLocale", locale)).trim();
         Double rate = parseDouble(request.get("rate")).orElse(1.0D);
 
-        return pythonAiService.textToSpeech(text, voiceGender, locale, rate)
+        return pythonAiService.textToSpeech(text, voiceGender, locale, voiceLocale, rate)
                 .map(ApiResponse::success)
                 .orElseGet(() -> ApiResponse.badRequest("云端 TTS 服务不可用或未返回音频"));
     }
@@ -48,11 +54,25 @@ public class VoiceController {
 
         String voiceGender = String.valueOf(request.getOrDefault("voiceGender", "female")).trim();
         String locale = String.valueOf(request.getOrDefault("locale", "zh-CN")).trim();
+        String voiceLocale = String.valueOf(request.getOrDefault("voiceLocale", locale)).trim();
         Double rate = parseDouble(request.get("rate")).orElse(1.0D);
 
-        return pythonAiService.textToSpeechUrl(text, voiceGender, locale, rate)
+        return pythonAiService.textToSpeechUrl(text, voiceGender, locale, voiceLocale, rate)
                 .map(ApiResponse::success)
                 .orElseGet(() -> ApiResponse.badRequest("云端 TTS 服务不可用或未返回音频地址"));
+    }
+
+    @PostMapping("/asr")
+    public ApiResponse<Map<String, Object>> recognizeSpeech(@RequestBody Map<String, Object> request) {
+        String audioBase64 = String.valueOf(request.getOrDefault("audioBase64", "")).trim();
+        if (audioBase64.isBlank()) {
+            return ApiResponse.badRequest("音频不能为空");
+        }
+
+        String locale = String.valueOf(request.getOrDefault("locale", "zh-CN")).trim();
+        return pythonAiService.recognizeSpeech(audioBase64, locale)
+                .map(ApiResponse::success)
+                .orElseGet(() -> ApiResponse.badRequest("云端语音识别服务不可用或未返回文本"));
     }
 
     @PostMapping("/tts-stream")
@@ -64,6 +84,7 @@ public class VoiceController {
 
         String voiceGender = String.valueOf(request.getOrDefault("voiceGender", "female")).trim();
         String locale = String.valueOf(request.getOrDefault("locale", "zh-CN")).trim();
+        String voiceLocale = String.valueOf(request.getOrDefault("voiceLocale", locale)).trim();
         Double rate = parseDouble(request.get("rate")).orElse(1.0D);
         Double volume = parseDouble(request.get("volume")).orElse(0.85D);
 
@@ -71,6 +92,7 @@ public class VoiceController {
         payload.put("text", text);
         payload.put("voiceGender", voiceGender);
         payload.put("locale", locale);
+        payload.put("voiceLocale", voiceLocale);
         payload.put("rate", rate);
         payload.put("volume", volume);
 
@@ -83,6 +105,16 @@ public class VoiceController {
         response.setHeader("X-Audio-Channels", "1");
 
         pythonAiService.streamTextToSpeech(payload, response);
+    }
+
+    @GetMapping("/preferences")
+    public ApiResponse<Map<String, Object>> getPreferences() {
+        return ApiResponse.success(voicePreferenceService.getCurrentUserPreference());
+    }
+
+    @PostMapping("/preferences")
+    public ApiResponse<Map<String, Object>> savePreferences(@RequestBody Map<String, Object> request) {
+        return ApiResponse.success(voicePreferenceService.saveCurrentUserPreference(request));
     }
 
     private Optional<Double> parseDouble(Object value) {

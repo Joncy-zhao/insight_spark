@@ -1,5 +1,6 @@
 from collections import defaultdict
 from math import sqrt
+import logging
 from typing import Any
 import base64
 import json
@@ -14,6 +15,7 @@ from pydantic import BaseModel
 
 
 app = FastAPI(title="Insight Spark AI Service", version="0.1.0")
+logger = logging.getLogger(__name__)
 
 
 def load_local_env_file(path: str = ".env") -> None:
@@ -37,9 +39,10 @@ load_local_env_file()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "qwen-plus").strip()
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1").rstrip("/")
+TRANSLATION_MODEL = os.getenv("DASHSCOPE_TRANSLATION_MODEL", "qwen-mt-plus").strip()
 TTS_API_KEY = os.getenv("DASHSCOPE_API_KEY", OPENAI_API_KEY).strip()
 TTS_BASE_URL = os.getenv("DASHSCOPE_TTS_BASE_URL", "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation").strip()
-TTS_MODEL = os.getenv("DASHSCOPE_TTS_MODEL", "qwen-tts").strip()
+TTS_MODEL = os.getenv("DASHSCOPE_TTS_MODEL", "qwen3-tts-flash-2025-09-18").strip()
 TTS_MALE_VOICE = os.getenv("DASHSCOPE_TTS_MALE_VOICE", "Ethan").strip()
 TTS_FEMALE_VOICE = os.getenv("DASHSCOPE_TTS_FEMALE_VOICE", "Cherry").strip()
 REALTIME_TTS_BASE_URL = os.getenv("DASHSCOPE_REALTIME_TTS_BASE_URL", "wss://dashscope.aliyuncs.com/api-ws/v1/realtime").strip()
@@ -127,8 +130,84 @@ class TtsRequest(BaseModel):
     text: str
     voiceGender: str = "female"
     locale: str = "zh-CN"
+    voiceLocale: str | None = None
     rate: float = 1.0
     volume: float = 0.85
+
+
+class AsrRequest(BaseModel):
+    audioBase64: str
+    locale: str = "en-US"
+
+
+def normalize_asr_language(locale: str) -> str | None:
+    normalized = str(locale or "").strip().lower()
+    if not normalized:
+        return None
+    if normalized.startswith(("zh-hk", "yue", "cantonese", "hk")):
+        return "yue"
+    if normalized.startswith("en"):
+        return "en"
+    if normalized.startswith(("ja", "jp")):
+        return "ja"
+    return "zh"
+
+
+def normalize_audio_data_uri(audio_value: str) -> str:
+    content = str(audio_value or "").strip()
+    if not content:
+        return ""
+    if content.startswith("data:"):
+        return content
+    return f"data:audio/wav;base64,{content}"
+
+
+def extract_asr_text(response: dict[str, Any]) -> str:
+    if not isinstance(response, dict):
+        return ""
+
+    candidate_choices = []
+    choices = response.get("choices")
+    if isinstance(choices, list):
+        candidate_choices.append(choices)
+
+    output = response.get("output")
+    if isinstance(output, dict):
+        output_choices = output.get("choices")
+        if isinstance(output_choices, list):
+            candidate_choices.append(output_choices)
+
+    for choice_list in candidate_choices:
+        for choice in choice_list:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message") if isinstance(choice.get("message"), dict) else None
+            delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else None
+            for content_node in (
+                message.get("content") if isinstance(message, dict) else None,
+                delta.get("content") if isinstance(delta, dict) else None,
+            ):
+                if isinstance(content_node, str):
+                    text = content_node.strip()
+                    if text:
+                        return text
+                if isinstance(content_node, list):
+                    parts: list[str] = []
+                    for item in content_node:
+                        if isinstance(item, dict):
+                            text = str(item.get("text") or item.get("content") or "").strip()
+                            if text:
+                                parts.append(text)
+                    text = "".join(parts).strip()
+                    if text:
+                        return text
+            if isinstance(message, dict):
+                audio = message.get("audio")
+                if isinstance(audio, dict):
+                    transcript = str(audio.get("transcript") or audio.get("text") or "").strip()
+                    if transcript:
+                        return transcript
+    return ""
 
 
 @app.get("/health")
@@ -268,6 +347,52 @@ def synthesize_speech_stream(payload: TtsRequest) -> StreamingResponse:
             "Cache-Control": "no-store",
         },
     )
+
+
+@app.post("/ai/asr")
+def recognize_speech(payload: AsrRequest) -> dict[str, Any]:
+    audio_data = normalize_audio_data_uri(payload.audioBase64)
+    if not audio_data:
+        raise HTTPException(status_code=400, detail="音频不能为空")
+    api_key = OPENAI_API_KEY or TTS_API_KEY
+    if not api_key:
+        raise HTTPException(status_code=503, detail="未配置云端 ASR API Key")
+
+    request_body: dict[str, Any] = {
+        "model": "qwen3-asr-flash",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": audio_data,
+                        },
+                    }
+                ],
+            }
+        ],
+        "stream": False,
+        "asr_options": {
+            "enable_itn": False,
+        },
+    }
+    language = normalize_asr_language(payload.locale)
+    if language:
+        request_body["asr_options"]["language"] = language
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+
+    response = read_http_json(f"{OPENAI_BASE_URL}/chat/completions", headers, request_body)
+    transcript = extract_asr_text(response)
+    if not transcript:
+        logger.warning("ASR response without transcript: keys=%s response=%s", list(response.keys()) if isinstance(response, dict) else type(response).__name__, response if isinstance(response, dict) else str(response))
+        raise HTTPException(status_code=502, detail="云端语音识别未返回文本")
+    return {"text": transcript, "locale": payload.locale}
 
 
 def build_dimension_expression(question: str, dimension: FieldMeta) -> str:
@@ -2788,33 +2913,68 @@ def rewrite_sql_alias(sql: str, dimension_key: str, metric_key: str) -> str:
 
 def normalize_tts_gender(value: Any) -> str:
     text = str(value or "").strip().lower()
-    if text in {"male", "man", "m", "男", "男声"}:
+    if text in {"male", "man", "m", "男", "男声", "男性"}:
         return "male"
     return "female"
 
 
+TTS_VOICE_PRESETS: dict[str, dict[str, str]] = {
+    "zh-cn": {"female": "Cherry", "male": "Ethan", "language_type": "Chinese"},
+    "zh-hk": {"female": "Kiki", "male": "Rocky", "language_type": "Chinese"},
+    "zh-sc": {"female": "Sunny", "male": "Eric", "language_type": "Chinese"},
+    "zh-bj": {"female": "Cherry", "male": "Dylan", "language_type": "Chinese"},
+    "zh-sh": {"female": "Jada", "male": "Ethan", "language_type": "Chinese"},
+    "zh-nj": {"female": "Cherry", "male": "Li", "language_type": "Chinese"},
+    "zh-sx": {"female": "Cherry", "male": "Marcus", "language_type": "Chinese"},
+    "zh-tj": {"female": "Cherry", "male": "Peter", "language_type": "Chinese"},
+    "zh-tw": {"female": "Cherry", "male": "Roy", "language_type": "Chinese"},
+    "en-us": {"female": "Cherry", "male": "Ethan", "language_type": "English"},
+}
+
+
+def normalize_tts_locale(locale: str) -> str:
+    normalized = str(locale or "").strip().lower()
+    if normalized.startswith(("zh-hk", "yue", "cantonese", "hk")):
+        return "zh-hk"
+    if normalized.startswith(("zh-sc", "sichuan", "sc", "sic")):
+        return "zh-sc"
+    if normalized.startswith(("zh-bj", "beijing", "bj")):
+        return "zh-bj"
+    if normalized.startswith(("zh-sh", "shanghai", "sh")):
+        return "zh-sh"
+    if normalized.startswith(("zh-nj", "nanjing", "nj")):
+        return "zh-nj"
+    if normalized.startswith(("zh-sx", "shanxi", "sx", "shaanxi")):
+        return "zh-sx"
+    if normalized.startswith(("zh-tj", "tianjin", "tj")):
+        return "zh-tj"
+    if normalized.startswith(("zh-tw", "zh-hant", "tw", "taiwan", "minnan", "mn")):
+        return "zh-tw"
+    if normalized.startswith("en"):
+        return "en-us"
+    if normalized.startswith("zh"):
+        return "zh-cn"
+    return "zh-cn"
+
+
 def select_tts_voice(gender: str, locale: str) -> str:
     normalized_gender = normalize_tts_gender(gender)
-    normalized_locale = str(locale or "").strip().lower()
-    if normalized_gender == "male":
-        if normalized_locale.startswith("en"):
-            return os.getenv("DASHSCOPE_TTS_EN_MALE_VOICE", TTS_MALE_VOICE).strip() or TTS_MALE_VOICE
-        return TTS_MALE_VOICE
-    if normalized_locale.startswith("en"):
-        return os.getenv("DASHSCOPE_TTS_EN_FEMALE_VOICE", TTS_FEMALE_VOICE).strip() or TTS_FEMALE_VOICE
-    return TTS_FEMALE_VOICE
+    normalized_locale = normalize_tts_locale(locale)
+    locale_config = TTS_VOICE_PRESETS.get(normalized_locale, TTS_VOICE_PRESETS["zh-cn"])
+    return str(locale_config.get(normalized_gender, locale_config["female"])).strip()
+
+
+def select_tts_language_type(locale: str) -> str:
+    normalized_locale = normalize_tts_locale(locale)
+    locale_config = TTS_VOICE_PRESETS.get(normalized_locale, TTS_VOICE_PRESETS["zh-cn"])
+    return str(locale_config["language_type"]).strip()
 
 
 def select_realtime_tts_voice(gender: str, locale: str) -> str:
     normalized_gender = normalize_tts_gender(gender)
-    normalized_locale = str(locale or "").strip().lower()
-    if normalized_gender == "male":
-        if normalized_locale.startswith("en"):
-            return os.getenv("DASHSCOPE_REALTIME_TTS_EN_MALE_VOICE", REALTIME_TTS_MALE_VOICE).strip() or REALTIME_TTS_MALE_VOICE
-        return REALTIME_TTS_MALE_VOICE
-    if normalized_locale.startswith("en"):
-        return os.getenv("DASHSCOPE_REALTIME_TTS_EN_FEMALE_VOICE", REALTIME_TTS_FEMALE_VOICE).strip() or REALTIME_TTS_FEMALE_VOICE
-    return REALTIME_TTS_FEMALE_VOICE
+    normalized_locale = normalize_tts_locale(locale)
+    locale_config = TTS_VOICE_PRESETS.get(normalized_locale, TTS_VOICE_PRESETS["zh-cn"])
+    return str(locale_config.get(normalized_gender, locale_config["female"])).strip()
 
 
 def clamp_tts_rate(value: Any) -> float:
@@ -2833,40 +2993,62 @@ def clamp_tts_volume(value: Any) -> float:
     return max(0.0, min(1.0, number))
 
 
-def map_locale_to_language_type(locale: str) -> str:
-    normalized = str(locale or "").strip().lower()
-    if normalized.startswith("en"):
-        return "English"
-    if normalized.startswith(("fr", "de", "it", "pt", "es", "ja", "ko", "ru")):
-        mapping = {
-            "fr": "French",
-            "de": "German",
-            "it": "Italian",
-            "pt": "Portuguese",
-            "es": "Spanish",
-            "ja": "Japanese",
-            "ko": "Korean",
-            "ru": "Russian",
+def contains_cjk(text: str) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", str(text or "")))
+
+
+def translate_tts_text(text: str, locale: str) -> str:
+    normalized_locale = normalize_tts_locale(locale)
+    content = str(text or "").strip()
+    if not content or normalized_locale != "en-us" or not contains_cjk(content):
+        return content
+    api_key = OPENAI_API_KEY or TTS_API_KEY
+    if not api_key:
+        return content
+
+    try:
+        request_body = {
+            "model": TRANSLATION_MODEL,
+            "messages": [
+                {"role": "user", "content": content}
+            ],
+            "translation_options": {
+                "source_lang": "Chinese",
+                "target_lang": "English"
+            }
         }
-        return mapping.get(normalized.split("-")[0], "Auto")
-    if normalized.startswith("zh"):
-        return "Chinese"
-    return "Auto"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        response = read_http_json(f"{OPENAI_BASE_URL}/chat/completions", headers, request_body)
+        choices = response.get("choices") if isinstance(response, dict) else None
+        if isinstance(choices, list) and choices:
+            first_choice = choices[0]
+            if isinstance(first_choice, dict):
+                message = first_choice.get("message") or {}
+                if isinstance(message, dict):
+                    translated = str(message.get("content") or "").strip()
+                    if translated:
+                        return translated
+    except Exception:
+        return content
+    return content
 
 
-def build_tts_payload(text: str, voice: str, rate: float) -> dict[str, Any]:
+def build_tts_payload(text: str, voice: str, rate: float, language_type: str) -> dict[str, Any]:
     del rate
     return {
         "model": TTS_MODEL,
         "input": {
             "text": text,
             "voice": voice,
-            "language_type": "Auto"
+            "language_type": language_type,
         }
     }
 
 
-def build_tts_cache_key(text: str, voice: str, locale: str, rate: float) -> str:
+def build_tts_cache_key(text: str, voice: str, locale: str, rate: float, language_type: str) -> str:
     del rate
     normalized_text = re.sub(r"\s+", " ", str(text or "").strip())
     normalized_locale = str(locale or "").strip().lower()
@@ -2875,6 +3057,7 @@ def build_tts_cache_key(text: str, voice: str, locale: str, rate: float) -> str:
             "text": normalized_text,
             "voice": str(voice or "").strip(),
             "locale": normalized_locale,
+            "languageType": str(language_type or "").strip(),
             "model": TTS_MODEL,
         },
         ensure_ascii=False,
@@ -2974,6 +3157,7 @@ def download_audio_as_base64(audio_url: str) -> str:
 
 def stream_dashscope_realtime_tts(payload: TtsRequest):
     try:
+        import dashscope
         from dashscope.audio.qwen_tts import SpeechSynthesizer
     except ImportError as exc:
         raise HTTPException(status_code=500, detail="缺少 DashScope 流式 TTS 依赖") from exc
@@ -2982,11 +3166,14 @@ def stream_dashscope_realtime_tts(payload: TtsRequest):
     if not text:
         raise HTTPException(status_code=400, detail="播报文本不能为空")
 
-    voice = select_tts_voice(payload.voiceGender, payload.locale)
-    language_type = map_locale_to_language_type(payload.locale)
+    tts_locale = payload.voiceLocale or payload.locale
+    voice = select_tts_voice(payload.voiceGender, tts_locale)
+    language_type = select_tts_language_type(tts_locale)
+    text = translate_tts_text(text, tts_locale)
     speech_rate = clamp_tts_rate(payload.rate)
     volume = int(round(clamp_tts_volume(payload.volume) * 100))
     emitted = False
+    dashscope.api_key = TTS_API_KEY
 
     try:
         responses = SpeechSynthesizer.call(
@@ -3039,10 +3226,12 @@ def stream_dashscope_realtime_tts(payload: TtsRequest):
 
 
 def call_dashscope_tts(payload: TtsRequest) -> dict[str, Any]:
-    voice = select_tts_voice(payload.voiceGender, payload.locale)
+    tts_locale = payload.voiceLocale or payload.locale
+    voice = select_tts_voice(payload.voiceGender, tts_locale)
     rate = clamp_tts_rate(payload.rate)
-    request_body = build_tts_payload(str(payload.text).strip(), voice, rate)
-    request_body["input"]["language_type"] = map_locale_to_language_type(payload.locale)
+    language_type = select_tts_language_type(tts_locale)
+    spoken_text = translate_tts_text(str(payload.text).strip(), tts_locale)
+    request_body = build_tts_payload(spoken_text, voice, rate, language_type)
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {TTS_API_KEY}"
@@ -3058,16 +3247,17 @@ def call_dashscope_tts(payload: TtsRequest) -> dict[str, Any]:
 
 
 def call_dashscope_tts_url(payload: TtsRequest) -> dict[str, Any]:
-    voice = select_tts_voice(payload.voiceGender, payload.locale)
+    tts_locale = payload.voiceLocale or payload.locale
+    voice = select_tts_voice(payload.voiceGender, tts_locale)
     rate = clamp_tts_rate(payload.rate)
-    text = str(payload.text).strip()
-    cache_key = build_tts_cache_key(text, voice, payload.locale, rate)
+    language_type = select_tts_language_type(tts_locale)
+    text = translate_tts_text(str(payload.text).strip(), tts_locale)
+    cache_key = build_tts_cache_key(text, voice, tts_locale, rate, language_type)
     cached = get_cached_tts_url(cache_key)
     if cached:
         return cached
 
-    request_body = build_tts_payload(text, voice, rate)
-    request_body["input"]["language_type"] = map_locale_to_language_type(payload.locale)
+    request_body = build_tts_payload(text, voice, rate, language_type)
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {TTS_API_KEY}"

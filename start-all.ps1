@@ -1,5 +1,6 @@
 param(
-  [switch]$SkipAi
+  [switch]$SkipAi,
+  [string]$PythonPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,7 +13,7 @@ $PidFile = Join-Path $RunDir "pids.json"
 $AiDir = Join-Path $Root "insight-spark-ai-service"
 $BackendDir = Join-Path $Root "insight-spark-backend"
 $FrontendDir = Join-Path $Root "insight-spark-frontend"
-$VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
+$ProjectVenvPython = Join-Path $AiDir ".venv\Scripts\python.exe"
 
 New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
@@ -88,6 +89,65 @@ function Start-App {
   }
 }
 
+function Resolve-CommandPath {
+  param(
+    [string[]]$Candidates
+  )
+
+  foreach ($candidate in $Candidates) {
+    $value = [string]$candidate
+    if ([string]::IsNullOrWhiteSpace($value)) {
+      continue
+    }
+    if (Test-Path $value) {
+      return (Resolve-Path $value).Path
+    }
+    $cmd = Get-Command $value -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) {
+      return $cmd.Source
+    }
+  }
+  return $null
+}
+
+function Resolve-PythonRuntime {
+  $resolved = Resolve-CommandPath -Candidates @(
+    $PythonPath,
+    $env:INSIGHT_SPARK_PYTHON,
+    $ProjectVenvPython,
+    "python",
+    "py"
+  )
+  if (-not $resolved) {
+    throw "No available Python runtime found. You can pass -PythonPath or set INSIGHT_SPARK_PYTHON."
+  }
+  return $resolved
+}
+
+function Resolve-MavenCommand {
+  $resolved = Resolve-CommandPath -Candidates @(
+    $env:INSIGHT_SPARK_MVN,
+    "mvn.cmd",
+    "mvn"
+  )
+  if (-not $resolved) {
+    throw "Maven not found. Please install Maven or set INSIGHT_SPARK_MVN."
+  }
+  return $resolved
+}
+
+function Resolve-NpmCommand {
+  $resolved = Resolve-CommandPath -Candidates @(
+    $env:INSIGHT_SPARK_NPM,
+    "npm.cmd",
+    "npm"
+  )
+  if (-not $resolved) {
+    throw "npm not found. Please install Node.js or set INSIGHT_SPARK_NPM."
+  }
+  return $resolved
+}
+
 if (Test-Path $PidFile) {
   Write-Host "Existing PID file found. Stopping previous services first."
   $stopScript = Join-Path $Root "stop-all.ps1"
@@ -103,23 +163,37 @@ if (Test-Path $PidFile) {
 }
 
 $records = @()
+$ResolvedPython = $null
+$ResolvedMaven = $null
+$ResolvedNpm = $null
+
+if (-not $SkipAi) {
+  $ResolvedPython = Resolve-PythonRuntime
+  Write-Host "AI Python: $ResolvedPython"
+}
+$ResolvedMaven = Resolve-MavenCommand
+$ResolvedNpm = Resolve-NpmCommand
+Write-Host "Maven    : $ResolvedMaven"
+Write-Host "NPM      : $ResolvedNpm"
 
 if ($SkipAi) {
   Write-Host "Skip AI service."
 } elseif (Test-PortOpen 8000) {
   Write-Host "AI port 8000 is already listening."
 } else {
-  if (-not (Test-Path $VenvPython)) {
-    throw "Venv python not found: $VenvPython"
+  if ($ResolvedPython -match "\\py(?:\.exe)?$") {
+    $aiArgs = "-3.10 -m uvicorn main:app --host 0.0.0.0 --port 8000"
+  } else {
+    $aiArgs = "-m uvicorn main:app --host 0.0.0.0 --port 8000"
   }
-  $records += Start-App -Name "AI service" -Exe $VenvPython -AppArgs "-m uvicorn main:app --host 0.0.0.0 --port 8000" -WorkDir $AiDir -LogPrefix "ai-service"
+  $records += Start-App -Name "AI service" -Exe $ResolvedPython -AppArgs $aiArgs -WorkDir $AiDir -LogPrefix "ai-service"
   Wait-WebReady -Url "http://localhost:8000/health" -TimeoutSeconds 90 -Label "AI service"
 }
 
 if (Test-PortOpen 8080) {
   Write-Host "Backend port 8080 is already listening."
 } else {
-  $records += Start-App -Name "Backend" -Exe "cmd.exe" -AppArgs "/c mvn clean spring-boot:run" -WorkDir $BackendDir -LogPrefix "backend"
+  $records += Start-App -Name "Backend" -Exe $ResolvedMaven -AppArgs "clean spring-boot:run" -WorkDir $BackendDir -LogPrefix "backend"
 }
 
 Wait-WebReady -Url "http://localhost:8080/api/data/tables" -TimeoutSeconds 180 -Label "Backend"
@@ -127,7 +201,7 @@ Wait-WebReady -Url "http://localhost:8080/api/data/tables" -TimeoutSeconds 180 -
 if (Test-PortOpen 5173) {
   Write-Host "Frontend port 5173 is already listening."
 } else {
-  $records += Start-App -Name "Frontend" -Exe "cmd.exe" -AppArgs "/c npm run dev" -WorkDir $FrontendDir -LogPrefix "frontend"
+  $records += Start-App -Name "Frontend" -Exe $ResolvedNpm -AppArgs "run dev -- --host 0.0.0.0" -WorkDir $FrontendDir -LogPrefix "frontend"
 }
 
 $records | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 -Path $PidFile

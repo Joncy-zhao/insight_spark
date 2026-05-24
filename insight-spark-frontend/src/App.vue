@@ -367,6 +367,7 @@ const lastAnalysis = ref(null)
 const {
   voiceLocaleOptions,
   recognitionLocale,
+  voiceLocale,
   selectedVoiceGender,
   speechRate,
   speechVolume,
@@ -379,15 +380,21 @@ const {
   voiceStatusText,
   listening,
   speaking,
+  speechPaused,
   recognitionError,
   interimTranscript,
   finalTranscript,
+  voiceHistory,
+  clearVoiceHistory,
   startListening,
   stopListening,
   clearTranscript,
+  loadVoicePreferences,
   prefetchSpeechText,
   speakText,
-  stopSpeaking
+  stopSpeaking,
+  pauseSpeaking,
+  resumeSpeaking
 } = useVoiceInteraction()
 let chartInstance = null
 const handleChartResize = () => {
@@ -429,6 +436,120 @@ const canDiagnoseLastAnalysis = computed(() => Boolean(lastAnalysis.value && num
 const canRegenerateLastAnalysis = computed(() => Boolean(String(lastAnalysis.value?.sourceQuestion || '').trim()))
 const canPinLastAnalysis = computed(() => Boolean(lastAnalysis.value?.data?.length))
 const hasVoiceConclusion = computed(() => Boolean(lastAnalysis.value?.data?.length || lastAnalysis.value?.message))
+const isVoicePhysicalColumnCode = (value) => /^col_\d+$/i.test(String(value || '').trim())
+
+const escapeVoiceRegExp = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+const splitVoiceAliases = (value) => {
+  const raw = String(value || '').trim()
+  if (!raw) return []
+  return [...new Set([raw, ...raw.split(/[，,;；、|/]+/).map(item => item.trim()).filter(Boolean)])]
+}
+
+const buildVoiceCanonicalFieldLabel = (field) => {
+  const displayName = String(field?.displayName || '').trim()
+  const sourceFieldName = String(field?.sourceFieldName || '').trim()
+  const columnName = String(field?.columnName || '').trim()
+  if (displayName && !isVoicePhysicalColumnCode(displayName)) {
+    return displayName
+  }
+  if (sourceFieldName && !isVoicePhysicalColumnCode(sourceFieldName)) {
+    return sourceFieldName
+  }
+  return columnName || displayName || sourceFieldName
+}
+
+const voiceNormalizationContext = computed(() => {
+  const aliasToCanonical = new Map()
+  const aliases = []
+  const registerAlias = (alias, canonical) => {
+    const normalizedAlias = String(alias || '').trim()
+    const normalizedCanonical = String(canonical || '').trim()
+    if (!normalizedAlias || !normalizedCanonical) return
+    if (normalizedAlias.length < 2 || normalizedCanonical.length < 1) return
+    const aliasKey = normalizedAlias.toLowerCase()
+    if (aliasToCanonical.has(aliasKey)) return
+    aliasToCanonical.set(aliasKey, normalizedCanonical)
+    aliases.push({ alias: normalizedAlias, canonical: normalizedCanonical })
+  }
+
+  const registerAliases = (values, canonical) => {
+    for (const value of values) {
+      for (const alias of splitVoiceAliases(value)) {
+        registerAlias(alias, canonical)
+      }
+    }
+  }
+
+  const selectedName = String(selectedTableName.value || '').trim()
+  const tableModels = filteredBusinessModelsByTable(selectedName)
+  const preferredIds = [
+    selectedChatBusinessModelId.value,
+    activeBusinessModelId.value,
+    lastAppliedBusinessModelId.value,
+    lastCreatedBusinessModelId.value
+  ]
+    .map(normalizeBusinessModelOptionId)
+    .filter(value => value !== null)
+
+  const preferredModels = []
+  for (const modelId of preferredIds) {
+    const matched = findBusinessModelById(modelId)
+    if (matched && isBusinessModelOnTable(matched, selectedName) && !preferredModels.some(item => String(item?.id) === String(matched.id))) {
+      preferredModels.push(matched)
+    }
+  }
+
+  const orderedModels = [
+    ...preferredModels,
+    ...tableModels.filter(model => !preferredModels.some(item => String(item?.id) === String(model?.id)))
+  ]
+
+  for (const model of orderedModels) {
+    const json = parseMaybeJson(model?.modelJson)
+    for (const entry of json?.dictionaryEntries || []) {
+      const canonical = String(entry?.term || '').trim()
+        || buildVoiceCanonicalFieldLabel({ columnName: entry?.field, displayName: entry?.field, sourceFieldName: entry?.field })
+        || String(entry?.field || '').trim()
+      registerAliases([entry?.term, entry?.field, entry?.synonyms], canonical)
+    }
+  }
+
+  for (const field of fields.value || []) {
+    const canonical = buildVoiceCanonicalFieldLabel(field)
+    registerAliases([
+      field?.displayName,
+      field?.sourceFieldName,
+      field?.columnName,
+      field?.fieldComment,
+      field?.synonyms
+    ], canonical)
+  }
+
+  aliases.sort((left, right) => right.alias.length - left.alias.length || right.canonical.length - left.canonical.length)
+  const aliasPattern = aliases.length
+    ? new RegExp(
+      `(?<![\\w\\u4e00-\\u9fa5])(?:${aliases.map(item => escapeVoiceRegExp(item.alias)).join('|')})(?![\\w\\u4e00-\\u9fa5])`,
+      'gi'
+    )
+    : null
+
+  return {
+    aliasToCanonical,
+    aliasPattern
+  }
+})
+
+const normalizeVoiceQuestion = (text) => {
+  const source = String(text || '').trim()
+  if (!source) return ''
+  const { aliasPattern, aliasToCanonical } = voiceNormalizationContext.value
+  if (!aliasPattern) return source.replace(/\s+/g, ' ').trim()
+  return source
+    .replace(aliasPattern, (matched) => aliasToCanonical.get(String(matched || '').toLowerCase()) || matched)
+    .replace(/\s+/g, ' ')
+    .trim()
+}
 
 const normalizeBusinessModelOptionId = (value) => {
   if (value === null || value === undefined || value === '') {
@@ -588,7 +709,7 @@ const bootstrapWorkbench = async () => {
   ensureChatChartInstance()
   window.addEventListener('resize', handleChartResize)
   try {
-    await Promise.all([loadTables(), loadBusinessModels(), loadAnalysisTemplates(), loadRecentChatQueries()])
+    await Promise.all([loadTables(), loadBusinessModels(), loadAnalysisTemplates(), loadRecentChatQueries(), loadVoicePreferences()])
   } catch (error) {
     if ((error.message || '').includes('登录已失效') || (error.message || '').includes('请先登录')) {
       ElMessage.warning('登录状态已过期，请重新登录')
@@ -2969,6 +3090,16 @@ const stopVoicePlayback = () => {
   stopSpeaking()
 }
 
+const toggleVoicePlayback = async () => {
+  if (speaking.value && speechPaused.value) {
+    await resumeSpeaking()
+    return
+  }
+  if (speaking.value) {
+    await pauseSpeaking()
+  }
+}
+
 const speakLatestAnalysisConclusion = async (analysis = lastAnalysis.value) => {
   const content = buildVoiceConclusion(analysis)
   if (!content) {
@@ -3015,23 +3146,24 @@ const stopVoiceQuestionInput = () => {
   stopListening()
 }
 
-const startVoiceQuestionInput = () => {
+const startVoiceQuestionInput = async () => {
   if (loading.value || isStreaming.value) {
     ElMessage.warning('当前正在生成分析结果，请稍后再试语音输入')
     return
   }
   try {
-    startListening({
+    await startListening({
       onStart: () => {
         ElMessage.success('已开始语音听写，请直接说出查询问题')
       },
       onPartial: (committed, interim) => {
-        question.value = [committed, interim].filter(Boolean).join(' ').trim()
+        question.value = normalizeVoiceQuestion([committed, interim].filter(Boolean).join(' '))
       },
       onFinal: async (committed) => {
-        question.value = committed
-        if (autoSendAfterRecognize.value && committed) {
-          await sendQuestion({ questionText: committed })
+        const normalized = normalizeVoiceQuestion(committed)
+        question.value = normalized
+        if (autoSendAfterRecognize.value && normalized) {
+          await sendQuestion({ questionText: normalized })
         }
       },
       onError: (message) => {
@@ -4060,6 +4192,7 @@ provide('workbench', {
   voicePanelVisible,
   voiceLocaleOptions,
   recognitionLocale,
+  voiceLocale,
   selectedVoiceGender,
   speechRate,
   speechVolume,
@@ -4072,14 +4205,19 @@ provide('workbench', {
   voiceStatusText,
   listening,
   speaking,
+  speechPaused,
   recognitionError,
   interimTranscript,
   finalTranscript,
+  voiceHistory,
+  clearVoiceHistory,
+  normalizeVoiceQuestion,
   hasVoiceConclusion,
   startVoiceQuestionInput,
   stopVoiceQuestionInput,
   speakChatBubble,
   stopVoicePlayback,
+  toggleVoicePlayback,
   stopQuestionGeneration,
   copySqlToClipboard,
   reuseChatQuestion,
