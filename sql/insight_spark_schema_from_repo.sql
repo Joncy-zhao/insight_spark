@@ -463,6 +463,7 @@ CREATE TABLE IF NOT EXISTS `is_chat_query_history` (
   `id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT '物理主键ID',
   `user_id` VARCHAR(64) NOT NULL COMMENT '用户逻辑ID，关联 is_user.user_id 实现权限隔离',
   `data_source_id` BIGINT NOT NULL COMMENT '数据源选择器ID，关联 is_official_datasource.id',
+  `query_table_name` VARCHAR(128) NULL COMMENT '查询目标表名，兼容上传表与官方数据源',
   `query_text` TEXT NOT NULL COMMENT '自然语言输入（文字/语音转写），支持一句话长指令搭建模型',
   
   -- AI 与 SQL 生成模块
@@ -480,6 +481,17 @@ CREATE TABLE IF NOT EXISTS `is_chat_query_history` (
   `audit_info` TEXT COMMENT '安全审计详细信息（拦截原因、慢查询标记等）',
   `execution_time_ms` INT COMMENT '查询性能统计（执行耗时）',
   `is_hit_cache` TINYINT(1) DEFAULT 0 COMMENT '是否优先命中Redis语义缓存，用于性能调优',
+
+  -- 连续对话兼容字段：旧历史能力保留，新会话能力双写关联
+  `conversation_id` BIGINT NULL COMMENT '关联 is_chat_conversation.id',
+  `parent_history_id` BIGINT NULL COMMENT '兼容历史表分支/追问父记录',
+  `turn_no` INT NULL COMMENT '会话内轮次序号',
+  `message_role` VARCHAR(16) NULL DEFAULT 'ASSISTANT' COMMENT '消息角色 USER/ASSISTANT/SYSTEM',
+  `intent_type` VARCHAR(64) NULL COMMENT '意图类型 QUERY/FOLLOWUP/COMPARE/DRILLDOWN/EXPLAIN',
+  `context_json` JSON NULL COMMENT '本轮上下文元数据',
+  `scope_json` JSON NULL COMMENT '数据源、表、业务模型等分析范围',
+  `artifact_type` VARCHAR(32) NULL DEFAULT 'CHART' COMMENT '主要产物类型 SQL/CHART/TABLE/TEXT/REPORT',
+  `summary_text` TEXT NULL COMMENT '本轮摘要或可检索摘要',
   
   -- 通用控制字段
   `is_deleted` TINYINT(1) DEFAULT 0 COMMENT '逻辑删除标志：0-未删除，1-已删除（支撑批量清理功能）',
@@ -495,6 +507,71 @@ CREATE TABLE IF NOT EXISTS `is_chat_query_history` (
 -- --------------------------------------------------------
 -- 9.2 预测与情景模拟配置表 (is_prediction_scenario_config)
 -- --------------------------------------------------------
+-- Chat conversation compatibility columns. Runtime initializer uses addColumnIfMissing;
+-- these ALTER statements document the expected upgraded shape for manual deployments.
+-- ALTER TABLE `is_chat_query_history` ADD COLUMN `conversation_id` BIGINT NULL;
+-- ALTER TABLE `is_chat_query_history` ADD COLUMN `parent_history_id` BIGINT NULL;
+-- ALTER TABLE `is_chat_query_history` ADD COLUMN `turn_no` INT NULL;
+-- ALTER TABLE `is_chat_query_history` ADD COLUMN `message_role` VARCHAR(16) NULL DEFAULT 'ASSISTANT';
+-- ALTER TABLE `is_chat_query_history` ADD COLUMN `intent_type` VARCHAR(64) NULL;
+-- ALTER TABLE `is_chat_query_history` ADD COLUMN `context_json` JSON NULL;
+-- ALTER TABLE `is_chat_query_history` ADD COLUMN `scope_json` JSON NULL;
+-- ALTER TABLE `is_chat_query_history` ADD COLUMN `artifact_type` VARCHAR(32) NULL DEFAULT 'CHART';
+-- ALTER TABLE `is_chat_query_history` ADD COLUMN `summary_text` TEXT NULL;
+
+-- --------------------------------------------------------
+-- 9.1b Conversation session / turn / artifact tables
+-- --------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `is_chat_conversation` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  `user_id` VARCHAR(64) NOT NULL,
+  `title` VARCHAR(255) NOT NULL,
+  `data_source_id` BIGINT NOT NULL DEFAULT 0,
+  `scope_json` JSON NULL,
+  `business_model_id` BIGINT NULL,
+  `summary` TEXT NULL,
+  `last_turn_id` BIGINT NULL,
+  `status` VARCHAR(32) NOT NULL DEFAULT 'ACTIVE',
+  `is_deleted` TINYINT(1) NOT NULL DEFAULT 0,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX `idx_chat_conv_user_time` (`user_id`, `updated_at`),
+  INDEX `idx_chat_conv_status` (`status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Chat conversation sessions';
+
+CREATE TABLE IF NOT EXISTS `is_chat_conversation_turn` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  `conversation_id` BIGINT NOT NULL,
+  `parent_turn_id` BIGINT NULL,
+  `turn_no` INT NOT NULL,
+  `role` VARCHAR(16) NOT NULL,
+  `message_text` TEXT NOT NULL,
+  `intent_type` VARCHAR(64) NULL,
+  `context_json` JSON NULL,
+  `followup_mode` VARCHAR(32) NOT NULL DEFAULT 'NEW',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_chat_turn_conversation` (`conversation_id`, `turn_no`),
+  INDEX `idx_chat_turn_parent` (`parent_turn_id`),
+  INDEX `idx_chat_turn_role` (`role`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Chat conversation turns';
+
+CREATE TABLE IF NOT EXISTS `is_chat_conversation_artifact` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  `conversation_id` BIGINT NOT NULL,
+  `turn_id` BIGINT NOT NULL,
+  `history_id` BIGINT NULL,
+  `artifact_type` VARCHAR(32) NOT NULL,
+  `artifact_json` JSON NULL,
+  `sql_text` TEXT NULL,
+  `chart_type` VARCHAR(50) NULL,
+  `risk_level` VARCHAR(20) NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_chat_artifact_conversation` (`conversation_id`, `created_at`),
+  INDEX `idx_chat_artifact_turn` (`turn_id`),
+  INDEX `idx_chat_artifact_history` (`history_id`),
+  INDEX `idx_chat_artifact_type` (`artifact_type`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Chat conversation artifacts';
+
 CREATE TABLE IF NOT EXISTS `is_prediction_scenario_config` (
   `id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT '物理主键ID',
   `user_id` VARCHAR(64) NOT NULL COMMENT '配置所属用户逻辑ID，关联 is_user.user_id',

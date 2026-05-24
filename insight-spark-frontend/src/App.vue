@@ -128,7 +128,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
 import axios from 'axios'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ChatDotRound,
   Close,
@@ -137,6 +137,7 @@ import {
   DataAnalysis,
   DataBoard,
   DocumentChecked,
+  Edit,
   Grid,
   Histogram,
   House,
@@ -144,8 +145,11 @@ import {
   Lock,
   Management,
   Monitor,
+  MoreFilled,
   Operation,
   Microphone,
+  Refresh,
+  Search,
   Setting,
   Share,
   Upload
@@ -340,6 +344,13 @@ const recentChatQueryKeyword = ref('')
 const recentChatQueryPage = ref(1)
 const recentChatQueryPageSize = ref(8)
 const recentChatQueryTotal = ref(0)
+const chatSessions = ref([])
+const activeChatSessionId = ref(null)
+const chatSessionLoading = ref(false)
+const chatSessionKeyword = ref('')
+const chatSessionStatus = ref('ACTIVE')
+const activeBranchParentTurnId = ref(null)
+const activeBranchParentTurnMeta = ref(null)
 const diagnosisProgress = ref({ percentage: 0, step: '待开始', logs: [] })
 const currentDiagnosis = ref(null)
 const diagnosisReports = ref([])
@@ -709,7 +720,14 @@ const bootstrapWorkbench = async () => {
   ensureChatChartInstance()
   window.addEventListener('resize', handleChartResize)
   try {
-    await Promise.all([loadTables(), loadBusinessModels(), loadAnalysisTemplates(), loadRecentChatQueries(), loadVoicePreferences()])
+    await Promise.all([
+      loadTables(),
+      loadBusinessModels(),
+      loadAnalysisTemplates(),
+      loadRecentChatQueries(),
+      loadChatSessions(),
+      loadVoicePreferences()
+    ])
   } catch (error) {
     if ((error.message || '').includes('登录已失效') || (error.message || '').includes('请先登录')) {
       ElMessage.warning('登录状态已过期，请重新登录')
@@ -792,6 +810,316 @@ const normalizeChatHistoryItem = (item) => ({
   chartType: String(item?.chartType || '').trim(),
   createdAt: item?.createdAt || new Date().toISOString()
 })
+
+const normalizeChartArtifactSnapshot = (artifact) => {
+  if (!artifact || typeof artifact !== 'object') return null
+  const raw = artifact.artifact ?? artifact.artifactJson ?? artifact.chartSnapshot ?? null
+  const parsed = parseMaybeJson(raw)
+  return parsed && typeof parsed === 'object' ? parsed : null
+}
+
+const buildAnalysisFromTurn = (turn, chartArtifact, sqlArtifact, fallbackMessage = '') => {
+  const snapshot = normalizeChartArtifactSnapshot(chartArtifact)
+  if (!snapshot || !Array.isArray(snapshot.data) || !snapshot.data.length) return null
+  const context = turn?.context && typeof turn.context === 'object' ? turn.context : {}
+  return {
+    tableName: String(snapshot.tableName || context.tableName || '').trim(),
+    chartType: String(snapshot.chartType || chartArtifact?.chartType || 'bar').trim() || 'bar',
+    data: Array.isArray(snapshot.data) ? snapshot.data : [],
+    fieldMapping: snapshot.fieldMapping || {},
+    sql: String(snapshot.sql || chartArtifact?.sqlText || sqlArtifact?.sqlText || '').trim(),
+    sourceSql: String(snapshot.sql || chartArtifact?.sqlText || sqlArtifact?.sqlText || '').trim(),
+    sourceQuestion: String(context.question || '').trim(),
+    sourceTableName: String(snapshot.tableName || context.tableName || '').trim(),
+    message: String(snapshot.message || fallbackMessage || turn?.messageText || '').trim(),
+    chartSnapshot: snapshot,
+    graphContext: Array.isArray(snapshot.graphContext) ? snapshot.graphContext : [],
+    graphPath: snapshot.graphPath || null,
+    graphSqlHints: snapshot.graphSqlHints || null,
+    riskLevel: chartArtifact?.riskLevel || 'SAFE',
+    riskReason: String(context.riskReason || '').trim(),
+    queryHistoryId: chartArtifact?.historyId == null ? null : String(chartArtifact.historyId),
+    artifactId: chartArtifact?.id == null ? null : String(chartArtifact.id),
+    artifactIds: [chartArtifact?.id, sqlArtifact?.id].filter(Boolean).map(item => String(item)),
+    assistantTurnId: turn?.id == null ? null : String(turn.id),
+    turnId: turn?.id == null ? null : String(turn.id),
+    turnNo: Number(turn?.turnNo || 0) || null
+  }
+}
+
+const restoreAnalysisFromMessage = (message, options = {}) => {
+  const analysis = message?.analysisSnapshot
+  if (!analysis || !Array.isArray(analysis.data) || !analysis.data.length) return false
+  const restoreModule = options.activateChat !== false
+  lastAnalysis.value = {
+    ...analysis,
+    sourceQuestion: String(analysis.sourceQuestion || message?.sourceQuestion || '').trim(),
+    sourceTableName: String(analysis.sourceTableName || analysis.tableName || '').trim()
+  }
+  currentChartType.value = lastAnalysis.value.chartType || 'bar'
+  if (restoreModule) {
+    activeModule.value = 'chat'
+  }
+  nextTick(() => {
+    renderChart(lastAnalysis.value.data, currentChartType.value)
+  })
+  return true
+}
+
+const setActiveBranchParent = (message) => {
+  const turnId = String(message?.turnId || '').trim()
+  if (!turnId) {
+    activeBranchParentTurnId.value = null
+    activeBranchParentTurnMeta.value = null
+    return
+  }
+  activeBranchParentTurnId.value = turnId
+  activeBranchParentTurnMeta.value = {
+    turnId,
+    turnNo: Number(message?.turnNo || 0) || null,
+    preview: String(message?.content || '').trim().slice(0, 40)
+  }
+}
+
+const openHistoricalAnalysis = (message) => {
+  if (!restoreAnalysisFromMessage(message)) return
+  const preview = String(message?.sourceQuestion || message?.content || '历史图表').trim()
+  ElMessage.success(`已切换到历史图表：${preview.slice(0, 24)}`)
+}
+
+const clearActiveBranchParent = () => {
+  activeBranchParentTurnId.value = null
+  activeBranchParentTurnMeta.value = null
+}
+
+const normalizeChatSessionItem = (item) => ({
+  id: String(item?.id || ''),
+  title: String(item?.title || '新对话').trim(),
+  summary: String(item?.summary || '').trim(),
+  tableName: String(item?.scope?.tableName || item?.tableName || '').trim(),
+  status: String(item?.status || 'ACTIVE').trim().toUpperCase(),
+  turnCount: Number(item?.turnCount || 0),
+  updatedAt: item?.updatedAt || item?.createdAt || new Date().toISOString()
+})
+
+const normalizeChatSessionStatus = (status) => {
+  const text = String(status || '').trim().toUpperCase()
+  if (['ALL', 'ACTIVE', 'ARCHIVED'].includes(text)) return text
+  return 'ACTIVE'
+}
+
+const syncChatSessionListItem = (session) => {
+  const normalized = normalizeChatSessionItem(session)
+  if (!normalized.id) return
+  chatSessions.value = [normalized, ...chatSessions.value.filter(item => item.id !== normalized.id)]
+}
+
+const loadChatSessions = async (options = {}) => {
+  if (!isAuthenticated.value) {
+    chatSessions.value = []
+    activeChatSessionId.value = null
+    return
+  }
+  const nextKeyword = String(options.keyword ?? chatSessionKeyword.value ?? '').trim()
+  const nextStatus = normalizeChatSessionStatus(options.status ?? chatSessionStatus.value)
+  chatSessionKeyword.value = nextKeyword
+  chatSessionStatus.value = nextStatus
+  chatSessionLoading.value = true
+  try {
+    const data = unwrap(await axios.get(`${API_BASE}/api/chat/sessions`, {
+      params: {
+        page: 1,
+        pageSize: 20,
+        keyword: nextKeyword || undefined,
+        status: nextStatus === 'ALL' ? undefined : nextStatus
+      }
+    }))
+    chatSessions.value = Array.isArray(data?.items)
+      ? data.items.map(normalizeChatSessionItem).filter(item => item.id)
+      : []
+  } catch (error) {
+    chatSessions.value = []
+    if (error?.response?.status !== 401) {
+      console.warn('loadChatSessions failed:', error)
+    }
+  } finally {
+    chatSessionLoading.value = false
+  }
+}
+
+const createChatSession = async () => {
+  if (loading.value || isStreaming.value) {
+    ElMessage.warning('当前正在生成，请稍后再试')
+    return
+  }
+  const payload = {
+    title: '',
+    tableName: selectedTableName.value || undefined,
+    businessModelId: selectedChatBusinessModelId.value || undefined
+  }
+  const data = unwrap(await axios.post(`${API_BASE}/api/chat/sessions`, payload))
+  const session = normalizeChatSessionItem(data)
+  if (session.id) {
+    activeChatSessionId.value = session.id
+    clearActiveBranchParent()
+    syncChatSessionListItem(session)
+    messages.value = [
+      { role: 'system', content: '已开始一个新的连续对话。' }
+    ]
+  }
+}
+
+const selectChatSession = async (sessionId) => {
+  if (!sessionId || String(activeChatSessionId.value || '') === String(sessionId)) return
+  if (loading.value || isStreaming.value) {
+    ElMessage.warning('当前正在生成，请稍后再切换会话')
+    return
+  }
+  activeChatSessionId.value = String(sessionId)
+  clearActiveBranchParent()
+  try {
+    const turns = unwrap(await axios.get(`${API_BASE}/api/chat/sessions/${sessionId}/turns`))
+    const nextMessages = []
+    let restoredAnalysis = null
+    for (const turn of Array.isArray(turns) ? turns : []) {
+      const role = String(turn?.role || '').toUpperCase() === 'USER' ? 'user' : 'system'
+      const artifacts = Array.isArray(turn?.artifacts) ? turn.artifacts : []
+      const chartArtifact = artifacts.find(item => String(item?.artifactType || '').toUpperCase() === 'CHART')
+      const sqlArtifact = artifacts.find(item => String(item?.artifactType || '').toUpperCase() === 'SQL')
+      const analysisSnapshot = role === 'system'
+        ? buildAnalysisFromTurn(turn, chartArtifact, sqlArtifact, String(turn?.messageText || ''))
+        : null
+      if (analysisSnapshot) {
+        restoredAnalysis = analysisSnapshot
+      }
+      nextMessages.push({
+        role,
+        content: String(turn?.messageText || ''),
+        sql: sqlArtifact?.sqlText || chartArtifact?.sqlText || '',
+        turnId: turn?.id == null ? null : String(turn.id),
+        parentTurnId: turn?.parentTurnId == null ? null : String(turn.parentTurnId),
+        turnNo: Number(turn?.turnNo || 0) || null,
+        artifactId: chartArtifact?.id == null ? null : String(chartArtifact.id),
+        artifactIds: artifacts.map(item => String(item?.id || '')).filter(Boolean),
+        analysisSnapshot,
+        clickableChart: Boolean(analysisSnapshot),
+        sourceQuestion: analysisSnapshot?.sourceQuestion || ''
+      })
+    }
+    messages.value = nextMessages.length
+      ? nextMessages
+      : [{ role: 'system', content: '这个会话还没有消息，可以直接继续提问。' }]
+    if (restoredAnalysis) {
+      restoreAnalysisFromMessage({ analysisSnapshot: restoredAnalysis }, { activateChat: false })
+    } else {
+      lastAnalysis.value = null
+      currentChartType.value = ''
+      ensureChatChartInstance()?.clear()
+    }
+  } catch (error) {
+    ElMessage.error(error.message || '加载会话失败')
+  }
+}
+
+const searchChatSessions = async () => {
+  await loadChatSessions({
+    keyword: chatSessionKeyword.value,
+    status: chatSessionStatus.value
+  })
+}
+
+const resetChatSessionSearch = async () => {
+  chatSessionKeyword.value = ''
+  chatSessionStatus.value = 'ACTIVE'
+  await loadChatSessions({
+    keyword: '',
+    status: 'ACTIVE'
+  })
+}
+
+const refreshActiveChatSessionSummary = async () => {
+  if (!activeChatSessionId.value) {
+    ElMessage.warning('请先选择一个会话')
+    return
+  }
+  const data = unwrap(await axios.post(`${API_BASE}/api/chat/sessions/${activeChatSessionId.value}/summary`, {}))
+  syncChatSessionListItem(data)
+  ElMessage.success('会话摘要已刷新')
+}
+
+const renameChatSession = async (session) => {
+  if (!session?.id) return
+  try {
+    const { value } = await ElMessageBox.prompt('请输入新的会话名称', '重命名会话', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      inputValue: session.title || '',
+      inputPlaceholder: '例如：华东销量趋势分析',
+      inputPattern: /\S+/,
+      inputErrorMessage: '会话名称不能为空'
+    })
+    const title = String(value || '').trim()
+    if (!title) return
+    const data = unwrap(await axios.post(`${API_BASE}/api/chat/sessions/${session.id}/rename`, { title }))
+    syncChatSessionListItem(data)
+    ElMessage.success('会话已重命名')
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') {
+      ElMessage.error(error.message || '会话重命名失败')
+    }
+  }
+}
+
+const updateChatSessionStatus = async (session, status) => {
+  if (!session?.id) return
+  const normalizedStatus = normalizeChatSessionStatus(status)
+  const data = unwrap(await axios.post(`${API_BASE}/api/chat/sessions/${session.id}/status`, {
+    status: normalizedStatus
+  }))
+  if (String(activeChatSessionId.value || '') === String(session.id)) {
+    activeChatSessionId.value = String(session.id)
+  }
+  const shouldKeepInList = chatSessionStatus.value === 'ALL' || chatSessionStatus.value === normalizedStatus
+  if (shouldKeepInList) {
+    syncChatSessionListItem(data)
+  } else {
+    chatSessions.value = chatSessions.value.filter(item => item.id !== String(session.id))
+  }
+  ElMessage.success(normalizedStatus === 'ARCHIVED' ? '会话已归档' : '会话已恢复')
+}
+
+const deleteChatSession = async (session) => {
+  if (!session?.id) return
+  try {
+    await ElMessageBox.confirm(
+      `确认删除会话“${session.title || '未命名会话'}”吗？`,
+      '删除会话',
+      {
+        type: 'warning',
+        confirmButtonText: '删除',
+        cancelButtonText: '取消'
+      }
+    )
+    await axios.post(`${API_BASE}/api/chat/sessions/${session.id}/delete`).then(unwrap)
+    const isCurrent = String(activeChatSessionId.value || '') === String(session.id)
+    chatSessions.value = chatSessions.value.filter(item => item.id !== String(session.id))
+    if (isCurrent) {
+      activeChatSessionId.value = null
+      clearActiveBranchParent()
+      messages.value = [
+        { role: 'system', content: '当前会话已删除，你可以开始一个新的连续对话。' }
+      ]
+      lastAnalysis.value = null
+      currentChartType.value = ''
+      ensureChatChartInstance()?.clear()
+    }
+    ElMessage.success('会话已删除')
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') {
+      ElMessage.error(error.message || '删除会话失败')
+    }
+  }
+}
 
 const isOfficialTableName = (tableName) => String(tableName || '').startsWith('official:')
 const isAccessibleTable = (tableName) => tables.value.some(item => item.tableName === tableName)
@@ -2993,14 +3321,18 @@ const pinChartToDashboard = async () => {
     return
   }
   const chartIdRaw = lastAnalysis.value?.queryHistoryId ?? lastAnalysis.value?.chartId
-  if (chartIdRaw == null || chartIdRaw === '') {
-    ElMessage.warning('当前图表缺少对话历史 id，无法钉入。请重新发起一次对话查询（流式完成后会自动写入历史），再点钉入看板。')
+  const artifactIdRaw = lastAnalysis.value?.artifactId
+  const turnIdRaw = lastAnalysis.value?.assistantTurnId ?? lastAnalysis.value?.turnId
+  if ((chartIdRaw == null || chartIdRaw === '') && (artifactIdRaw == null || artifactIdRaw === '') && (turnIdRaw == null || turnIdRaw === '')) {
+    ElMessage.warning('当前结果缺少可绑定的图表记录，暂时无法钉入看板。请重新完成一次对话查询后再试。')
     return
   }
   pinning.value = true
   try {
     const payload = {
-      chartId: Number(chartIdRaw),
+      chartId: chartIdRaw == null || chartIdRaw === '' ? undefined : Number(chartIdRaw),
+      artifactId: artifactIdRaw == null || artifactIdRaw === '' ? undefined : Number(artifactIdRaw),
+      turnId: turnIdRaw == null || turnIdRaw === '' ? undefined : Number(turnIdRaw),
       title: String(lastAnalysis.value?.sourceQuestion || '图表卡片').slice(0, 80),
       chartType: lastAnalysis.value?.chartType || currentChartType.value || 'bar',
       tableName: lastAnalysis.value?.tableName || '',
@@ -3197,6 +3529,7 @@ const sendQuestion = async (options = {}) => {
   const requestedTableName = String(options?.tableName || '').trim()
   const queryTableName = requestedTableName || selectedTableName.value
   const isRegenerate = Boolean(options?.regenerate)
+  const branchParentTurnId = String(options?.parentTurnId || activeBranchParentTurnId.value || '').trim()
 
   if (!userQuestion) return
   if (!queryTableName && !shouldUseBusinessModelAgent(userQuestion)) {
@@ -3339,7 +3672,8 @@ const sendQuestion = async (options = {}) => {
       ...data,
       sourceQuestion: userQuestion,
       sourceSql: data.sql,
-      sourceTableName
+      sourceTableName,
+      parentTurnId: branchParentTurnId || null
     }
     currentChartType.value = data.chartType
     updateStreamMessage({
@@ -3348,7 +3682,11 @@ const sendQuestion = async (options = {}) => {
       thinkingLogs: compactLogs,
       thinkingCollapsed: true,
       sourceQuestion: userQuestion,
-      sourceTableName
+      sourceTableName,
+      turnId: data?.assistantTurnId == null ? null : String(data.assistantTurnId),
+      parentTurnId: branchParentTurnId || null,
+      artifactId: data?.artifactId == null ? null : String(data.artifactId),
+      artifactIds: Array.isArray(data?.artifactIds) ? data.artifactIds.map(item => String(item || '')).filter(Boolean) : []
     })
 
     nextTick(() => {
@@ -3390,7 +3728,10 @@ const sendQuestion = async (options = {}) => {
       controller.abort()
     }
     try {
-      const response = await fetch(`${API_BASE}/api/chat/ask-stream?${new URLSearchParams({ question: userQuestion, tableName: queryTableName }).toString()}`, {
+      const params = new URLSearchParams({ question: userQuestion, tableName: queryTableName })
+      if (activeChatSessionId.value) params.set('conversationId', activeChatSessionId.value)
+      if (branchParentTurnId) params.set('parentTurnId', branchParentTurnId)
+      const response = await fetch(`${API_BASE}/api/chat/ask-stream?${params.toString()}`, {
         method: 'GET',
         headers: {
           Accept: 'text/event-stream',
@@ -3526,7 +3867,9 @@ const sendQuestion = async (options = {}) => {
       try {
         fallbackData = unwrap(await axios.post(`${API_BASE}/api/chat/ask-enhanced`, {
           question: userQuestion,
-          tableName: queryTableName
+          tableName: queryTableName,
+          conversationId: activeChatSessionId.value || undefined,
+          parentTurnId: branchParentTurnId || undefined
         }, {
           signal: fallbackController.signal
         }))
@@ -3540,7 +3883,9 @@ const sendQuestion = async (options = {}) => {
         }
         fallbackData = unwrap(await axios.post(`${API_BASE}/api/chat/ask`, {
           question: userQuestion,
-          tableName: queryTableName
+          tableName: queryTableName,
+          conversationId: activeChatSessionId.value || undefined,
+          parentTurnId: branchParentTurnId || undefined
         }, {
           signal: fallbackController.signal
         }))
@@ -3562,7 +3907,12 @@ const sendQuestion = async (options = {}) => {
       return
     }
     applyAnalysisResult(data)
+    if (data?.conversationId) {
+      activeChatSessionId.value = String(data.conversationId)
+    }
+    clearActiveBranchParent()
     await loadRecentChatQueries()
+    await loadChatSessions()
 
     if (isAdminUser.value) {
       await loadAuditLogs()
@@ -4120,6 +4470,25 @@ provide('workbench', {
   recentChatQueryPage,
   recentChatQueryPageSize,
   recentChatQueryTotal,
+  chatSessions,
+  activeChatSessionId,
+  chatSessionLoading,
+  chatSessionKeyword,
+  chatSessionStatus,
+  searchChatSessions,
+  resetChatSessionSearch,
+  refreshActiveChatSessionSummary,
+  renameChatSession,
+  updateChatSessionStatus,
+  deleteChatSession,
+  loadChatSessions,
+  createChatSession,
+  selectChatSession,
+  openHistoricalAnalysis,
+  setActiveBranchParent,
+  clearActiveBranchParent,
+  activeBranchParentTurnId,
+  activeBranchParentTurnMeta,
   loadTables,
   loadPermissionCenter,
   loadAdminPermissionRequests,

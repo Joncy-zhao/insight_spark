@@ -137,6 +137,36 @@ public class PythonAiService {
         }
     }
 
+    public Optional<String> generateConversationTitle(String openingQuestion, String tableName) {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("question", openingQuestion);
+        request.put("tableName", tableName);
+        request.put("maxLength", 18);
+        request.put("style", "short_session_title");
+
+        try {
+            Map<String, Object> response = restTemplate.postForObject(
+                    aiServiceUrl + "/ai/conversation-title",
+                    request,
+                    Map.class
+            );
+            if (response == null) {
+                return Optional.empty();
+            }
+            String title = Optional.ofNullable(response.get("title"))
+                    .map(String::valueOf)
+                    .orElse("");
+            title = title.trim();
+            return title.isBlank() ? Optional.empty() : Optional.of(title);
+        } catch (HttpClientErrorException e) {
+            log.warn("Python AI 会话命名失败: {}", e.getResponseBodyAsString());
+            return Optional.empty();
+        } catch (RestClientException e) {
+            log.warn("Python AI 会话命名不可用: {}", e.getMessage());
+            return Optional.empty();
+        }
+    }
+
     public Optional<Map<String, Object>> textToSpeech(String text, String voiceGender, String locale, String voiceLocale, Double rate) {
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("text", text);

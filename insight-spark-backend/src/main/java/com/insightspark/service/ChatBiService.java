@@ -18,6 +18,63 @@ import java.util.concurrent.CancellationException;
 @Service
 public class ChatBiService {
 
+    public static class ChatQueryRequest {
+        private Long conversationId;
+        private Long parentTurnId;
+        private List<String> tableNames;
+        private Map<String, Object> filters;
+        private String question;
+        private String mode;
+
+        public Long getConversationId() {
+            return conversationId;
+        }
+
+        public void setConversationId(Long conversationId) {
+            this.conversationId = conversationId;
+        }
+
+        public Long getParentTurnId() {
+            return parentTurnId;
+        }
+
+        public void setParentTurnId(Long parentTurnId) {
+            this.parentTurnId = parentTurnId;
+        }
+
+        public List<String> getTableNames() {
+            return tableNames;
+        }
+
+        public void setTableNames(List<String> tableNames) {
+            this.tableNames = tableNames;
+        }
+
+        public Map<String, Object> getFilters() {
+            return filters;
+        }
+
+        public void setFilters(Map<String, Object> filters) {
+            this.filters = filters;
+        }
+
+        public String getQuestion() {
+            return question;
+        }
+
+        public void setQuestion(String question) {
+            this.question = question;
+        }
+
+        public String getMode() {
+            return mode;
+        }
+
+        public void setMode(String mode) {
+            this.mode = mode;
+        }
+    }
+
     private static final Logger log = LoggerFactory.getLogger(ChatBiService.class);
 
     @Autowired
@@ -40,6 +97,20 @@ public class ChatBiService {
 
     @Autowired
     private RuleBasedNl2SqlStrategy ruleBasedNl2SqlStrategy;
+
+    public Map<String, Object> executeChat(ChatQueryRequest request) {
+        ChatQueryRequest safeRequest = request == null ? new ChatQueryRequest() : request;
+        String question = Objects.toString(safeRequest.getQuestion(), "").trim();
+        String tableName = resolvePreferredTableName(safeRequest);
+        Map<String, Object> response = executeChat(question, tableName);
+        response.put("question", question);
+        response.put("conversationId", safeRequest.getConversationId());
+        response.put("parentTurnId", safeRequest.getParentTurnId());
+        response.put("tableNames", safeRequest.getTableNames() == null ? List.of() : safeRequest.getTableNames());
+        response.put("filters", safeRequest.getFilters() == null ? Map.of() : safeRequest.getFilters());
+        response.put("mode", Objects.toString(safeRequest.getMode(), ""));
+        return response;
+    }
 
     public Map<String, Object> executeChat(String question, String tableName) {
         log.info("Received chat question: {}", question);
@@ -372,6 +443,29 @@ public class ChatBiService {
             m.put("y", "value");
         }
         return m;
+    }
+
+    private String resolvePreferredTableName(ChatQueryRequest request) {
+        if (request == null) {
+            return "";
+        }
+        List<String> tableNames = request.getTableNames();
+        if (tableNames != null) {
+            for (String tableName : tableNames) {
+                String normalized = Objects.toString(tableName, "").trim();
+                if (!normalized.isBlank()) {
+                    return normalized;
+                }
+            }
+        }
+        Map<String, Object> filters = request.getFilters();
+        if (filters != null) {
+            String candidate = Objects.toString(filters.get("tableName"), "").trim();
+            if (!candidate.isBlank()) {
+                return candidate;
+            }
+        }
+        return "";
     }
 
     private Map<String, Object> defaultOptionTemplateForChartType(String chartType) {
