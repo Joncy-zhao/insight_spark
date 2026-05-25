@@ -75,6 +75,19 @@ public class KnowledgeDocumentService {
     }
 
     public List<Map<String, Object>> listDocs() {
+        if (!canAccessAllDocs()) {
+            return jdbcTemplate.queryForList("""
+                    SELECT d.id, d.title, d.file_name AS fileName, d.doc_type AS docType,
+                           d.created_by AS createdBy, d.created_at AS createdAt,
+                           COUNT(c.id) AS chunkCount
+                    FROM is_knowledge_doc d
+                    LEFT JOIN is_knowledge_chunk c ON c.doc_id = d.id
+                    WHERE d.created_by = ?
+                    GROUP BY d.id, d.title, d.file_name, d.doc_type, d.created_by, d.created_at
+                    ORDER BY d.created_at DESC
+                    LIMIT 100
+                    """, permissionService.currentUserId());
+        }
         return jdbcTemplate.queryForList("""
                 SELECT d.id, d.title, d.file_name AS fileName, d.doc_type AS docType,
                        d.created_by AS createdBy, d.created_at AS createdAt,
@@ -88,6 +101,17 @@ public class KnowledgeDocumentService {
     }
 
     public List<Map<String, Object>> listChunks(Long docId) {
+        if (!canAccessAllDocs()) {
+            return jdbcTemplate.queryForList("""
+                    SELECT c.id, c.doc_id AS docId, d.title, c.chunk_index AS chunkIndex,
+                           c.chunk_text AS chunkText, c.keywords, c.created_at AS createdAt
+                    FROM is_knowledge_chunk c
+                    JOIN is_knowledge_doc d ON d.id = c.doc_id
+                    WHERE c.doc_id = ? AND d.created_by = ?
+                    ORDER BY c.chunk_index ASC
+                    LIMIT 100
+                    """, docId, permissionService.currentUserId());
+        }
         return jdbcTemplate.queryForList("""
                 SELECT c.id, c.doc_id AS docId, d.title, c.chunk_index AS chunkIndex,
                        c.chunk_text AS chunkText, c.keywords, c.created_at AS createdAt
@@ -100,11 +124,14 @@ public class KnowledgeDocumentService {
     }
 
     public Map<String, Object> index(Long docId) {
+        String ownerClause = canAccessAllDocs() ? "" : " AND created_by = ?";
+        Object[] params = canAccessAllDocs()
+                ? new Object[]{docId}
+                : new Object[]{docId, permissionService.currentUserId()};
         List<Map<String, Object>> docs = jdbcTemplate.queryForList("""
                 SELECT id, title, content
                 FROM is_knowledge_doc
-                WHERE id = ?
-                """, docId);
+                WHERE id = ?""" + ownerClause, params);
         if (docs.isEmpty()) {
             throw new IllegalArgumentException("知识文档不存在：" + docId);
         }
@@ -120,18 +147,44 @@ public class KnowledgeDocumentService {
         return Map.of("docId", docId, "chunkCount", chunks.size());
     }
 
+    public Map<String, Object> delete(Long docId) {
+        if (docId == null) {
+            throw new IllegalArgumentException("知识文档ID不能为空");
+        }
+        String ownerClause = canAccessAllDocs() ? "" : " AND created_by = ?";
+        Object[] params = canAccessAllDocs()
+                ? new Object[]{docId}
+                : new Object[]{docId, permissionService.currentUserId()};
+        Integer count = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM is_knowledge_doc WHERE id = ?" + ownerClause,
+                Integer.class,
+                params);
+        if (count == null || count <= 0) {
+            throw new IllegalArgumentException("知识文档不存在或无权删除：" + docId);
+        }
+        jdbcTemplate.update("DELETE FROM is_knowledge_chunk WHERE doc_id = ?", docId);
+        int deleted = jdbcTemplate.update("DELETE FROM is_knowledge_doc WHERE id = ?" + ownerClause, params);
+        return Map.of("deleted", deleted, "id", docId);
+    }
+
     public List<Map<String, Object>> search(String question, int limit) {
         List<String> terms = extractSearchTerms(question);
         int safeLimit = Math.max(1, Math.min(limit, 20));
+        String ownerClause = canAccessAllDocs() ? "" : "WHERE d.created_by = ?";
+        Object[] params = canAccessAllDocs()
+                ? new Object[]{}
+                : new Object[]{permissionService.currentUserId()};
         List<Map<String, Object>> candidates = jdbcTemplate.queryForList("""
                 SELECT c.doc_id AS docId, d.title, d.file_name AS fileName, d.doc_type AS docType,
+                       d.created_by AS createdBy,
                        c.chunk_index AS chunkIndex, c.chunk_text AS chunkText, c.keywords,
                        CONCAT('《', d.title, '》第', c.chunk_index, '段') AS source
                 FROM is_knowledge_chunk c
                 JOIN is_knowledge_doc d ON d.id = c.doc_id
+                """ + ownerClause + """
                 ORDER BY c.created_at DESC
                 LIMIT 500
-                """);
+                """, params);
         for (Map<String, Object> row : candidates) {
             double score = terms.isEmpty() ? 0 : scoreChunk(row, terms);
             row.put("score", Math.round(score * 100.0) / 100.0);
@@ -148,9 +201,11 @@ public class KnowledgeDocumentService {
             return matched;
         }
 
-        // When the user has uploaded evidence docs but the query is still too narrow,
-        // return recent chunks instead of making GraphRAG look like it has no documents.
-        return candidates.stream().limit(safeLimit).toList();
+        return List.of();
+    }
+
+    private boolean canAccessAllDocs() {
+        return "ADMIN".equalsIgnoreCase(permissionService.currentRole());
     }
 
     private List<String> splitChunks(String content, int chunkSize, int overlap) {

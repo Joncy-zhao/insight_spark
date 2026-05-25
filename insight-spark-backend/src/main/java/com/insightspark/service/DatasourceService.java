@@ -143,6 +143,21 @@ public class DatasourceService {
                 """);
 
         jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS `is_official_table_permission` (
+                  `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+                  `datasource_id` BIGINT NOT NULL,
+                  `table_name` VARCHAR(128) NOT NULL,
+                  `principal_type` VARCHAR(32) NOT NULL,
+                  `principal_id` VARCHAR(128) NOT NULL,
+                  `permission_type` VARCHAR(32) NOT NULL DEFAULT 'READ',
+                  `expire_at` DATETIME NULL,
+                  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  UNIQUE KEY `uk_official_table_permission` (`datasource_id`, `table_name`, `principal_type`, `principal_id`, `permission_type`),
+                  INDEX `idx_official_table_permission_principal` (`principal_type`, `principal_id`, `permission_type`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='official table permission';
+                """);
+
+        jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS `is_federal_relation` (
                   `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
                   `datasource_id` BIGINT NOT NULL,
@@ -255,15 +270,7 @@ public class DatasourceService {
         if (AuthContext.isAdmin()) {
             return;
         }
-        Integer permissionCount = jdbcTemplate.queryForObject("""
-                SELECT COUNT(*)
-                FROM is_official_datasource_permission
-                WHERE datasource_id = ? AND permission_type = 'READ'
-                  AND (expire_at IS NULL OR expire_at > NOW())
-                  AND ((principal_type = 'USER' AND principal_id = ?)
-                    OR (principal_type = 'ROLE' AND principal_id = ?))
-                """, Integer.class, source.datasourceId(), AuthContext.userId(), AuthContext.role());
-        if (permissionCount == null || permissionCount == 0) {
+        if (!hasOfficialTablePermission(source, "READ")) {
             throw new IllegalArgumentException("当前用户无权访问官方数据源：" + sourceKey);
         }
     }
@@ -347,6 +354,16 @@ public class DatasourceService {
         }
     }
 
+    public Map<String, Object> syncKnowledgeGraph() {
+        if (knowledgeGraphService == null) {
+            return Map.of("enabled", false, "message", "知识图谱服务未启用");
+        }
+        Map<String, Object> result = knowledgeGraphService.syncGraph();
+        Map<String, Object> out = new LinkedHashMap<>(result);
+        out.put("enabled", true);
+        return out;
+    }
+
     public List<Map<String, Object>> listSchemaTables(Long datasourceId) {
         return jdbcTemplate.queryForList("""
                 SELECT id, datasource_id AS datasourceId, table_name AS tableName, table_comment AS tableComment,
@@ -398,30 +415,34 @@ public class DatasourceService {
 
     public List<Map<String, Object>> listPermissions(Long datasourceId) {
         return jdbcTemplate.queryForList("""
-                SELECT id, datasource_id AS datasourceId, principal_type AS principalType,
+                SELECT id, datasource_id AS datasourceId, table_name AS tableName, principal_type AS principalType,
                        principal_id AS principalId, permission_type AS permissionType,
                        expire_at AS expireAt, created_at AS createdAt
-                FROM is_official_datasource_permission
+                FROM is_official_table_permission
                 WHERE datasource_id = ?
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, table_name ASC
                 """, datasourceId);
     }
 
     public Map<String, Object> grantPermission(Long datasourceId, Map<String, Object> request) {
+        String tableName = Objects.toString(request.get("tableName"), "").trim();
+        if (tableName.isBlank()) {
+            throw new IllegalArgumentException("请选择要授权的官方表");
+        }
         String principalType = Objects.toString(request.getOrDefault("principalType", "USER")).toUpperCase();
         String principalId = requiredString(request, "principalId");
         String permissionType = Objects.toString(request.getOrDefault("permissionType", "READ")).toUpperCase();
         jdbcTemplate.update("""
-                INSERT INTO is_official_datasource_permission(datasource_id, principal_type, principal_id, permission_type)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO is_official_table_permission(datasource_id, table_name, principal_type, principal_id, permission_type)
+                VALUES (?, ?, ?, ?, ?)
                 ON DUPLICATE KEY UPDATE created_at = CURRENT_TIMESTAMP
-                """, datasourceId, principalType, principalId, permissionType);
-        return Map.of("datasourceId", datasourceId, "principalType", principalType,
+                """, datasourceId, tableName, principalType, principalId, permissionType);
+        return Map.of("datasourceId", datasourceId, "tableName", tableName, "principalType", principalType,
                 "principalId", principalId, "permissionType", permissionType);
     }
 
     public void revokePermission(Long permissionId) {
-        jdbcTemplate.update("DELETE FROM is_official_datasource_permission WHERE id = ?", permissionId);
+        jdbcTemplate.update("DELETE FROM is_official_table_permission WHERE id = ?", permissionId);
     }
 
     public List<Map<String, Object>> listFederalRelations(Long datasourceId) {
@@ -522,8 +543,10 @@ public class DatasourceService {
                 JOIN is_official_schema_table t ON t.datasource_id = d.id
                 WHERE d.status = 'ENABLED'
                   AND (? = 'ADMIN' OR EXISTS (
-                    SELECT 1 FROM is_official_datasource_permission p
-                    WHERE p.datasource_id = d.id AND p.permission_type = 'READ'
+                    SELECT 1 FROM is_official_table_permission p
+                    WHERE p.datasource_id = d.id AND (p.table_name = t.table_name OR p.table_name = '*')
+                      AND p.permission_type = 'READ'
+                      AND (p.expire_at IS NULL OR p.expire_at > NOW())
                       AND ((p.principal_type = 'USER' AND p.principal_id = ?) OR (p.principal_type = 'ROLE' AND p.principal_id = ?))
                   ))
                 ORDER BY d.created_at DESC, t.table_name ASC
@@ -590,7 +613,10 @@ public class DatasourceService {
     }
 
     public Map<String, Object> saveRowPolicy(Long datasourceId, Map<String, Object> request) {
-        String tableName = requiredString(request, "tableName");
+        String tableName = Objects.toString(request.getOrDefault("tableName", "*")).trim();
+        if (tableName.isBlank()) {
+            tableName = "*";
+        }
         String principalType = Objects.toString(request.getOrDefault("principalType", "USER")).toUpperCase();
         String principalId = requiredString(request, "principalId");
         String filterExpression = sanitizeRowPolicy(requiredString(request, "filterExpression"));
@@ -730,7 +756,7 @@ public class DatasourceService {
         List<String> filters = jdbcTemplate.queryForList("""
                 SELECT filter_expression
                 FROM is_official_row_policy
-                WHERE datasource_id = ? AND table_name = ? AND enabled = 1
+                WHERE datasource_id = ? AND (table_name = ? OR table_name = '*') AND enabled = 1
                   AND ((principal_type = 'USER' AND principal_id = ?)
                     OR (principal_type = 'ROLE' AND principal_id = ?))
                 ORDER BY created_at ASC
@@ -1026,6 +1052,19 @@ public class DatasourceService {
             throw new IllegalArgumentException("上传表关联字段不存在：" + fieldName);
         }
         return columns.get(0);
+    }
+
+    private boolean hasOfficialTablePermission(OfficialSource source, String permissionType) {
+        Integer count = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*)
+                FROM is_official_table_permission
+                WHERE datasource_id = ? AND (table_name = ? OR table_name = '*') AND permission_type = ?
+                  AND (expire_at IS NULL OR expire_at > NOW())
+                  AND ((principal_type = 'USER' AND principal_id = ?)
+                    OR (principal_type = 'ROLE' AND principal_id = ?))
+                """, Integer.class, source.datasourceId(), source.tableName(), permissionType,
+                AuthContext.userId(), AuthContext.role());
+        return count != null && count > 0;
     }
 
     private OfficialSource parseSourceKey(String sourceKey) {

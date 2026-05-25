@@ -182,6 +182,11 @@
               </div>
             </div>
             <el-form label-position="top" class="datasource-form">
+              <el-form-item label="授权表">
+                <el-select v-model="datasourcePermissionForm.tableName" class="full-width" placeholder="请选择官方表">
+                  <el-option v-for="item in schemaTables" :key="item.tableName" :label="item.tableComment || item.tableName" :value="item.tableName" />
+                </el-select>
+              </el-form-item>
               <el-form-item label="授权对象类型">
                 <el-select v-model="datasourcePermissionForm.principalType" class="full-width">
                   <el-option label="用户" value="USER" />
@@ -197,6 +202,7 @@
               <el-button @click="loadDatasourcePermissions()">刷新</el-button>
             </div>
             <el-table :data="datasourcePermissions" height="220" empty-text="请选择数据源">
+              <el-table-column prop="tableName" label="授权表" min-width="140" />
               <el-table-column prop="principalType" label="类型" width="90" />
               <el-table-column prop="principalId" label="对象" min-width="140" />
               <el-table-column prop="permissionType" label="权限" width="90" />
@@ -240,7 +246,11 @@
               <el-button @click="loadRowPolicies()">刷新</el-button>
             </div>
             <el-table :data="rowPolicies" height="220" empty-text="暂无行级隔离规则">
-              <el-table-column prop="tableName" label="表名" min-width="130" />
+              <el-table-column label="表名" min-width="130">
+                <template #default="{ row }">
+                  {{ row.tableName === '*' ? '全部表' : row.tableName }}
+                </template>
+              </el-table-column>
               <el-table-column prop="principalType" label="对象类型" width="100" />
               <el-table-column prop="principalId" label="对象" min-width="130" />
               <el-table-column prop="filterExpression" label="过滤条件" min-width="220" show-overflow-tooltip />
@@ -286,6 +296,7 @@
             </el-form>
             <div class="datasource-actions">
               <el-button type="primary" @click="saveNeo4jConfig">保存图谱配置</el-button>
+              <el-button type="success" @click="syncKnowledgeGraph">同步知识图谱</el-button>
               <el-button @click="loadNeo4jConfig">刷新</el-button>
             </div>
           </div>
@@ -477,7 +488,11 @@ const saveRowPolicy = async () => {
     return
   }
   try {
-    await axios.post(`${API_BASE}/api/datasources/${selectedDatasourceId.value}/row-policies`, rowPolicyForm.value).then(unwrap)
+    const payload = {
+      ...rowPolicyForm.value,
+      tableName: String(rowPolicyForm.value.tableName || '').trim() || '*'
+    }
+    await axios.post(`${API_BASE}/api/datasources/${selectedDatasourceId.value}/row-policies`, payload).then(unwrap)
     ElMessage.success('行级规则已保存')
     rowPolicyForm.value.filterExpression = ''
     await loadRowPolicies()
@@ -512,6 +527,17 @@ const saveNeo4jConfig = async () => {
     ElMessage.success('Neo4j 配置已保存')
   } catch (error) {
     ElMessage.error(error.message || '保存 Neo4j 配置失败')
+  }
+}
+
+const syncKnowledgeGraph = async () => {
+  try {
+    const result = unwrap(await axios.post(`${API_BASE}/api/datasources/sync-knowledge-graph`))
+    const nodeCount = result.nodeUpsertCount ?? 0
+    const edgeCount = result.edgeUpsertCount ?? 0
+    ElMessage.success(`知识图谱已同步：${nodeCount} 个节点，${edgeCount} 条关系`)
+  } catch (error) {
+    ElMessage.error(error.message || '同步知识图谱失败')
   }
 }
 

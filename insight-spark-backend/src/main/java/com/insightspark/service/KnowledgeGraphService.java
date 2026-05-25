@@ -151,7 +151,7 @@ public class KnowledgeGraphService {
                         "字段类型：" + field.get("fieldType") + "；敏感：" + field.get("sensitive") + "；" + Objects.toString(field.get("fieldComment"), ""),
                         Boolean.TRUE.equals(field.get("sensitive")) ? 2.0 : 1.0);
                 edgeCount += upsertEdge(tableKey, fieldKey, "HAS_FIELD", 1.0);
-                if (isSensitive(field.get("sensitive"))) {
+                if (truthy(field.get("sensitive"))) {
                     String sensitiveKey = "tag:sensitive";
                     nodeCount += upsertNode(sensitiveKey, "TAG", "敏感字段", "SYSTEM", "sensitive", "需要脱敏或审计关注的字段", 3.0);
                     edgeCount += upsertEdge(fieldKey, sensitiveKey, "MARKED_AS", 2.0);
@@ -177,28 +177,66 @@ public class KnowledgeGraphService {
             edgeCount += upsertEdge(dsKey, tableKey, "HAS_TABLE", 1.0);
             List<Map<String, Object>> fields = jdbcTemplate.queryForList("""
                     SELECT column_name AS columnName, data_type AS dataType, column_comment AS columnComment,
-                           business_name AS businessName, `sensitive`
+                           business_name AS businessName, business_desc AS businessDesc, synonyms,
+                           kg_sync_enabled AS kgSyncEnabled, kg_sync_rule AS kgSyncRule, `sensitive`
                     FROM is_official_schema_field
                     WHERE datasource_id = ? AND table_name = ?
                     """, table.get("datasourceId"), tableName);
             for (Map<String, Object> field : fields) {
+                Object kgSyncEnabled = field.get("kgSyncEnabled");
+                if (kgSyncEnabled != null && !truthy(kgSyncEnabled)) {
+                    continue;
+                }
                 String columnName = Objects.toString(field.get("columnName"), "");
                 String label = Objects.toString(field.get("businessName"), "");
                 if (label.isBlank()) {
                     label = Objects.toString(field.get("columnComment"), columnName);
                 }
+                String content = "字段类型：" + field.get("dataType")
+                        + "；数据库注释：" + Objects.toString(field.get("columnComment"), "")
+                        + "；业务含义：" + Objects.toString(field.get("businessDesc"), "")
+                        + "；同义词：" + Objects.toString(field.get("synonyms"), "")
+                        + "；同步规则：" + Objects.toString(field.get("kgSyncRule"), "")
+                        + "；敏感：" + field.get("sensitive");
                 String fieldKey = tableKey + ":field:" + columnName;
                 nodeCount += upsertNode(fieldKey, "FIELD", label.isBlank() ? columnName : label,
                         "OFFICIAL", datasourceId + "." + tableName + "." + columnName,
-                        "字段类型：" + field.get("dataType") + "；数据库注释：" + Objects.toString(field.get("columnComment"), "") + "；敏感：" + field.get("sensitive"),
-                        isSensitive(field.get("sensitive")) ? 2.0 : 1.0);
+                        content,
+                        truthy(field.get("sensitive")) ? 2.0 : 1.0);
                 edgeCount += upsertEdge(tableKey, fieldKey, "HAS_FIELD", 1.0);
-                if (isSensitive(field.get("sensitive"))) {
+                if (truthy(field.get("sensitive"))) {
                     String sensitiveKey = "tag:sensitive";
                     nodeCount += upsertNode(sensitiveKey, "TAG", "敏感字段", "SYSTEM", "sensitive", "需要脱敏或审计关注的字段", 3.0);
                     edgeCount += upsertEdge(fieldKey, sensitiveKey, "MARKED_AS", 2.0);
                 }
             }
+        }
+
+        List<Map<String, Object>> federalRelations = jdbcTemplate.queryForList("""
+                SELECT datasource_id AS datasourceId, left_table AS leftTable, left_field AS leftField,
+                       right_source_type AS rightSourceType, right_table AS rightTable, right_field AS rightField,
+                       relation_type AS relationType
+                FROM is_federal_relation
+                """);
+        for (Map<String, Object> relation : federalRelations) {
+            String datasourceId = Objects.toString(relation.get("datasourceId"), "");
+            String leftTable = Objects.toString(relation.get("leftTable"), "");
+            String leftField = Objects.toString(relation.get("leftField"), "");
+            String rightTable = Objects.toString(relation.get("rightTable"), "");
+            String rightField = Objects.toString(relation.get("rightField"), "");
+            String relationType = Objects.toString(relation.get("relationType"), "LEFT_JOIN");
+            String relationKey = "federal_relation:" + datasourceId + ":" + leftTable + "." + leftField
+                    + "=" + rightTable + "." + rightField;
+            String officialTableKey = "official_table:" + datasourceId + ":" + leftTable;
+            String uploadTableKey = "upload_table:" + rightTable;
+            String label = leftTable + "." + leftField + " = " + rightTable + "." + rightField;
+            String content = "联邦跨库关联；右侧来源：" + Objects.toString(relation.get("rightSourceType"), "UPLOAD")
+                    + "；关联类型：" + relationType;
+            nodeCount += upsertNode(relationKey, "FEDERAL_RELATION", label, "FEDERAL", datasourceId, content, 2.5);
+            edgeCount += upsertEdge(officialTableKey, relationKey, "FEDERAL_LEFT_TABLE", 1.5);
+            edgeCount += upsertEdge(uploadTableKey, relationKey, "FEDERAL_RIGHT_TABLE", 1.5);
+            edgeCount += upsertEdge(relationKey, officialTableKey, "JOINS_OFFICIAL_TABLE", 1.5);
+            edgeCount += upsertEdge(relationKey, uploadTableKey, "JOINS_UPLOAD_TABLE", 1.5);
         }
 
         Map<String, Integer> metricSync = syncBusinessMetricNodes();
@@ -295,14 +333,14 @@ public class KnowledgeGraphService {
     public Map<String, Object> multiHopSearch(String keyword, String tableName, int depth, int limit) {
         Neo4jRuntimeConfig config = loadNeo4jRuntimeConfig();
         if (!config.enabled()) {
-            return fallbackMultiHopContext(keyword, tableName, "Neo4j disabled, fallback to local MySQL knowledge graph");
+            return emptyNeo4jContext(keyword, tableName, "Neo4j disabled");
         }
         try {
             return neo4jMultiHopSearch(keyword, tableName, depth, limit);
         } catch (Exception e) {
             String error = safeErrorMessage(e);
-            log.warn("Neo4j multi-hop query failed, fallback to local graph: {}", error);
-            return fallbackMultiHopContext(keyword, tableName, error);
+            log.warn("Neo4j multi-hop query failed, strict mode returns empty graph: {}", error);
+            return emptyNeo4jContext(keyword, tableName, error);
         }
     }
 
@@ -382,7 +420,7 @@ public class KnowledgeGraphService {
             return new LinkedHashMap<>(bundle);
         } catch (Exception e) {
             markNeo4jQueryFailure(e);
-            return fallbackMultiHopContext(question, tableName, safeErrorMessage(e));
+            return emptyNeo4jContext(question, tableName, safeErrorMessage(e));
         }
     }
 
@@ -440,47 +478,21 @@ public class KnowledgeGraphService {
         );
     }
 
-    private Map<String, Object> fallbackMultiHopContext(String question, String tableName, String error) {
-        List<Map<String, Object>> nodes = List.of();
-        List<Map<String, Object>> edges = List.of();
-        String fallbackError = Objects.toString(error, "");
-        try {
-            nodes = search(question, 20);
-        } catch (Exception e) {
-            fallbackError = chooseFirstNonBlank(fallbackError, safeErrorMessage(e));
-            log.warn("Local fallback node query failed: {}", safeErrorMessage(e));
-        }
-        try {
-            List<String> nodeKeys = nodes.stream().map(item -> Objects.toString(item.get("nodeKey"), "")).toList();
-            edges = nodeKeys.isEmpty()
-                    ? List.of()
-                    : jdbcTemplate.queryForList("""
-                            SELECT from_key AS fromKey, to_key AS toKey, relation_type AS relationType, weight
-                            FROM is_kg_edge
-                            WHERE from_key IN (%s) OR to_key IN (%s)
-                            ORDER BY weight DESC
-                            LIMIT 80
-                            """.formatted(placeholders(nodeKeys.size()), placeholders(nodeKeys.size())),
-                    doubledArgs(nodeKeys));
-        } catch (Exception e) {
-            fallbackError = chooseFirstNonBlank(fallbackError, safeErrorMessage(e));
-            log.warn("Local fallback edge query failed: {}", safeErrorMessage(e));
-        }
-
-        Map<String, Object> fallback = new LinkedHashMap<>();
-        fallback.put("nodes", nodes);
-        fallback.put("edges", edges);
-        fallback.put("pathText", buildPathText(nodes, edges));
-        fallback.put("ragContext", nodes);
-        fallback.put("depth", 1);
-        fallback.put("neo4jEnabled", loadNeo4jRuntimeConfig().enabled());
-        fallback.put("neo4jFallback", true);
-        fallback.put("neo4jError", fallbackError.isBlank() ? "neo4j unavailable" : fallbackError);
-        fallback.put("fallbackSource", "MYSQL_KG");
-        fallback.put("tableName", Objects.toString(tableName, ""));
-        fallback.put("question", Objects.toString(question, ""));
-        fallback.put("fallbackError", fallbackError);
-        return fallback;
+    private Map<String, Object> emptyNeo4jContext(String question, String tableName, String error) {
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("nodes", List.of());
+        context.put("edges", List.of());
+        context.put("pathText", "");
+        context.put("ragContext", List.of());
+        context.put("depth", 0);
+        context.put("neo4jEnabled", loadNeo4jRuntimeConfig().enabled());
+        context.put("neo4jFallback", false);
+        context.put("neo4jStrict", true);
+        context.put("graphSource", "NEO4J");
+        context.put("neo4jError", Objects.toString(error, ""));
+        context.put("tableName", Objects.toString(tableName, ""));
+        context.put("question", Objects.toString(question, ""));
+        return context;
     }
 
     private Map<String, Object> neo4jMultiHopSearch(String keyword, String tableName, int depth, int limit) throws Exception {
@@ -537,7 +549,9 @@ public class KnowledgeGraphService {
         List<Map<String, Object>> edges = castMapList(row.getOrDefault("edges", List.of()));
         return Map.of("nodes", nodes, "edges", edges, "ragContext", nodes,
                 "pathText", buildPathText(nodes, edges),
-                "depth", safeDepth, "neo4jEnabled", true);
+                "depth", safeDepth, "neo4jEnabled", true,
+                "neo4jFallback", false, "neo4jStrict", true,
+                "graphSource", "NEO4J");
     }
 
     private List<Map<String, Object>> neo4jQueryRows(String cypher, Map<String, Object> params) throws Exception {
@@ -1063,7 +1077,7 @@ public class KnowledgeGraphService {
         return 1;
     }
 
-    private boolean isSensitive(Object value) {
+    private boolean truthy(Object value) {
         if (value == null) {
             return false;
         }

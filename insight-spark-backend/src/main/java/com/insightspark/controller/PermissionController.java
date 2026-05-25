@@ -48,6 +48,16 @@ public class PermissionController {
         return ApiResponse.success(permissionService.listSensitiveFieldPermissions());
     }
 
+    @GetMapping("/row-policies")
+    public ApiResponse<List<Map<String, Object>>> rowPolicies() {
+        return ApiResponse.success(permissionService.listRowPoliciesForCurrentUser());
+    }
+
+    @GetMapping("/compliance-document")
+    public ApiResponse<Map<String, Object>> complianceDocument() {
+        return ApiResponse.success(permissionService.getComplianceDocument());
+    }
+
     @GetMapping("/my-requests")
     public ApiResponse<List<Map<String, Object>>> myRequests() {
         return ApiResponse.success(permissionService.listMyRequests());

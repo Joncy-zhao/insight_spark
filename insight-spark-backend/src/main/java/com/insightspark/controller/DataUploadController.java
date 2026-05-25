@@ -39,7 +39,11 @@ public class DataUploadController {
     }
 
     public ApiResponse<Map<String, Object>> uploadExcel(MultipartFile file) {
-        return uploadExcel(file, null);
+        try {
+            return ApiResponse.success("文件解析入库成功", dataUploadService.processFileWithTask(file));
+        } catch (Exception e) {
+            return ApiResponse.error("文件解析异常，请检查文件格式。错误详情: " + e.getMessage());
+        }
     }
 
     @PostMapping("/upload-batch")
@@ -57,7 +61,12 @@ public class DataUploadController {
     }
 
     public ApiResponse<Map<String, Object>> uploadBatch(MultipartFile[] files, String mergeMode, String joinKey, String modelRequirement) {
-        return uploadBatch(files, mergeMode, joinKey, modelRequirement, null);
+        try {
+            return ApiResponse.success("多文件解析、合并与建模完成",
+                    dataUploadService.processFilesWithTask(Arrays.asList(files), mergeMode, joinKey, modelRequirement));
+        } catch (Exception e) {
+            return ApiResponse.error("批量上传异常: " + e.getMessage());
+        }
     }
 
     @PostMapping("/upload-async")
@@ -71,7 +80,11 @@ public class DataUploadController {
     }
 
     public ApiResponse<Map<String, Object>> uploadExcelAsync(MultipartFile file) {
-        return uploadExcelAsync(file, null);
+        try {
+            return ApiResponse.success("上传任务已创建", dataUploadService.startAsyncProcessFile(file));
+        } catch (Exception e) {
+            return ApiResponse.error("上传任务创建失败: " + e.getMessage());
+        }
     }
 
     @PostMapping("/upload-batch-async")

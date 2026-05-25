@@ -214,14 +214,17 @@
       </el-table>
     </div>
 
-    <div v-if="selectedFieldStats" class="panel">
-      <div class="panel-header">
-        <div>
-          <h2>字段统计：{{ selectedFieldStats.columnName }}</h2>
-          <p>查看字段分布、空值率、重复率和数值异常。</p>
-        </div>
-        <el-button size="small" @click="selectedFieldStats = null">关闭</el-button>
-      </div>
+    <el-dialog
+      v-model="fieldStatsDialogVisible"
+      append-to-body
+      destroy-on-close
+      width="min(920px, 92vw)"
+      class="field-stats-dialog"
+      :title="`字段统计：${selectedFieldStats?.displayName || selectedFieldStats?.sourceFieldName || selectedFieldStats?.columnName || '-'}`"
+      @opened="renderDistributionChart"
+      @closed="closeFieldStatistics"
+    >
+      <p class="field-stats-desc">查看字段分布、空值率、重复率和数值异常。</p>
       <div class="stats-grid">
         <div v-for="item in statisticCards" :key="item.label" class="stat-card">
           <div class="stat-label">{{ item.label }}</div>
@@ -240,7 +243,7 @@
         <div class="section-title">数据分布</div>
         <div ref="distributionChart" class="distribution-chart"></div>
       </div>
-    </div>
+    </el-dialog>
 
     <el-drawer
       v-model="fieldConfigDrawerVisible"
@@ -556,6 +559,7 @@ const selectedRows = ref([])
 const selectedFieldStats = ref(null)
 const fieldDistribution = ref(null)
 const distributionChart = ref(null)
+const fieldStatsDialogVisible = ref(false)
 const batchReplaceDialogVisible = ref(false)
 const transformDialogVisible = ref(false)
 const cleaningApplying = ref(false)
@@ -742,6 +746,7 @@ onMounted(async () => {
 
 watch(selectedTableName, async (tableName) => {
   selectedFieldStats.value = null
+  fieldStatsDialogVisible.value = false
   dataQuality.value = null
   if (tableName) {
     await loadDataQuality()
@@ -1299,12 +1304,24 @@ async function showFieldStatistics(row) {
       getFieldStatistics(selectedTableName.value, row.columnName),
       getFieldDistribution(selectedTableName.value, row.columnName)
     ])
-    selectedFieldStats.value = stats
+    selectedFieldStats.value = {
+      ...stats,
+      displayName: row.displayName || row.sourceFieldName || row.columnName,
+      sourceFieldName: row.sourceFieldName || row.columnName
+    }
     fieldDistribution.value = distribution
-    await nextTick()
-    renderDistributionChart()
+    fieldStatsDialogVisible.value = true
   } catch (error) {
     ElMessage.error(error.message || '字段统计失败')
+  }
+}
+
+function closeFieldStatistics() {
+  selectedFieldStats.value = null
+  fieldDistribution.value = null
+  if (distributionChartInstance) {
+    distributionChartInstance.dispose()
+    distributionChartInstance = null
   }
 }
 
@@ -1324,6 +1341,7 @@ function renderDistributionChart() {
     yAxis: { type: 'value' },
     series: [{ type: 'bar', data: values, itemStyle: { borderRadius: [4, 4, 0, 0], color: '#2f7cf6' } }]
   }, true)
+  distributionChartInstance.resize()
 }
 
 function quickQuery(row) {
@@ -1999,4 +2017,5 @@ async function refreshCurrentTable() {
 .footer-right {
   margin-left: auto;
 }
+
 </style>

@@ -10,10 +10,12 @@ import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 @Service
 public class PermissionService {
@@ -89,6 +91,23 @@ public class PermissionService {
                   UNIQUE KEY `uk_dashboard_permission_user_board_type` (`dashboard_id`, `user_id`, `permission_type`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='公共看板访问授权';
                 """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS `is_official_table_permission` (
+                  `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+                  `datasource_id` BIGINT NOT NULL,
+                  `table_name` VARCHAR(128) NOT NULL,
+                  `principal_type` VARCHAR(32) NOT NULL,
+                  `principal_id` VARCHAR(128) NOT NULL,
+                  `permission_type` VARCHAR(32) NOT NULL DEFAULT 'READ',
+                  `expire_at` DATETIME NULL,
+                  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  UNIQUE KEY `uk_official_table_permission` (`datasource_id`, `table_name`, `principal_type`, `principal_id`, `permission_type`),
+                  INDEX `idx_official_table_permission_principal` (`principal_type`, `principal_id`, `permission_type`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='official table permission';
+                """);
+        initRbacTables();
+        initComplianceDocuments();
+        migrateApprovedOfficialRequests();
     }
 
     public boolean canAccessTable(String tableName) {
@@ -188,7 +207,7 @@ public class PermissionService {
                 "SELECT COUNT(*) FROM is_permission_request WHERE applicant_id = ? AND status = 'PENDING'",
                 Integer.class, currentUserId());
         Integer officialCount = jdbcTemplate.queryForObject("""
-                SELECT COUNT(*) FROM is_official_datasource_permission
+                SELECT COUNT(*) FROM is_official_table_permission
                 WHERE principal_type = 'USER' AND principal_id = ? AND permission_type = 'READ'
                 """, Integer.class, currentUserId());
         Map<String, Object> overview = new LinkedHashMap<>();
@@ -199,6 +218,10 @@ public class PermissionService {
         overview.put("pendingRequestCount", valueOrZero(pendingCount));
         overview.put("officialDatasourceCount", valueOrZero(officialCount));
         overview.put("sensitiveFieldCount", listSensitiveFieldPermissions().size());
+        Map<String, Object> rbacProfile = getRbacProfile();
+        overview.put("rbacProfile", rbacProfile);
+        overview.put("effectiveRoles", rbacProfile.getOrDefault("effectiveRoles", List.of(currentRole())));
+        overview.put("effectivePermissions", rbacProfile.getOrDefault("effectivePermissions", List.of()));
         overview.put("dataScope", AuthContext.isAdmin() ? "管理员可查看全部数据" : "本人上传数据 + 已审批授权数据");
         overview.put("sensitiveRule", "敏感字段按字段标记识别，查询展示默认脱敏。");
         overview.put("roleLevel", AuthContext.isAdmin() ? "L3 管理员" : "L1 普通用户");
@@ -218,6 +241,109 @@ public class PermissionService {
                 "违规访问、转存或传播数据会触发审计追踪，并可能导致账号冻结与内部合规处理。"
         ));
         return overview;
+    }
+
+    public Map<String, Object> getRbacProfile() {
+        List<String> assignedRoles = assignedRolesFor(currentUserId(), currentRole());
+        List<String> effectiveRoles = effectiveRolesFor(assignedRoles);
+        List<Map<String, Object>> roleDetails = effectiveRoles.isEmpty()
+                ? List.of()
+                : jdbcTemplate.queryForList("""
+                        SELECT role_code AS roleCode, role_name AS roleName, parent_role_code AS parentRoleCode,
+                               role_level AS roleLevel, data_scope AS dataScope, description, enabled
+                        FROM is_role
+                        WHERE role_code IN (%s)
+                        ORDER BY role_level DESC, role_code ASC
+                        """.formatted(placeholders(effectiveRoles.size())), effectiveRoles.toArray());
+        List<Map<String, Object>> permissions = effectiveRoles.isEmpty()
+                ? List.of()
+                : jdbcTemplate.queryForList("""
+                        SELECT role_code AS roleCode, permission_code AS permissionCode,
+                               permission_name AS permissionName, permission_type AS permissionType,
+                               resource_scope AS resourceScope
+                        FROM is_role_permission
+                        WHERE role_code IN (%s)
+                        ORDER BY permission_type ASC, permission_code ASC
+                        """.formatted(placeholders(effectiveRoles.size())), effectiveRoles.toArray());
+        return Map.of(
+                "assignedRoles", assignedRoles,
+                "effectiveRoles", effectiveRoles,
+                "roleDetails", roleDetails,
+                "effectivePermissions", permissions,
+                "inheritanceMode", "ROLE_PARENT_CHAIN"
+        );
+    }
+
+    public List<Map<String, Object>> listRowPoliciesForCurrentUser() {
+        List<Map<String, Object>> policies = new ArrayList<>();
+        if (AuthContext.isAdmin()) {
+            policies.add(new LinkedHashMap<>(Map.of(
+                    "sourceType", "GLOBAL",
+                    "tableName", "*",
+                    "displayName", "管理员全局数据范围",
+                    "principalType", "ROLE",
+                    "principalId", "ADMIN",
+                    "filterExpression", "NO_FILTER",
+                    "policyDesc", "管理员角色可查看全部上传数据、官方库数据与审批记录。"
+            )));
+        } else {
+            policies.add(new LinkedHashMap<>(Map.of(
+                    "sourceType", "UPLOAD",
+                    "tableName", "is_data_table",
+                    "displayName", "本人上传数据表",
+                    "principalType", "USER",
+                    "principalId", currentUserId(),
+                    "filterExpression", "owner_id = '" + currentUserId() + "'",
+                    "policyDesc", "普通用户只能直接访问 owner_id 等于当前用户的数据表；他人上传表必须走授权记录。"
+            )));
+            policies.add(new LinkedHashMap<>(Map.of(
+                    "sourceType", "UPLOAD_GRANT",
+                    "tableName", "is_data_permission",
+                    "displayName", "他人上传表授权",
+                    "principalType", "USER",
+                    "principalId", currentUserId(),
+                    "filterExpression", "is_data_permission.user_id = '" + currentUserId() + "' AND expire_at > NOW()",
+                    "policyDesc", "审批通过后才允许查看或编辑授权范围内的数据表。"
+            )));
+        }
+        if (tableExists("is_official_row_policy")) {
+            List<String> effectiveRoles = effectiveRolesFor(assignedRolesFor(currentUserId(), currentRole()));
+            String roleIn = placeholders(Math.max(1, effectiveRoles.size()));
+            List<Object> args = new ArrayList<>();
+            args.add(currentRole());
+            args.add(currentUserId());
+            args.addAll(effectiveRoles.isEmpty() ? List.of(currentRole()) : effectiveRoles);
+            policies.addAll(jdbcTemplate.queryForList("""
+                    SELECT 'OFFICIAL' AS sourceType,
+                           CONCAT('official:', p.datasource_id, ':', p.table_name) AS tableName,
+                           CONCAT(COALESCE(d.name, 'official'), ' / ', COALESCE(NULLIF(t.table_comment, ''), p.table_name)) AS displayName,
+                           p.principal_type AS principalType, p.principal_id AS principalId,
+                           p.filter_expression AS filterExpression,
+                           CASE WHEN p.enabled = 1 THEN 'ENABLED' ELSE 'DISABLED' END AS status,
+                           '官方库行级策略会在查询 SQL 上追加过滤条件。' AS policyDesc,
+                           p.created_at AS createdAt
+                    FROM is_official_row_policy p
+                    LEFT JOIN is_official_datasource d ON d.id = p.datasource_id
+                    LEFT JOIN is_official_schema_table t ON t.datasource_id = p.datasource_id AND t.table_name = p.table_name
+                    WHERE (? = 'ADMIN' OR (p.enabled = 1 AND ((p.principal_type = 'USER' AND p.principal_id = ?)
+                       OR (p.principal_type = 'ROLE' AND p.principal_id IN (%s)))))
+                    ORDER BY p.created_at DESC
+                    """.formatted(roleIn), args.toArray()));
+        }
+        return policies;
+    }
+
+    public Map<String, Object> getComplianceDocument() {
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT title, version, content, updated_by AS updatedBy, updated_at AS updatedAt
+                FROM is_compliance_document
+                WHERE doc_key = 'DATA_SECURITY'
+                LIMIT 1
+                """);
+        if (rows.isEmpty()) {
+            return Map.of("title", "企业数据安全合规文档", "version", "v1.0", "content", "");
+        }
+        return rows.get(0);
     }
 
     public Map<String, Object> submitRequest(Map<String, Object> request) {
@@ -314,11 +440,12 @@ public class PermissionService {
     }
 
     private void grantOfficialDatasourcePermission(String tableName, Object applicantId, String permissionType, Object expireAt) {
+        String physicalTableName = parseOfficialTableName(tableName);
         jdbcTemplate.update("""
-                INSERT INTO is_official_datasource_permission(datasource_id, principal_type, principal_id, permission_type, expire_at)
-                VALUES (?, 'USER', ?, ?, ?)
+                INSERT INTO is_official_table_permission(datasource_id, table_name, principal_type, principal_id, permission_type, expire_at)
+                VALUES (?, ?, 'USER', ?, ?, ?)
                 ON DUPLICATE KEY UPDATE expire_at = VALUES(expire_at), created_at = CURRENT_TIMESTAMP
-                """, parseOfficialDatasourceId(tableName), applicantId, permissionType, expireAt);
+                """, parseOfficialDatasourceId(tableName), physicalTableName, applicantId, permissionType, expireAt);
     }
 
     private void grantDashboardPermission(String tableName, Object applicantId, String permissionType, Object expireAt) {
@@ -338,52 +465,61 @@ public class PermissionService {
     }
 
     public List<Map<String, Object>> listAccessibleOfficialTables() {
-        return jdbcTemplate.queryForList("""
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
                 SELECT CONCAT('official:', d.id, ':', t.table_name) AS tableName,
                        CONCAT(d.name, ' / ', COALESCE(NULLIF(t.table_comment, ''), t.table_name)) AS displayName,
                        d.name AS datasourceName, d.id AS datasourceId, t.table_name AS physicalTableName,
+                       t.table_comment AS tableComment,
                        COALESCE(t.table_rows, 0) AS rowCount,
                        (SELECT COUNT(*) FROM is_official_schema_field f WHERE f.datasource_id = d.id AND f.table_name = t.table_name) AS fieldCount,
                        'OFFICIAL' AS sourceType, p.created_at AS grantedAt, p.expire_at AS expireAt,
                        CASE WHEN EXISTS (
-                         SELECT 1 FROM is_official_datasource_permission pe
-                         WHERE pe.datasource_id = d.id AND pe.permission_type = 'EDIT'
+                         SELECT 1 FROM is_official_table_permission pe
+                         WHERE pe.datasource_id = d.id AND (pe.table_name = t.table_name OR pe.table_name = '*')
+                           AND pe.permission_type = 'EDIT'
                            AND (pe.expire_at IS NULL OR pe.expire_at > NOW())
                            AND ((pe.principal_type = 'USER' AND pe.principal_id = ?) OR (pe.principal_type = 'ROLE' AND pe.principal_id = ?))
                        ) THEN 'VIEW,EDIT' ELSE 'VIEW' END AS permissionScope
                 FROM is_official_datasource d
                 JOIN is_official_schema_table t ON t.datasource_id = d.id
-                JOIN is_official_datasource_permission p ON p.datasource_id = d.id
+                JOIN is_official_table_permission p ON p.datasource_id = d.id AND (p.table_name = t.table_name OR p.table_name = '*')
                 WHERE d.status = 'ENABLED' AND p.permission_type = 'READ'
                   AND (p.expire_at IS NULL OR p.expire_at > NOW())
                   AND ((p.principal_type = 'USER' AND p.principal_id = ?) OR (p.principal_type = 'ROLE' AND p.principal_id = ?))
                 ORDER BY d.created_at DESC, t.table_name ASC
                 """, currentUserId(), currentRole(), currentUserId(), currentRole());
+        normalizeOfficialDisplayNames(rows);
+        return rows;
     }
 
     public List<Map<String, Object>> listRequestableOfficialTables() {
-        return jdbcTemplate.queryForList("""
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
                 SELECT CONCAT('official:', d.id, ':', t.table_name) AS tableName,
                        CONCAT(d.name, ' / ', COALESCE(NULLIF(t.table_comment, ''), t.table_name)) AS displayName,
-                       d.name AS ownerId, COALESCE(t.table_rows, 0) AS rowCount,
+                       d.name AS ownerId, d.name AS datasourceName, t.table_name AS physicalTableName,
+                       t.table_comment AS tableComment, COALESCE(t.table_rows, 0) AS rowCount,
                        (SELECT COUNT(*) FROM is_official_schema_field f WHERE f.datasource_id = d.id AND f.table_name = t.table_name) AS fieldCount,
                        'OFFICIAL' AS sourceType, 'OFFICIAL' AS resourceType,
                        CASE WHEN pr.id IS NULL THEN 'READ' ELSE 'EDIT' END AS suggestedPermissionType,
                        t.created_at AS createdAt
                 FROM is_official_datasource d
                 JOIN is_official_schema_table t ON t.datasource_id = d.id
-                LEFT JOIN is_official_datasource_permission pr ON pr.datasource_id = d.id AND pr.permission_type = 'READ'
+                LEFT JOIN is_official_table_permission pr ON pr.datasource_id = d.id AND (pr.table_name = t.table_name OR pr.table_name = '*')
+                  AND pr.permission_type = 'READ'
                   AND (pr.expire_at IS NULL OR pr.expire_at > NOW())
                   AND ((pr.principal_type = 'USER' AND pr.principal_id = ?) OR (pr.principal_type = 'ROLE' AND pr.principal_id = ?))
                 WHERE d.status = 'ENABLED'
                   AND NOT EXISTS (
-                    SELECT 1 FROM is_official_datasource_permission p
-                    WHERE p.datasource_id = d.id AND p.permission_type = 'EDIT'
+                    SELECT 1 FROM is_official_table_permission p
+                    WHERE p.datasource_id = d.id AND (p.table_name = t.table_name OR p.table_name = '*')
+                      AND p.permission_type = 'EDIT'
                       AND (p.expire_at IS NULL OR p.expire_at > NOW())
                       AND ((p.principal_type = 'USER' AND p.principal_id = ?) OR (p.principal_type = 'ROLE' AND p.principal_id = ?))
                   )
                 ORDER BY d.created_at DESC, t.table_name ASC
                 """, currentUserId(), currentRole(), currentUserId(), currentRole());
+        normalizeOfficialDisplayNames(rows);
+        return rows;
     }
 
     public List<Map<String, Object>> listRequestablePublicDashboards() {
@@ -429,7 +565,7 @@ public class PermissionService {
                        '已授权访问，查询结果按脱敏规则展示' AS reason
                 FROM is_official_schema_field s
                 JOIN is_official_datasource d ON d.id = s.datasource_id
-                JOIN is_official_datasource_permission p ON p.datasource_id = d.id
+                JOIN is_official_table_permission p ON p.datasource_id = d.id AND (p.table_name = s.table_name OR p.table_name = '*')
                 WHERE s.sensitive = 1 AND d.status = 'ENABLED' AND p.permission_type = 'READ'
                   AND (p.expire_at IS NULL OR p.expire_at > NOW())
                   AND ((p.principal_type = 'USER' AND p.principal_id = ?) OR (p.principal_type = 'ROLE' AND p.principal_id = ?))
@@ -459,8 +595,9 @@ public class PermissionService {
                     JOIN is_official_datasource d ON d.id = s.datasource_id
                     WHERE s.sensitive = 1 AND d.status = 'ENABLED'
                       AND NOT EXISTS (
-                        SELECT 1 FROM is_official_datasource_permission p
-                        WHERE p.datasource_id = d.id AND p.permission_type = 'READ'
+                        SELECT 1 FROM is_official_table_permission p
+                        WHERE p.datasource_id = d.id AND (p.table_name = s.table_name OR p.table_name = '*')
+                          AND p.permission_type = 'READ'
                           AND (p.expire_at IS NULL OR p.expire_at > NOW())
                           AND ((p.principal_type = 'USER' AND p.principal_id = ?) OR (p.principal_type = 'ROLE' AND p.principal_id = ?))
                       )
@@ -535,6 +672,163 @@ public class PermissionService {
         return rows.isEmpty() ? Map.of() : rows.get(0);
     }
 
+    private void initRbacTables() {
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS `is_role` (
+                  `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+                  `role_code` VARCHAR(64) NOT NULL UNIQUE,
+                  `role_name` VARCHAR(128) NOT NULL,
+                  `parent_role_code` VARCHAR(64) NULL,
+                  `role_level` INT NOT NULL DEFAULT 1,
+                  `data_scope` VARCHAR(32) NOT NULL DEFAULT 'SELF',
+                  `description` VARCHAR(1000) NULL,
+                  `enabled` TINYINT(1) NOT NULL DEFAULT 1,
+                  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                  INDEX `idx_is_role_parent` (`parent_role_code`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='RBAC role definition';
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS `is_user_role` (
+                  `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+                  `user_id` VARCHAR(64) NOT NULL,
+                  `role_code` VARCHAR(64) NOT NULL,
+                  `source` VARCHAR(32) NOT NULL DEFAULT 'SYSTEM',
+                  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  UNIQUE KEY `uk_is_user_role` (`user_id`, `role_code`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='RBAC user role binding';
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS `is_role_permission` (
+                  `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+                  `role_code` VARCHAR(64) NOT NULL,
+                  `permission_code` VARCHAR(128) NOT NULL,
+                  `permission_name` VARCHAR(255) NOT NULL,
+                  `permission_type` VARCHAR(32) NOT NULL,
+                  `resource_scope` VARCHAR(255) NULL,
+                  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  UNIQUE KEY `uk_is_role_permission` (`role_code`, `permission_code`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='RBAC role permission binding';
+                """);
+        seedRole("USER", "普通用户", null, 1, "SELF", "本人上传数据、已授权官方数据与公共看板申请能力");
+        seedRole("ADMIN", "管理员", "USER", 3, "ALL", "继承普通用户权限，并拥有全局配置、审批和治理权限");
+        bindExistingUserRoles();
+        seedRolePermission("USER", "menu:user-workbench", "用户工作台", "MENU", "USER");
+        seedRolePermission("USER", "menu:chat-analysis", "对话分析", "MENU", "USER");
+        seedRolePermission("USER", "menu:data-upload", "数据上传", "MENU", "USER");
+        seedRolePermission("USER", "menu:dashboard", "我的看板", "MENU", "USER");
+        seedRolePermission("USER", "menu:diagnosis", "智能诊断", "MENU", "USER");
+        seedRolePermission("USER", "menu:permission-center", "数据权限中心", "MENU", "USER");
+        seedRolePermission("USER", "data:self-upload", "本人上传数据", "DATA", "SELF");
+        seedRolePermission("USER", "data:granted-official-table", "已授权官方库表", "DATA", "GRANTED_TABLE");
+        seedRolePermission("ADMIN", "menu:permission-approval", "权限审批", "MENU", "ADMIN");
+        seedRolePermission("ADMIN", "menu:datasource-admin", "数据源管理", "MENU", "ADMIN");
+        seedRolePermission("ADMIN", "menu:sql-audit", "SQL 审计", "MENU", "ADMIN");
+        seedRolePermission("ADMIN", "data:all", "全量数据", "DATA", "ALL");
+        seedRolePermission("ADMIN", "operation:rbac-manage", "用户与角色权限管理", "OPERATION", "ADMIN");
+    }
+
+    private void initComplianceDocuments() {
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS `is_compliance_document` (
+                  `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+                  `doc_key` VARCHAR(64) NOT NULL UNIQUE,
+                  `title` VARCHAR(255) NOT NULL,
+                  `version` VARCHAR(32) NOT NULL DEFAULT 'v1.0',
+                  `content` LONGTEXT NOT NULL,
+                  `updated_by` VARCHAR(64) NULL,
+                  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='enterprise compliance document';
+                """);
+        Integer count = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM is_compliance_document WHERE doc_key = 'DATA_SECURITY'",
+                Integer.class);
+        if (count == null || count == 0) {
+            jdbcTemplate.update("""
+                    INSERT INTO is_compliance_document(doc_key, title, version, content, updated_by)
+                    VALUES ('DATA_SECURITY', '企业数据安全合规文档', 'v1.0', ?, 'system')
+                    """, """
+                    1. 数据仅可用于申请时声明的业务目的，禁止转发给未授权人员、群组或外部系统。
+                    2. 手机号、身份证、金额、订单号等敏感字段必须按系统脱敏规则展示和导出。
+                    3. 官方库访问以表级授权为最小边界；未授权表不可用于对话查询、预览或导出。
+                    4. 普通用户只能访问本人上传数据和审批通过的数据；管理员操作必须保留审计痕迹。
+                    5. 违规访问、复制、截图传播或绕过审批使用数据，将触发账号冻结和内部合规处理。
+                    """);
+        }
+    }
+
+    private void seedRole(String code, String name, String parentCode, int level, String dataScope, String description) {
+        jdbcTemplate.update("""
+                INSERT INTO is_role(role_code, role_name, parent_role_code, role_level, data_scope, description, enabled)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+                ON DUPLICATE KEY UPDATE role_name = VALUES(role_name), parent_role_code = VALUES(parent_role_code),
+                    role_level = VALUES(role_level), data_scope = VALUES(data_scope), description = VALUES(description), enabled = 1
+                """, code, name, parentCode, level, dataScope, description);
+    }
+
+    private void seedRolePermission(String roleCode, String permissionCode, String permissionName, String permissionType, String resourceScope) {
+        jdbcTemplate.update("""
+                INSERT INTO is_role_permission(role_code, permission_code, permission_name, permission_type, resource_scope)
+                VALUES (?, ?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE permission_name = VALUES(permission_name),
+                    permission_type = VALUES(permission_type), resource_scope = VALUES(resource_scope)
+                """, roleCode, permissionCode, permissionName, permissionType, resourceScope);
+    }
+
+    private void bindExistingUserRoles() {
+        if (!tableExists("is_user")) {
+            return;
+        }
+        jdbcTemplate.update("""
+                INSERT IGNORE INTO is_user_role(user_id, role_code, source)
+                SELECT user_id, role, 'LEGACY_ROLE_COLUMN'
+                FROM is_user
+                WHERE role IS NOT NULL AND role <> ''
+                """);
+    }
+
+    private void migrateApprovedOfficialRequests() {
+        if (!tableExists("is_permission_request") || !tableExists("is_official_schema_table")) {
+            return;
+        }
+        jdbcTemplate.update("""
+                INSERT INTO is_official_table_permission(datasource_id, table_name, principal_type, principal_id,
+                                                         permission_type, expire_at, created_at)
+                SELECT CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(r.table_name, ':', 2), ':', -1) AS UNSIGNED),
+                       SUBSTRING_INDEX(r.table_name, ':', -1),
+                       'USER',
+                       r.applicant_id,
+                       'READ',
+                       r.expire_at,
+                       COALESCE(r.reviewed_at, r.created_at)
+                FROM is_permission_request r
+                JOIN is_official_schema_table t
+                  ON t.datasource_id = CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(r.table_name, ':', 2), ':', -1) AS UNSIGNED)
+                 AND t.table_name = SUBSTRING_INDEX(r.table_name, ':', -1)
+                WHERE r.resource_type = 'OFFICIAL' AND r.status = 'APPROVED'
+                  AND r.table_name LIKE 'official:%:%'
+                ON DUPLICATE KEY UPDATE expire_at = VALUES(expire_at), created_at = VALUES(created_at)
+                """);
+        jdbcTemplate.update("""
+                INSERT INTO is_official_table_permission(datasource_id, table_name, principal_type, principal_id,
+                                                         permission_type, expire_at, created_at)
+                SELECT CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(r.table_name, ':', 2), ':', -1) AS UNSIGNED),
+                       SUBSTRING_INDEX(r.table_name, ':', -1),
+                       'USER',
+                       r.applicant_id,
+                       'EDIT',
+                       r.expire_at,
+                       COALESCE(r.reviewed_at, r.created_at)
+                FROM is_permission_request r
+                JOIN is_official_schema_table t
+                  ON t.datasource_id = CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(r.table_name, ':', 2), ':', -1) AS UNSIGNED)
+                 AND t.table_name = SUBSTRING_INDEX(r.table_name, ':', -1)
+                WHERE r.resource_type = 'OFFICIAL' AND r.status = 'APPROVED' AND r.permission_type = 'EDIT'
+                  AND r.table_name LIKE 'official:%:%'
+                ON DUPLICATE KEY UPDATE expire_at = VALUES(expire_at), created_at = VALUES(created_at)
+                """);
+    }
+
     private Integer officialTableCount(String sourceKey) {
         String[] parts = sourceKey.split(":", 3);
         if (parts.length != 3) {
@@ -555,6 +849,14 @@ public class PermissionService {
         return Long.parseLong(parts[1]);
     }
 
+    private String parseOfficialTableName(String sourceKey) {
+        String[] parts = sourceKey.split(":", 3);
+        if (parts.length != 3 || parts[2].isBlank()) {
+            throw new IllegalArgumentException("无效的官方数据表标识：" + sourceKey);
+        }
+        return parts[2];
+    }
+
     private Long parseDashboardId(String sourceKey) {
         String[] parts = sourceKey.split(":", 2);
         if (parts.length != 2) {
@@ -567,12 +869,12 @@ public class PermissionService {
         List<Map<String, Object>> rows;
         if ("OFFICIAL".equals(resourceType)) {
             rows = jdbcTemplate.queryForList("""
-                    SELECT CONCAT(d.name, ' / ', COALESCE(NULLIF(t.table_comment, ''), t.table_name)) AS displayName
+                    SELECT d.name AS datasourceName, t.table_name AS physicalTableName, t.table_comment AS tableComment
                     FROM is_official_datasource d
                     JOIN is_official_schema_table t ON t.datasource_id = d.id
                     WHERE d.id = ? AND t.table_name = ? AND d.status = 'ENABLED'
                     LIMIT 1
-                    """, parseOfficialDatasourceId(tableName), tableName.split(":", 3)[2]);
+                    """, parseOfficialDatasourceId(tableName), parseOfficialTableName(tableName));
         } else if ("DASHBOARD".equals(resourceType)) {
             rows = jdbcTemplate.queryForList("""
                     SELECT name AS displayName FROM is_dashboard
@@ -589,17 +891,60 @@ public class PermissionService {
         if (rows.isEmpty()) {
             throw new IllegalArgumentException("申请资源不存在或不可申请");
         }
+        if ("OFFICIAL".equals(resourceType)) {
+            Map<String, Object> row = rows.get(0);
+            return officialDisplayName(
+                    Objects.toString(row.get("datasourceName"), ""),
+                    Objects.toString(row.get("physicalTableName"), tableName),
+                    Objects.toString(row.get("tableComment"), "")
+            );
+        }
         return Objects.toString(rows.get(0).get("displayName"), tableName);
+    }
+
+    private void normalizeOfficialDisplayNames(List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            row.put("displayName", officialDisplayName(
+                    Objects.toString(row.get("datasourceName"), Objects.toString(row.get("ownerId"), "")),
+                    Objects.toString(row.get("physicalTableName"), ""),
+                    Objects.toString(row.get("tableComment"), "")
+            ));
+        }
+    }
+
+    private String officialDisplayName(String datasourceName, String tableName, String tableComment) {
+        String label = usableText(tableComment) ? tableComment.trim() : tableName;
+        if (datasourceName == null || datasourceName.isBlank()) {
+            return label;
+        }
+        return datasourceName + " / " + label;
+    }
+
+    private boolean usableText(String value) {
+        String text = Objects.toString(value, "").trim();
+        if (text.isBlank()) {
+            return false;
+        }
+        return !looksMojibake(text);
+    }
+
+    private boolean looksMojibake(String text) {
+        String markers = "锛銆鐨绋鍙鎴鎵嬈冨簱鏉冮檺瑙ｆ瀽涓婁紶";
+        long hits = text.chars()
+                .filter(ch -> markers.indexOf(ch) >= 0)
+                .count();
+        return hits >= 2 || text.contains("�");
     }
 
     private boolean hasOfficialDatasourcePermission(String tableName, String permissionType) {
         Long datasourceId = parseOfficialDatasourceId(tableName);
+        String physicalTableName = parseOfficialTableName(tableName);
         Integer count = jdbcTemplate.queryForObject("""
-                SELECT COUNT(*) FROM is_official_datasource_permission
-                WHERE datasource_id = ? AND permission_type = ?
+                SELECT COUNT(*) FROM is_official_table_permission
+                WHERE datasource_id = ? AND (table_name = ? OR table_name = '*') AND permission_type = ?
                   AND (expire_at IS NULL OR expire_at > NOW())
                   AND ((principal_type = 'USER' AND principal_id = ?) OR (principal_type = 'ROLE' AND principal_id = ?))
-                """, Integer.class, datasourceId, permissionType, currentUserId(), currentRole());
+                """, Integer.class, datasourceId, physicalTableName, permissionType, currentUserId(), currentRole());
         return count != null && count > 0;
     }
 
@@ -610,6 +955,63 @@ public class PermissionService {
                   AND (expire_at IS NULL OR expire_at > NOW())
                 """, Integer.class, tableName, currentUserId(), permissionType);
         return count != null && count > 0;
+    }
+
+    private List<String> assignedRolesFor(String userId, String fallbackRole) {
+        LinkedHashSet<String> roles = new LinkedHashSet<>();
+        if (tableExists("is_user_role")) {
+            jdbcTemplate.queryForList("""
+                    SELECT role_code AS roleCode
+                    FROM is_user_role
+                    WHERE user_id = ?
+                    ORDER BY created_at ASC
+                    """, userId).forEach(row -> {
+                String role = Objects.toString(row.get("roleCode"), "").trim();
+                if (!role.isBlank()) {
+                    roles.add(role);
+                }
+            });
+        }
+        String fallback = Objects.toString(fallbackRole, "").trim();
+        if (!fallback.isBlank()) {
+            roles.add(fallback);
+        }
+        if (roles.isEmpty()) {
+            roles.add("USER");
+        }
+        return new ArrayList<>(roles);
+    }
+
+    private List<String> effectiveRolesFor(List<String> assignedRoles) {
+        LinkedHashSet<String> resolved = new LinkedHashSet<>();
+        for (String role : assignedRoles) {
+            collectRoleWithParents(role, resolved, new LinkedHashSet<>());
+        }
+        return new ArrayList<>(resolved);
+    }
+
+    private void collectRoleWithParents(String roleCode, Set<String> resolved, Set<String> visiting) {
+        String role = Objects.toString(roleCode, "").trim();
+        if (role.isBlank() || resolved.contains(role) || visiting.contains(role)) {
+            return;
+        }
+        visiting.add(role);
+        resolved.add(role);
+        if (tableExists("is_role")) {
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                    SELECT parent_role_code AS parentRoleCode
+                    FROM is_role
+                    WHERE role_code = ? AND enabled = 1
+                    LIMIT 1
+                    """, role);
+            if (!rows.isEmpty()) {
+                collectRoleWithParents(Objects.toString(rows.get(0).get("parentRoleCode"), ""), resolved, visiting);
+            }
+        }
+    }
+
+    private String placeholders(int count) {
+        return String.join(",", java.util.Collections.nCopies(Math.max(1, count), "?"));
     }
 
     private boolean hasDashboardPermission(String tableName, String permissionType) {
@@ -700,6 +1102,14 @@ public class PermissionService {
         if (columns.isEmpty()) {
             jdbcTemplate.execute("ALTER TABLE `" + tableName + "` ADD COLUMN `" + columnName + "` " + definition);
         }
+    }
+
+    private boolean tableExists(String tableName) {
+        Integer count = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM information_schema.tables
+                WHERE table_schema = DATABASE() AND table_name = ?
+                """, Integer.class, tableName);
+        return count != null && count > 0;
     }
 
     private int valueOrZero(Integer value) {

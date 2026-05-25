@@ -173,4 +173,13 @@ public class DatasourceController {
             return ApiResponse.badRequest(e.getMessage());
         }
     }
+
+    @PostMapping("/sync-knowledge-graph")
+    public ApiResponse<Map<String, Object>> syncKnowledgeGraph() {
+        try {
+            return ApiResponse.success("知识图谱同步完成", datasourceService.syncKnowledgeGraph());
+        } catch (Exception e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
 }

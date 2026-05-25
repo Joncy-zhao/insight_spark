@@ -52,4 +52,13 @@ public class KnowledgeDocumentController {
     public ApiResponse<Map<String, Object>> index(@PathVariable Long id) {
         return ApiResponse.success(knowledgeDocumentService.index(id));
     }
+
+    @PostMapping("/{id}/delete")
+    public ApiResponse<Map<String, Object>> delete(@PathVariable Long id) {
+        try {
+            return ApiResponse.success("知识文档已删除", knowledgeDocumentService.delete(id));
+        } catch (Exception e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
 }

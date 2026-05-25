@@ -294,6 +294,8 @@ const accessibleTables = ref([])
 const accessibleOfficialTables = ref([])
 const requestableTables = ref([])
 const sensitiveFieldPermissions = ref([])
+const rowPolicyDetails = ref([])
+const complianceDocument = ref({})
 const myPermissionRequests = ref([])
 const adminPermissionRequests = ref([])
 const adminRequestStatus = ref('PENDING')
@@ -324,7 +326,7 @@ const datasourceForm = ref({
   kgSyncRule: ''
 })
 const datasourcePermissions = ref([])
-const datasourcePermissionForm = ref({ principalType: 'USER', principalId: 'user', permissionType: 'READ' })
+const datasourcePermissionForm = ref({ tableName: '', principalType: 'USER', principalId: 'user', permissionType: 'READ' })
 const federalRelations = ref([])
 const federalForm = ref({ leftTable: '', leftField: '', rightSourceType: 'UPLOAD', rightTable: '', rightField: '', relationType: 'LEFT_JOIN' })
 const officialDatasources = ref([])
@@ -1398,6 +1400,8 @@ const loadPermissionCenter = async () => {
   myPermissionRequests.value = unwrap(myRequestsRes)
   accessibleOfficialTables.value = unwrap(await axios.get(`${API_BASE}/api/permission/accessible-official-tables`))
   sensitiveFieldPermissions.value = unwrap(await axios.get(`${API_BASE}/api/permission/sensitive-fields`))
+  rowPolicyDetails.value = unwrap(await axios.get(`${API_BASE}/api/permission/row-policies`))
+  complianceDocument.value = unwrap(await axios.get(`${API_BASE}/api/permission/compliance-document`))
   if (isAdminUser.value) {
     await loadAdminPermissionRequests()
   } else {
@@ -1552,6 +1556,7 @@ const createDatasource = async () => {
 const selectDatasource = async (row) => {
   selectedDatasourceId.value = row.id
   schemaFields.value = []
+  datasourcePermissionForm.value.tableName = ''
   await Promise.all([loadSchemaTables(row.id), loadDatasourcePermissions(row.id), loadFederalRelations(row.id)])
 }
 
@@ -1602,6 +1607,7 @@ const loadDatasourcePermissions = async (datasourceId = selectedDatasourceId.val
 
 const grantDatasourcePermission = async () => {
   if (!selectedDatasourceId.value) return ElMessage.warning('请先选择数据源')
+  if (!datasourcePermissionForm.value.tableName) return ElMessage.warning('请选择要授权的官方表')
   await axios.post(`${API_BASE}/api/datasources/${selectedDatasourceId.value}/permissions`, datasourcePermissionForm.value).then(unwrap)
   ElMessage.success('数据源授权已保存')
   await loadDatasourcePermissions()
@@ -1833,7 +1839,7 @@ const startDiagnosisProgress = () => {
       diagnosisProgress.value = {
         percentage: 35,
         step: '文档扫描',
-        logs: [...diagnosisProgress.value.logs, { step: 2, title: '文档扫描', detail: '正在检索企业内部文档、行业研报与历史证据。' }]
+        logs: [...diagnosisProgress.value.logs, { step: 2, title: '知识证据检查', detail: '正在检查当前用户可用的知识文档、行业研报与历史证据。' }]
       }
     }
   }, 350)
@@ -1868,8 +1874,8 @@ const startDiagnosisProgressV2 = (context = {}) => {
     if (diagnosisLoading.value) {
       diagnosisProgress.value = {
         percentage: 35,
-        step: '文档扫描',
-        logs: [...diagnosisProgress.value.logs, { step: 2, title: '文档扫描', status: 'running', detail: '正在检索企业内部文档、行业研报与历史诊断证据。' }]
+        step: '知识证据检查',
+        logs: [...diagnosisProgress.value.logs, { step: 2, title: '知识证据检查', status: 'running', detail: '正在检查当前用户可用的知识文档、行业研报与历史诊断证据。' }]
       }
     }
   }, 350)
@@ -4123,6 +4129,12 @@ const indexKnowledgeDoc = async (doc) => {
   await loadKnowledgeDocs()
 }
 
+const deleteKnowledgeDoc = async (doc) => {
+  await axios.post(`${API_BASE}/api/knowledge/docs/${doc.id}/delete`).then(unwrap)
+  ElMessage.success('知识文档已删除')
+  await loadKnowledgeDocs()
+}
+
 const riskTagType = (riskLevel) => {
   if (riskLevel === 'SAFE') return 'success'
   if (riskLevel === 'WARN') return 'warning'
@@ -4417,6 +4429,8 @@ provide('workbench', {
   accessibleOfficialTables,
   requestableTables,
   sensitiveFieldPermissions,
+  rowPolicyDetails,
+  complianceDocument,
   myPermissionRequests,
   adminPermissionRequests,
   adminRequestStatus,
@@ -4613,6 +4627,7 @@ provide('workbench', {
   loadKnowledgeDocs,
   uploadKnowledgeDoc,
   indexKnowledgeDoc,
+  deleteKnowledgeDoc,
   riskTagType,
   statusTagType,
   renderChart,
