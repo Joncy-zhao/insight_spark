@@ -88,13 +88,18 @@
                   {{ chatContentMode === 'messages' ? currentChatSessionSubtitle : '查看、切换和管理已有对话' }}
                 </div>
               </div>
-              <el-tag
-                  v-if="chatContentMode === 'messages' && currentChatSession?.status === 'ARCHIVED'"
-                  size="small"
-                  effect="plain"
-              >
-                已归档
-              </el-tag>
+              <div class="chat-thread-actions">
+                <el-button size="small" plain class="chat-thread-history-btn" @click="openHistoryDrawer">
+                  历史产物
+                </el-button>
+                <el-tag
+                    v-if="chatContentMode === 'messages' && currentChatSession?.status === 'ARCHIVED'"
+                    size="small"
+                    effect="plain"
+                >
+                  已归档
+                </el-tag>
+              </div>
             </div>
 
             <template v-if="chatContentMode === 'sessions'">
@@ -183,6 +188,18 @@
                 <div v-for="(msg, index) in messages" :key="index" :class="['message-wrapper', msg.role]">
                   <div class="avatar">{{ msg.role === 'system' ? '🤖' : '👤' }}</div>
                   <div class="msg-content">
+                    <div v-if="msg.isFollowUp && msg.followUpMeta" class="message-followup-ref">
+                      <div class="message-followup-ref__label">
+                        <span class="message-followup-ref__dot"></span>
+                        <span>追问上下文</span>
+                      </div>
+                      <div class="message-followup-ref__content">
+                        {{ msg.followUpMeta.preview || `Turn #${msg.followUpMeta.turnNo || msg.followUpMeta.parentTurnId}` }}
+                      </div>
+                      <div v-if="msg.followUpMeta.tableName" class="message-followup-ref__meta">
+                        {{ msg.followUpMeta.source === 'history' ? '来自历史产物' : '来自当前对话' }} · {{ msg.followUpMeta.tableName }}
+                      </div>
+                    </div>
                     <div class="bubble">{{ msg.content }}</div>
                     <div v-if="msg.fieldBindingResults?.length" class="field-binding-card">
                       <div class="field-binding-card__header">{{ msg.fieldBindingTitle || '字段变更结果' }}</div>
@@ -250,6 +267,20 @@
                     </div>
                   </div>
                 </div>
+              </div>
+
+              <div v-if="activeBranchParentTurnMeta" class="chat-followup-banner">
+                <div class="chat-followup-banner__main">
+                  <div class="chat-followup-banner__eyebrow">继续追问</div>
+                  <div class="chat-followup-banner__title">
+                    {{ activeBranchParentTurnMeta.preview || `Turn #${activeBranchParentTurnMeta.turnNo || activeBranchParentTurnMeta.turnId}` }}
+                  </div>
+                  <div class="chat-followup-banner__meta">
+                    {{ activeBranchParentTurnMeta.source === 'history' ? '来自历史产物' : '来自当前对话消息' }}
+                    <span v-if="activeBranchParentTurnMeta.tableName"> · {{ activeBranchParentTurnMeta.tableName }}</span>
+                  </div>
+                </div>
+                <el-button size="small" text @click="clearActiveBranchParent">取消追问</el-button>
               </div>
 
               <div class="ask-bar">
@@ -516,12 +547,487 @@
               </div>
             </div>
           </el-drawer>
+          <el-drawer
+              v-model="historyDrawerVisible"
+              title="历史产物"
+              size="72%"
+              destroy-on-close
+          >
+            <div class="history-drawer">
+              <div class="history-toolbar">
+                <div class="history-toolbar__primary">
+                  <el-input
+                      v-model.trim="recentChatQueryKeyword"
+                      class="history-toolbar__keyword"
+                      placeholder="搜索问题、SQL、表名"
+                      clearable
+                      @keyup.enter="searchRecentChatQueries"
+                      @clear="resetHistoryKeyword"
+                  >
+                    <template #prefix>
+                      <el-icon><Search /></el-icon>
+                    </template>
+                  </el-input>
+                  <el-select
+                      v-model="recentChatQueryTableName"
+                      class="history-toolbar__table"
+                      clearable
+                      filterable
+                      placeholder="数据源"
+                      @change="syncHistorySearch"
+                  >
+                    <el-option
+                        v-for="table in historyTableOptions"
+                        :key="table.tableName"
+                        :label="formatTableOptionLabel(table)"
+                        :value="table.tableName"
+                    />
+                  </el-select>
+                  <el-select
+                      v-model="recentChatQueryChartType"
+                      class="history-toolbar__chart"
+                      clearable
+                      placeholder="图表类型"
+                      @change="syncHistorySearch"
+                  >
+                    <el-option label="柱状图" value="bar" />
+                    <el-option label="折线图" value="line" />
+                    <el-option label="饼图" value="pie" />
+                    <el-option label="表格" value="table" />
+                  </el-select>
+                  <el-select
+                      v-model="recentChatQueryRiskLevel"
+                      class="history-toolbar__risk"
+                      clearable
+                      placeholder="风险等级"
+                      @change="syncHistorySearch"
+                  >
+                    <el-option label="安全" value="SAFE" />
+                    <el-option label="预警" value="WARN" />
+                    <el-option label="拦截" value="BLOCKED" />
+                  </el-select>
+                  <el-select
+                      v-model="recentChatQueryExecutionStatus"
+                      class="history-toolbar__status"
+                      clearable
+                      placeholder="执行状态"
+                      @change="syncHistorySearch"
+                  >
+                    <el-option label="成功" value="SUCCESS" />
+                    <el-option label="失败" value="FAILED" />
+                    <el-option label="取消" value="CANCELLED" />
+                  </el-select>
+                  <el-date-picker
+                      v-model="recentChatQueryDateRange"
+                      class="history-toolbar__date"
+                      type="daterange"
+                      range-separator="至"
+                      start-placeholder="开始日期"
+                      end-placeholder="结束日期"
+                      value-format="YYYY-MM-DD"
+                      @change="syncHistorySearch"
+                  />
+                </div>
+                <div class="history-toolbar__secondary">
+                  <div class="history-toolbar__quick-range">
+                    <el-segmented
+                        v-model="historyQuickDateRange"
+                        :options="historyQuickDateOptions"
+                        @change="applyHistoryQuickDateRange"
+                    />
+                  </div>
+                  <div class="history-toolbar__sort">
+                    <el-button plain @click="toggleHistorySortDirection">
+                      {{ recentChatQuerySortDirection === 'ASC' ? '时间正序' : '时间倒序' }}
+                    </el-button>
+                  </div>
+                  <div class="history-toolbar__actions">
+                    <el-button type="primary" @click="searchRecentChatQueries">
+                      <el-icon><Search /></el-icon>
+                      <span>搜索</span>
+                    </el-button>
+                    <el-button plain @click="resetHistoryKeyword">
+                      <el-icon><Refresh /></el-icon>
+                      <span>重置</span>
+                    </el-button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="history-summary">
+                <span>共 {{ recentChatQueryTotal }} 条</span>
+                <span v-if="recentChatQueryError" class="history-summary__error">{{ recentChatQueryError }}</span>
+              </div>
+
+              <div class="history-content" v-loading="recentChatQueryLoading">
+                <div v-if="recentChatQueries?.length" class="history-list">
+                  <button
+                      v-for="entry in recentChatQueries"
+                      :key="entry.id"
+                      type="button"
+                      :class="['history-card', { 'is-active': String(selectedHistoryId || '') === String(entry.id || '') }]"
+                      @click="selectHistoryEntry(entry)"
+                  >
+                    <div class="history-card__head">
+                      <div class="history-card__title-wrap">
+                        <div class="history-card__title">{{ entry.question || '未命名查询' }}</div>
+                      </div>
+                      <el-tag size="small" effect="light" class="history-tag history-tag--risk" :type="riskTagType(entry.riskLevel)">
+                        {{ entry.riskLevel || 'SAFE' }}
+                      </el-tag>
+                    </div>
+                    <div class="history-card__meta">
+                      <span class="history-card__meta-item">{{ entry.tableName || '未指定数据源' }}</span>
+                      <span class="history-card__meta-item">{{ historyChartTypeLabel(entry.chartType) }}</span>
+                      <span class="history-card__meta-item">{{ historyExecutionStatusLabel(entry) }}</span>
+                      <span class="history-card__meta-item">{{ formatHistoryExecutionTime(entry.executionTimeMs) }}</span>
+                      <span class="history-card__meta-item">{{ formatChatHistoryTime(entry.createdAt) }}</span>
+                    </div>
+                    <div class="history-card__status">
+                      <el-tag size="small" effect="light" class="history-tag history-tag--execution" :type="historyExecutionStatusType(entry)">
+                        {{ historyExecutionStatusLabel(entry) }}
+                      </el-tag>
+                      <el-tag size="small" effect="light" class="history-tag history-tag--cache" :type="historyCacheTagType(entry)">
+                        {{ historyCacheLabel(entry) }}
+                      </el-tag>
+                      <el-tag size="small" effect="light" class="history-tag history-tag--snapshot" :type="historySnapshotStatusType(entry)">
+                        {{ historySnapshotStatusLabel(entry) }}
+                      </el-tag>
+                      <el-tag v-if="entry.isPinned" size="small" effect="light" class="history-tag history-tag--pinned" type="warning">
+                        已钉入
+                      </el-tag>
+                    </div>
+                  </button>
+                </div>
+
+                <div v-if="recentChatQueries?.length" class="history-detail" v-loading="historyDetailLoading">
+                  <template v-if="selectedHistoryEntry">
+                    <div class="history-detail__head">
+                      <div class="history-detail__title-wrap">
+                        <div class="history-detail__title">{{ selectedHistoryEntry.question || '未命名查询' }}</div>
+                        <div class="history-detail__submeta">
+                          <span>{{ selectedHistoryEntry.tableName || '未指定数据源' }}</span>
+                          <span>{{ historyChartTypeLabel(selectedHistoryEntry.chartType) }}</span>
+                          <span>{{ formatChatHistoryTime(selectedHistoryEntry.createdAt) }}</span>
+                        </div>
+                      </div>
+                      <div class="history-detail__tags">
+                        <el-tag size="small" effect="light" class="history-tag history-tag--execution" :type="historyExecutionStatusType(selectedHistoryEntry)">
+                          {{ historyExecutionStatusLabel(selectedHistoryEntry) }}
+                        </el-tag>
+                        <el-tag size="small" effect="light" class="history-tag history-tag--risk" :type="riskTagType(selectedHistoryEntry.riskLevel)">
+                          {{ selectedHistoryEntry.riskLevel || 'SAFE' }}
+                        </el-tag>
+                        <el-tag size="small" effect="light" class="history-tag history-tag--cache" :type="historyCacheTagType(selectedHistoryEntry)">
+                          {{ historyCacheLabel(selectedHistoryEntry) }}
+                        </el-tag>
+                        <el-tag size="small" effect="light" class="history-tag history-tag--snapshot" :type="historySnapshotStatusType(selectedHistoryEntry)">
+                          {{ historySnapshotStatusLabel(selectedHistoryEntry) }}
+                        </el-tag>
+                        <el-tag v-if="selectedHistoryEntry.isPinned" size="small" effect="light" class="history-tag history-tag--pinned" type="warning">
+                          已钉入
+                        </el-tag>
+                      </div>
+                    </div>
+
+                    <div class="history-detail__section">
+                      <div class="history-detail__section-title">基本信息</div>
+                      <div class="history-detail__status-grid">
+                        <div class="history-detail__status-item">
+                          <span class="history-detail__status-label">执行状态</span>
+                          <span class="history-detail__status-value">{{ historyExecutionStatusLabel(selectedHistoryEntry) }}</span>
+                        </div>
+                        <div class="history-detail__status-item">
+                          <span class="history-detail__status-label">快照状态</span>
+                          <span class="history-detail__status-value">{{ historySnapshotStatusLabel(selectedHistoryEntry) }}</span>
+                        </div>
+                        <div class="history-detail__status-item">
+                          <span class="history-detail__status-label">执行耗时</span>
+                          <span class="history-detail__status-value">{{ formatHistoryExecutionTime(selectedHistoryEntry.executionTimeMs) }}</span>
+                        </div>
+                        <div class="history-detail__status-item">
+                          <span class="history-detail__status-label">图表行数</span>
+                          <span class="history-detail__status-value">{{ selectedHistoryEntry.chartDataCount || 0 }}</span>
+                        </div>
+                        <div class="history-detail__status-item">
+                          <span class="history-detail__status-label">缓存命中</span>
+                          <span class="history-detail__status-value">{{ historyCacheLabel(selectedHistoryEntry) }}</span>
+                        </div>
+                        <div class="history-detail__status-item">
+                          <span class="history-detail__status-label">是否归属会话</span>
+                          <span class="history-detail__status-value">{{ selectedHistoryEntry.conversationId ? '是' : '否' }}</span>
+                        </div>
+                      </div>
+                      <div v-if="selectedHistoryEntry.pinnedDashboardNames?.length" class="history-detail__hint">
+                        已钉入：{{ selectedHistoryEntry.pinnedDashboardNames.join('、') }}
+                      </div>
+                    </div>
+
+                    <div class="history-detail__section">
+                      <div class="history-detail__section-title">字段映射</div>
+                      <div v-if="summarizeFieldMapping(selectedHistoryEntry.fieldMapping).length" class="history-detail__kv-grid">
+                        <div
+                            v-for="item in summarizeFieldMapping(selectedHistoryEntry.fieldMapping)"
+                            :key="item.label"
+                            class="history-detail__kv-item"
+                        >
+                          <span class="history-detail__kv-label">{{ item.label }}</span>
+                          <span class="history-detail__kv-value">{{ item.value }}</span>
+                        </div>
+                      </div>
+                      <div v-else class="history-detail__placeholder">暂无字段映射</div>
+                    </div>
+
+                    <div class="history-detail__section">
+                      <div class="history-detail__section-title">风险说明</div>
+                      <div class="history-detail__text">
+                        {{ selectedHistoryEntry.riskReason || '暂无风险说明' }}
+                      </div>
+                    </div>
+
+                    <div class="history-detail__section">
+                      <div class="history-detail__section-title">图谱上下文</div>
+                      <div v-if="summarizeGraphContext(selectedHistoryEntry).length" class="history-detail__context-list">
+                        <span
+                            v-for="(item, index) in summarizeGraphContext(selectedHistoryEntry)"
+                            :key="`${selectedHistoryEntry.id}-ctx-${index}`"
+                            class="history-detail__context-chip"
+                        >
+                          {{ item }}
+                        </span>
+                      </div>
+                      <div v-else class="history-detail__placeholder">暂无上下文片段</div>
+                    </div>
+
+                    <div class="history-detail__section">
+                      <div class="history-detail__section-title">推理过程</div>
+                      <template v-if="historyReplaySteps.length">
+                        <div class="history-detail__reasoning-toolbar">
+                          <div class="history-detail__reasoning-progress">
+                            已展开 {{ historyReplayVisibleCount }}/{{ historyReplaySteps.length }} 步
+                            <span v-if="historyReplayVisibleCount < historyReplaySteps.length">
+                              ，剩余 {{ historyReplaySteps.length - historyReplayVisibleCount }} 步
+                            </span>
+                          </div>
+                          <div class="history-detail__reasoning-actions">
+                            <el-button size="small" plain @click="restartHistoryReplay">重播</el-button>
+                            <el-button size="small" plain @click="toggleHistoryReplay">
+                              {{ historyReplayPlaying ? '暂停' : '继续' }}
+                            </el-button>
+                            <el-button size="small" text @click="revealAllHistoryReplaySteps">全部展开</el-button>
+                          </div>
+                        </div>
+                        <ol class="history-detail__reasoning-list">
+                          <li
+                              v-for="(step, index) in historyReplaySteps.slice(0, historyReplayVisibleCount)"
+                              :key="`${selectedHistoryEntry.id}-reason-${index}`"
+                              :class="[
+                                'history-detail__reasoning-item',
+                                { 'is-current': historyReplayPlaying && index === Math.max(historyReplayVisibleCount - 1, 0) }
+                              ]"
+                          >
+                            <div class="history-detail__reasoning-marker">
+                              <span class="history-detail__reasoning-dot"></span>
+                              <span
+                                  v-if="index < historyReplayVisibleCount - 1"
+                                  class="history-detail__reasoning-line"
+                              ></span>
+                            </div>
+                            <div class="history-detail__reasoning-card">
+                              <div class="history-detail__reasoning-head">
+                                <div class="history-detail__reasoning-stepno">STEP {{ index + 1 }}</div>
+                                <div class="history-detail__reasoning-title">{{ step.title || `步骤 ${index + 1}` }}</div>
+                              </div>
+                              <div class="history-detail__reasoning-detail">
+                                {{ step.detail || step.text || step.message || '暂无详情' }}
+                              </div>
+                            </div>
+                          </li>
+                        </ol>
+                      </template>
+                      <div v-else class="history-detail__placeholder">暂无可回放的推理步骤</div>
+                    </div>
+
+                    <div class="history-detail__section">
+                      <div class="history-detail__section-title">快照预览</div>
+                      <div v-if="historySnapshotPreviewRows(selectedHistoryEntry).length" class="history-detail__snapshot-preview">
+                        <div class="history-detail__snapshot-cards">
+                          <article
+                              v-for="card in historySnapshotPreviewCards(selectedHistoryEntry)"
+                              :key="card.id"
+                              class="history-detail__snapshot-card"
+                          >
+                            <div class="history-detail__snapshot-card-head">
+                              <span class="history-detail__snapshot-card-label">{{ card.titleLabel }}</span>
+                              <strong class="history-detail__snapshot-card-title">{{ card.titleValue }}</strong>
+                            </div>
+                            <div class="history-detail__snapshot-card-metric">
+                              <span class="history-detail__snapshot-card-label">{{ card.metricLabel }}</span>
+                              <span class="history-detail__snapshot-card-value">{{ card.metricValue }}</span>
+                            </div>
+                            <div v-if="card.extraFields.length" class="history-detail__snapshot-card-extra">
+                              <div
+                                  v-for="field in card.extraFields"
+                                  :key="`${card.id}-${field.label}`"
+                                  class="history-detail__snapshot-card-extra-item"
+                              >
+                                <span class="history-detail__snapshot-card-label">{{ field.label }}</span>
+                                <span class="history-detail__snapshot-card-extra-value">{{ field.value }}</span>
+                              </div>
+                            </div>
+                          </article>
+                        </div>
+                        <div class="history-detail__snapshot-table">
+                          <table>
+                            <thead>
+                            <tr>
+                              <th v-for="column in historySnapshotPreviewColumns(selectedHistoryEntry)" :key="column">
+                                {{ column }}
+                              </th>
+                            </tr>
+                            </thead>
+                            <tbody>
+                            <tr
+                                v-for="(row, rowIndex) in historySnapshotPreviewRows(selectedHistoryEntry)"
+                                :key="`${selectedHistoryEntry.id}-row-${rowIndex}`"
+                            >
+                              <td
+                                  v-for="column in historySnapshotPreviewColumns(selectedHistoryEntry)"
+                                  :key="`${selectedHistoryEntry.id}-${rowIndex}-${column}`"
+                              >
+                                {{ formatHistoryValue(row[column]) }}
+                              </td>
+                            </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                        <div class="history-detail__thumbnail-card">
+                          <div class="history-detail__thumbnail-head">
+                            <div class="history-detail__thumbnail-title">图表缩略图</div>
+                            <div class="history-detail__thumbnail-meta">
+                              {{ selectedHistoryEntry.fieldMapping?.dimension || '维度' }} / {{ selectedHistoryEntry.fieldMapping?.metric || '指标' }}
+                            </div>
+                          </div>
+                          <div ref="historyPreviewChartRef" class="history-detail__thumbnail-chart"></div>
+                        </div>
+                      </div>
+                      <div v-else class="history-detail__placeholder">
+                        暂无可预览的图表快照
+                      </div>
+                    </div>
+
+                    <div class="history-detail__section">
+                      <div class="history-detail__section-title">SQL</div>
+                      <div v-if="selectedHistoryEntry.sql" class="history-detail__sql-wrap">
+                        <pre class="history-detail__sql">{{ selectedHistoryEntry.sql }}</pre>
+                      </div>
+                      <div v-else class="history-detail__placeholder">暂无 SQL</div>
+                    </div>
+
+                    <div
+                        :class="[
+                          'history-detail__footer',
+                          { 'is-readonly': !isHistoryEntryRestorable(selectedHistoryEntry) }
+                        ]"
+                    >
+                      <div
+                          v-if="!isHistoryEntryRestorable(selectedHistoryEntry)"
+                          class="history-detail__action-hint"
+                      >
+                        {{ historyRestoreHint(selectedHistoryEntry) }}
+                      </div>
+                      <el-button
+                          size="small"
+                          type="primary"
+                          plain
+                          :disabled="!isHistoryEntryRestorable(selectedHistoryEntry)"
+                          @click="openHistoricalAnalysisFromHistory(selectedHistoryEntry)"
+                      >
+                        恢复图表
+                      </el-button>
+                      <el-button
+                          size="small"
+                          type="primary"
+                          plain
+                          :disabled="!selectedHistoryEntry?.question"
+                          @click="reuseChatQuestion(selectedHistoryEntry)"
+                      >
+                        复用问题
+                      </el-button>
+                      <el-button
+                          size="small"
+                          plain
+                          :disabled="!selectedHistoryEntry?.question"
+                          @click="draftChatQuestionFromHistory(selectedHistoryEntry)"
+                      >
+                        带入提问
+                      </el-button>
+                      <el-button
+                          size="small"
+                          plain
+                          :disabled="!isHistoryEntryRestorable(selectedHistoryEntry)"
+                          @click="continueFromChatHistory(selectedHistoryEntry)"
+                      >
+                        继续追问
+                      </el-button>
+                      <el-button
+                          size="small"
+                          plain
+                          :disabled="selectedHistoryEntry.isPinned || !isHistoryEntryRestorable(selectedHistoryEntry)"
+                          @click="pinHistoryToDashboard(selectedHistoryEntry)"
+                      >
+                        {{ selectedHistoryEntry.isPinned ? '已钉入' : '钉入看板' }}
+                      </el-button>
+                      <el-button
+                          v-if="selectedHistoryEntry.sql"
+                          size="small"
+                          plain
+                          @click="copySqlToClipboard(selectedHistoryEntry.sql)"
+                      >
+                        复制SQL
+                      </el-button>
+                      <el-button size="small" type="danger" plain @click="removeRecentChatQuery(selectedHistoryEntry)">
+                        删除记录
+                      </el-button>
+                    </div>
+                  </template>
+                </div>
+
+                <div v-else class="history-empty-state">
+                  <div class="history-empty-state__title">{{ historyEmptyTitle }}</div>
+                  <div class="history-empty-state__text">{{ historyEmptyDescription }}</div>
+                  <el-button
+                      v-if="recentChatQueryError"
+                      size="small"
+                      type="primary"
+                      @click="searchRecentChatQueries"
+                  >
+                    重新加载
+                  </el-button>
+                </div>
+              </div>
+
+              <div class="history-pagination">
+                <el-pagination
+                    layout="prev, pager, next, sizes"
+                    :current-page="recentChatQueryPage"
+                    :page-size="recentChatQueryPageSize"
+                    :page-sizes="[8, 16, 24, 32]"
+                    :total="recentChatQueryTotal"
+                    :disabled="!recentChatQueries?.length && !recentChatQueryTotal"
+                    @current-change="handleRecentChatPageChange"
+                    @size-change="handleRecentChatPageSizeChange"
+                />
+              </div>
+            </div>
+          </el-drawer>
 </section>
 </template>
 
 <script setup>
-import { computed, inject, ref } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { ArrowLeftBold, ArrowRightBold, Close, Edit, Management, Microphone, Refresh, Search, Setting, Share, View } from '@element-plus/icons-vue'
+import * as echarts from 'echarts'
 import BusinessDictionaryView from '../../components/BusinessDictionaryView.vue'
 
 const localVoiceGenderOptions = [
@@ -607,6 +1113,20 @@ const {
   chatSessionLoading,
   chatSessionKeyword,
   chatSessionStatus,
+  recentChatQueries,
+  recentChatQueryKeyword,
+  recentChatQueryTableName,
+  recentChatQueryChartType,
+  recentChatQueryRiskLevel,
+  recentChatQueryExecutionStatus,
+  recentChatQueryDateRange,
+  recentChatQuerySortDirection,
+  recentChatQueryPage,
+  recentChatQueryPageSize,
+  recentChatQueryTotal,
+  recentChatQueryLoading,
+  recentChatQueryError,
+  recentChatQueryErrorType,
   searchChatSessions,
   resetChatSessionSearch,
   refreshActiveChatSessionSummary,
@@ -640,6 +1160,10 @@ const {
   openPinDialog,
   pinChartToDashboard,
   openHistoricalAnalysis,
+  openHistoricalAnalysisFromHistory,
+  reuseChatQuestion,
+  continueFromChatHistory,
+  draftChatQuestionFromHistory,
   pinDialogVisible,
   pinning,
   pinDashboardId,
@@ -672,6 +1196,13 @@ const {
   clearVoiceHistory,
   normalizeVoiceQuestion,
   stopQuestionGeneration,
+  removeRecentChatQuery,
+  searchRecentChatQueries,
+  resetRecentChatQuerySearch,
+  handleRecentChatPageChange,
+  handleRecentChatPageSizeChange,
+  loadPinnedHistoryIds,
+  ensureHistoryEntrySnapshot,
   seriesData,
   statusTagType,
   submitPermissionRequest,
@@ -756,6 +1287,522 @@ const currentChatSessionSubtitle = computed(() => {
   return parts.join(' · ')
 })
 
+const historyDrawerVisible = ref(false)
+const selectedHistoryId = ref('')
+const historyDetailLoading = ref(false)
+const historyPreviewChartRef = ref(null)
+const historyQuickDateRange = ref('')
+const historyReplayTimer = ref(null)
+const historyReplayVisibleCount = ref(0)
+const historyReplayPlaying = ref(false)
+let historyPreviewChartInstance = null
+
+const historyQuickDateOptions = [
+  { label: '全部', value: '' },
+  { label: '今日', value: 'today' },
+  { label: '本周', value: 'week' },
+  { label: '本月', value: 'month' }
+]
+
+const historyTableOptions = computed(() => [
+  ...(uploadTables?.value || []),
+  ...(officialQueryTables?.value || [])
+])
+
+const openHistoryDrawer = async () => {
+  historyDrawerVisible.value = true
+  await searchRecentChatQueries()
+  await loadPinnedHistoryIds()
+}
+
+const syncHistorySearch = async () => {
+  await searchRecentChatQueries()
+}
+
+const resetHistoryKeyword = async () => {
+  historyQuickDateRange.value = ''
+  await resetRecentChatQuerySearch()
+}
+
+const formatHistoryDatePart = (date) => {
+  const year = date.getFullYear()
+  const month = `${date.getMonth() + 1}`.padStart(2, '0')
+  const day = `${date.getDate()}`.padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+const buildHistoryQuickDateRange = (mode) => {
+  const now = new Date()
+  if (Number.isNaN(now.getTime())) return []
+  const current = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  if (mode === 'today') {
+    const value = formatHistoryDatePart(current)
+    return [value, value]
+  }
+  if (mode === 'week') {
+    const day = current.getDay() || 7
+    const start = new Date(current)
+    start.setDate(current.getDate() - day + 1)
+    return [formatHistoryDatePart(start), formatHistoryDatePart(current)]
+  }
+  if (mode === 'month') {
+    const start = new Date(current.getFullYear(), current.getMonth(), 1)
+    return [formatHistoryDatePart(start), formatHistoryDatePart(current)]
+  }
+  return []
+}
+
+const applyHistoryQuickDateRange = async (value) => {
+  const mode = String(value || '').trim()
+  recentChatQueryDateRange.value = buildHistoryQuickDateRange(mode)
+  await searchRecentChatQueries()
+}
+
+const toggleHistorySortDirection = async () => {
+  recentChatQuerySortDirection.value = recentChatQuerySortDirection.value === 'ASC' ? 'DESC' : 'ASC'
+  await searchRecentChatQueries()
+}
+
+const historyChartTypeLabel = (type) => {
+  const text = String(type || '').trim()
+  if (text === 'bar') return '柱状图'
+  if (text === 'line') return '折线图'
+  if (text === 'pie') return '饼图'
+  if (text === 'table') return '表格'
+  return text || '图表'
+}
+
+const hasHistoryFilters = computed(() => Boolean(
+  String(recentChatQueryKeyword?.value || '').trim()
+  || String(recentChatQueryTableName?.value || '').trim()
+  || String(recentChatQueryChartType?.value || '').trim()
+  || String(recentChatQueryRiskLevel?.value || '').trim()
+  || String(recentChatQueryExecutionStatus?.value || '').trim()
+  || (Array.isArray(recentChatQueryDateRange?.value) && recentChatQueryDateRange.value.filter(Boolean).length)
+))
+
+const selectedHistoryEntry = computed(() =>
+  (recentChatQueries?.value || []).find(item => String(item?.id || '') === String(selectedHistoryId.value || '')) || null
+)
+
+const historyEmptyDescription = computed(() => {
+  if (recentChatQueryError?.value) return recentChatQueryError.value
+  return hasHistoryFilters.value ? '没有找到匹配的历史产物' : '暂无历史产物'
+})
+
+const historyEmptyTitle = computed(() => {
+  if (recentChatQueryError?.value) {
+    return recentChatQueryErrorType?.value === 'search' ? '搜索失败' : '加载失败'
+  }
+  return hasHistoryFilters.value ? '暂无匹配结果' : '暂无历史产物'
+})
+
+const summarizeFieldMapping = (mapping) => {
+  if (!mapping || typeof mapping !== 'object') return []
+  return [
+    { label: '维度', value: String(mapping.dimension || mapping.dimensionKey || '').trim() },
+    { label: '指标', value: String(mapping.metric || mapping.metricKey || '').trim() },
+    { label: '维度字段', value: String(mapping.dimensionKey || '').trim() },
+    { label: '指标字段', value: String(mapping.metricKey || '').trim() }
+  ].filter(item => item.value)
+}
+
+const summarizeGraphContext = (entry) => {
+  const rows = Array.isArray(entry?.graphContext) ? entry.graphContext : []
+  return rows.slice(0, 3).map(item => {
+    if (typeof item === 'string') return item
+    return String(item?.label || item?.name || item?.title || item?.id || '').trim()
+  }).filter(Boolean)
+}
+
+const historySnapshotStatusLabel = (entry) => {
+  const status = String(entry?.snapshotStatus || '').trim()
+  if (status === 'ready') return '可恢复'
+  if (status === 'missing') return '缺失'
+  if (status === 'error') return '异常'
+  return entry?.hasChartSnapshot ? '可恢复' : '缺失'
+}
+
+const historySnapshotStatusType = (entry) => {
+  const status = String(entry?.snapshotStatus || '').trim()
+  if (status === 'ready') return 'primary'
+  if (status === 'missing') return 'info'
+  if (status === 'error') return 'danger'
+  return entry?.hasChartSnapshot ? 'primary' : 'info'
+}
+
+const historyExecutionStatusLabel = (entry) => {
+  const status = Number(entry?.executionStatus)
+  if (status === 1) return '执行成功'
+  if (status === 0) return '执行失败'
+  if (status === 2) return '已取消'
+  return '未知'
+}
+
+const historyExecutionStatusType = (entry) => {
+  const status = Number(entry?.executionStatus)
+  if (status === 1) return 'success'
+  if (status === 0) return 'danger'
+  if (status === 2) return 'warning'
+  return 'info'
+}
+
+const historyCacheLabel = (entry) => entry?.isHitCache ? '命中缓存' : '未命中缓存'
+const historyCacheTagType = (entry) => entry?.isHitCache ? 'primary' : 'info'
+const isHistoryEntryRestorable = (entry) => Boolean(entry?.hasChartSnapshot)
+
+const formatHistoryValue = (value) => {
+  if (value == null || value === '') return '--'
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (Array.isArray(value)) return value.map(item => formatHistoryValue(item)).join('、')
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
+}
+
+const formatHistoryExecutionTime = (value) => {
+  const duration = Number(value)
+  if (!Number.isFinite(duration) || duration < 0) return '未知'
+  if (duration < 1000) return `${duration} ms`
+  if (duration < 60000) return `${(duration / 1000).toFixed(duration >= 10000 ? 0 : 1)} s`
+  return `${(duration / 60000).toFixed(1)} min`
+}
+
+const toChartNumber = (value) => {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0
+  const parsed = Number(String(value ?? '').replace(/,/g, '').trim())
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+const sortHistoryChartRows = (rows) => {
+  const normalizedRows = Array.isArray(rows) ? rows : []
+  return [...normalizedRows].sort((left, right) => toChartNumber(right?.value) - toChartNumber(left?.value))
+}
+
+const buildHistoryPreviewSeriesData = (entry) => {
+  const rows = sortHistoryChartRows(Array.isArray(entry?.chartSnapshot?.data) ? entry.chartSnapshot.data : []).slice(0, 8)
+  return rows.map(row => ({
+    name: String(row?.name ?? row?.dim_name ?? row?.dimension ?? '--'),
+    value: toChartNumber(row?.value ?? row?.metric_value ?? row?.metric ?? 0)
+  }))
+}
+
+const historySnapshotPreviewRows = (entry) => {
+  const rows = Array.isArray(entry?.chartSnapshot?.data) ? entry.chartSnapshot.data : []
+  return rows.slice(0, 3).map(row => (row && typeof row === 'object' ? row : { value: row }))
+}
+
+const historySnapshotPreviewColumns = (entry) =>
+  Object.keys(historySnapshotPreviewRows(entry)[0] || {})
+
+const historySnapshotPreviewCards = (entry) => {
+  const rows = historySnapshotPreviewRows(entry)
+  const dimensionKey = String(entry?.fieldMapping?.dimensionKey || '').trim()
+  const metricKey = String(entry?.fieldMapping?.metricKey || '').trim()
+  return rows.map((row, index) => {
+    const keys = Object.keys(row || {})
+    const titleKey = keys.find(key => key === dimensionKey) || keys[0] || ''
+    const metricFieldKey = keys.find(key => key === metricKey) || keys.find(key => key !== titleKey) || ''
+    const extraFieldKeys = keys.filter(key => key !== titleKey && key !== metricFieldKey).slice(0, 3)
+    return {
+      id: `${entry?.id || 'history'}-preview-${index}`,
+      titleLabel: titleKey || '维度',
+      titleValue: titleKey ? formatHistoryValue(row?.[titleKey]) : `第${index + 1}条`,
+      metricLabel: metricFieldKey || '指标',
+      metricValue: metricFieldKey ? formatHistoryValue(row?.[metricFieldKey]) : '--',
+      extraFields: extraFieldKeys.map(key => ({
+        label: key,
+        value: formatHistoryValue(row?.[key])
+      }))
+    }
+  })
+}
+
+const historyRestoreHint = (entry) => {
+  const status = String(entry?.snapshotStatus || '').trim()
+  if (status === 'missing') return '该历史记录暂无可恢复的图表快照'
+  if (status === 'error') return '图表快照加载异常，可稍后重试'
+  return '该历史记录暂无可恢复的图表快照'
+}
+
+const historyReplaySteps = computed(() => {
+  const entry = selectedHistoryEntry.value
+  const steps = Array.isArray(entry?.reasoningReplaySteps) && entry.reasoningReplaySteps.length
+    ? entry.reasoningReplaySteps
+    : (Array.isArray(entry?.reasoningProcess)
+      ? entry.reasoningProcess.map((step, index) => ({
+        title: `步骤 ${index + 1}`,
+        detail: String(step || '').trim()
+      })).filter(step => step.detail)
+      : [])
+  return steps.map((step, index) => ({
+    title: String(step?.title || `步骤 ${index + 1}`).trim(),
+    detail: String(step?.detail || step?.text || step?.message || '').trim(),
+    ts: step?.ts ?? null
+  })).filter(step => step.title || step.detail)
+})
+
+const clearHistoryReplayTimer = () => {
+  if (historyReplayTimer.value) {
+    window.clearTimeout(historyReplayTimer.value)
+    historyReplayTimer.value = null
+  }
+}
+
+const scheduleHistoryReplay = () => {
+  clearHistoryReplayTimer()
+  if (!historyReplayPlaying.value) return
+  if (historyReplayVisibleCount.value >= historyReplaySteps.value.length) {
+    historyReplayPlaying.value = false
+    return
+  }
+  historyReplayTimer.value = window.setTimeout(() => {
+    historyReplayVisibleCount.value += 1
+    scheduleHistoryReplay()
+  }, 560)
+}
+
+const startHistoryReplay = () => {
+  if (!historyReplaySteps.value.length) {
+    historyReplayPlaying.value = false
+    historyReplayVisibleCount.value = 0
+    return
+  }
+  historyReplayPlaying.value = true
+  if (historyReplayVisibleCount.value <= 0) {
+    historyReplayVisibleCount.value = 1
+  }
+  scheduleHistoryReplay()
+}
+
+const pauseHistoryReplay = () => {
+  historyReplayPlaying.value = false
+  clearHistoryReplayTimer()
+}
+
+const restartHistoryReplay = () => {
+  clearHistoryReplayTimer()
+  historyReplayVisibleCount.value = 0
+  startHistoryReplay()
+}
+
+const toggleHistoryReplay = () => {
+  if (!historyReplaySteps.value.length) return
+  if (historyReplayPlaying.value) {
+    pauseHistoryReplay()
+  } else {
+    if (historyReplayVisibleCount.value >= historyReplaySteps.value.length) {
+      historyReplayVisibleCount.value = 0
+    }
+    startHistoryReplay()
+  }
+}
+
+const revealAllHistoryReplaySteps = () => {
+  pauseHistoryReplay()
+  historyReplayVisibleCount.value = historyReplaySteps.value.length
+}
+
+const pinHistoryToDashboard = async (entry) => {
+  const restored = await openHistoricalAnalysisFromHistory(entry)
+  if (restored === false) return
+  await openPinDialog()
+}
+
+const disposeHistoryPreviewChart = () => {
+  if (historyPreviewChartInstance) {
+    historyPreviewChartInstance.dispose()
+    historyPreviewChartInstance = null
+  }
+}
+
+const renderHistoryPreviewChart = (entry) => {
+  if (!historyPreviewChartRef.value || !entry || !isHistoryEntryRestorable(entry)) {
+    disposeHistoryPreviewChart()
+    return
+  }
+  const seriesData = buildHistoryPreviewSeriesData(entry)
+  if (!seriesData.length) {
+    disposeHistoryPreviewChart()
+    return
+  }
+  const chartType = String(entry?.chartType || '').trim() || 'bar'
+  const metricLabel = String(entry?.fieldMapping?.metric || '指标').trim()
+  if (!historyPreviewChartInstance) {
+    historyPreviewChartInstance = echarts.init(historyPreviewChartRef.value)
+  }
+  const option = chartType === 'pie'
+    ? {
+        animation: false,
+        tooltip: { trigger: 'item' },
+        legend: { show: false },
+        series: [{
+          type: 'pie',
+          radius: ['42%', '68%'],
+          center: ['50%', '54%'],
+          label: {
+            formatter: ({ name }) => {
+              const text = String(name || '')
+              return text.length > 6 ? `${text.slice(0, 6)}...` : text
+            },
+            color: '#334155',
+            fontSize: 11
+          },
+          data: seriesData
+        }]
+      }
+    : {
+        animation: false,
+        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+        grid: { left: 52, right: 12, top: 20, bottom: 50 },
+        xAxis: {
+          type: 'category',
+          data: seriesData.map(item => item.name),
+          axisLine: { lineStyle: { color: '#cbd5e1' } },
+          axisTick: { show: false },
+          axisLabel: {
+            color: '#64748b',
+            fontSize: 10,
+            interval: 0,
+            rotate: seriesData.length > 4 ? 24 : 0,
+            formatter: (value) => {
+              const text = String(value || '')
+              return text.length > 6 ? `${text.slice(0, 6)}...` : text
+            }
+          }
+        },
+        yAxis: {
+          type: 'value',
+          name: metricLabel,
+          nameTextStyle: { color: '#64748b', fontSize: 10, padding: [0, 0, 0, -8] },
+          axisLabel: {
+            color: '#64748b',
+            fontSize: 10,
+            formatter: (value) => {
+              const num = Number(value)
+              if (!Number.isFinite(num)) return value
+              if (Math.abs(num) >= 10000) return `${(num / 10000).toFixed(1)}w`
+              return `${num}`
+            }
+          },
+          splitLine: { lineStyle: { color: '#eef2f7' } }
+        },
+        series: [{
+          type: chartType === 'line' ? 'line' : 'bar',
+          smooth: chartType === 'line',
+          symbol: chartType === 'line' ? 'circle' : 'none',
+          symbolSize: chartType === 'line' ? 6 : 0,
+          data: seriesData.map(item => item.value),
+          barMaxWidth: 22,
+          itemStyle: {
+            color: chartType === 'line' ? '#2563eb' : '#3b82f6',
+            borderRadius: chartType === 'line' ? 0 : [4, 4, 0, 0]
+          },
+          lineStyle: {
+            width: 2,
+            color: '#2563eb'
+          },
+          areaStyle: chartType === 'line'
+            ? { color: 'rgba(59, 130, 246, 0.10)' }
+            : undefined
+        }]
+      }
+  historyPreviewChartInstance.setOption(option, true)
+  historyPreviewChartInstance.resize()
+}
+
+const selectHistoryEntry = async (entry) => {
+  if (!entry?.id) return
+  selectedHistoryId.value = String(entry.id)
+  historyDetailLoading.value = true
+  try {
+    await ensureHistoryEntrySnapshot(entry)
+  } finally {
+    historyDetailLoading.value = false
+  }
+}
+
+watch(recentChatQueries, (items) => {
+  const normalizedRows = Array.isArray(items) ? items : []
+  if (!normalizedRows.length) {
+    selectedHistoryId.value = ''
+    return
+  }
+  const exists = normalizedRows.some(item => String(item?.id || '') === String(selectedHistoryId.value || ''))
+  if (!exists) {
+    selectedHistoryId.value = String(normalizedRows[0]?.id || '')
+  }
+}, { immediate: true })
+
+watch(selectedHistoryEntry, async (entry) => {
+  if (!entry?.id) return
+  if (String(entry?.snapshotStatus || '').trim() !== 'unknown') return
+  historyDetailLoading.value = true
+  try {
+    await ensureHistoryEntrySnapshot(entry)
+  } finally {
+    historyDetailLoading.value = false
+  }
+})
+
+watch(historyReplaySteps, (steps) => {
+  clearHistoryReplayTimer()
+  historyReplayVisibleCount.value = 0
+  historyReplayPlaying.value = false
+  if (steps.length) {
+    startHistoryReplay()
+  }
+}, { immediate: true })
+
+watch(historyDrawerVisible, (visible) => {
+  if (!visible) {
+    historyQuickDateRange.value = ''
+    selectedHistoryId.value = ''
+    historyDetailLoading.value = false
+    pauseHistoryReplay()
+    disposeHistoryPreviewChart()
+  }
+})
+
+watch(selectedHistoryEntry, async (entry) => {
+  await nextTick()
+  renderHistoryPreviewChart(entry)
+})
+
+watch(historyDetailLoading, async (loadingState) => {
+  if (loadingState) return
+  await nextTick()
+  renderHistoryPreviewChart(selectedHistoryEntry.value)
+})
+
+watch(historyDrawerVisible, async (visible) => {
+  if (!visible) return
+  await nextTick()
+  renderHistoryPreviewChart(selectedHistoryEntry.value)
+})
+
+watch(recentChatQueryDateRange, (range) => {
+  if (!Array.isArray(range) || range.length !== 2 || !range[0] || !range[1]) {
+    historyQuickDateRange.value = ''
+    return
+  }
+  const todayRange = buildHistoryQuickDateRange('today')
+  const weekRange = buildHistoryQuickDateRange('week')
+  const monthRange = buildHistoryQuickDateRange('month')
+  if (range[0] === todayRange[0] && range[1] === todayRange[1]) {
+    historyQuickDateRange.value = 'today'
+    return
+  }
+  if (range[0] === weekRange[0] && range[1] === weekRange[1]) {
+    historyQuickDateRange.value = 'week'
+    return
+  }
+  if (range[0] === monthRange[0] && range[1] === monthRange[1]) {
+    historyQuickDateRange.value = 'month'
+    return
+  }
+  historyQuickDateRange.value = ''
+}, { immediate: true })
+
 const toggleChatContentMode = async () => {
   const nextMode = chatContentMode.value === 'messages' ? 'sessions' : 'messages'
   chatContentMode.value = nextMode
@@ -813,6 +1860,11 @@ const formatGraphContextContent = (item) => {
     .map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(', ') : value}`)
   return pairs.join('；') || '暂无详细内容'
 }
+
+onBeforeUnmount(() => {
+  clearHistoryReplayTimer()
+  disposeHistoryPreviewChart()
+})
 </script>
 <style scoped>
 .chart-actions {
@@ -940,6 +1992,15 @@ const formatGraphContextContent = (item) => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.chat-thread-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.chat-thread-history-btn {
+  border-radius: 8px;
 }
 .chat-session-manager {
   flex: 1 1 auto;
@@ -1074,6 +2135,75 @@ const formatGraphContextContent = (item) => {
   align-items: center;
   gap: 4px;
   margin-top: 10px;
+}
+.message-followup-ref {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  border: 1px solid #dbe7f6;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #f8fbff 0%, #f3f7fc 100%);
+}
+.message-followup-ref__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 700;
+}
+.message-followup-ref__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
+}
+.message-followup-ref__content {
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+.message-followup-ref__meta {
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.chat-followup-banner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid #dbe7f6;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f8fbff 0%, #f2f7ff 100%);
+}
+.chat-followup-banner__main {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+.chat-followup-banner__eyebrow {
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 700;
+}
+.chat-followup-banner__title {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.chat-followup-banner__meta {
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.4;
+  word-break: break-word;
 }
 .ask-bar :deep(.el-input) {
   flex: 1;
@@ -1260,6 +2390,603 @@ const formatGraphContextContent = (item) => {
   white-space: normal;
   word-break: break-word;
 }
+.history-drawer {
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 14px;
+}
+.history-toolbar {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+}
+.history-toolbar__primary {
+  display: grid;
+  grid-template-columns: minmax(240px, 1.5fr) repeat(3, minmax(120px, 0.8fr)) minmax(260px, 1.1fr);
+  gap: 10px;
+  align-items: center;
+}
+.history-toolbar__secondary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.history-toolbar :deep(.el-input),
+.history-toolbar :deep(.el-select),
+.history-toolbar :deep(.el-date-editor) {
+  width: 100%;
+}
+.history-toolbar :deep(.el-input__wrapper),
+.history-toolbar :deep(.el-select__wrapper) {
+  min-height: 40px;
+  border-radius: 10px;
+  box-shadow: 0 0 0 1px #d8e1ee inset;
+  background: #fff;
+}
+.history-toolbar :deep(.el-range-editor.el-input__wrapper) {
+  min-height: 40px;
+  padding-right: 10px;
+}
+.history-toolbar :deep(.el-input__wrapper:hover),
+.history-toolbar :deep(.el-select__wrapper:hover),
+.history-toolbar :deep(.el-range-editor.el-input__wrapper:hover) {
+  box-shadow: 0 0 0 1px #b8c8df inset;
+}
+.history-toolbar__keyword,
+.history-toolbar__table,
+.history-toolbar__chart,
+.history-toolbar__risk,
+.history-toolbar__status,
+.history-toolbar__date,
+.history-toolbar__quick-range,
+.history-toolbar__sort {
+  min-width: 0;
+}
+.history-toolbar__quick-range :deep(.el-segmented) {
+  width: 100%;
+  padding: 4px;
+  border-radius: 10px;
+  background: #eef3fb;
+}
+.history-toolbar__quick-range {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+.history-toolbar__sort {
+  display: flex;
+  justify-content: flex-start;
+}
+.history-toolbar__sort :deep(.el-button) {
+  min-width: 110px;
+  border-radius: 10px;
+  border-color: #d7e3f4;
+  color: #334155;
+}
+.history-toolbar__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+}
+.history-toolbar__actions :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+.history-toolbar__actions :deep(.el-button) {
+  min-width: 96px;
+  border-radius: 10px;
+}
+.history-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #64748b;
+  font-size: 12px;
+  padding: 0 2px;
+}
+.history-summary__error {
+  color: #b91c1c;
+}
+.history-content {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(320px, 0.95fr) minmax(0, 1.25fr);
+  gap: 14px;
+  overflow: hidden;
+}
+.history-list {
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  padding-right: 4px;
+}
+.history-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
+  padding: 14px 14px 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
+}
+.history-card:hover {
+  border-color: #c8d7eb;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.07);
+}
+.history-card.is-active {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.14), 0 10px 28px rgba(37, 99, 235, 0.08);
+  background: linear-gradient(180deg, #f8fbff 0%, #f1f7ff 100%);
+}
+.history-card__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.history-card__title-wrap {
+  min-width: 0;
+  flex: 1;
+}
+.history-card__title {
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.45;
+  white-space: normal;
+  word-break: break-word;
+}
+.history-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  color: #64748b;
+  font-size: 12px;
+}
+.history-card__meta-item {
+  min-width: 0;
+  word-break: break-word;
+  position: relative;
+}
+.history-card__meta-item:not(:last-child)::after {
+  content: '';
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  margin-left: 10px;
+  border-radius: 999px;
+  background: #cbd5e1;
+  vertical-align: middle;
+}
+.history-card__status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.history-tag {
+  border-radius: 999px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+.history-tag:deep(.el-tag__content) {
+  display: inline-flex;
+  align-items: center;
+}
+.history-tag--execution {
+  border-color: rgba(59, 130, 246, 0.24);
+}
+.history-tag--risk {
+  border-color: rgba(148, 163, 184, 0.24);
+}
+.history-tag--cache {
+  border-color: rgba(99, 102, 241, 0.2);
+}
+.history-tag--snapshot {
+  border-color: rgba(14, 165, 233, 0.2);
+}
+.history-tag--pinned {
+  border-color: rgba(245, 158, 11, 0.24);
+}
+.history-detail {
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+  padding: 16px;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+.history-detail__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.history-detail__title-wrap {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+.history-detail__title {
+  color: #0f172a;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.45;
+  word-break: break-word;
+}
+.history-detail__submeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  color: #64748b;
+  font-size: 12px;
+}
+.history-detail__tags {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.history-detail__section {
+  display: grid;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #f1f5f9;
+}
+.history-detail__section-title {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 700;
+}
+.history-detail__status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.history-detail__status-item,
+.history-detail__kv-item {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+.history-detail__status-label,
+.history-detail__kv-label {
+  color: #64748b;
+  font-size: 12px;
+}
+.history-detail__status-value,
+.history-detail__kv-value {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 600;
+  word-break: break-word;
+}
+.history-detail__kv-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.history-detail__text,
+.history-detail__placeholder,
+.history-detail__hint {
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.7;
+  word-break: break-word;
+}
+.history-detail__context-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.history-detail__reasoning-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 12px;
+}
+.history-detail__reasoning-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.history-detail__reasoning-progress {
+  color: #64748b;
+  font-size: 12px;
+}
+.history-detail__reasoning-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.history-detail__reasoning-item {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+.history-detail__reasoning-marker {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  min-height: 100%;
+  padding-top: 12px;
+}
+.history-detail__reasoning-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #2563eb;
+  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.12);
+  position: relative;
+  z-index: 1;
+}
+.history-detail__reasoning-line {
+  position: absolute;
+  top: 22px;
+  bottom: -12px;
+  width: 2px;
+  background: #dbeafe;
+  border-radius: 999px;
+}
+.history-detail__reasoning-item:last-child .history-detail__reasoning-line {
+  display: none;
+}
+.history-detail__reasoning-card {
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: #f8fbff;
+}
+.history-detail__reasoning-item.is-current .history-detail__reasoning-card {
+  border-color: #93c5fd;
+  background: #eff6ff;
+}
+.history-detail__reasoning-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.history-detail__reasoning-stepno {
+  color: #2563eb;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+.history-detail__reasoning-title {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+.history-detail__reasoning-detail {
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.7;
+  word-break: break-word;
+}
+.history-detail__context-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.history-detail__snapshot-preview {
+  display: grid;
+  gap: 10px;
+}
+.history-detail__thumbnail-card {
+  display: grid;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: #ffffff;
+}
+.history-detail__thumbnail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.history-detail__thumbnail-title {
+  color: #0f172a;
+  font-size: 12px;
+  font-weight: 700;
+}
+.history-detail__thumbnail-meta {
+  color: #64748b;
+  font-size: 11px;
+}
+.history-detail__thumbnail-chart {
+  width: 100%;
+  height: 170px;
+}
+.history-detail__snapshot-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.history-detail__snapshot-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #f8fbff 0%, #f1f5f9 100%);
+}
+.history-detail__snapshot-card-head,
+.history-detail__snapshot-card-metric,
+.history-detail__snapshot-card-extra-item {
+  display: grid;
+  gap: 4px;
+}
+.history-detail__snapshot-card-label {
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.history-detail__snapshot-card-title {
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.history-detail__snapshot-card-value {
+  color: #1d4ed8;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.3;
+  word-break: break-word;
+}
+.history-detail__snapshot-card-extra {
+  display: grid;
+  gap: 8px;
+  padding-top: 2px;
+  border-top: 1px solid rgba(148, 163, 184, 0.24);
+}
+.history-detail__snapshot-card-extra-value {
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.history-detail__snapshot-table {
+  overflow: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+.history-detail__snapshot-table table {
+  width: 100%;
+  min-width: 320px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+.history-detail__snapshot-table th,
+.history-detail__snapshot-table td {
+  padding: 9px 10px;
+  border-bottom: 1px solid #e2e8f0;
+  text-align: left;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+  vertical-align: top;
+}
+.history-detail__snapshot-table th {
+  background: #f8fafc;
+  color: #0f172a;
+  font-weight: 700;
+}
+.history-detail__sql-wrap {
+  border-radius: 8px;
+  overflow: hidden;
+}
+.history-detail__sql {
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #dbeafe;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.history-detail__footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 6px;
+}
+.history-detail__footer.is-readonly {
+  opacity: 0.72;
+}
+.history-detail__action-hint {
+  flex: 1 0 100%;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 10px 12px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+.history-detail__footer :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+.history-detail__footer :deep(.el-button) {
+  min-width: 88px;
+}
+.history-detail__footer.is-readonly :deep(.el-button:not(.is-disabled)) {
+  opacity: 0.86;
+}
+.history-detail__footer :deep(.el-button.is-disabled) {
+  opacity: 0.42;
+}
+.history-empty-state {
+  min-height: 320px;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  text-align: center;
+  border: 1px dashed #cbd5e1;
+  border-radius: 10px;
+  background: #fff;
+  padding: 20px;
+}
+.history-empty-state__title {
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 700;
+}
+.history-empty-state__text {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.history-pagination {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 4px;
+}
 .thinking-details {
   margin-top: 8px;
   padding: 8px 10px;
@@ -1315,18 +3042,10 @@ const formatGraphContextContent = (item) => {
   font-size: 13px;
 }
 .chat-branch-banner {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 8px 0 12px;
-  padding: 8px 12px;
-  border: 1px solid var(--el-border-color-light);
-  border-radius: 8px;
-  background: var(--el-fill-color-light);
+  display: none;
 }
 .chat-branch-banner small {
-  flex: 1;
-  color: var(--el-text-color-secondary);
+  display: none;
 }
 .thinking-list {
   margin: 8px 0 0 18px;
@@ -1350,6 +3069,49 @@ const formatGraphContextContent = (item) => {
 }
 
 @media (max-width: 900px) {
+  .history-toolbar__primary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .history-toolbar__keyword,
+  .history-toolbar__table,
+  .history-toolbar__chart,
+  .history-toolbar__risk,
+  .history-toolbar__status,
+  .history-toolbar__date {
+    grid-column: 1 / -1;
+  }
+  .history-toolbar__secondary {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .history-toolbar__actions,
+  .history-toolbar__sort {
+    width: 100%;
+  }
+  .history-toolbar__sort :deep(.el-button) {
+    width: 100%;
+  }
+  .history-toolbar__actions {
+    justify-content: stretch;
+  }
+  .history-toolbar__actions :deep(.el-button) {
+    flex: 1;
+  }
+  .history-content {
+    grid-template-columns: 1fr;
+  }
+  .history-detail__snapshot-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .history-detail__head {
+    flex-direction: column;
+  }
+  .history-detail__tags {
+    justify-content: flex-start;
+  }
+  .history-detail__thumbnail-chart {
+    height: 200px;
+  }
   .chat-session-toolbar {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -1364,6 +3126,44 @@ const formatGraphContextContent = (item) => {
   }
   .chat-session-card-actions {
     justify-content: flex-end;
+  }
+  .chat-thread-header {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .chat-thread-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}
+
+@media (max-width: 720px) {
+  .chat-followup-banner {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .history-toolbar {
+    padding: 10px;
+  }
+  .history-toolbar__primary {
+    grid-template-columns: 1fr;
+  }
+  .history-toolbar__actions :deep(.el-button) {
+    flex: 1;
+  }
+  .history-summary {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .history-detail__status-grid,
+  .history-detail__kv-grid {
+    grid-template-columns: 1fr;
+  }
+  .history-detail__snapshot-cards {
+    grid-template-columns: 1fr;
+  }
+  .history-pagination {
+    justify-content: center;
   }
 }
 </style>

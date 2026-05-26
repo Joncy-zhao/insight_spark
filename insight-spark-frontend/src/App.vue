@@ -341,9 +341,19 @@ const stopRequested = ref(false)
 const isStreaming = ref(false)
 const recentChatQueries = ref([])
 const recentChatQueryKeyword = ref('')
+const recentChatQueryTableName = ref('')
+const recentChatQueryChartType = ref('')
+const recentChatQueryRiskLevel = ref('')
+const recentChatQueryExecutionStatus = ref('')
+const recentChatQueryDateRange = ref([])
+const recentChatQuerySortDirection = ref('DESC')
 const recentChatQueryPage = ref(1)
 const recentChatQueryPageSize = ref(8)
 const recentChatQueryTotal = ref(0)
+const recentChatQueryLoading = ref(false)
+const recentChatQueryError = ref('')
+const recentChatQueryErrorType = ref('')
+const pinnedHistoryIds = ref([])
 const chatSessions = ref([])
 const activeChatSessionId = ref(null)
 const chatSessionLoading = ref(false)
@@ -725,6 +735,7 @@ const bootstrapWorkbench = async () => {
       loadBusinessModels(),
       loadAnalysisTemplates(),
       loadRecentChatQueries(),
+      loadPinnedHistoryIds(),
       loadChatSessions(),
       loadVoicePreferences()
     ])
@@ -803,13 +814,252 @@ const closeTab = (moduleName) => {
   activeModule.value = fallbackTab?.key || homeModuleKey.value
 }
 
-const normalizeChatHistoryItem = (item) => ({
-  id: String(item?.id || `${item?.tableName || ''}::${item?.question || ''}`),
-  question: String(item?.question || '').trim(),
-  tableName: String(item?.tableName || '').trim(),
-  chartType: String(item?.chartType || '').trim(),
-  createdAt: item?.createdAt || new Date().toISOString()
-})
+const normalizeChatHistoryItem = (item) => {
+  const rawSnapshot = parseMaybeJson(item?.chartSnapshot)
+  const snapshot = rawSnapshot && typeof rawSnapshot === 'object' ? rawSnapshot : {}
+  const normalizeReplaySteps = (steps) => {
+    if (!Array.isArray(steps)) return []
+    return steps.map((step, index) => {
+      if (step && typeof step === 'object' && !Array.isArray(step)) {
+        const title = String(step.title || step.stage || `步骤 ${index + 1}`).trim()
+        const detail = String(step.detail || step.text || step.message || '').trim()
+        return {
+          title: title || `步骤 ${index + 1}`,
+          detail,
+          ts: step.ts ?? null
+        }
+      }
+      const detail = String(step || '').trim()
+      if (!detail) return null
+      return {
+        title: `步骤 ${index + 1}`,
+        detail,
+        ts: null
+      }
+    }).filter(Boolean)
+  }
+  const normalizedReplaySteps = normalizeReplaySteps(
+    item?.reasoningReplaySteps
+      || snapshot?.reasoningReplaySteps
+      || item?.reasoningProcess
+      || snapshot?.reasoningProcess
+  )
+  const question = String(
+    item?.question
+    || item?.queryText
+    || snapshot?.sourceQuestion
+    || snapshot?.message
+    || ''
+  ).trim()
+  const tableName = String(
+    item?.tableName
+    || item?.queryTableName
+    || snapshot?.tableName
+    || ''
+  ).trim()
+  const chartType = String(
+    item?.chartType
+    || snapshot?.chartType
+    || ''
+  ).trim()
+  const chartData = Array.isArray(snapshot?.data) ? snapshot.data : []
+  const graphContext = Array.isArray(snapshot?.graphContext) ? snapshot.graphContext : []
+  const rawExecutionStatus = Number(item?.executionStatus ?? snapshot?.executionStatus)
+  const rawExecutionTimeMs = Number(item?.executionTimeMs ?? snapshot?.executionTimeMs)
+  const rawCacheFlag = item?.isHitCache ?? snapshot?.isHitCache
+  return {
+    id: String(item?.id || `${tableName}::${question}`),
+    question,
+    tableName,
+    chartType,
+    riskLevel: String(item?.riskLevel || snapshot?.riskLevel || 'SAFE').trim().toUpperCase(),
+    riskReason: String(item?.riskReason || item?.auditInfo || snapshot?.riskReason || '').trim(),
+    sql: String(item?.sql || item?.generatedSql || snapshot?.sql || snapshot?.generatedSql || '').trim(),
+    sourceType: String(item?.sourceType || '').trim().toUpperCase(),
+    conversationId: item?.conversationId == null ? null : String(item?.conversationId),
+    userTurnId: item?.userTurnId == null ? null : String(item?.userTurnId),
+    assistantTurnId: item?.assistantTurnId == null ? null : String(item?.assistantTurnId),
+    turnId: (item?.turnId ?? item?.assistantTurnId) == null ? null : String(item?.turnId ?? item?.assistantTurnId),
+    turnNo: item?.turnNo == null ? null : Number(item?.turnNo) || null,
+    artifactType: String(item?.artifactType || '').trim().toUpperCase(),
+    fieldMapping: snapshot?.fieldMapping && typeof snapshot.fieldMapping === 'object' ? snapshot.fieldMapping : {},
+    chartSnapshot: snapshot,
+    graphContext,
+    graphPath: snapshot?.graphPath || null,
+    graphSqlHints: snapshot?.graphSqlHints || null,
+    reasoningReplaySteps: normalizedReplaySteps,
+    reasoningProcess: Array.isArray(item?.reasoningProcess)
+      ? item.reasoningProcess.map(step => String(step || '').trim()).filter(Boolean)
+      : (Array.isArray(snapshot?.reasoningProcess)
+        ? snapshot.reasoningProcess.map(step => String(step || '').trim()).filter(Boolean)
+        : []),
+    executionStatus: Number.isFinite(rawExecutionStatus) ? rawExecutionStatus : null,
+    executionTimeMs: Number.isFinite(rawExecutionTimeMs) && rawExecutionTimeMs >= 0 ? rawExecutionTimeMs : null,
+    isHitCache: rawCacheFlag === true || Number(rawCacheFlag) === 1 || String(rawCacheFlag || '').trim().toLowerCase() === 'true',
+    hasChartSnapshot: chartData.length > 0,
+    chartDataCount: chartData.length,
+    snapshotStatus: chartData.length > 0 ? 'ready' : 'unknown',
+    isPinned: Boolean(item?.isPinned),
+    pinnedDashboardNames: Array.isArray(item?.pinnedDashboardNames)
+      ? item.pinnedDashboardNames.map(name => String(name || '').trim()).filter(Boolean)
+      : [],
+    createdAt: item?.createdAt || new Date().toISOString()
+  }
+}
+
+const extractPinnedHistoryId = (item) => {
+  const raw = item?.chart_id ?? item?.chartId ?? item?.historyId ?? item?.id
+  const numeric = Number(raw)
+  if (Number.isFinite(numeric) && numeric > 0) {
+    return String(numeric)
+  }
+  return String(raw || '').trim()
+}
+
+const extractPinnedDashboardNames = (item) => {
+  const names = String(item?.dashboard_names ?? item?.dashboardNames ?? '').trim()
+  if (!names) return []
+  return names.split(',').map(name => String(name || '').trim()).filter(Boolean)
+}
+
+const attachPinnedFlagsToHistory = (items) => {
+  const pinnedSet = new Set((pinnedHistoryIds.value || []).map(id => String(id || '').trim()).filter(Boolean))
+  return items.map(item => ({
+    ...item,
+    isPinned: pinnedSet.has(String(item?.id || '').trim()),
+    pinnedDashboardNames: Array.isArray(item?.pinnedDashboardNames) ? item.pinnedDashboardNames : []
+  }))
+}
+
+const updateRecentChatHistoryEntry = (entryId, patch) => {
+  const targetId = String(entryId || '').trim()
+  if (!targetId) return
+  recentChatQueries.value = recentChatQueries.value.map(item => {
+    if (String(item?.id || '').trim() !== targetId) return item
+    return typeof patch === 'function' ? patch(item) : { ...item, ...(patch || {}) }
+  })
+}
+
+const loadPinnedHistoryIds = async () => {
+  try {
+    const rows = unwrap(await axios.get(`${API_BASE}/api/c/dashboards/pinned-charts`))
+    const list = Array.isArray(rows) ? rows : []
+    const idSet = new Set()
+    const dashboardNameMap = new Map()
+    list.forEach(item => {
+      const historyId = extractPinnedHistoryId(item)
+      if (!historyId) return
+      idSet.add(historyId)
+      dashboardNameMap.set(historyId, extractPinnedDashboardNames(item))
+    })
+    pinnedHistoryIds.value = [...idSet]
+    recentChatQueries.value = recentChatQueries.value.map(item => ({
+      ...item,
+      isPinned: idSet.has(String(item?.id || '').trim()),
+      pinnedDashboardNames: dashboardNameMap.get(String(item?.id || '').trim()) || []
+    }))
+  } catch (error) {
+    if (error?.response?.status !== 401) {
+      console.warn('loadPinnedHistoryIds failed:', error)
+    }
+  }
+}
+
+const hasRecentChatQueryFilters = (options = {}) => {
+  const keyword = String(options.keyword || '').trim()
+  const tableName = String(options.tableName || '').trim()
+  const chartType = String(options.chartType || '').trim()
+  const riskLevel = String(options.riskLevel || '').trim()
+  const executionStatus = String(options.executionStatus || '').trim()
+  const dateRange = Array.isArray(options.dateRange) ? options.dateRange.filter(Boolean) : []
+  return Boolean(keyword || tableName || chartType || riskLevel || executionStatus || dateRange.length)
+}
+
+const isHistoryWithinDateRange = (createdAt, dateRange = []) => {
+  if (!Array.isArray(dateRange) || !dateRange.length) return true
+  const rawDate = new Date(createdAt)
+  if (Number.isNaN(rawDate.getTime())) return false
+  const start = dateRange?.[0] ? new Date(`${dateRange[0]}T00:00:00`) : null
+  const end = dateRange?.[1] ? new Date(`${dateRange[1]}T23:59:59`) : null
+  if (start && rawDate < start) return false
+  if (end && rawDate > end) return false
+  return true
+}
+
+const filterRecentChatHistoryItems = (items, options = {}) => {
+  const keyword = String(options.keyword || '').trim().toLowerCase()
+  const tableName = String(options.tableName || '').trim()
+  const chartType = String(options.chartType || '').trim()
+  const riskLevel = String(options.riskLevel || '').trim().toUpperCase()
+  const dateRange = Array.isArray(options.dateRange) ? options.dateRange : []
+  return items.filter(item => {
+    if (keyword) {
+      const haystack = [
+        item?.question,
+        item?.sql,
+        item?.tableName
+      ].map(value => String(value || '').toLowerCase()).join(' ')
+      if (!haystack.includes(keyword)) {
+        return false
+      }
+    }
+    if (tableName && String(item?.tableName || '').trim() !== tableName) {
+      return false
+    }
+    if (chartType && String(item?.chartType || '').trim() !== chartType) {
+      return false
+    }
+    if (riskLevel && String(item?.riskLevel || '').trim().toUpperCase() !== riskLevel) {
+      return false
+    }
+    return isHistoryWithinDateRange(item?.createdAt, dateRange)
+  })
+}
+
+const fetchAllRecentChatHistoryItems = async (params = {}) => {
+  const firstPage = unwrap(await axios.get(`${API_BASE}/api/chat/history`, {
+    params: {
+      page: 1,
+      pageSize: 50,
+      keyword: params.keyword || undefined,
+      tableName: params.tableName || undefined,
+      chartType: params.chartType || undefined,
+      riskLevel: params.riskLevel || undefined,
+      dateFrom: params.dateRange?.[0] || undefined,
+      dateTo: params.dateRange?.[1] || undefined
+    }
+  }))
+  const firstItems = Array.isArray(firstPage?.items)
+    ? firstPage.items.map(normalizeChatHistoryItem).filter(item => item.question)
+    : []
+  const total = Number(firstPage?.total || firstItems.length || 0)
+  const totalPages = Math.max(1, Math.ceil(total / 50))
+  if (totalPages <= 1) {
+    return firstItems
+  }
+  const extraPages = await Promise.all(
+    Array.from({ length: totalPages - 1 }, (_, index) =>
+      axios.get(`${API_BASE}/api/chat/history`, {
+        params: {
+          page: index + 2,
+          pageSize: 50,
+          keyword: params.keyword || undefined,
+          tableName: params.tableName || undefined,
+          chartType: params.chartType || undefined,
+          riskLevel: params.riskLevel || undefined,
+          dateFrom: params.dateRange?.[0] || undefined,
+          dateTo: params.dateRange?.[1] || undefined
+        }
+      }).then(unwrap)
+    )
+  )
+  const extraItems = extraPages.flatMap(page =>
+    Array.isArray(page?.items)
+      ? page.items.map(normalizeChatHistoryItem).filter(item => item.question)
+      : []
+  )
+  return [...firstItems, ...extraItems]
+}
 
 const normalizeChartArtifactSnapshot = (artifact) => {
   if (!artifact || typeof artifact !== 'object') return null
@@ -866,6 +1116,135 @@ const restoreAnalysisFromMessage = (message, options = {}) => {
   return true
 }
 
+const buildAnalysisFromHistoryItem = (entry) => {
+  const snapshot = entry?.chartSnapshot && typeof entry.chartSnapshot === 'object'
+    ? entry.chartSnapshot
+    : parseMaybeJson(entry?.chartSnapshot)
+  if (!snapshot || typeof snapshot !== 'object') return null
+  const chartData = Array.isArray(snapshot.data) ? snapshot.data : []
+  if (!chartData.length) return null
+  const tableName = String(entry?.tableName || snapshot.tableName || '').trim()
+  const chartType = String(entry?.chartType || snapshot.chartType || 'bar').trim() || 'bar'
+  const sql = String(entry?.sql || snapshot.sql || snapshot.generatedSql || '').trim()
+  const question = String(entry?.question || snapshot.sourceQuestion || '').trim()
+  return {
+    tableName,
+    chartType,
+    data: chartData,
+    fieldMapping: snapshot.fieldMapping || {},
+    sql,
+    sourceSql: sql,
+    sourceQuestion: question,
+    sourceTableName: tableName,
+    message: String(snapshot.message || entry?.riskReason || '').trim() || `历史查询：${question || tableName || '图表'}`,
+    chartSnapshot: snapshot,
+    graphContext: Array.isArray(snapshot.graphContext) ? snapshot.graphContext : [],
+    graphPath: snapshot.graphPath || null,
+    graphSqlHints: snapshot.graphSqlHints || null,
+    reasoningReplaySteps: Array.isArray(entry?.reasoningReplaySteps)
+      ? entry.reasoningReplaySteps
+      : (Array.isArray(snapshot.reasoningReplaySteps) ? snapshot.reasoningReplaySteps : []),
+    reasoningProcess: Array.isArray(snapshot.reasoningProcess)
+      ? snapshot.reasoningProcess.map(step => String(step || '').trim()).filter(Boolean)
+      : [],
+    riskLevel: String(entry?.riskLevel || snapshot.riskLevel || 'SAFE').trim().toUpperCase() || 'SAFE',
+    riskReason: String(entry?.riskReason || snapshot.riskReason || '').trim(),
+    queryHistoryId: entry?.id == null ? null : String(entry.id),
+    artifactId: entry?.artifactId == null ? null : String(entry.artifactId),
+    artifactIds: Array.isArray(snapshot.artifactIds)
+      ? snapshot.artifactIds.map(item => String(item || '')).filter(Boolean)
+      : [],
+    conversationId: entry?.conversationId == null ? null : String(entry.conversationId),
+    assistantTurnId: entry?.assistantTurnId == null ? null : String(entry.assistantTurnId),
+    turnId: (entry?.turnId || entry?.assistantTurnId) == null ? null : String(entry.turnId || entry.assistantTurnId),
+    turnNo: entry?.turnNo == null ? null : Number(entry.turnNo) || null
+  }
+}
+
+const fetchHistoryChartSnapshot = async (historyId) => {
+  const id = Number(historyId)
+  if (!Number.isFinite(id) || id <= 0) return null
+  const rows = unwrap(await axios.post(`${API_BASE}/api/chat/history/charts-batch`, {
+    ids: [id]
+  }))
+  const item = Array.isArray(rows) ? rows.find(row => Number(row?.id) === id) : null
+  if (!item) return null
+  return normalizeChatHistoryItem({
+    ...item,
+    question: item?.queryText ?? item?.question,
+    tableName: item?.queryTableName ?? item?.tableName,
+    sql: item?.generatedSql ?? item?.sql,
+    isPinned: pinnedHistoryIds.value.includes(String(id))
+  })
+}
+
+const ensureHistoryEntrySnapshot = async (entry) => {
+  if (!entry?.id) return entry
+  const localSnapshot = entry?.chartSnapshot && typeof entry.chartSnapshot === 'object' ? entry.chartSnapshot : {}
+  if (Array.isArray(localSnapshot.data) && localSnapshot.data.length) {
+    const readyEntry = {
+      ...entry,
+      hasChartSnapshot: true,
+      chartDataCount: localSnapshot.data.length,
+      snapshotStatus: 'ready'
+    }
+    updateRecentChatHistoryEntry(entry.id, readyEntry)
+    return readyEntry
+  }
+  try {
+    const remoteEntry = await fetchHistoryChartSnapshot(entry.id)
+    if (!remoteEntry) {
+      const missingEntry = {
+        ...entry,
+        hasChartSnapshot: false,
+        chartDataCount: 0,
+        snapshotStatus: 'missing'
+      }
+      updateRecentChatHistoryEntry(entry.id, missingEntry)
+      return missingEntry
+    }
+    const merged = {
+      ...entry,
+      ...remoteEntry,
+      question: remoteEntry.question || entry.question,
+      tableName: remoteEntry.tableName || entry.tableName,
+      sql: remoteEntry.sql || entry.sql,
+      chartType: remoteEntry.chartType || entry.chartType,
+      chartSnapshot: Object.keys(remoteEntry.chartSnapshot || {}).length
+        ? remoteEntry.chartSnapshot
+        : (entry.chartSnapshot || {}),
+      hasChartSnapshot: Boolean(remoteEntry.hasChartSnapshot),
+      chartDataCount: Number(remoteEntry.chartDataCount || 0),
+      snapshotStatus: remoteEntry.hasChartSnapshot ? 'ready' : 'missing'
+    }
+    updateRecentChatHistoryEntry(entry.id, merged)
+    return merged
+  } catch (error) {
+    console.warn('ensureHistoryEntrySnapshot failed:', error)
+    const errorEntry = {
+      ...entry,
+      snapshotStatus: 'error'
+    }
+    updateRecentChatHistoryEntry(entry.id, errorEntry)
+    return errorEntry
+  }
+}
+
+const restoreAnalysisFromHistory = async (entry) => {
+  const resolvedEntry = await ensureHistoryEntrySnapshot(entry)
+  const analysis = buildAnalysisFromHistoryItem(resolvedEntry)
+  if (!analysis) return false
+  lastAnalysis.value = analysis
+  currentChartType.value = analysis.chartType || 'bar'
+  if (resolvedEntry?.tableName && isAccessibleTable(resolvedEntry.tableName)) {
+    selectedTableName.value = resolvedEntry.tableName
+  }
+  nextTick(() => {
+    renderChart(lastAnalysis.value.data, currentChartType.value)
+  })
+  return true
+}
+
 const setActiveBranchParent = (message) => {
   const turnId = String(message?.turnId || '').trim()
   if (!turnId) {
@@ -877,7 +1256,10 @@ const setActiveBranchParent = (message) => {
   activeBranchParentTurnMeta.value = {
     turnId,
     turnNo: Number(message?.turnNo || 0) || null,
-    preview: String(message?.content || '').trim().slice(0, 40)
+    preview: String(message?.content || '').trim().slice(0, 40),
+    source: 'message',
+    role: String(message?.role || '').trim() || 'system',
+    tableName: String(message?.sourceTableName || message?.tableName || selectedTableName.value || '').trim()
   }
 }
 
@@ -885,6 +1267,16 @@ const openHistoricalAnalysis = (message) => {
   if (!restoreAnalysisFromMessage(message)) return
   const preview = String(message?.sourceQuestion || message?.content || '历史图表').trim()
   ElMessage.success(`已切换到历史图表：${preview.slice(0, 24)}`)
+}
+
+const openHistoricalAnalysisFromHistory = async (entry) => {
+  if (!await restoreAnalysisFromHistory(entry)) {
+    ElMessage.warning('该历史记录暂未保存可回放图表')
+    return false
+  }
+  const preview = String(entry?.question || entry?.tableName || '历史图表').trim()
+  ElMessage.success(`已恢复历史产物：${preview.slice(0, 24)}`)
+  return true
 }
 
 const clearActiveBranchParent = () => {
@@ -1129,28 +1521,65 @@ const loadRecentChatQueries = async (options = {}) => {
     recentChatQueries.value = []
     recentChatQueryTotal.value = 0
     recentChatQueryPage.value = 1
+    recentChatQueryLoading.value = false
+    recentChatQueryError.value = ''
+    recentChatQueryErrorType.value = ''
     return
   }
   const nextPage = Math.max(1, Number(options.page ?? recentChatQueryPage.value ?? 1))
   const nextPageSize = Math.max(1, Math.min(50, Number(options.pageSize ?? recentChatQueryPageSize.value ?? 8)))
   const nextKeyword = String(options.keyword ?? recentChatQueryKeyword.value ?? '').trim()
+  const nextTableName = String(options.tableName ?? recentChatQueryTableName.value ?? '').trim()
+  const nextChartType = String(options.chartType ?? recentChatQueryChartType.value ?? '').trim()
+  const nextRiskLevel = String(options.riskLevel ?? recentChatQueryRiskLevel.value ?? '').trim()
+  const nextExecutionStatus = String(options.executionStatus ?? recentChatQueryExecutionStatus.value ?? '').trim()
+  const nextDateRange = Array.isArray(options.dateRange ?? recentChatQueryDateRange.value)
+    ? (options.dateRange ?? recentChatQueryDateRange.value)
+    : []
+  const nextSortDirection = String(options.sortDirection ?? recentChatQuerySortDirection.value ?? 'DESC').trim().toUpperCase() === 'ASC'
+    ? 'ASC'
+    : 'DESC'
   const skipAdjust = Boolean(options.skipAdjust)
   try {
+    recentChatQueryLoading.value = true
+    recentChatQueryError.value = ''
+    recentChatQueryErrorType.value = ''
+    const currentFilters = {
+      keyword: nextKeyword,
+      tableName: nextTableName,
+      chartType: nextChartType,
+      riskLevel: nextRiskLevel,
+      executionStatus: nextExecutionStatus,
+      dateRange: nextDateRange
+    }
     const data = unwrap(await axios.get(`${API_BASE}/api/chat/history`, {
       params: {
         page: nextPage,
         pageSize: nextPageSize,
-        keyword: nextKeyword || undefined
+        keyword: nextKeyword || undefined,
+        tableName: nextTableName || undefined,
+        chartType: nextChartType || undefined,
+        riskLevel: nextRiskLevel || undefined,
+        executionStatus: nextExecutionStatus || undefined,
+        dateFrom: nextDateRange?.[0] || undefined,
+        dateTo: nextDateRange?.[1] || undefined,
+        sortDirection: nextSortDirection
       }
     }))
     const items = Array.isArray(data?.items)
-        ? data.items.map(normalizeChatHistoryItem).filter(item => item.question)
-        : []
-    recentChatQueries.value = items
+      ? data.items.map(normalizeChatHistoryItem).filter(item => item.question)
+      : []
+    recentChatQueries.value = attachPinnedFlagsToHistory(items)
     recentChatQueryTotal.value = Number(data?.total || 0)
     recentChatQueryPage.value = Number(data?.page || nextPage)
     recentChatQueryPageSize.value = Number(data?.pageSize || nextPageSize)
     recentChatQueryKeyword.value = String(data?.keyword ?? nextKeyword).trim()
+    recentChatQueryTableName.value = nextTableName
+    recentChatQueryChartType.value = nextChartType
+    recentChatQueryRiskLevel.value = nextRiskLevel
+    recentChatQueryExecutionStatus.value = nextExecutionStatus
+    recentChatQueryDateRange.value = nextDateRange
+    recentChatQuerySortDirection.value = nextSortDirection
 
     if (!skipAdjust) {
       const maxPage = Math.max(1, Math.ceil(recentChatQueryTotal.value / recentChatQueryPageSize.value))
@@ -1160,6 +1589,12 @@ const loadRecentChatQueries = async (options = {}) => {
           page: maxPage,
           pageSize: recentChatQueryPageSize.value,
           keyword: recentChatQueryKeyword.value,
+          tableName: recentChatQueryTableName.value,
+          chartType: recentChatQueryChartType.value,
+          riskLevel: recentChatQueryRiskLevel.value,
+          executionStatus: recentChatQueryExecutionStatus.value,
+          dateRange: recentChatQueryDateRange.value,
+          sortDirection: recentChatQuerySortDirection.value,
           skipAdjust: true
         })
       }
@@ -1167,9 +1602,20 @@ const loadRecentChatQueries = async (options = {}) => {
   } catch (error) {
     recentChatQueries.value = []
     recentChatQueryTotal.value = 0
+    recentChatQueryErrorType.value = hasRecentChatQueryFilters({
+      keyword: nextKeyword,
+      tableName: nextTableName,
+      chartType: nextChartType,
+      riskLevel: nextRiskLevel,
+      executionStatus: nextExecutionStatus,
+      dateRange: nextDateRange
+    }) ? 'search' : 'load'
+    recentChatQueryError.value = error?.message || '加载历史产物失败'
     if (error?.response?.status !== 401) {
       console.warn('loadRecentChatQueries failed:', error)
     }
+  } finally {
+    recentChatQueryLoading.value = false
   }
 }
 
@@ -1178,17 +1624,35 @@ const searchRecentChatQueries = async () => {
   await loadRecentChatQueries({
     page: 1,
     pageSize: recentChatQueryPageSize.value,
-    keyword: recentChatQueryKeyword.value
+    keyword: recentChatQueryKeyword.value,
+    tableName: recentChatQueryTableName.value,
+    chartType: recentChatQueryChartType.value,
+    riskLevel: recentChatQueryRiskLevel.value,
+    executionStatus: recentChatQueryExecutionStatus.value,
+    dateRange: recentChatQueryDateRange.value,
+    sortDirection: recentChatQuerySortDirection.value
   })
 }
 
 const resetRecentChatQuerySearch = async () => {
   recentChatQueryKeyword.value = ''
+  recentChatQueryTableName.value = ''
+  recentChatQueryChartType.value = ''
+  recentChatQueryRiskLevel.value = ''
+  recentChatQueryExecutionStatus.value = ''
+  recentChatQueryDateRange.value = []
+  recentChatQuerySortDirection.value = 'DESC'
   recentChatQueryPage.value = 1
   await loadRecentChatQueries({
     page: 1,
     pageSize: recentChatQueryPageSize.value,
-    keyword: ''
+    keyword: '',
+    tableName: '',
+    chartType: '',
+    riskLevel: '',
+    executionStatus: '',
+    dateRange: [],
+    sortDirection: 'DESC'
   })
 }
 
@@ -1197,7 +1661,13 @@ const handleRecentChatPageChange = async (page) => {
   await loadRecentChatQueries({
     page,
     pageSize: recentChatQueryPageSize.value,
-    keyword: recentChatQueryKeyword.value
+    keyword: recentChatQueryKeyword.value,
+    tableName: recentChatQueryTableName.value,
+    chartType: recentChatQueryChartType.value,
+    riskLevel: recentChatQueryRiskLevel.value,
+    executionStatus: recentChatQueryExecutionStatus.value,
+    dateRange: recentChatQueryDateRange.value,
+    sortDirection: recentChatQuerySortDirection.value
   })
 }
 
@@ -1207,22 +1677,45 @@ const handleRecentChatPageSizeChange = async (pageSize) => {
   await loadRecentChatQueries({
     page: 1,
     pageSize,
-    keyword: recentChatQueryKeyword.value
+    keyword: recentChatQueryKeyword.value,
+    tableName: recentChatQueryTableName.value,
+    chartType: recentChatQueryChartType.value,
+    riskLevel: recentChatQueryRiskLevel.value,
+    executionStatus: recentChatQueryExecutionStatus.value,
+    dateRange: recentChatQueryDateRange.value,
+    sortDirection: recentChatQuerySortDirection.value
   })
 }
 
 const removeRecentChatQuery = async (entry) => {
   if (!entry?.id) return
   try {
+    await ElMessageBox.confirm(
+      `确认删除历史记录“${String(entry.question || '未命名查询').slice(0, 24)}”吗？`,
+      '删除历史记录',
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
     await axios.post(`${API_BASE}/api/chat/history/${entry.id}/delete`).then(unwrap)
     ElMessage.success('已删除历史记录')
     await loadRecentChatQueries({
       page: recentChatQueryPage.value,
       pageSize: recentChatQueryPageSize.value,
-      keyword: recentChatQueryKeyword.value
+      keyword: recentChatQueryKeyword.value,
+      tableName: recentChatQueryTableName.value,
+      chartType: recentChatQueryChartType.value,
+      riskLevel: recentChatQueryRiskLevel.value,
+      executionStatus: recentChatQueryExecutionStatus.value,
+      dateRange: recentChatQueryDateRange.value,
+      sortDirection: recentChatQuerySortDirection.value
     })
   } catch (error) {
-    ElMessage.error(error.message || '删除历史记录失败')
+    if (error !== 'cancel' && error !== 'close') {
+      ElMessage.error(error.message || '删除历史记录失败')
+    }
   }
 }
 
@@ -1244,10 +1737,76 @@ const reuseChatQuestion = async (entry) => {
     ElMessage.warning('当前正在生成，请稍后再试')
     return
   }
+  if (entry.conversationId) {
+    activeChatSessionId.value = String(entry.conversationId)
+  }
+  if (entry.turnId) {
+    setActiveBranchParent({
+      turnId: entry.turnId,
+      turnNo: entry.turnNo,
+      content: entry.question
+    })
+  }
   await sendQuestion({
     questionText: entry.question,
-    tableName: entry.tableName || selectedTableName.value
+    tableName: entry.tableName || selectedTableName.value,
+    parentTurnId: entry.turnId || undefined
   })
+}
+
+const continueFromChatHistory = async (entry) => {
+  if (!entry) return
+  if (loading.value || isStreaming.value) {
+    ElMessage.warning('当前正在生成，请稍后再试')
+    return
+  }
+  const restored = await openHistoricalAnalysisFromHistory(entry)
+  if (!restored) return
+  if (entry.conversationId) {
+    activeChatSessionId.value = String(entry.conversationId)
+  }
+  const parentTurnId = String(entry.turnId || entry.assistantTurnId || '').trim()
+  activeBranchParentTurnId.value = parentTurnId || null
+  activeBranchParentTurnMeta.value = {
+    turnId: parentTurnId || entry.id,
+    turnNo: entry.turnNo,
+    preview: String(entry.question || '').trim().slice(0, 40),
+    source: 'history',
+    role: 'system',
+    tableName: String(entry.tableName || '').trim()
+  }
+  question.value = ''
+}
+
+const draftChatQuestionFromHistory = async (entry) => {
+  if (!entry?.question) return
+  if (loading.value || isStreaming.value) {
+    ElMessage.warning('当前正在生成，请稍后再试')
+    return
+  }
+  if (entry.conversationId) {
+    activeChatSessionId.value = String(entry.conversationId)
+  }
+  if (entry.tableName && isAccessibleTable(entry.tableName)) {
+    selectedTableName.value = entry.tableName
+  }
+  const parentTurnId = String(entry.turnId || entry.assistantTurnId || '').trim()
+  if (parentTurnId) {
+    activeBranchParentTurnId.value = parentTurnId
+    activeBranchParentTurnMeta.value = {
+      turnId: parentTurnId,
+      turnNo: entry.turnNo,
+      preview: String(entry.question || '').trim().slice(0, 40),
+      source: 'history',
+      role: 'system',
+      tableName: String(entry.tableName || '').trim()
+    }
+  } else {
+    clearActiveBranchParent()
+  }
+  activeModule.value = 'chat'
+  question.value = String(entry.question || '').trim()
+  ElMessage.success('已带回原问题，可修改后重新生成')
 }
 
 const regenerateLastAnalysis = async () => {
@@ -1292,6 +1851,12 @@ const handleLogout = async () => {
     tables.value = []
     recentChatQueries.value = []
     recentChatQueryKeyword.value = ''
+    recentChatQueryTableName.value = ''
+    recentChatQueryChartType.value = ''
+    recentChatQueryRiskLevel.value = ''
+    recentChatQueryExecutionStatus.value = ''
+    recentChatQueryDateRange.value = []
+    recentChatQuerySortDirection.value = 'DESC'
     recentChatQueryPage.value = 1
     recentChatQueryPageSize.value = 8
     recentChatQueryTotal.value = 0
@@ -3346,6 +3911,7 @@ const pinChartToDashboard = async () => {
       throw new Error(body.message || '钉入失败')
     }
     ElMessage.success('图表已钉入看板')
+    await loadPinnedHistoryIds()
     pinDialogVisible.value = false
   } catch (error) {
     ElMessage.error(error.message || '钉入看板失败')
@@ -3549,6 +4115,18 @@ const sendQuestion = async (options = {}) => {
   messages.value.push({
     role: 'user',
     content: isRegenerate ? `${userQuestion}\n（重新生成）` : userQuestion
+    , parentTurnId: branchParentTurnId || null
+    , isFollowUp: Boolean(branchParentTurnId)
+    , followUpMeta: branchParentTurnId
+      ? {
+          parentTurnId: branchParentTurnId,
+          preview: String(activeBranchParentTurnMeta.value?.preview || '').trim(),
+          turnNo: activeBranchParentTurnMeta.value?.turnNo ?? null,
+          source: String(activeBranchParentTurnMeta.value?.source || '').trim() || 'message',
+          role: String(activeBranchParentTurnMeta.value?.role || '').trim() || 'system',
+          tableName: String(activeBranchParentTurnMeta.value?.tableName || queryTableName || '').trim()
+        }
+      : null
   })
   question.value = ''
   loading.value = true
@@ -4467,9 +5045,18 @@ provide('workbench', {
   uploadTables,
   officialQueryTables,
   recentChatQueryKeyword,
+  recentChatQueryTableName,
+  recentChatQueryChartType,
+  recentChatQueryRiskLevel,
+  recentChatQueryExecutionStatus,
+  recentChatQueryDateRange,
+  recentChatQuerySortDirection,
   recentChatQueryPage,
   recentChatQueryPageSize,
   recentChatQueryTotal,
+  recentChatQueryLoading,
+  recentChatQueryError,
+  recentChatQueryErrorType,
   chatSessions,
   activeChatSessionId,
   chatSessionLoading,
@@ -4485,6 +5072,9 @@ provide('workbench', {
   createChatSession,
   selectChatSession,
   openHistoricalAnalysis,
+  openHistoricalAnalysisFromHistory,
+  continueFromChatHistory,
+  draftChatQuestionFromHistory,
   setActiveBranchParent,
   clearActiveBranchParent,
   activeBranchParentTurnId,
@@ -4595,6 +5185,8 @@ provide('workbench', {
   resetRecentChatQuerySearch,
   handleRecentChatPageChange,
   handleRecentChatPageSizeChange,
+  loadPinnedHistoryIds,
+  ensureHistoryEntrySnapshot,
   formatChatHistoryTime,
   loadAuditLogs,
   loadAuditRules,
