@@ -98,6 +98,13 @@ export const menuGroups = [
         subtitle: '全量 SQL 日志、审计规则配置、风险等级、敏感脱敏、慢查询监控与导出。'
       },
       {
+        key: 'adminChatHistory',
+        role: 'ADMIN',
+        index: '7',
+        title: '管理员对话历史',
+        subtitle: '全平台对话查询、SQL 生成、知识图谱匹配、推理过程与性能审计统一查看。'
+      },
+      {
         key: 'stackCConfig',
         role: 'ADMIN',
         index: '9',

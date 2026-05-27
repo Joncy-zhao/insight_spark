@@ -281,6 +281,9 @@ public class PythonAiService {
 
     private Void copyAudioStream(ClientHttpResponse aiResponse, HttpServletResponse servletResponse) throws IOException {
         servletResponse.setStatus(aiResponse.getStatusCode().value());
+        servletResponse.setContentType("audio/pcm");
+        servletResponse.setCharacterEncoding("UTF-8");
+        servletResponse.setHeader("Cache-Control", "no-store");
         copyHeaderIfPresent(aiResponse, servletResponse, "X-Audio-Format");
         copyHeaderIfPresent(aiResponse, servletResponse, "X-Audio-Sample-Rate");
         copyHeaderIfPresent(aiResponse, servletResponse, "X-Audio-Channels");

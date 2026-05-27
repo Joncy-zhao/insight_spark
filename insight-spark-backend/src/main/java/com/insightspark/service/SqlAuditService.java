@@ -93,6 +93,7 @@ public class SqlAuditService {
         addColumnIfMissing("is_sql_audit_log", "cache_hit", "`cache_hit` TINYINT(1) NOT NULL DEFAULT 0");
         addColumnIfMissing("is_sql_audit_log", "cache_sql", "`cache_sql` TEXT NULL");
         addColumnIfMissing("is_sql_audit_log", "cache_audit_status", "`cache_audit_status` VARCHAR(32) NULL");
+        addColumnIfMissing("is_sql_audit_log", "redis_status", "`redis_status` VARCHAR(32) NULL DEFAULT 'LOCAL'");
         addColumnIfMissing("is_sql_audit_log", "mask_detail", "`mask_detail` VARCHAR(1000) NULL");
         addColumnIfMissing("is_sql_audit_log", "execution_guard", "`execution_guard` VARCHAR(1000) NULL");
         addColumnIfMissing("is_sql_audit_log", "query_guard_action", "`query_guard_action` VARCHAR(32) NULL");
@@ -275,8 +276,8 @@ public class SqlAuditService {
                                              risk_reason, matched_rules, sensitive_fields, slow_query,
                                              execute_status, duration_ms, error_message, generation_trace,
                                              kg_match_log, cache_key, cache_hit, cache_sql, cache_audit_status,
-                                             mask_detail, execution_guard, query_guard_action)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                             redis_status, mask_detail, execution_guard, query_guard_action)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 AuthContext.userId(),
                 safeText(question, 1000),
@@ -297,6 +298,7 @@ public class SqlAuditService {
                 booleanDetail(details, "cacheHit"),
                 safeText(stringDetail(details, "cacheSql"), 65535),
                 safeText(stringDetail(details, "cacheAuditStatus"), 32),
+                safeText(stringDetail(details, "redisStatus"), 32),
                 safeText(stringDetail(details, "maskDetail"), 1000),
                 safeText(stringDetail(details, "executionGuard"), 1000),
                 safeText(stringDetail(details, "queryGuardAction"), 32)

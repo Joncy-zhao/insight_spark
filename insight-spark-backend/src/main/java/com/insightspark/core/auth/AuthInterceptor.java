@@ -29,6 +29,7 @@ public class AuthInterceptor implements HandlerInterceptor {
         boolean loginRequired = uri.startsWith("/api/data")
             || uri.startsWith("/api/auth/me")
             || uri.startsWith("/api/chat")
+                || uri.startsWith("/api/admin")
                 || uri.startsWith("/api/permission")
                 || uri.startsWith("/api/datasource")
                 || uri.startsWith("/api/datasources")
@@ -73,6 +74,7 @@ public class AuthInterceptor implements HandlerInterceptor {
         return uri.startsWith("/api/datasource")
                 || uri.startsWith("/api/datasources")
                 || uri.startsWith("/api/audit")
+                || uri.startsWith("/api/admin")
                 || uri.startsWith("/api/knowledge-graph")
                 || uri.startsWith("/api/permission/admin")
                 || uri.startsWith("/api/c/admin");

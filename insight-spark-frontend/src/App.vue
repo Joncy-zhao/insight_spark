@@ -73,6 +73,7 @@
         <DiagnosisReportView v-if="activeModule === 'diagnosis'" />
         <KnowledgeGraphView v-if="activeModule === 'knowledgeGraph'" />
         <SqlAuditView v-if="activeModule === 'audit'" />
+        <AdminChatHistoryView v-if="activeModule === 'adminChatHistory'" />
         <UserWorkbenchView v-if="activeModule === 'workbench'" />
         <UserDashboardView v-if="activeModule === 'dashboard'" />
         <BusinessCollaborationView v-if="activeModule === 'collaboration'" />
@@ -81,7 +82,7 @@
         <StackCSystemConfigView v-if="activeModule === 'stackCConfig'" />
         <PerformanceGovernanceView v-if="activeModule === 'performanceGovernance'" />
         <PlaceholderView
-            v-if="!['upload', 'chat', 'audit', 'permission', 'permissionAdmin', 'datasource', 'diagnosis', 'knowledgeGraph', 'workbench', 'dashboard', 'collaboration', 'adminWorkbench', 'adminDashboard', 'stackCConfig', 'performanceGovernance'].includes(activeModule)"
+            v-if="!['upload', 'chat', 'audit', 'adminChatHistory', 'permission', 'permissionAdmin', 'datasource', 'diagnosis', 'knowledgeGraph', 'workbench', 'dashboard', 'collaboration', 'adminWorkbench', 'adminDashboard', 'stackCConfig', 'performanceGovernance'].includes(activeModule)"
         />
       </el-main>
     </el-container>
@@ -163,6 +164,7 @@ import DatasourceManageView from './views/admin/DatasourceManageView.vue'
 import DiagnosisReportView from './views/user/DiagnosisReportView.vue'
 import KnowledgeGraphView from './views/admin/KnowledgeGraphView.vue'
 import SqlAuditView from './views/admin/SqlAuditView.vue'
+import AdminChatHistoryView from './views/admin/AdminChatHistoryView.vue'
 import StackCSystemConfigView from './views/admin/StackCSystemConfigView.vue'
 import PerformanceGovernanceView from './views/admin/PerformanceGovernanceView.vue'
 import AdminWorkbenchView from './views/admin/AdminWorkbenchView.vue'
@@ -193,6 +195,7 @@ const moduleIconMap = {
   datasource: Connection,
   knowledgeGraph: Share,
   audit: DataAnalysis,
+  adminChatHistory: Monitor,
   stackCConfig: Setting,
   performanceGovernance: Cpu,
   default: Grid
@@ -435,7 +438,7 @@ const visibleMenuGroups = computed(() => {
       .filter(group => group.modules.length)
 })
 const isPermissionModule = computed(() => activeModule.value === 'permission' || activeModule.value === 'permissionAdmin')
-const isAdminModule = computed(() => ['datasource', 'permissionAdmin', 'knowledgeGraph', 'audit', 'stackCConfig', 'adminWorkbench', 'adminDashboard', 'performanceGovernance'].includes(activeModule.value))
+const isAdminModule = computed(() => ['datasource', 'permissionAdmin', 'knowledgeGraph', 'audit', 'adminChatHistory', 'stackCConfig', 'adminWorkbench', 'adminDashboard', 'performanceGovernance'].includes(activeModule.value))
 const isAdminUser = computed(() => currentUser.value?.role === 'ADMIN')
 const portalLabel = computed(() => isAdminUser.value ? '管理员门户' : '用户门户')
 const homeModuleKey = computed(() => isAdminUser.value ? 'adminWorkbench' : 'workbench')

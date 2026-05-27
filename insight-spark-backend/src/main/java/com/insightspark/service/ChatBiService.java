@@ -152,6 +152,12 @@ public class ChatBiService {
             response.put("chartType", "bar");
             response.put("fieldMapping", Map.of("join", "Excel 与官方库关联"));
             response.put("engine", "java-federal-join");
+            response.put("reasoningLogs", List.of(
+                    "federalJoin=direct",
+                    "sourceType=FEDERAL_JOIN",
+                    "tableName=" + activeTable
+            ));
+            response.put("reasoningProcess", response.get("reasoningLogs"));
             response.put("riskLevel", "SAFE");
             response.put("riskReason", "已按联邦关联配置执行只读分步查询并在 Java 内存中合并");
             response.put("message", "已根据联邦关联配置合并上传表与官方库信息。");
@@ -353,6 +359,7 @@ public class ChatBiService {
         response.put("chartType", chartType);
         response.put("fieldMapping", fieldMapping);
         response.put("engine", engine);
+        response.put("cacheHit", cacheHit);
         response.put("fallbackUsed", engine.startsWith("java-fallback") || fallbackExecuted);
         response.put("fallbackReason", fallbackReason);
         response.put("graphContext", graphContext);
@@ -362,6 +369,8 @@ public class ChatBiService {
         response.put("graphFallbackReason", graphFallbackReason);
         response.put("riskLevel", auditResult.riskLevel());
         response.put("riskReason", auditResult.riskReason());
+        response.put("reasoningLogs", generationTrace);
+        response.put("reasoningProcess", generationTrace);
         response.put("message", "分析完成。已基于字段「" + fieldMapping.getOrDefault("dimension", "未知维度")
                 + "」和指标「" + fieldMapping.getOrDefault("metric", "记录数")
                 + "」生成" + chartName(chartType) + "。");
