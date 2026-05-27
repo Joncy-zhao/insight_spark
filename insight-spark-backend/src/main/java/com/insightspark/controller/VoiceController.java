@@ -96,14 +96,6 @@ public class VoiceController {
         payload.put("rate", rate);
         payload.put("volume", volume);
 
-        response.setStatus(HttpServletResponse.SC_OK);
-        response.setContentType("audio/pcm");
-        response.setCharacterEncoding("UTF-8");
-        response.setHeader("Cache-Control", "no-store");
-        response.setHeader("X-Audio-Format", "pcm_s16le");
-        response.setHeader("X-Audio-Sample-Rate", "24000");
-        response.setHeader("X-Audio-Channels", "1");
-
         pythonAiService.streamTextToSpeech(payload, response);
     }
 

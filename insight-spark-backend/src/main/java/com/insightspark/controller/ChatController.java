@@ -247,8 +247,16 @@ public class ChatController {
     @GetMapping("/history")
     public ApiResponse<Map<String, Object>> listHistory(@RequestParam(defaultValue = "1") int page,
                                                         @RequestParam(defaultValue = "8") int pageSize,
-                                                        @RequestParam(required = false) String keyword) {
-        return ApiResponse.success(chatQueryHistoryService.listHistoryPage(page, pageSize, keyword));
+                                                        @RequestParam(required = false) String keyword,
+                                                        @RequestParam(required = false) String tableName,
+                                                        @RequestParam(required = false) String chartType,
+                                                        @RequestParam(required = false) String riskLevel,
+                                                        @RequestParam(required = false) String executionStatus,
+                                                        @RequestParam(required = false) String dateFrom,
+                                                        @RequestParam(required = false) String dateTo,
+                                                        @RequestParam(required = false) String sortDirection) {
+        return ApiResponse.success(chatQueryHistoryService.listHistoryPage(
+                page, pageSize, keyword, tableName, chartType, riskLevel, executionStatus, dateFrom, dateTo, sortDirection));
     }
 
     @PostMapping("/history/{historyId}/delete")
@@ -367,6 +375,7 @@ public class ChatController {
                         pauseForSseProgress();
                     }
                     enrichEnhancedResponse(result, question, tableName);
+                    attachHistoryReplaySteps(result, question, tableName);
                     Long historyId = chatQueryHistoryService.recordSuccess(question, tableName, result,
                             System.currentTimeMillis() - startedAt);
                     if (historyId != null) {
@@ -448,6 +457,7 @@ public class ChatController {
             if (enhanced) {
                 enrichEnhancedResponse(result, question, tableName);
             }
+            attachHistoryReplaySteps(result, question, tableName);
             Long historyId = chatQueryHistoryService.recordSuccess(question, tableName, result, System.currentTimeMillis() - startedAt);
             if (historyId != null) {
                 result.put("queryHistoryId", historyId);
@@ -538,6 +548,90 @@ public class ChatController {
         );
     }
 
+    private void attachHistoryReplaySteps(Map<String, Object> result, String question, String tableName) {
+        if (result == null) {
+            return;
+        }
+        result.put("reasoningReplaySteps", buildHistoryReplaySteps(question, tableName, result));
+    }
+
+    private List<Map<String, Object>> buildHistoryReplaySteps(String question, String tableName,
+                                                              Map<String, Object> result) {
+        List<Map<String, Object>> steps = new ArrayList<>();
+        String safeQuestion = trimTo(Objects.toString(question, ""), 80);
+        String safeTableName = trimTo(Objects.toString(tableName, ""), 80);
+        String chartType = Objects.toString(result == null ? null : result.get("chartType"), "bar");
+        String chartLabel = humanizeChartType(chartType);
+        String riskLevel = Objects.toString(result == null ? null : result.get("riskLevel"), "SAFE");
+        String riskReason = trimTo(Objects.toString(result == null ? null : result.get("riskReason"), ""), 120);
+        int dataCount = countResultRows(result == null ? null : result.get("data"));
+        List<String> reasoningLogs = toStringList(result == null ? null : result.get("reasoningLogs"));
+
+        steps.add(step("收到问题", safeQuestion.isBlank()
+                ? "已接收用户查询，开始进入分析流程"
+                : "已接收用户查询：" + safeQuestion));
+        steps.add(step("图谱导航", safeTableName.isBlank()
+                ? "正在结合数据源与字段元信息定位分析对象"
+                : "已定位数据表 " + safeTableName + "，正在结合图谱与字段元信息分析"));
+        steps.add(step("语义改写", "已将自然语言问题拆解为结构化分析意图，准备生成 SQL"));
+        steps.add(step("SQL 生成", "已生成 " + chartLabel + " 所需 SQL，并完成字段映射"));
+        steps.add(step("安全检测", "SQL 安全审计 " + riskLevel + (riskReason.isBlank() ? "" : "，" + riskReason)));
+        steps.add(step("执行查询", dataCount > 0
+                ? "查询执行完成，返回 " + dataCount + " 行结果"
+                : "查询已完成，返回结果待整理"));
+        if (!reasoningLogs.isEmpty()) {
+            steps.add(step("推理摘要", String.join("；", reasoningLogs.stream().limit(4).toList())));
+        }
+        steps.add(step("结果整理", trimTo(Objects.toString(result == null ? null : result.get("message"), "分析完成"), 120)));
+        return steps;
+    }
+
+    private Map<String, Object> step(String title, String detail) {
+        Map<String, Object> step = new LinkedHashMap<>();
+        step.put("title", title);
+        step.put("detail", detail);
+        return step;
+    }
+
+    private String humanizeChartType(String chartType) {
+        String text = Objects.toString(chartType, "").trim().toLowerCase();
+        return switch (text) {
+            case "line" -> "折线图";
+            case "pie" -> "饼图";
+            case "table" -> "表格";
+            default -> "柱状图";
+        };
+    }
+
+    private int countResultRows(Object data) {
+        if (data instanceof List<?> list) {
+            return list.size();
+        }
+        return 0;
+    }
+
+    private List<String> toStringList(Object value) {
+        if (value instanceof List<?> list) {
+            List<String> result = new ArrayList<>();
+            for (Object item : list) {
+                String text = Objects.toString(item, "").trim();
+                if (!text.isBlank()) {
+                    result.add(text);
+                }
+            }
+            return result;
+        }
+        String text = Objects.toString(value, "").trim();
+        return text.isBlank() ? List.of() : List.of(text);
+    }
+
+    private String trimTo(String value, int maxLength) {
+        String text = Objects.toString(value, "").trim();
+        if (text.length() <= maxLength) {
+            return text;
+        }
+        return text.substring(0, maxLength).trim();
+    }
     private Long safeEnsureConversation(Long conversationId, String question, String tableName) {
         try {
             return chatConversationService.ensureConversation(conversationId, question, tableName);

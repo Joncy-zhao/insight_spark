@@ -281,9 +281,12 @@ public class PythonAiService {
 
     private Void copyAudioStream(ClientHttpResponse aiResponse, HttpServletResponse servletResponse) throws IOException {
         servletResponse.setStatus(aiResponse.getStatusCode().value());
-        copyHeaderIfPresent(aiResponse, servletResponse, "X-Audio-Format");
-        copyHeaderIfPresent(aiResponse, servletResponse, "X-Audio-Sample-Rate");
-        copyHeaderIfPresent(aiResponse, servletResponse, "X-Audio-Channels");
+        servletResponse.setContentType("audio/pcm");
+        servletResponse.setCharacterEncoding("UTF-8");
+        servletResponse.setHeader("Cache-Control", "no-store");
+        copyHeaderOrDefault(aiResponse, servletResponse, "X-Audio-Format", "pcm_s16le");
+        copyHeaderOrDefault(aiResponse, servletResponse, "X-Audio-Sample-Rate", "24000");
+        copyHeaderOrDefault(aiResponse, servletResponse, "X-Audio-Channels", "1");
         servletResponse.flushBuffer();
 
         ServletOutputStream outputStream = servletResponse.getOutputStream();
@@ -297,6 +300,16 @@ public class PythonAiService {
             }
         }
         return null;
+    }
+
+    private void copyHeaderOrDefault(ClientHttpResponse source, HttpServletResponse target,
+                                     String headerName, String defaultValue) {
+        String value = source.getHeaders().getFirst(headerName);
+        if (value == null || value.isBlank()) {
+            target.setHeader(headerName, defaultValue);
+            return;
+        }
+        target.setHeader(headerName, value);
     }
 
     private void copyHeaderIfPresent(ClientHttpResponse source, HttpServletResponse target, String headerName) {

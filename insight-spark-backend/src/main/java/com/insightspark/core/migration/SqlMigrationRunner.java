@@ -28,7 +28,8 @@ public class SqlMigrationRunner {
 
     private static final List<String> MIGRATIONS = List.of(
             "db/migration/chat_conversation_migration_20260524.sql",
-            "db/migration/dashboard_component_artifact_turn_migration_20260524.sql"
+            "db/migration/dashboard_component_artifact_turn_migration_20260524.sql",
+            "db/migration/admin_chat_history_migration_20260527.sql"
     );
 
     private final DataSource dataSource;
@@ -158,6 +159,9 @@ public class SqlMigrationRunner {
             return;
         }
         if (normalized.startsWith("ALTER TABLE `IS_CHAT_QUERY_HISTORY` ADD COLUMN ")) {
+            return;
+        }
+        if (normalized.startsWith("ALTER TABLE `IS_SQL_AUDIT_LOG` ADD COLUMN ")) {
             return;
         }
         if (normalized.startsWith("ALTER TABLE `IS_DASHBOARD_COMPONENT` ADD COLUMN ")) {
