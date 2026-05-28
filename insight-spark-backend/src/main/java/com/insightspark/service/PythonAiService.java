@@ -47,6 +47,14 @@ public class PythonAiService {
                                                    List<Map<String, Object>> previewRows,
                                                    Map<String, Object> graphPath,
                                                    Map<String, Object> graphSqlHints) {
+        return textToSql(question, tableName, fields, previewRows, graphPath, graphSqlHints, Map.of());
+    }
+
+    public Optional<Map<String, Object>> textToSql(String question, String tableName, List<Map<String, Object>> fields,
+                                                   List<Map<String, Object>> previewRows,
+                                                   Map<String, Object> graphPath,
+                                                   Map<String, Object> graphSqlHints,
+                                                   Map<String, Object> modelOptions) {
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("question", question);
         request.put("tableName", tableName);
@@ -55,6 +63,10 @@ public class PythonAiService {
         request.put("graphPath", graphPath == null ? Map.of() : graphPath);
         request.put("graphContext", graphPath == null ? List.of() : graphPath.getOrDefault("ragContext", List.of()));
         request.put("graphSqlHints", graphSqlHints == null ? Map.of() : graphSqlHints);
+        request.put("modelConfig", modelOptions == null ? Map.of() : modelOptions);
+        request.put("modelId", modelOptions == null ? "gpt-4" : modelOptions.getOrDefault("modelId", "gpt-4"));
+        request.put("temperature", modelOptions == null ? 0.2D : modelOptions.getOrDefault("temperature", 0.2D));
+        request.put("timeoutSeconds", modelOptions == null ? 30 : modelOptions.getOrDefault("timeoutSeconds", 30));
 
         try {
             Map<String, Object> response = restTemplate.postForObject(
