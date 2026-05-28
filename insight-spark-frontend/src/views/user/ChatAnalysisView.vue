@@ -201,6 +201,19 @@
                       </div>
                     </div>
                     <div class="bubble">{{ msg.content }}</div>
+                    <div v-if="msg.advancedAnalysis" class="advanced-dialog-entry">
+                      <div class="advanced-dialog-entry__main">
+                        <div class="advanced-dialog-entry__type">{{ advancedAnalysisTypeLabel(msg.advancedAnalysis.type) }}</div>
+                        <div class="advanced-dialog-entry__title">{{ msg.advancedAnalysis.title }}</div>
+                        <div class="advanced-dialog-entry__summary">{{ msg.advancedAnalysis.summary }}</div>
+                      </div>
+                      <el-tag size="small" effect="light" :type="msg.advancedAnalysis.status === '模拟生成' ? 'warning' : 'success'">
+                        {{ msg.advancedAnalysis.status || '已生成' }}
+                      </el-tag>
+                      <el-button size="small" type="primary" plain @click="openAdvancedAnalysisDialog(msg.advancedAnalysis)">
+                        查看详情
+                      </el-button>
+                    </div>
                     <div v-if="msg.fieldBindingResults?.length" class="field-binding-card">
                       <div class="field-binding-card__header">{{ msg.fieldBindingTitle || '字段变更结果' }}</div>
                       <div
@@ -288,10 +301,10 @@
                     v-model="question"
                     placeholder="试试问我：按省份统计销售额、按日期看趋势、分类占比等..."
                     :disabled="loading"
-                    @keyup.enter="sendQuestion"
+                    @keyup.enter="sendChatQuestion"
                 >
                   <template #append>
-                    <el-button type="primary" :loading="loading" @click="sendQuestion">
+                    <el-button type="primary" :loading="loading" @click="sendChatQuestion">
                       <span v-if="!loading">🚀 发送分析</span>
                       <span v-else>思考中...</span>
                     </el-button>
@@ -656,6 +669,7 @@
 
               <div class="history-summary">
                 <span>共 {{ recentChatQueryTotal }} 条</span>
+                <el-button size="small" plain @click="advancedHistoryVisible = true">高级分析记录</el-button>
                 <span v-if="recentChatQueryError" class="history-summary__error">{{ recentChatQueryError }}</span>
               </div>
 
@@ -1021,6 +1035,130 @@
               </div>
             </div>
           </el-drawer>
+          <el-drawer
+              v-model="advancedHistoryVisible"
+              title="预测与情景模拟记录"
+              size="520px"
+              destroy-on-close
+          >
+            <div class="advanced-history">
+              <div v-if="advancedAnalysisHistory.length" class="advanced-history__list">
+                <article
+                    v-for="item in advancedAnalysisHistory"
+                    :key="item.id"
+                    class="advanced-history__item"
+                >
+                  <div class="advanced-history__head">
+                    <div>
+                      <div class="advanced-history__type">{{ advancedAnalysisTypeLabel(item.type) }}</div>
+                      <h4>{{ item.title }}</h4>
+                    </div>
+                    <el-tag size="small" effect="light">{{ item.createdAt }}</el-tag>
+                  </div>
+                  <p>{{ item.summary }}</p>
+                  <div class="advanced-history__meta">
+                    <span>{{ item.tableName || '当前对话上下文' }}</span>
+                    <span>{{ item.metric || '自动推断指标' }}</span>
+                  </div>
+                  <div class="advanced-history__actions">
+                    <el-button size="small" type="primary" plain @click="restoreAdvancedAnalysis(item)">回到对话</el-button>
+                    <el-button size="small" plain @click="removeAdvancedAnalysisHistory(item)">删除</el-button>
+                  </div>
+                </article>
+              </div>
+              <div v-else class="advanced-history__empty">
+                暂无已保存的预测、推演或预警记录。
+              </div>
+            </div>
+          </el-drawer>
+          <el-dialog
+              v-model="advancedAnalysisDialogVisible"
+              :title="activeAdvancedAnalysis ? advancedAnalysisTypeLabel(activeAdvancedAnalysis.type) : '高级分析'"
+              width="860px"
+              destroy-on-close
+              class="advanced-analysis-dialog"
+          >
+            <AdvancedAnalysisCard
+              v-if="activeAdvancedAnalysis"
+              :analysis="activeAdvancedAnalysis"
+              @recalculate="recalculateAdvancedAnalysis"
+              @save="saveAdvancedAnalysis"
+              @pin="pinAdvancedAnalysis"
+            />
+          </el-dialog>
+          <el-dialog
+              v-model="forecastConfirmVisible"
+              title="确认预测参数"
+              width="560px"
+              destroy-on-close
+          >
+            <el-form label-position="top" class="forecast-confirm-form">
+              <el-alert
+                  title="系统已根据数据源字段和自然语言推断预测参数，请确认后执行真实预测。"
+                  type="info"
+                  :closable="false"
+                  show-icon
+              />
+              <el-form-item label="时间字段">
+                <el-select v-model="forecastConfirmForm.timeField" class="full-width" filterable placeholder="请选择时间字段">
+                  <el-option
+                      v-for="field in forecastConfirmMeta.timeFields"
+                      :key="field.columnName"
+                      :label="formatAdvancedFieldLabel(field)"
+                      :value="field.columnName"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="指标字段">
+                <el-select v-model="forecastConfirmForm.metricField" class="full-width" filterable placeholder="请选择指标字段">
+                  <el-option
+                      v-for="field in forecastConfirmMeta.numericFields"
+                      :key="field.columnName"
+                      :label="formatAdvancedFieldLabel(field)"
+                      :value="field.columnName"
+                  />
+                </el-select>
+              </el-form-item>
+              <div class="forecast-confirm-grid">
+                <el-form-item label="聚合粒度">
+                  <el-select v-model="forecastConfirmForm.granularity">
+                    <el-option label="按日" value="day" />
+                    <el-option label="按周" value="week" />
+                    <el-option label="按月" value="month" />
+                    <el-option label="按季度" value="quarter" />
+                    <el-option label="按年" value="year" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="预测点数">
+                  <el-input-number v-model="forecastConfirmForm.horizon" :min="1" :max="60" />
+                </el-form-item>
+              </div>
+              <el-form-item label="算法">
+                <el-select v-model="forecastConfirmForm.algorithm" class="full-width">
+                  <el-option label="Prophet-like" value="Prophet" />
+                  <el-option label="Holt-Winters" value="Holt-Winters" />
+                </el-select>
+              </el-form-item>
+              <div v-if="forecastConfirmForm.algorithm === 'Holt-Winters'" class="forecast-confirm-grid">
+                <el-form-item label="Alpha">
+                  <el-input-number v-model="forecastConfirmForm.alpha" :min="0.01" :max="0.99" :step="0.01" />
+                </el-form-item>
+                <el-form-item label="Beta">
+                  <el-input-number v-model="forecastConfirmForm.beta" :min="0.01" :max="0.99" :step="0.01" />
+                </el-form-item>
+                <el-form-item label="Gamma">
+                  <el-input-number v-model="forecastConfirmForm.gamma" :min="0.01" :max="0.99" :step="0.01" />
+                </el-form-item>
+                <el-form-item label="季节周期">
+                  <el-input-number v-model="forecastConfirmForm.seasonLength" :min="0" :max="60" />
+                </el-form-item>
+              </div>
+            </el-form>
+            <template #footer>
+              <el-button @click="cancelForecastConfirm">取消</el-button>
+              <el-button type="primary" @click="submitForecastConfirm">执行真实预测</el-button>
+            </template>
+          </el-dialog>
 </section>
 </template>
 
@@ -1028,7 +1166,16 @@
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { ArrowLeftBold, ArrowRightBold, Close, Edit, Management, Microphone, Refresh, Search, Setting, Share, View } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
+import { ElMessage } from 'element-plus'
 import BusinessDictionaryView from '../../components/BusinessDictionaryView.vue'
+import AdvancedAnalysisCard from '../../components/AdvancedAnalysisCard.vue'
+import {
+  fetchAdvancedAnalysisFieldMeta,
+  parseAdvancedAnalysisIntent,
+  runAdvancedForecast,
+  runAdvancedForecastFromSeries,
+  runAdvancedWhatIf
+} from '../../api/advancedAnalysis'
 
 const localVoiceGenderOptions = [
   { label: '男声', value: 'male' },
@@ -1266,6 +1413,700 @@ const currentChatSession = computed(() =>
 )
 
 const chatContentMode = ref('messages')
+const advancedHistoryVisible = ref(false)
+const advancedAnalysisHistory = ref([])
+const advancedAnalysisDialogVisible = ref(false)
+const activeAdvancedAnalysis = ref(null)
+const forecastConfirmVisible = ref(false)
+const forecastConfirmMeta = ref({ timeFields: [], numericFields: [] })
+const forecastConfirmForm = ref({
+  tableName: '',
+  timeField: '',
+  metricField: '',
+  granularity: 'month',
+  horizon: 3,
+  algorithm: 'Holt-Winters',
+  alpha: 0.55,
+  beta: 0.28,
+  gamma: 0.20,
+  seasonLength: 0
+})
+let forecastConfirmResolver = null
+
+const advancedAnalysisTypeLabel = (type) => {
+  if (type === 'forecast') return '时序预测'
+  if (type === 'whatIf') return 'What-if 推演'
+  if (type === 'alert') return '离线智能预警'
+  return '高级分析'
+}
+
+const formatAdvancedNumber = (value) => {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '--'
+  if (Math.abs(number) >= 10000) return `${(number / 10000).toFixed(1)}万`
+  return number.toLocaleString('zh-CN', { maximumFractionDigits: 0 })
+}
+
+const formatAdvancedFieldLabel = (field) => {
+  const displayName = String(field?.displayName || field?.businessName || '').trim()
+  const columnName = String(field?.columnName || '').trim()
+  if (displayName && columnName && displayName !== columnName) {
+    return `${displayName}（${columnName}）`
+  }
+  return displayName || columnName || '未命名字段'
+}
+
+const inferAdvancedIntent = (text) => {
+  const content = String(text || '').trim().toLowerCase()
+  if (!content) return ''
+  if (/预测|预估|未来|走势|forecast|prophet|holt/.test(content)) return 'forecast'
+  if (/what-?if|如果|若|假设|提升|下降|降低|增长|推演|模拟|利润变化/.test(content)) return 'whatIf'
+  if (/预警|提醒|告警|低于|高于|超过|异常|阈值|通知|钉钉|邮件|z-?score/.test(content)) return 'alert'
+  return ''
+}
+
+const inferMetricFromQuestion = (text) => {
+  const content = String(text || '')
+  const candidates = ['销售额', '利润', '成本', '销量', '收入', '转化率', '退货率', '客单价']
+  return candidates.find(item => content.includes(item)) || String(lastAnalysis?.value?.fieldMapping?.metric || '').trim() || '核心指标'
+}
+
+const inferForecastHorizon = (text) => {
+  const content = String(text || '')
+  if (/6\s*个?月|半年/.test(content)) return '6m'
+  if (/3\s*个?月|季度/.test(content)) return '3m'
+  if (/30\s*天|一个月|1\s*个?月/.test(content)) return '30d'
+  if (/7\s*天|一周|1\s*周/.test(content)) return '7d'
+  return '3m'
+}
+
+const inferAlertThreshold = (text) => {
+  const content = String(text || '')
+  const match = content.match(/(\d+(?:\.\d+)?)\s*(万|千|k|w)?/)
+  if (!match) return 100000
+  const raw = Number(match[1])
+  if (!Number.isFinite(raw)) return 100000
+  const unit = String(match[2] || '').toLowerCase()
+  if (unit === '万' || unit === 'w') return raw * 10000
+  if (unit === '千' || unit === 'k') return raw * 1000
+  return raw
+}
+
+const inferWhatIfVariables = (text) => {
+  const content = String(text || '')
+  const matches = [...content.matchAll(/([\u4e00-\u9fa5A-Za-z]+?)(提升|增长|上涨|下降|降低|减少)\s*(\d+(?:\.\d+)?)\s*%/g)]
+  const variables = matches.map(match => ({
+    name: match[1].replace(/[如果若假设]/g, '').trim() || '变量',
+    change: ['下降', '降低', '减少'].includes(match[2]) ? -Number(match[3]) : Number(match[3])
+  })).filter(item => item.name && Number.isFinite(item.change))
+  return variables.length ? variables : [
+    { name: '销量', change: 10 },
+    { name: '成本', change: -5 }
+  ]
+}
+
+const buildForecastSeries = (params = {}) => {
+  const horizon = String(params.horizon || '3m')
+  const futureCount = horizon === '7d' ? 7 : horizon === '30d' ? 8 : horizon === '6m' ? 6 : 3
+  const historyCount = 10
+  const base = 86000
+  const rows = []
+  for (let index = 0; index < historyCount; index += 1) {
+    const value = Math.round(base + index * 4200 + Math.sin(index / 1.7) * 7600)
+    rows.push({
+      name: `历史${index + 1}`,
+      history: value,
+      forecast: null,
+      upper: null,
+      lower: null
+    })
+  }
+  const lastValue = rows[rows.length - 1].history
+  for (let index = 1; index <= futureCount; index += 1) {
+    const forecast = Math.round(lastValue * (1 + index * 0.045) + Math.sin(index) * 3800)
+    rows.push({
+      name: `未来${index}`,
+      history: null,
+      forecast,
+      upper: Math.round(forecast * 1.12),
+      lower: Math.round(forecast * 0.88)
+    })
+  }
+  return rows
+}
+
+const buildWhatIfSeries = (variables = []) => {
+  const base = Number(lastAnalysis?.value?.data?.[0]?.value || 120000)
+  const effect = variables.reduce((sum, variable) => {
+    const name = String(variable.name || '')
+    const change = Number(variable.change || 0)
+    const weight = /成本|费用/.test(name) ? -0.42 : /价格|客单价/.test(name) ? 0.36 : 0.58
+    return sum + change * weight
+  }, 0)
+  const scenario = Math.max(0, Math.round(base * (1 + effect / 100)))
+  const optimized = Math.round(Math.max(base, scenario) * 1.08)
+  return [
+    { name: '基准方案', value: Math.round(base) },
+    { name: '模拟方案', value: scenario },
+    { name: '推荐方案', value: optimized }
+  ]
+}
+
+const buildAlertSeries = (threshold = 100000) => {
+  const base = Number(threshold) || 100000
+  return Array.from({ length: 12 }, (_, index) => {
+    const value = Math.round(base * (0.82 + index * 0.025 + Math.sin(index / 1.2) * 0.16))
+    return { name: `第${index + 1}期`, value }
+  })
+}
+
+const normalizeAdvancedIntentType = (type) => {
+  const value = String(type || '').trim()
+  if (['forecast', 'timeSeriesForecast', 'prediction'].includes(value)) return 'forecast'
+  if (['whatIf', 'simulation', 'scenario'].includes(value)) return 'whatIf'
+  if (['alert', 'warning', 'anomaly'].includes(value)) return 'alert'
+  return ''
+}
+
+const normalizeLlmVariables = (items) => {
+  if (!Array.isArray(items)) return []
+  return items.map(item => ({
+    name: String(item?.name || item?.variable || item?.label || '').trim(),
+    change: Number(item?.change ?? item?.changePercent ?? item?.delta ?? 0)
+  })).filter(item => item.name && Number.isFinite(item.change))
+}
+
+const normalizeHorizonCount = (horizon) => {
+  const value = String(horizon || '').trim()
+  if (value === '7d') return 7
+  if (value === '30d') return 8
+  if (value === '6m') return 6
+  return 3
+}
+
+const parseChartNumber = (value) => {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  const parsed = Number(String(value ?? '').replace(/,/g, '').trim())
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+const getRowValueByCandidates = (row, candidates = []) => {
+  if (!row || typeof row !== 'object') return undefined
+  for (const key of candidates) {
+    if (key && Object.prototype.hasOwnProperty.call(row, key)) {
+      return row[key]
+    }
+  }
+  return undefined
+}
+
+const resolveLastAnalysisTimeSeries = () => {
+  const analysis = lastAnalysis?.value
+  const rows = Array.isArray(analysis?.data) ? analysis.data : []
+  if (rows.length < 3) return []
+  const mapping = analysis?.fieldMapping || {}
+  const dimensionKey = String(mapping.dimensionKey || '').trim()
+  const metricKey = String(mapping.metricKey || '').trim()
+  const dimensionCandidates = [
+    dimensionKey,
+    'name',
+    'dim_name',
+    'dimension',
+    'bucket_name',
+    'date',
+    'month',
+    'time'
+  ].filter(Boolean)
+  const metricCandidates = [
+    metricKey,
+    'value',
+    'metric_value',
+    'metric',
+    'sales_amt',
+    'amount',
+    'total'
+  ].filter(Boolean)
+  return rows.map((row, index) => {
+    const name = String(getRowValueByCandidates(row, dimensionCandidates) ?? '').trim()
+    const value = parseChartNumber(getRowValueByCandidates(row, metricCandidates))
+    return {
+      name: name || `历史${index + 1}`,
+      value
+    }
+  }).filter(item => item.name && item.value != null)
+}
+
+const nextSeriesName = (lastName, offset) => {
+  const text = String(lastName || '').trim()
+  const monthMatch = text.match(/^(\d{4})-(\d{1,2})$/)
+  if (monthMatch) {
+    const date = new Date(Number(monthMatch[1]), Number(monthMatch[2]) - 1 + offset, 1)
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+  }
+  const dayMatch = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
+  if (dayMatch) {
+    const date = new Date(Number(dayMatch[1]), Number(dayMatch[2]) - 1, Number(dayMatch[3]) + offset)
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+  }
+  return `未来${offset}`
+}
+
+const buildForecastSeriesFromChartData = (params = {}) => {
+  const historyRows = resolveLastAnalysisTimeSeries()
+  if (historyRows.length < 3) return []
+  const futureCount = normalizeHorizonCount(params.horizon)
+  const first = historyRows[0].value
+  const last = historyRows[historyRows.length - 1].value
+  const trend = historyRows.length > 1 ? (last - first) / (historyRows.length - 1) : 0
+  const average = historyRows.reduce((sum, item) => sum + item.value, 0) / historyRows.length
+  const std = Math.sqrt(historyRows.reduce((sum, item) => sum + Math.pow(item.value - average, 2), 0) / historyRows.length)
+  const alpha = 0.55
+  let level = first
+  historyRows.forEach(item => {
+    level = alpha * item.value + (1 - alpha) * level
+  })
+  const rows = historyRows.map(item => ({
+    name: item.name,
+    history: item.value,
+    forecast: null,
+    upper: null,
+    lower: null
+  }))
+  for (let index = 1; index <= futureCount; index += 1) {
+    const forecast = Math.max(0, Math.round(level + trend * index))
+    const band = Math.max(Math.abs(forecast) * 0.12, std * 1.2)
+    rows.push({
+      name: nextSeriesName(historyRows[historyRows.length - 1].name, index),
+      history: null,
+      forecast,
+      upper: Math.round(forecast + band),
+      lower: Math.max(0, Math.round(forecast - band))
+    })
+  }
+  return rows
+}
+
+const fieldNameMatches = (field, target) => {
+  const text = String(target || '').trim()
+  if (!text) return false
+  return [
+    field?.columnName,
+    field?.displayName,
+    field?.sourceFieldName,
+    field?.fieldComment,
+    field?.businessName,
+    field?.synonyms
+  ].some(value => String(value || '').includes(text) || text.includes(String(value || '___')))
+}
+
+const pickFieldName = (fields = [], preferred = '', fallback = '') => {
+  const matched = fields.find(field => fieldNameMatches(field, preferred))
+  return String(matched?.columnName || fallback || fields[0]?.columnName || '').trim()
+}
+
+const confirmForecastParams = (fieldMeta, defaults = {}) => new Promise((resolve) => {
+  forecastConfirmMeta.value = {
+    timeFields: Array.isArray(fieldMeta?.timeFields) ? fieldMeta.timeFields : [],
+    numericFields: Array.isArray(fieldMeta?.numericFields) ? fieldMeta.numericFields : []
+  }
+  forecastConfirmForm.value = {
+    tableName: defaults.tableName || '',
+    timeField: defaults.timeField || forecastConfirmMeta.value.timeFields[0]?.columnName || '',
+    metricField: defaults.metricField || forecastConfirmMeta.value.numericFields[0]?.columnName || '',
+    granularity: defaults.granularity || 'month',
+    horizon: defaults.horizon || 3,
+    algorithm: defaults.algorithm || 'Holt-Winters',
+    alpha: defaults.alpha ?? 0.55,
+    beta: defaults.beta ?? 0.28,
+    gamma: defaults.gamma ?? 0.20,
+    seasonLength: defaults.seasonLength ?? 0
+  }
+  forecastConfirmResolver = resolve
+  forecastConfirmVisible.value = true
+})
+
+const submitForecastConfirm = () => {
+  if (!forecastConfirmForm.value.timeField || !forecastConfirmForm.value.metricField) {
+    ElMessage.warning('请选择时间字段和指标字段')
+    return
+  }
+  forecastConfirmVisible.value = false
+  if (forecastConfirmResolver) {
+    forecastConfirmResolver({ ...forecastConfirmForm.value })
+    forecastConfirmResolver = null
+  }
+}
+
+const cancelForecastConfirm = () => {
+  forecastConfirmVisible.value = false
+  if (forecastConfirmResolver) {
+    forecastConfirmResolver(null)
+    forecastConfirmResolver = null
+  }
+}
+
+const buildAnalysisFromRealForecast = (result, text, params, llmIntent) => {
+  const metric = String(llmIntent?.metric || result?.metricField || '').trim() || inferMetricFromQuestion(text)
+  return {
+    id: `advanced-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    type: 'forecast',
+    title: `${metric}趋势预测`,
+    summary: '已基于真实历史数据生成预测结果，预测值与置信区间由后端算法计算。',
+    tableName: result?.tableName || selectedTableName?.value || '',
+    metric,
+    timeRange: result?.granularity || params.horizon || '自定义周期',
+    status: '真实计算',
+    params: {
+      horizon: params.horizon,
+      algorithm: result?.algorithm || params.algorithm || 'Holt-Winters',
+      confidence: result?.confidence || params.confidence || '95%',
+      algorithmParams: result?.algorithmParams || {},
+      alpha: result?.algorithmParams?.alpha ?? params.alpha,
+      beta: result?.algorithmParams?.beta ?? params.beta,
+      gamma: result?.algorithmParams?.gamma ?? params.gamma,
+      seasonLength: result?.algorithmParams?.seasonLength ?? params.seasonLength
+    },
+    series: Array.isArray(result?.series) ? result.series : [],
+    insights: Array.isArray(result?.insights)
+      ? result.insights.map(item => ({ label: String(item.label || ''), value: String(item.value ?? '') }))
+      : []
+  }
+}
+
+const buildAnalysisFromRealWhatIf = (result, text, params, llmIntent) => {
+  const metric = String(llmIntent?.metric || result?.targetMetric || '').trim() || inferMetricFromQuestion(text)
+  return {
+    id: `advanced-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    type: 'whatIf',
+    title: `${metric}情景推演`,
+    summary: '已基于真实历史数据估计变量影响，结果用于情景比较和方案筛选。',
+    tableName: result?.tableName || selectedTableName?.value || '',
+    metric,
+    timeRange: '当前分析周期',
+    status: '真实计算',
+    params: {
+      variables: (params.variables || []).map(item => ({ ...item }))
+    },
+    series: Array.isArray(result?.series) ? result.series : [],
+    insights: Array.isArray(result?.insights)
+      ? result.insights.map(item => ({ label: String(item.label || ''), value: String(item.value ?? '') }))
+      : []
+  }
+}
+
+const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = {}) => {
+  const tableName = selectedTableName?.value || lastAnalysis?.value?.tableName || ''
+  if (!tableName || type === 'alert') {
+    return createAdvancedAnalysis(type, text, params, llmIntent)
+  }
+  try {
+    const fieldMeta = await fetchAdvancedAnalysisFieldMeta({ tableName })
+    if (type === 'forecast') {
+      const mergedParams = {
+        horizon: params.horizon || llmIntent.horizon || inferForecastHorizon(text),
+        algorithm: params.algorithm || llmIntent.algorithm || 'Holt-Winters',
+        confidence: params.confidence || llmIntent.confidence || '95%',
+        alpha: params.alpha ?? 0.55,
+        beta: params.beta ?? 0.28,
+        gamma: params.gamma ?? 0.20,
+        seasonLength: params.seasonLength ?? 0
+      }
+      const chartSeries = resolveLastAnalysisTimeSeries()
+      if (chartSeries.length >= 3) {
+        const result = await runAdvancedForecastFromSeries({
+          tableName,
+          metric: llmIntent.metric || lastAnalysis?.value?.fieldMapping?.metric || inferMetricFromQuestion(text),
+          series: chartSeries,
+          horizon: normalizeHorizonCount(mergedParams.horizon),
+          algorithm: mergedParams.algorithm,
+          alpha: mergedParams.alpha,
+          beta: mergedParams.beta,
+          gamma: mergedParams.gamma,
+          seasonLength: mergedParams.seasonLength
+        })
+        return buildAnalysisFromRealForecast(result, text, mergedParams, llmIntent)
+      }
+      const timeField = String(llmIntent.timeField || lastAnalysis?.value?.fieldMapping?.dimensionKey || '').trim()
+      const metricField = String(llmIntent.metricField || llmIntent.targetMetricField || lastAnalysis?.value?.fieldMapping?.metricKey || '').trim()
+      const inferredPayload = {
+        tableName,
+        timeField: pickFieldName(fieldMeta?.timeFields || [], timeField, ''),
+        metricField: pickFieldName(fieldMeta?.numericFields || [], metricField || llmIntent.metric, ''),
+        granularity: llmIntent.granularity || 'month',
+        horizon: normalizeHorizonCount(mergedParams.horizon),
+        algorithm: mergedParams.algorithm,
+        alpha: mergedParams.alpha,
+        beta: mergedParams.beta,
+        gamma: mergedParams.gamma,
+        seasonLength: mergedParams.seasonLength
+      }
+      const confirmedPayload = await confirmForecastParams(fieldMeta, inferredPayload)
+      if (!confirmedPayload) {
+        throw new Error('已取消预测参数确认')
+      }
+      const payload = {
+        ...inferredPayload,
+        ...confirmedPayload
+      }
+      if (!payload.timeField || !payload.metricField) {
+        throw new Error('缺少可用于真实预测的时间字段或数值指标，且上一轮查询结果不足以预测')
+      }
+      const result = await runAdvancedForecast(payload)
+      return buildAnalysisFromRealForecast(result, text, mergedParams, llmIntent)
+    }
+    if (type === 'whatIf') {
+      const variables = params.variables?.length
+        ? params.variables
+        : (normalizeLlmVariables(llmIntent.variables).length ? normalizeLlmVariables(llmIntent.variables) : inferWhatIfVariables(text))
+      const targetMetric = pickFieldName(
+        fieldMeta?.numericFields || [],
+        llmIntent.targetMetricField || llmIntent.metric || lastAnalysis?.value?.fieldMapping?.metricKey || '',
+        ''
+      )
+      const numericFields = fieldMeta?.numericFields || []
+      const normalizedVariables = variables.map(variable => {
+        const field = pickFieldName(numericFields, variable.field || variable.name, '')
+        return field ? { ...variable, field } : null
+      }).filter(Boolean)
+      if (!targetMetric || !normalizedVariables.length) {
+        throw new Error('缺少可用于真实推演的目标指标或变量字段')
+      }
+      const result = await runAdvancedWhatIf({
+        tableName,
+        targetMetric,
+        variables: normalizedVariables
+      })
+      return buildAnalysisFromRealWhatIf(result, text, { variables }, llmIntent)
+    }
+  } catch (error) {
+    console.warn('advanced analysis real compute fallback:', error)
+    if (type === 'forecast') {
+      return createAdvancedAnalysis(type, text, params, {
+        ...llmIntent,
+        simulated: true,
+        fallbackReason: error.message || '真实预测接口不可用'
+      })
+    }
+    ElMessage.warning(`真实计算暂不可用，已使用前端模拟结果：${error.message || '未知原因'}`)
+  }
+  return createAdvancedAnalysis(type, text, params, llmIntent)
+}
+
+const createAdvancedAnalysis = (type, text, params = {}, llmIntent = {}) => {
+  const metric = String(llmIntent.metric || llmIntent.targetMetric || '').trim() || inferMetricFromQuestion(text)
+  const tableName = String(selectedTableName?.value || lastAnalysis?.value?.tableName || '').trim()
+  const id = `advanced-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  if (type === 'forecast') {
+    const mergedParams = {
+      horizon: params.horizon || llmIntent.horizon || inferForecastHorizon(text),
+      algorithm: params.algorithm || llmIntent.algorithm || 'Prophet',
+      confidence: params.confidence || llmIntent.confidence || '95%'
+    }
+    const series = buildForecastSeries(mergedParams)
+    const forecastRows = series.filter(item => item.forecast != null)
+    const lastForecast = forecastRows[forecastRows.length - 1]?.forecast || 0
+    return {
+      id,
+      type,
+      title: `${metric}趋势预测`,
+      summary: llmIntent.simulated
+        ? `未取得可用真实时间序列，已生成模拟预测卡片用于参数预览。原因：${llmIntent.fallbackReason || '字段不足或数据不可用'}`
+        : `基于当前对话上下文生成${mergedParams.confidence}置信区间预测曲线，可调整周期和算法后重新计算。`,
+      tableName,
+      metric,
+      timeRange: mergedParams.horizon === '6m' ? '未来 6 个月' : mergedParams.horizon === '30d' ? '未来 30 天' : mergedParams.horizon === '7d' ? '未来 7 天' : '未来 3 个月',
+      status: llmIntent.simulated ? '模拟生成' : '已生成',
+      params: mergedParams,
+      series,
+      insights: [
+        { label: '末期预测', value: formatAdvancedNumber(lastForecast) },
+        { label: '算法', value: mergedParams.algorithm },
+        { label: '置信区间', value: mergedParams.confidence }
+      ]
+    }
+  }
+  if (type === 'whatIf') {
+    const variables = params.variables?.length
+      ? params.variables
+      : (normalizeLlmVariables(llmIntent.variables).length ? normalizeLlmVariables(llmIntent.variables) : inferWhatIfVariables(text))
+    const series = buildWhatIfSeries(variables)
+    const base = series[0]?.value || 0
+    const scenario = series[1]?.value || 0
+    const delta = base ? ((scenario - base) / base) * 100 : 0
+    return {
+      id,
+      type,
+      title: `${metric}情景推演`,
+      summary: '已根据变量变化生成基准方案、模拟方案和推荐方案，可继续调整变量重新计算。',
+      tableName,
+      metric,
+      timeRange: '当前分析周期',
+      status: '已生成',
+      params: { variables },
+      series,
+      insights: [
+        { label: '模拟变化', value: `${delta >= 0 ? '+' : ''}${delta.toFixed(1)}%` },
+        { label: '推荐方案', value: formatAdvancedNumber(series[2]?.value) },
+        { label: '变量数', value: `${variables.length} 个` }
+      ]
+    }
+  }
+  const threshold = params.threshold ?? llmIntent.threshold ?? inferAlertThreshold(text)
+  const operator = params.operator || llmIntent.operator || (/高于|超过|大于/.test(text) ? 'gt' : /异常|z-?score/i.test(text) ? 'zscore' : 'lt')
+  const series = buildAlertSeries(threshold)
+  const abnormalCount = series.filter(item => operator === 'gt' ? item.value > threshold : item.value < threshold).length
+  return {
+    id,
+    type,
+    title: `${metric}预警规则`,
+    summary: '已生成离线批处理 Agent 轮询规则，确认保存后可用于后续异常检测与推送。',
+    tableName,
+    metric,
+    timeRange: '每日上午 9:00 检测',
+    status: '待确认',
+    params: {
+      operator,
+      threshold,
+      channel: params.channel || llmIntent.channel || 'both'
+    },
+    series,
+    insights: [
+      { label: '阈值', value: formatAdvancedNumber(threshold) },
+      { label: '模拟异常', value: `${abnormalCount} 次` },
+      { label: '检测方式', value: operator === 'zscore' ? 'Z-Score' : '阈值检测' }
+    ]
+  }
+}
+
+const parseAdvancedIntentWithLlm = async (text) => {
+  try {
+    const tableName = selectedTableName?.value || lastAnalysis?.value?.tableName || ''
+    let fieldMeta = null
+    if (tableName) {
+      try {
+        fieldMeta = await fetchAdvancedAnalysisFieldMeta({ tableName })
+      } catch (error) {
+        console.warn('advanced analysis field meta unavailable:', error)
+      }
+    }
+    const parsed = await parseAdvancedAnalysisIntent({
+      question: text,
+      tableName,
+      context: {
+        lastMetric: lastAnalysis?.value?.fieldMapping?.metric || '',
+        lastMetricKey: lastAnalysis?.value?.fieldMapping?.metricKey || '',
+        lastDimension: lastAnalysis?.value?.fieldMapping?.dimension || '',
+        lastDimensionKey: lastAnalysis?.value?.fieldMapping?.dimensionKey || '',
+        chartType: lastAnalysis?.value?.chartType || '',
+        sourceQuestion: lastAnalysis?.value?.sourceQuestion || '',
+        fields: fieldMeta?.fields || [],
+        timeFields: fieldMeta?.timeFields || [],
+        numericFields: fieldMeta?.numericFields || []
+      }
+    })
+    const intent = normalizeAdvancedIntentType(parsed?.intent || parsed?.type)
+    if (!intent) return null
+    return { ...parsed, intent }
+  } catch (error) {
+    console.warn('advanced analysis llm parse fallback:', error)
+    return null
+  }
+}
+
+const pushAdvancedAnalysisMessage = (analysis, userText = '') => {
+  messages.value.push({
+    role: 'system',
+    content: `${advancedAnalysisTypeLabel(analysis.type)}已生成，请在卡片中调整参数、重新计算或保存方案。`,
+    advancedAnalysis: analysis,
+    sourceQuestion: userText,
+    sourceTableName: analysis.tableName || selectedTableName?.value || ''
+  })
+  nextTick(() => {
+    const dom = document.getElementById('chatHistory')
+    if (dom) dom.scrollTop = dom.scrollHeight
+  })
+}
+
+const openAdvancedAnalysisDialog = (analysis) => {
+  activeAdvancedAnalysis.value = analysis
+  advancedAnalysisDialogVisible.value = true
+}
+
+const sendChatQuestion = async () => {
+  const text = String(question?.value || '').trim()
+  const localIntent = inferAdvancedIntent(text)
+  if (!localIntent) {
+    await sendQuestion()
+    return
+  }
+  if (!selectedTableName?.value && !lastAnalysis?.value?.tableName) {
+    ElMessage.warning('请先选择数据源，或先完成一轮普通查询后再发起预测/推演/预警')
+    return
+  }
+  const llmIntent = await parseAdvancedIntentWithLlm(text)
+  const intent = llmIntent?.intent || localIntent
+  messages.value.push({
+    role: 'user',
+    content: text,
+    parentTurnId: String(activeBranchParentTurnMeta?.value?.turnId || '').trim() || null
+  })
+  question.value = ''
+  const analysis = await createAdvancedAnalysisAsync(intent, text, {}, llmIntent || {})
+  pushAdvancedAnalysisMessage(analysis, text)
+}
+
+const recalculateAdvancedAnalysis = async ({ analysis, params }) => {
+  if (!analysis?.id) return
+  let nextAnalysis
+  try {
+    nextAnalysis = await createAdvancedAnalysisAsync(analysis.type, analysis.title || '', params)
+  } catch (error) {
+    ElMessage.error(`重新计算失败：${error.message || '无法基于真实数据预测'}`)
+    return
+  }
+  nextAnalysis.id = analysis.id
+  nextAnalysis.title = analysis.title
+  const target = (messages.value || []).find(item => item?.advancedAnalysis?.id === analysis.id)
+  if (target) {
+    target.advancedAnalysis = nextAnalysis
+  }
+  if (activeAdvancedAnalysis.value?.id === analysis.id) {
+    activeAdvancedAnalysis.value = nextAnalysis
+  }
+  ElMessage.success('已根据最新参数重新计算')
+}
+
+const saveAdvancedAnalysis = (analysis) => {
+  if (!analysis?.id) return
+  const existsIndex = advancedAnalysisHistory.value.findIndex(item => item.id === analysis.id)
+  const record = {
+    ...analysis,
+    createdAt: new Date().toLocaleString('zh-CN', { hour12: false })
+  }
+  if (existsIndex >= 0) {
+    advancedAnalysisHistory.value.splice(existsIndex, 1, record)
+  } else {
+    advancedAnalysisHistory.value.unshift(record)
+  }
+  ElMessage.success('已保存到预测与情景模拟记录')
+}
+
+const pinAdvancedAnalysis = (analysis) => {
+  saveAdvancedAnalysis(analysis)
+  ElMessage.success('已生成可钉入看板的预测图表记录')
+}
+
+const restoreAdvancedAnalysis = (analysis) => {
+  advancedHistoryVisible.value = false
+  chatContentMode.value = 'messages'
+  const restored = { ...analysis, id: `advanced-${Date.now()}` }
+  pushAdvancedAnalysisMessage(restored, analysis.title)
+  openAdvancedAnalysisDialog(restored)
+}
+
+const removeAdvancedAnalysisHistory = (analysis) => {
+  advancedAnalysisHistory.value = advancedAnalysisHistory.value.filter(item => item.id !== analysis.id)
+}
 
 const currentChatSessionTitle = computed(() =>
   String(currentChatSession.value?.title || '').trim() || '新对话'
@@ -3036,6 +3877,62 @@ onBeforeUnmount(() => {
   font-family: Consolas, 'Courier New', monospace;
   word-break: break-word;
 }
+.advanced-dialog-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  width: min(620px, 100%);
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.06);
+}
+.advanced-dialog-entry__main {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+.advanced-dialog-entry__type {
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 700;
+}
+.advanced-dialog-entry__title {
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.advanced-dialog-entry__summary {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.advanced-analysis-dialog :deep(.el-dialog__body) {
+  padding-top: 8px;
+}
+.advanced-analysis-dialog :deep(.advanced-card) {
+  width: 100%;
+  margin-top: 0;
+  box-shadow: none;
+}
+.forecast-confirm-form {
+  display: grid;
+  gap: 12px;
+}
+.forecast-confirm-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.forecast-confirm-form :deep(.el-form-item) {
+  margin-bottom: 0;
+}
 .thinking-details summary {
   cursor: pointer;
   color: #374151;
@@ -3138,6 +4035,13 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 720px) {
+  .advanced-dialog-entry {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+  .forecast-confirm-grid {
+    grid-template-columns: 1fr;
+  }
   .chat-followup-banner {
     flex-direction: column;
     align-items: stretch;

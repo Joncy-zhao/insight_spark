@@ -39,6 +39,12 @@ load_local_env_file()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "qwen-plus").strip()
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1").rstrip("/")
+COMMERCIAL_API_KEY = os.getenv("COMMERCIAL_API_KEY", "").strip()
+COMMERCIAL_MODEL = os.getenv("COMMERCIAL_MODEL", "").strip()
+COMMERCIAL_BASE_URL = os.getenv("COMMERCIAL_BASE_URL", "").rstrip("/")
+LOCAL_API_KEY = os.getenv("LOCAL_API_KEY", os.getenv("OLLAMA_API_KEY", "ollama")).strip()
+LOCAL_MODEL = os.getenv("LOCAL_MODEL", os.getenv("OLLAMA_MODEL", "")).strip()
+LOCAL_BASE_URL = os.getenv("LOCAL_BASE_URL", os.getenv("OLLAMA_BASE_URL", "")).rstrip("/")
 TRANSLATION_MODEL = os.getenv("DASHSCOPE_TRANSLATION_MODEL", "qwen-mt-plus").strip()
 TTS_API_KEY = os.getenv("DASHSCOPE_API_KEY", OPENAI_API_KEY).strip()
 TTS_BASE_URL = os.getenv("DASHSCOPE_TTS_BASE_URL", "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation").strip()
@@ -73,6 +79,10 @@ class TextToSqlRequest(BaseModel):
     graphPath: dict[str, Any] = {}
     graphContext: list[dict[str, Any]] = []
     graphSqlHints: dict[str, Any] = {}
+    modelId: str = ""
+    modelConfig: dict[str, Any] = {}
+    temperature: float | int | None = None
+    timeoutSeconds: int | None = None
 
 
 class ChartRecommendRequest(BaseModel):
@@ -124,6 +134,12 @@ class BusinessModelPatchRequest(BaseModel):
     dimensionSystem: list[dict[str, Any]] = []
     fields: list[FieldMeta]
     previewRows: list[dict[str, Any]] = []
+
+
+class AdvancedAnalysisParseRequest(BaseModel):
+    question: str
+    tableName: str = ""
+    context: dict[str, Any] = {}
 
 
 class TtsRequest(BaseModel):
@@ -211,8 +227,13 @@ def extract_asr_text(response: dict[str, Any]) -> str:
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health() -> dict[str, Any]:
+    return {"status": "ok", "models": list_llm_models()}
+
+
+@app.get("/ai/models")
+def ai_models() -> dict[str, Any]:
+    return {"models": list_llm_models()}
 
 
 @app.post("/ai/schema-index")
@@ -297,6 +318,18 @@ def business_model_patch(payload: BusinessModelPatchRequest) -> dict[str, Any]:
             return normalize_business_model_patch_result(ai_result, payload)
 
     return build_rule_based_business_model_patch_result(payload)
+
+
+@app.post("/ai/advanced-analysis/parse")
+def advanced_analysis_parse(payload: AdvancedAnalysisParseRequest) -> dict[str, Any]:
+    question = (payload.question or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="高级分析问题不能为空。")
+    if OPENAI_API_KEY:
+        ai_result = call_openai_advanced_analysis_parse(payload)
+        if ai_result:
+            return normalize_advanced_analysis_parse_result(ai_result, payload)
+    return build_rule_based_advanced_analysis_parse_result(payload)
 
 
 @app.post("/ai/tts")
@@ -1175,8 +1208,9 @@ def build_report_markdown(
 
 def call_openai_text_to_sql(payload: TextToSqlRequest) -> dict[str, Any] | None:
     prompt = build_text_to_sql_prompt(payload)
+    model_config = resolve_llm_config(payload)
     body = json.dumps({
-        "model": OPENAI_MODEL,
+        "model": model_config["model"],
         "messages": [
             {"role": "system", "content": (
                 "你是企业级 Text-to-SQL 专家。\n"
@@ -1191,31 +1225,148 @@ def call_openai_text_to_sql(payload: TextToSqlRequest) -> dict[str, Any] | None:
             )},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.1,
+        "temperature": model_config["temperature"],
     }).encode("utf-8")
 
     req = request.Request(
-        f"{OPENAI_BASE_URL}/chat/completions",
+        f"{model_config['baseUrl']}/chat/completions",
         data=body,
         headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Authorization": f"Bearer {model_config['apiKey']}",
             "Content-Type": "application/json",
         },
         method="POST",
     )
     try:
-        with request.urlopen(req, timeout=25) as resp:
+        with request.urlopen(req, timeout=model_config["timeoutSeconds"]) as resp:
             payload_json = json.loads(resp.read().decode("utf-8"))
         content = payload_json["choices"][0]["message"]["content"]
         parsed = json.loads(content)
         if not isinstance(parsed, dict) or not parsed.get("sql"):
             return None
         parsed = normalize_ai_sql_result(parsed, payload)
-        parsed.setdefault("model", OPENAI_MODEL)
+        parsed.setdefault("model", model_config["model"])
+        parsed.setdefault("modelId", model_config["id"])
+        parsed.setdefault("modelName", model_config["name"])
+        parsed.setdefault("provider", model_config["provider"])
         parsed.setdefault("reasoning", ["由大模型生成"])
         return parsed
     except (error.URLError, error.HTTPError, KeyError, ValueError, json.JSONDecodeError):
         return None
+
+
+def list_llm_models() -> list[dict[str, Any]]:
+    default_model_name = OPENAI_MODEL or "qwen-plus"
+    models = []
+    if OPENAI_API_KEY and OPENAI_MODEL and OPENAI_BASE_URL:
+        models.append(
+        {
+            "id": "default",
+            "name": default_model_name,
+            "category": "CONFIGURED_DEFAULT",
+            "provider": provider_label(OPENAI_BASE_URL),
+            "model": default_model_name,
+            "baseUrl": mask_base_url(OPENAI_BASE_URL),
+            "available": bool(OPENAI_API_KEY),
+            "note": "当前 .env 中 OPENAI_MODEL / OPENAI_BASE_URL 配置的默认模型",
+        })
+    if COMMERCIAL_API_KEY and COMMERCIAL_MODEL and COMMERCIAL_BASE_URL:
+        models.append(
+        {
+            "id": "commercial-default",
+            "name": COMMERCIAL_MODEL,
+            "category": "CLOSED_COMMERCIAL",
+            "provider": provider_label(COMMERCIAL_BASE_URL),
+            "model": COMMERCIAL_MODEL,
+            "baseUrl": mask_base_url(COMMERCIAL_BASE_URL),
+            "available": bool(COMMERCIAL_API_KEY),
+            "note": "COMMERCIAL_MODEL / COMMERCIAL_BASE_URL 配置的闭源商用模型",
+        })
+    if LOCAL_MODEL and LOCAL_BASE_URL:
+        models.append(
+        {
+            "id": "local-private",
+            "name": LOCAL_MODEL,
+            "category": "LOCAL_PRIVATE",
+            "provider": provider_label(LOCAL_BASE_URL),
+            "model": LOCAL_MODEL,
+            "baseUrl": mask_base_url(LOCAL_BASE_URL),
+            "available": bool(LOCAL_BASE_URL),
+            "note": "LOCAL_MODEL / LOCAL_BASE_URL 配置的本地私有化模型",
+        })
+    seen = set()
+    unique_models = []
+    for item in models:
+        key = (item["model"], item["baseUrl"])
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_models.append(item)
+    return unique_models
+
+
+def resolve_llm_config(payload: TextToSqlRequest) -> dict[str, Any]:
+    model_config = payload.modelConfig if isinstance(payload.modelConfig, dict) else {}
+    requested_id = str(payload.modelId or model_config.get("modelId") or "default").strip()
+    if requested_id in {"gpt-4", "openai-default", "qwen-plus", ""}:
+        requested_id = "default"
+    temperature = model_config.get("temperature", payload.temperature)
+    timeout_seconds = model_config.get("timeoutSeconds", payload.timeoutSeconds)
+    try:
+        temperature_value = float(temperature if temperature is not None else 0.1)
+    except (TypeError, ValueError):
+        temperature_value = 0.1
+    try:
+        timeout_value = int(timeout_seconds if timeout_seconds is not None else 25)
+    except (TypeError, ValueError):
+        timeout_value = 25
+    timeout_value = max(5, min(timeout_value, 120))
+    if requested_id == "commercial-default":
+        return llm_config(
+            "commercial-default", COMMERCIAL_MODEL or OPENAI_MODEL, "闭源商用模型",
+            COMMERCIAL_BASE_URL or OPENAI_BASE_URL, COMMERCIAL_API_KEY or OPENAI_API_KEY,
+            temperature_value, timeout_value
+        )
+    if requested_id == "local-private":
+        return llm_config(
+            "local-private", LOCAL_MODEL, "本地私有化模型",
+            LOCAL_BASE_URL, LOCAL_API_KEY or "ollama",
+            temperature_value, timeout_value
+        )
+    return llm_config(
+        "default", OPENAI_MODEL, OPENAI_MODEL or "默认模型",
+        OPENAI_BASE_URL, OPENAI_API_KEY,
+        temperature_value, timeout_value
+    )
+
+
+def llm_config(model_id: str, model: str, name: str, base_url: str, api_key: str,
+               temperature: float, timeout_seconds: int) -> dict[str, Any]:
+    return {
+        "id": model_id,
+        "model": model,
+        "name": name or model,
+        "baseUrl": base_url.rstrip("/"),
+        "apiKey": api_key,
+        "provider": provider_label(base_url),
+        "temperature": temperature,
+        "timeoutSeconds": timeout_seconds,
+    }
+
+
+def provider_label(base_url: str) -> str:
+    lowered = (base_url or "").lower()
+    if "localhost:11434" in lowered or "127.0.0.1:11434" in lowered:
+        return "Ollama"
+    if "dashscope" in lowered:
+        return "DashScope"
+    if "openai" in lowered:
+        return "OpenAI"
+    return "OpenAI-Compatible"
+
+
+def mask_base_url(base_url: str) -> str:
+    return (base_url or "").rstrip("/")
 
 
 def call_openai_business_model_semantic(payload: BusinessModelSemanticRequest) -> dict[str, Any] | None:
@@ -1306,6 +1457,199 @@ def call_openai_business_model_patch(payload: BusinessModelPatchRequest) -> dict
         return parsed
     except (error.URLError, error.HTTPError, KeyError, ValueError, json.JSONDecodeError):
         return None
+
+
+def call_openai_advanced_analysis_parse(payload: AdvancedAnalysisParseRequest) -> dict[str, Any] | None:
+    prompt = (
+        "请把用户自然语言解析为预测与情景模拟模块的前端参数。\n"
+        "只输出严格 JSON，不要输出 Markdown 或解释文本。\n"
+        "intent 只能是 forecast、whatIf、alert 或 none。\n"
+        "forecast 需要尽量给出 metric、horizon(7d/30d/3m/6m)、algorithm(Prophet/Holt-Winters)、confidence。\n"
+        "如果上下文提供 fields/timeFields/numericFields，请优先返回真实 columnName：timeField、metricField、targetMetricField。\n"
+        "whatIf 需要给出 metric、variables 数组，变量项包含 name 与 change，change 表示百分比变化，可为负数。\n"
+        "whatIf 的 variables 如能匹配真实字段，请给出 field。\n"
+        "alert 需要给出 metric、operator(lt/gt/zscore)、threshold 数值、channel(email/dingtalk/both)。\n"
+        f"用户问题：{payload.question}\n"
+        f"当前数据源：{payload.tableName}\n"
+        f"上下文：{json.dumps(payload.context or {}, ensure_ascii=False)}"
+    )
+    body = json.dumps({
+        "model": OPENAI_MODEL,
+        "messages": [
+            {"role": "system", "content": "你是企业 BI 预测、情景推演和预警意图解析器。必须输出可被 json.loads 解析的 JSON。"},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.1,
+    }).encode("utf-8")
+
+    req = request.Request(
+        f"{OPENAI_BASE_URL}/chat/completions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=30) as resp:
+            payload_json = json.loads(resp.read().decode("utf-8"))
+        content = str(payload_json["choices"][0]["message"]["content"]).strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:json)?\s*", "", content)
+            content = re.sub(r"\s*```$", "", content)
+        parsed = json.loads(content)
+        return parsed if isinstance(parsed, dict) else None
+    except (error.URLError, error.HTTPError, KeyError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def normalize_advanced_intent(value: Any) -> str:
+    text = str(value or "").strip()
+    if text in {"forecast", "timeSeriesForecast", "prediction"}:
+        return "forecast"
+    if text in {"whatIf", "simulation", "scenario"}:
+        return "whatIf"
+    if text in {"alert", "warning", "anomaly"}:
+        return "alert"
+    return "none"
+
+
+def normalize_advanced_analysis_parse_result(parsed: dict[str, Any], payload: AdvancedAnalysisParseRequest) -> dict[str, Any]:
+    intent = normalize_advanced_intent(parsed.get("intent") or parsed.get("type"))
+    result = {
+        "intent": intent,
+        "metric": str(parsed.get("metric") or parsed.get("targetMetric") or "").strip(),
+        "timeField": str(parsed.get("timeField") or "").strip(),
+        "metricField": str(parsed.get("metricField") or "").strip(),
+        "targetMetricField": str(parsed.get("targetMetricField") or "").strip(),
+        "granularity": str(parsed.get("granularity") or "").strip(),
+        "horizon": str(parsed.get("horizon") or "").strip(),
+        "algorithm": str(parsed.get("algorithm") or "").strip(),
+        "confidence": str(parsed.get("confidence") or "").strip(),
+        "operator": str(parsed.get("operator") or "").strip(),
+        "threshold": parsed.get("threshold"),
+        "channel": str(parsed.get("channel") or "").strip(),
+        "variables": parsed.get("variables") if isinstance(parsed.get("variables"), list) else [],
+        "reasoning": parsed.get("reasoning") or "由大模型解析预测/推演/预警意图",
+        "model": parsed.get("model") or OPENAI_MODEL,
+        "fallbackUsed": False,
+    }
+    if not result["metric"]:
+        result["metric"] = infer_advanced_metric(payload.question, payload.context)
+    if intent == "forecast":
+        result["horizon"] = result["horizon"] or infer_advanced_horizon(payload.question)
+        result["algorithm"] = result["algorithm"] or "Prophet"
+        result["confidence"] = result["confidence"] or "95%"
+    elif intent == "alert":
+        result["operator"] = normalize_advanced_operator(result["operator"], payload.question)
+        result["threshold"] = normalize_advanced_threshold(result["threshold"], payload.question)
+        result["channel"] = result["channel"] if result["channel"] in {"email", "dingtalk", "both"} else "both"
+    elif intent == "whatIf":
+        result["variables"] = normalize_advanced_variables(result["variables"], payload.question)
+    return result
+
+
+def build_rule_based_advanced_analysis_parse_result(payload: AdvancedAnalysisParseRequest) -> dict[str, Any]:
+    question = payload.question or ""
+    lowered = question.lower()
+    intent = "none"
+    if re.search(r"预测|预估|未来|走势|forecast|prophet|holt", lowered):
+        intent = "forecast"
+    elif re.search(r"what-?if|如果|若|假设|提升|下降|降低|增长|推演|模拟|利润变化", lowered):
+        intent = "whatIf"
+    elif re.search(r"预警|提醒|告警|低于|高于|超过|异常|阈值|通知|钉钉|邮件|z-?score", lowered):
+        intent = "alert"
+    result = {
+        "intent": intent,
+        "metric": infer_advanced_metric(question, payload.context),
+        "fallbackUsed": True,
+        "reasoning": "未调用大模型或大模型解析失败，已使用规则兜底",
+    }
+    if intent == "forecast":
+        result.update({"horizon": infer_advanced_horizon(question), "algorithm": "Prophet", "confidence": "95%"})
+    elif intent == "whatIf":
+        result["variables"] = normalize_advanced_variables([], question)
+    elif intent == "alert":
+        result.update({
+            "operator": normalize_advanced_operator("", question),
+            "threshold": normalize_advanced_threshold(None, question),
+            "channel": "both",
+        })
+    return result
+
+
+def infer_advanced_metric(question: str, context: dict[str, Any] | None = None) -> str:
+    for candidate in ["销售额", "利润", "成本", "销量", "收入", "转化率", "退货率", "客单价"]:
+        if candidate in question:
+            return candidate
+    if isinstance(context, dict):
+        return str(context.get("lastMetric") or "").strip()
+    return ""
+
+
+def infer_advanced_horizon(question: str) -> str:
+    if re.search(r"6\s*个?月|半年", question):
+        return "6m"
+    if re.search(r"3\s*个?月|季度", question):
+        return "3m"
+    if re.search(r"30\s*天|一个月|1\s*个?月", question):
+        return "30d"
+    if re.search(r"7\s*天|一周|1\s*周", question):
+        return "7d"
+    return "3m"
+
+
+def normalize_advanced_operator(value: Any, question: str) -> str:
+    text = str(value or "").strip()
+    if text in {"lt", "gt", "zscore"}:
+        return text
+    if re.search(r"高于|超过|大于", question):
+        return "gt"
+    if re.search(r"异常|z-?score", question, re.I):
+        return "zscore"
+    return "lt"
+
+
+def normalize_advanced_threshold(value: Any, question: str) -> float:
+    try:
+        number = float(value)
+        if number >= 0:
+            return number
+    except (TypeError, ValueError):
+        pass
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(万|千|k|w)?", question, re.I)
+    if not match:
+        return 100000
+    number = float(match.group(1))
+    unit = (match.group(2) or "").lower()
+    if unit in {"万", "w"}:
+        return number * 10000
+    if unit in {"千", "k"}:
+        return number * 1000
+    return number
+
+
+def normalize_advanced_variables(items: list[Any], question: str) -> list[dict[str, Any]]:
+    variables: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("variable") or item.get("label") or "").strip()
+        try:
+            change = float(item.get("change", item.get("changePercent", item.get("delta", 0))))
+        except (TypeError, ValueError):
+            continue
+        if name:
+            variables.append({"name": name, "change": change})
+    if variables:
+        return variables
+    for name, direction, raw in re.findall(r"([\u4e00-\u9fa5A-Za-z]+?)(提升|增长|上涨|下降|降低|减少)\s*(\d+(?:\.\d+)?)\s*%", question):
+        value = float(raw)
+        if direction in {"下降", "降低", "减少"}:
+            value = -value
+        variables.append({"name": re.sub(r"[如果若假设]", "", name).strip() or "变量", "change": value})
+    return variables or [{"name": "销量", "change": 10}, {"name": "成本", "change": -5}]
 
 
 def build_business_model_semantic_prompt(payload: BusinessModelSemanticRequest) -> str:

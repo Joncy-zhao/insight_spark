@@ -24,6 +24,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.ArrayList;
 import java.util.Optional;
 
 @Service
@@ -48,6 +49,28 @@ public class PythonAiService {
                                                    Map<String, Object> graphPath,
                                                    Map<String, Object> graphSqlHints) {
         return textToSql(question, tableName, fields, previewRows, graphPath, graphSqlHints, Map.of());
+    }
+
+    @SuppressWarnings("unchecked")
+    public List<Map<String, Object>> listModels() {
+        try {
+            Map<String, Object> response = restTemplate.getForObject(aiServiceUrl + "/ai/models", Map.class);
+            Object models = response == null ? null : response.get("models");
+            if (models instanceof List<?> list) {
+                List<Map<String, Object>> result = new ArrayList<>();
+                for (Object item : list) {
+                    if (item instanceof Map<?, ?> map) {
+                        result.add(new LinkedHashMap<>((Map<String, Object>) map));
+                    }
+                }
+                if (!result.isEmpty()) {
+                    return result;
+                }
+            }
+        } catch (RestClientException e) {
+            log.warn("Python AI 模型配置不可用，使用后端默认模型列表: {}", e.getMessage());
+        }
+        return List.of();
     }
 
     public Optional<Map<String, Object>> textToSql(String question, String tableName, List<Map<String, Object>> fields,
@@ -145,6 +168,29 @@ public class PythonAiService {
             return Optional.empty();
         } catch (RestClientException e) {
             log.warn("Python AI 业务模型修改不可用: {}", e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    public Optional<Map<String, Object>> parseAdvancedAnalysisIntent(String question, String tableName,
+                                                                     Map<String, Object> context) {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("question", question);
+        request.put("tableName", tableName);
+        request.put("context", context == null ? Map.of() : context);
+
+        try {
+            Map<String, Object> response = restTemplate.postForObject(
+                    aiServiceUrl + "/ai/advanced-analysis/parse",
+                    request,
+                    Map.class
+            );
+            return response == null ? Optional.empty() : Optional.of(response);
+        } catch (HttpClientErrorException e) {
+            log.warn("Python AI 预测推演意图解析失败: {}", e.getResponseBodyAsString());
+            return Optional.empty();
+        } catch (RestClientException e) {
+            log.warn("Python AI 预测推演意图解析不可用: {}", e.getMessage());
             return Optional.empty();
         }
     }
