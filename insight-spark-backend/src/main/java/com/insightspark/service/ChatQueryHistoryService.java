@@ -701,42 +701,6 @@ public class ChatQueryHistoryService {
         }
     }
 
-    public void attachConversationMetadata(Long historyId, Long conversationId, Long parentHistoryId, Integer turnNo,
-                                           String messageRole, String intentType, Map<String, Object> context,
-                                           Map<String, Object> scope, String artifactType, String summaryText) {
-        if (historyId == null || conversationId == null) {
-            return;
-        }
-        try {
-            jdbcTemplate.update("""
-                    UPDATE is_chat_query_history
-                       SET conversation_id = ?,
-                           parent_history_id = ?,
-                           turn_no = ?,
-                           message_role = ?,
-                           intent_type = ?,
-                           context_json = ?,
-                           scope_json = ?,
-                           artifact_type = ?,
-                           summary_text = ?
-                     WHERE id = ?
-                    """,
-                    conversationId,
-                    parentHistoryId,
-                    turnNo,
-                    safeText(Objects.toString(messageRole, "ASSISTANT"), 16),
-                    safeText(intentType, 64),
-                    toJson(context == null ? Map.of() : context),
-                    toJson(scope == null ? Map.of() : scope),
-                    safeText(Objects.toString(artifactType, "CHART"), 32),
-                    safeText(summaryText, MAX_AUDIT_INFO_LENGTH),
-                    historyId
-            );
-        } catch (Exception ignored) {
-            // 会话元数据是兼容增强，不应影响旧历史主链路。
-        }
-    }
-
     private Map<String, Object> mapHistoryRow(Map<String, Object> row) {
         Map<String, Object> item = new LinkedHashMap<>(row);
         Map<String, Object> snapshot = parseJsonMap(row.get("chartSnapshot"));

@@ -9,8 +9,8 @@
         <el-button :loading="loadingMeta" @click="loadMeta">刷新配置</el-button>
         <el-button class="rerun-latest-btn" :loading="rerunLoading" @click="rerunLatestTest">最近重跑</el-button>
         <el-button class="compare-model-btn" :loading="compareLoading" @click="openCompareDialog">模型对比</el-button>
-        <el-button :disabled="!activeSession?.id" @click="exportSession">导出记录</el-button>
-        <el-button class="reasoning-export-btn" :disabled="!streamSteps.length" @click="exportReasoningLog">导出推理日志</el-button>
+        <el-button :disabled="!activeSession?.id" @click="exportSession">导出记录 Word</el-button>
+        <el-button class="reasoning-export-btn" :disabled="!activeSession?.id" @click="exportReasoningLog">导出推理日志 Word</el-button>
       </div>
     </header>
 
@@ -69,7 +69,7 @@
           </el-form-item>
           <el-form-item label="底层大模型">
             <el-select v-model="form.modelId" class="full-width">
-              <el-option v-for="model in models" :key="model.id" :label="`${model.name} - ${model.category}`" :value="model.id" />
+              <el-option v-for="model in models" :key="model.id" :label="model.name" :value="model.id" :disabled="model.available === false" />
             </el-select>
           </el-form-item>
           <el-form-item label="常用测试指令模板">
@@ -179,7 +179,7 @@
           <div><span>解析引擎</span><strong>{{ result?.engine || '等待解析' }}</strong></div>
           <div><span>数据源类型</span><strong>{{ result?.sourceType || '-' }}</strong></div>
           <div><span>安全等级</span><strong><el-tag size="small" :type="riskTagType(result?.riskLevel)">{{ result?.riskLevel || '待检测' }}</el-tag></strong></div>
-          <div><span>使用模型</span><strong>{{ result?.modelName || selectedModelName }}</strong></div>
+          <div><span>使用模型</span><strong>{{ result?.modelName || activeSessionModelName }}</strong></div>
           <div><span>会话状态</span><strong><el-tag size="small" :type="statusTagType(activeSession?.status)">{{ activeSession?.status || '待执行' }}</el-tag></strong></div>
         </div>
       </section>
@@ -301,6 +301,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   compareAdminChatQueryModels,
   createAdminChatQuerySession,
+  exportAdminChatQueryReasoningUrl,
   deleteAdminChatQueryTemplate,
   exportAdminChatQuerySessionUrl,
   fetchAdminChatQueryDatasources,
@@ -350,7 +351,7 @@ const labRules = ref([
 
 const form = ref({
   selectedTables: [],
-  modelId: 'gpt-4',
+  modelId: 'default',
   temperature: 0.2,
   timeoutSeconds: 30,
   simulatedUserId: '',
@@ -380,7 +381,8 @@ const currentDatasourceSummary = computed(() => {
   const type = String(selected.sourceType || 'UPLOAD').toUpperCase()
   return `${type} / ${Number(selected.rowCount || 0)}行`
 })
-const selectedModelName = computed(() => models.value.find((item) => item.id === form.value.modelId)?.name || 'GPT-4')
+const selectedModelName = computed(() => models.value.find((item) => item.id === form.value.modelId)?.name || '默认模型')
+const activeSessionModelName = computed(() => resolveSessionModelName(activeSession.value))
 const safeCount = computed(() => historyItems.value.filter((item) => item.riskLevel === 'SAFE').length)
 const warnCount = computed(() => historyItems.value.filter((item) => item.riskLevel === 'WARN').length)
 const blockedCount = computed(() => historyItems.value.filter((item) => item.riskLevel === 'BLOCKED' || item.status === 'FAILED').length)
@@ -394,6 +396,10 @@ const loadMeta = async () => {
     ])
     datasources.value = sourceRows || []
     models.value = modelRows || []
+    if (models.value.length && !models.value.some((item) => item.id === form.value.modelId)) {
+      const availableModel = models.value.find((item) => item.available !== false) || models.value[0]
+      form.value.modelId = availableModel.id
+    }
     if (!form.value.selectedTables.length && datasources.value[0]?.tableName) {
       form.value.selectedTables = [datasources.value[0].tableName]
     }
@@ -595,12 +601,14 @@ const runModelCompare = async () => {
 }
 
 const refreshActiveSession = async (sessionId) => {
+  result.value = null
+  permissionCheckResult.value = null
   const detail = await fetchAdminChatQuerySession(sessionId)
   activeSession.value = detail
   const artifact = (detail.artifacts || []).find((item) => item.artifactType === 'SQL')?.artifact
   const permissionArtifact = (detail.artifacts || []).find((item) => item.artifactType === 'PERMISSION')?.artifact
-  result.value = artifact || result.value
-  permissionCheckResult.value = permissionArtifact || permissionCheckResult.value
+  result.value = artifact || null
+  permissionCheckResult.value = permissionArtifact || null
   await nextTick()
   renderResultChart()
 }
@@ -735,27 +743,45 @@ const exportSession = async () => {
       method: 'POST',
       headers
     })
+    if (!response.ok) {
+      const message = await response.text()
+      throw new Error(message || `导出失败：${response.status}`)
+    }
     const blob = await response.blob()
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = `admin-chat-query-session-${activeSession.value.id}.json`
+    link.download = `admin-chat-query-session-${activeSession.value.id}.docx`
     link.click()
     URL.revokeObjectURL(url)
   } catch (error) {
-    ElMessage.error('导出失败')
+    ElMessage.error(error.message || '导出失败')
   }
 }
 
-const exportReasoningLog = () => {
-  const payload = {
-    sessionId: activeSession.value?.id || null,
-    question: form.value.question,
-    exportedAt: new Date().toISOString(),
-    steps: streamSteps.value,
-    permissionComparison: permissionComparisonRows.value
+const exportReasoningLog = async () => {
+  if (!activeSession.value?.id) return
+  try {
+    const headers = {}
+    attachAuthHeader({ headers })
+    const response = await fetch(exportAdminChatQueryReasoningUrl(activeSession.value.id), {
+      method: 'POST',
+      headers
+    })
+    if (!response.ok) {
+      const message = await response.text()
+      throw new Error(message || `导出失败：${response.status}`)
+    }
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `admin-chat-query-reasoning-${activeSession.value.id}.docx`
+    link.click()
+    URL.revokeObjectURL(url)
+  } catch (error) {
+    ElMessage.error(error.message || '导出推理日志失败')
   }
-  downloadText(`admin-chat-query-reasoning-${activeSession.value?.id || 'draft'}.json`, JSON.stringify(payload, null, 2))
 }
 
 const exportChartImage = () => {
@@ -789,6 +815,22 @@ const copySql = async () => {
 
 const formatDatasourceLabel = (item) =>
   `${item.displayName || item.tableName} (${item.sourceType || 'UPLOAD'} / ${item.rowCount || 0}行)`
+
+const resolveSessionModelName = (session) => {
+  const modelConfig = session?.modelConfig || {}
+  const modelId = modelConfig.modelId
+  if (modelId) {
+    const matched = models.value.find((item) => String(item.id) === String(modelId))
+    if (matched?.name) {
+      return matched.name
+    }
+    if (modelId === 'default') {
+      return '默认模型'
+    }
+    return String(modelId)
+  }
+  return '未记录'
+}
 
 const summarizePayload = (eventName, payload) => {
   if (eventName === 'SQL_GENERATED') return payload.sql || 'SQL 已生成'

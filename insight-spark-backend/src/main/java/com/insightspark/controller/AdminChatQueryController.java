@@ -143,12 +143,23 @@ public class AdminChatQueryController {
 
     @PostMapping("/sessions/{sessionId}/export")
     public ResponseEntity<byte[]> exportSession(@PathVariable Long sessionId) {
-        byte[] content = adminChatQueryService.exportSession(sessionId);
+        byte[] content = adminChatQueryService.exportSessionDocx(sessionId);
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.attachment()
-                        .filename("admin-chat-query-session-" + sessionId + ".json", java.nio.charset.StandardCharsets.UTF_8)
+                        .filename("admin-chat-query-session-" + sessionId + ".docx", java.nio.charset.StandardCharsets.UTF_8)
                         .build().toString())
-                .header(HttpHeaders.CONTENT_TYPE, "application/json;charset=UTF-8")
+                .header(HttpHeaders.CONTENT_TYPE, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                .body(content);
+    }
+
+    @PostMapping("/sessions/{sessionId}/reasoning-export")
+    public ResponseEntity<byte[]> exportReasoning(@PathVariable Long sessionId) {
+        byte[] content = adminChatQueryService.exportReasoningDocx(sessionId);
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.attachment()
+                        .filename("admin-chat-query-reasoning-" + sessionId + ".docx", java.nio.charset.StandardCharsets.UTF_8)
+                        .build().toString())
+                .header(HttpHeaders.CONTENT_TYPE, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
                 .body(content);
     }
 

@@ -42,6 +42,9 @@ export const compareAdminChatQueryModels = (payload) =>
 export const exportAdminChatQuerySessionUrl = (sessionId) =>
   `${API_BASE}/api/admin/chat-query/sessions/${sessionId}/export`
 
+export const exportAdminChatQueryReasoningUrl = (sessionId) =>
+  `${API_BASE}/api/admin/chat-query/sessions/${sessionId}/reasoning-export`
+
 export const streamAdminChatQuerySession = async (sessionId, params, handlers = {}) => {
   const search = new URLSearchParams()
   Object.entries(params || {}).forEach(([key, value]) => {
