@@ -12,6 +12,8 @@ import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.ss.usermodel.Workbook;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -36,6 +38,8 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 @Service
 public class SqlAuditService {
+
+    private static final Logger log = LoggerFactory.getLogger(SqlAuditService.class);
 
     @Autowired
     private JdbcTemplate jdbcTemplate;

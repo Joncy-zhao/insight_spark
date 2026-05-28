@@ -29,7 +29,9 @@ public class SqlMigrationRunner {
     private static final List<String> MIGRATIONS = List.of(
             "db/migration/chat_conversation_migration_20260524.sql",
             "db/migration/dashboard_component_artifact_turn_migration_20260524.sql",
-            "db/migration/admin_chat_history_migration_20260527.sql"
+            "db/migration/admin_chat_history_migration_20260527.sql",
+            "db/migration/admin_chat_query_lab_migration_20260527.sql",
+            "db/migration/admin_chat_query_template_migration_20260528.sql"
     );
 
     private final DataSource dataSource;

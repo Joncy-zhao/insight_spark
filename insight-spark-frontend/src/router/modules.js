@@ -105,6 +105,13 @@ export const menuGroups = [
         subtitle: '全平台对话查询、SQL 生成、知识图谱匹配、推理过程与性能审计统一查看。'
       },
       {
+        key: 'adminChatQueryLab',
+        role: 'ADMIN',
+        index: '8',
+        title: '对话查询实验室',
+        subtitle: '跨数据源验证 Text-to-SQL、GraphRAG、SQL 安全、权限穿透和图表渲染效果。'
+      },
+      {
         key: 'stackCConfig',
         role: 'ADMIN',
         index: '9',
