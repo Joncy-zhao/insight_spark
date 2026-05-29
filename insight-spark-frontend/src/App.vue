@@ -71,6 +71,7 @@
         <PermissionCenterView v-if="isPermissionModule" />
         <DatasourceManageView v-if="activeModule === 'datasource'" />
         <DiagnosisReportView v-if="activeModule === 'diagnosis'" />
+        <AdvancedAnalysisManageView v-if="activeModule === 'advancedAnalysis'" />
         <KnowledgeGraphView v-if="activeModule === 'knowledgeGraph'" />
         <SqlAuditView v-if="activeModule === 'audit'" />
         <AdminChatHistoryView v-if="activeModule === 'adminChatHistory'" />
@@ -83,7 +84,7 @@
         <StackCSystemConfigView v-if="activeModule === 'stackCConfig'" />
         <PerformanceGovernanceView v-if="activeModule === 'performanceGovernance'" />
         <PlaceholderView
-            v-if="!['upload', 'chat', 'audit', 'adminChatHistory', 'adminChatQueryLab', 'permission', 'permissionAdmin', 'datasource', 'diagnosis', 'knowledgeGraph', 'workbench', 'dashboard', 'collaboration', 'adminWorkbench', 'adminDashboard', 'stackCConfig', 'performanceGovernance'].includes(activeModule)"
+            v-if="!['upload', 'chat', 'audit', 'adminChatHistory', 'adminChatQueryLab', 'permission', 'permissionAdmin', 'datasource', 'diagnosis', 'advancedAnalysis', 'knowledgeGraph', 'workbench', 'dashboard', 'collaboration', 'adminWorkbench', 'adminDashboard', 'stackCConfig', 'performanceGovernance'].includes(activeModule)"
         />
       </el-main>
     </el-container>
@@ -175,6 +176,7 @@ import AdminDashboardView from './views/admin/AdminDashboardView.vue'
 import UserWorkbenchView from './views/user/UserWorkbenchView.vue'
 import UserDashboardView from './views/user/UserDashboardView.vue'
 import BusinessCollaborationView from './views/user/BusinessCollaborationView.vue'
+import AdvancedAnalysisManageView from './views/user/AdvancedAnalysisManageView.vue'
 import PlaceholderView from './views/PlaceholderView.vue'
 import AuthView from './views/AuthView.vue'
 import { authToken, currentUser, isAuthenticated, clearSession, restoreSessionHeader } from './store/session'
@@ -189,6 +191,7 @@ const moduleIconMap = {
   dashboard: DataBoard,
   adminDashboard: Histogram,
   collaboration: Share,
+  advancedAnalysis: DataAnalysis,
   businessDictionary: Operation,
   upload: Upload,
   chat: ChatDotRound,

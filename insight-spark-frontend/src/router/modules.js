@@ -43,6 +43,13 @@ export const menuGroups = [
         subtitle: '自然语言生成 SQL，经 GraphRAG 上下文、SQL 审计和权限校验后渲染 ECharts 图表。'
       },
       {
+        key: 'advancedAnalysis',
+        role: 'USER',
+        index: '8',
+        title: '预测与情景模拟',
+        subtitle: '管理时序预测方案、What-if 推演、预警规则、预警事件和后续推送记录。'
+      },
+      {
         key: 'permission',
         role: 'USER',
         index: '6',

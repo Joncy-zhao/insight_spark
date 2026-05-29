@@ -31,7 +31,10 @@ public class SqlMigrationRunner {
             "db/migration/dashboard_component_artifact_turn_migration_20260524.sql",
             "db/migration/admin_chat_history_migration_20260527.sql",
             "db/migration/admin_chat_query_lab_migration_20260527.sql",
-            "db/migration/admin_chat_query_template_migration_20260528.sql"
+            "db/migration/admin_chat_query_template_migration_20260528.sql",
+            "db/migration/advanced_alert_rule_migration_20260529.sql",
+            "db/migration/advanced_alert_event_migration_20260529.sql",
+            "db/migration/advanced_analysis_plan_migration_20260529.sql"
     );
 
     private final DataSource dataSource;

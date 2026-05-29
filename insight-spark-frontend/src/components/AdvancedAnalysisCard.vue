@@ -28,7 +28,7 @@
       <el-form label-position="top">
         <div class="advanced-card__form-grid">
           <el-form-item label="预测周期">
-            <el-input-number v-model="draft.horizon" :min="1" :max="60" @change="emitRecalculate" />
+            <el-input :model-value="horizonDisplay" disabled />
           </el-form-item>
           <el-form-item label="算法">
             <el-select v-model="draft.algorithm" @change="emitRecalculate">
@@ -68,8 +68,49 @@
           class="advanced-card__variable"
         >
           <el-input v-model="variable.name" placeholder="变量名称" @change="emitRecalculate" />
-          <el-input-number v-model="variable.change" :min="-100" :max="100" :step="1" @change="emitRecalculate" />
-          <span>%</span>
+          <el-select v-model="variable.mode" class="advanced-card__variable-mode" @change="emitRecalculate">
+            <el-option label="百分比" value="percent" />
+            <el-option label="绝对值" value="absolute" />
+            <el-option label="固定值" value="set" />
+          </el-select>
+          <el-input-number
+            v-model="variable.change"
+            class="advanced-card__variable-change"
+            :step="1"
+            controls-position="right"
+            @change="emitRecalculate"
+          />
+          <span class="advanced-card__variable-percent">{{ whatIfModeUnit(variable.mode) }}</span>
+        </div>
+      </div>
+      <div v-if="whatIfScenarioRows.length" class="advanced-card__scenario-grid">
+        <div
+          v-for="item in whatIfScenarioRows"
+          :key="item.name"
+          class="advanced-card__scenario-item"
+        >
+          <span>{{ item.name }}</span>
+          <strong>{{ item.valueText }}</strong>
+        </div>
+      </div>
+      <div v-if="whatIfSensitivityRows.length" class="advanced-card__sensitivity">
+        <div class="advanced-card__sensitivity-head">
+          <span>敏感性排序</span>
+          <strong>变量影响</strong>
+        </div>
+        <div
+          v-for="item in whatIfSensitivityRows"
+          :key="item.key"
+          class="advanced-card__sensitivity-row"
+        >
+          <div class="advanced-card__sensitivity-meta">
+            <span>{{ item.name }}</span>
+            <small>{{ item.direction }}</small>
+          </div>
+          <div class="advanced-card__sensitivity-track">
+            <i :style="{ width: item.width, backgroundColor: item.color }"></i>
+          </div>
+          <strong>{{ item.valueText }}</strong>
         </div>
       </div>
     </section>
@@ -100,9 +141,47 @@
 
     <div ref="chartRef" class="advanced-card__chart"></div>
 
-    <section class="advanced-card__insights">
+    <section v-if="analysis.type === 'forecast'" class="advanced-card__explain">
+      <div class="advanced-card__explain-item">
+        <div class="advanced-card__explain-title">
+          <span>算法说明</span>
+          <el-tooltip placement="top" effect="dark" :show-after="150">
+            <template #content>
+              <div class="advanced-card__help-popover">
+                <div class="advanced-card__help-popover-title">{{ forecastAlgorithmHelpTitle }}</div>
+                <div
+                  v-for="item in forecastAlgorithmHelpItems"
+                  :key="item.label"
+                  class="advanced-card__help-popover-item"
+                >
+                  <strong>{{ item.label }}</strong>
+                  <span>{{ item.description }}</span>
+                </div>
+              </div>
+            </template>
+            <el-icon class="advanced-card__help-icon"><QuestionFilled /></el-icon>
+          </el-tooltip>
+        </div>
+        <p>{{ forecastAlgorithmText }}</p>
+      </div>
+      <div v-if="forecastQualityRows.length" class="advanced-card__quality-grid">
+        <div
+          v-for="item in forecastQualityRows"
+          :key="item.label"
+          class="advanced-card__quality-item"
+        >
+          <span>{{ item.label }}</span>
+          <strong>{{ item.value }}</strong>
+        </div>
+      </div>
+      <div v-if="forecastQualityMessage" class="advanced-card__quality-note">
+        {{ forecastQualityMessage }}
+      </div>
+    </section>
+
+    <section v-if="analysis.type !== 'forecast' || forecastInsightRows.length" class="advanced-card__insights">
       <div
-        v-for="item in analysis.insights"
+        v-for="item in (analysis.type === 'forecast' ? forecastInsightRows : analysis.insights)"
         :key="item.label"
         class="advanced-card__insight"
       >
@@ -112,9 +191,9 @@
     </section>
 
     <footer class="advanced-card__actions">
-      <el-button size="small" type="primary" plain @click="$emit('save', analysis)">保存方案</el-button>
+      <el-button v-if="props.showSaveAction" size="small" type="primary" plain @click="$emit('save', analysis)">保存方案</el-button>
       <el-button
-        v-if="analysis.type === 'forecast'"
+        v-if="props.showPinAction && analysis.type === 'forecast'"
         size="small"
         type="success"
         plain
@@ -124,22 +203,32 @@
       </el-button>
       <el-button size="small" plain @click="exportImage">导出图表</el-button>
       <el-button size="small" plain @click="emitRecalculate">重新计算</el-button>
+      <el-button v-if="analysis.type === 'alert'" size="small" plain type="warning" @click="$emit('manage-alerts')">规则管理</el-button>
     </footer>
   </article>
 </template>
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { QuestionFilled } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 
 const props = defineProps({
   analysis: {
     type: Object,
     required: true
+  },
+  showSaveAction: {
+    type: Boolean,
+    default: true
+  },
+  showPinAction: {
+    type: Boolean,
+    default: true
   }
 })
 
-const emit = defineEmits(['recalculate', 'save', 'pin'])
+const emit = defineEmits(['recalculate', 'save', 'pin', 'manage-alerts'])
 
 const chartRef = ref(null)
 let chartInstance = null
@@ -169,10 +258,117 @@ const statusLabel = computed(() => {
   return props.analysis.status || '已生成'
 })
 
+const whatIfModeUnit = (mode) => {
+  if (mode === 'absolute') return '绝对值'
+  if (mode === 'set') return '固定值'
+  return '%'
+}
+
+const horizonDisplay = computed(() => {
+  const horizon = Number(draft.horizon)
+  if (!Number.isFinite(horizon)) return '自动'
+  const unit = String(props.analysis?.timeRange || '').trim()
+  if (unit === 'day') return `${horizon} 天`
+  if (unit === 'week') return `${horizon} 周`
+  if (unit === 'quarter') return `${horizon} 个季度`
+  if (unit === 'year') return `${horizon} 年`
+  return `${horizon} 期`
+})
+
 const tagType = computed(() => {
   if (props.analysis.type === 'alert') return 'warning'
   if (props.analysis.type === 'whatIf') return 'success'
   return 'primary'
+})
+
+const whatIfSensitivityRows = computed(() => {
+  const variables = Array.isArray(draft.variables) ? draft.variables : []
+  const rows = variables
+    .map((item, index) => {
+      const correlation = Number(item.estimatedCorrelation ?? item.correlation ?? 0)
+      const change = Number(item.change ?? 0)
+      const impact = Number.isFinite(correlation) && Number.isFinite(change) ? change * correlation : 0
+      return {
+        key: `${item.field || item.name || 'variable'}-${index}`,
+        name: String(item.name || item.field || `变量${index + 1}`),
+        impact
+      }
+    })
+    .filter(item => Number.isFinite(item.impact) && item.impact !== 0)
+    .sort((a, b) => Math.abs(b.impact) - Math.abs(a.impact))
+  const max = Math.max(...rows.map(item => Math.abs(item.impact)), 1)
+  return rows.map(item => ({
+    ...item,
+    width: `${Math.max(8, Math.min(100, Math.abs(item.impact) / max * 100))}%`,
+    color: item.impact >= 0 ? '#14b8a6' : '#f97316',
+    direction: item.impact >= 0 ? '正向影响' : '反向影响',
+    valueText: `${item.impact >= 0 ? '+' : ''}${item.impact.toFixed(2)}%`
+  }))
+})
+
+const whatIfScenarioRows = computed(() => {
+  if (props.analysis?.type !== 'whatIf') return []
+  const rows = Array.isArray(props.analysis?.series) ? props.analysis.series : []
+  return rows
+    .filter(item => ['基准方案', '保守方案', '中性方案', '乐观方案', '推荐方案', '模拟方案'].includes(String(item?.name || '')))
+    .map(item => ({
+      name: item.name,
+      valueText: formatAxisValue(item.value)
+    }))
+})
+
+const formatQualityNumber = (value) => {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return value ?? '-'
+  return Math.abs(number) >= 10000 ? `${(number / 10000).toFixed(2)}w` : number.toFixed(2)
+}
+
+const forecastAlgorithmText = computed(() => {
+  const algorithm = String(draft.algorithm || props.analysis?.params?.algorithm || '').trim()
+  if (algorithm === 'Holt-Winters') {
+    return `Holt-Winters 指数平滑，alpha=${draft.alpha}，beta=${draft.beta}，gamma=${draft.gamma}，季节周期=${draft.seasonLength || '自动'}。`
+  }
+  return `Prophet-like 趋势拟合，使用趋势项与季节项生成预测；当前为轻量实现，非 Python Prophet 服务。`
+})
+
+const forecastAlgorithmHelpTitle = computed(() => {
+  const algorithm = String(draft.algorithm || props.analysis?.params?.algorithm || '').trim()
+  return algorithm === 'Holt-Winters' ? 'Holt-Winters 参数说明' : 'Prophet-like 参数说明'
+})
+
+const forecastAlgorithmHelpItems = computed(() => {
+  const algorithm = String(draft.algorithm || props.analysis?.params?.algorithm || '').trim()
+  if (algorithm === 'Holt-Winters') {
+    return [
+      { label: '预测周期', description: '控制向前推演多少期，周期越长，未来点越多。' },
+      { label: 'Alpha', description: '控制对最新数据的敏感度，越大越重视近期变化。' },
+      { label: 'Beta', description: '控制趋势项更新速度，越大越容易跟随趋势变化。' },
+      { label: 'Gamma', description: '控制季节项更新速度，越大越重视季节波动。' },
+      { label: '季节周期', description: '表示波动多久重复一次，用来让算法记住周期规律。按月销售额常用 12，按日数据有周规律可用 7；设对后，预测会更贴近真实业务节奏。' },
+      { label: '置信区间', description: '控制结果展示的置信范围，数值越高，区间越宽。' }
+    ]
+  }
+  return [
+    { label: '预测周期', description: '控制向前推演多少期，周期越长，未来点越多。' },
+    { label: '置信区间', description: '控制结果展示的置信范围，数值越高，区间越宽。' },
+    { label: '季节周期', description: '表示波动多久重复一次，用来拟合周期性变化。按月销售额常用 12，按日数据有周规律可用 7。' }
+  ]
+})
+
+const forecastQualityRows = computed(() => {
+  const quality = props.analysis?.dataQuality || {}
+  return [
+    { label: '历史点数', value: quality.points },
+    { label: '均值', value: formatQualityNumber(quality.average) },
+    { label: '标准差', value: formatQualityNumber(quality.stdDev) }
+  ].filter(item => item.value !== undefined && item.value !== null && item.value !== '')
+})
+
+const forecastQualityMessage = computed(() => props.analysis?.dataQuality?.message || '')
+
+const forecastInsightRows = computed(() => {
+  const insights = Array.isArray(props.analysis?.insights) ? props.analysis.insights : []
+  return insights.filter(item => !['历史点数', '真实序列点数'].includes(String(item?.label || '').trim()))
 })
 
 const formatAxisValue = (value) => {
@@ -182,15 +378,40 @@ const formatAxisValue = (value) => {
   return `${number}`
 }
 
+const getForecastZoomRange = (rows) => {
+  const total = Array.isArray(rows) ? rows.length : 0
+  if (total <= 24) {
+    return { startValue: 0, endValue: Math.max(0, total - 1) }
+  }
+  const forecastCount = rows.filter(item => item && item.forecast != null).length
+  const visibleCount = Math.min(total, Math.max(24, forecastCount + 18))
+  return {
+    startValue: Math.max(0, total - visibleCount),
+    endValue: total - 1
+  }
+}
+
 const buildForecastOption = () => {
   const rows = props.analysis.series || []
+  const zoomRange = getForecastZoomRange(rows)
   return {
     tooltip: { trigger: 'axis' },
     legend: { top: 4, data: ['历史值', '预测值', '置信上界', '置信下界'] },
-    grid: { left: 54, right: 24, top: 48, bottom: 42 },
-    xAxis: { type: 'category', data: rows.map(item => item.name) },
+    grid: { left: 54, right: 24, top: 48, bottom: 42, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: rows.map(item => item.name),
+      axisLabel: {
+        hideOverlap: true,
+        interval: 'auto',
+        rotate: rows.length > 48 ? 35 : 0
+      }
+    },
     yAxis: { type: 'value', axisLabel: { formatter: formatAxisValue } },
-    dataZoom: [{ type: 'inside' }, { type: 'slider', height: 16, bottom: 8 }],
+    dataZoom: [
+      { type: 'inside', startValue: zoomRange.startValue, endValue: zoomRange.endValue },
+      { type: 'slider', height: 16, bottom: 8, startValue: zoomRange.startValue, endValue: zoomRange.endValue }
+    ],
     series: [
       {
         name: '历史值',
@@ -198,6 +419,7 @@ const buildForecastOption = () => {
         smooth: true,
         data: rows.map(item => item.history),
         connectNulls: false,
+        showSymbol: false,
         lineStyle: { color: '#2563eb', width: 2 },
         itemStyle: { color: '#2563eb' }
       },
@@ -207,6 +429,9 @@ const buildForecastOption = () => {
         smooth: true,
         data: rows.map(item => item.forecast),
         connectNulls: false,
+        showSymbol: true,
+        symbolSize: 8,
+        sampling: 'lttb',
         lineStyle: { color: '#16a34a', width: 2, type: 'dashed' },
         itemStyle: { color: '#16a34a' }
       },
@@ -215,6 +440,7 @@ const buildForecastOption = () => {
         type: 'line',
         data: rows.map(item => item.upper),
         symbol: 'none',
+        showSymbol: false,
         lineStyle: { color: '#93c5fd', width: 1 },
         areaStyle: { color: 'rgba(147, 197, 253, 0.18)' }
       },
@@ -223,6 +449,7 @@ const buildForecastOption = () => {
         type: 'line',
         data: rows.map(item => item.lower),
         symbol: 'none',
+        showSymbol: false,
         lineStyle: { color: '#93c5fd', width: 1 }
       }
     ]
@@ -418,19 +645,200 @@ onBeforeUnmount(() => {
 .advanced-card__controls :deep(.el-form-item) {
   margin-bottom: 0;
 }
+.advanced-card__controls :deep(.el-input.is-disabled .el-input__wrapper) {
+  background: #f8fafc;
+  box-shadow: inset 0 0 0 1px #dbe4f0;
+}
 .advanced-card__variable-list {
   display: grid;
   gap: 8px;
 }
 .advanced-card__variable {
-  display: grid;
-  grid-template-columns: minmax(120px, 1fr) 132px 20px;
+  display: flex;
   align-items: center;
   gap: 8px;
+}
+.advanced-card__variable :deep(.el-input) {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.advanced-card__variable-mode {
+  flex: 0 0 112px;
+}
+.advanced-card__variable-change {
+  flex: 0 0 120px;
+}
+.advanced-card__variable-percent {
+  flex: 0 0 52px;
+  width: 52px;
+  text-align: center;
+  line-height: 1;
+  white-space: nowrap;
+  color: #64748b;
+}
+.advanced-card__scenario-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+.advanced-card__scenario-item {
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+.advanced-card__scenario-item span {
+  color: #64748b;
+  font-size: 12px;
+}
+.advanced-card__scenario-item strong {
+  color: #0f172a;
+  font-size: 14px;
+  line-height: 1.3;
+  word-break: break-word;
+}
+.advanced-card__sensitivity {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e2e8f0;
+}
+.advanced-card__sensitivity-head,
+.advanced-card__sensitivity-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(120px, 1.2fr) 76px;
+  align-items: center;
+  gap: 10px;
+}
+.advanced-card__sensitivity-head {
+  font-size: 12px;
+  color: #64748b;
+}
+.advanced-card__sensitivity-head strong {
+  justify-self: end;
+  grid-column: 3;
+  font-size: 12px;
+  color: #64748b;
+}
+.advanced-card__sensitivity-meta {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.advanced-card__sensitivity-meta span {
+  overflow: hidden;
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.advanced-card__sensitivity-meta small {
+  color: #64748b;
+  font-size: 12px;
+}
+.advanced-card__sensitivity-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e2e8f0;
+}
+.advanced-card__sensitivity-track i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+}
+.advanced-card__sensitivity-row > strong {
+  justify-self: end;
+  color: #0f172a;
+  font-size: 13px;
 }
 .advanced-card__chart {
   width: 100%;
   height: 280px;
+}
+.advanced-card__explain {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+.advanced-card__explain-item {
+  display: grid;
+  gap: 4px;
+}
+.advanced-card__explain-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.advanced-card__explain-item span,
+.advanced-card__quality-item span {
+  color: #64748b;
+  font-size: 12px;
+}
+.advanced-card__help-icon {
+  color: #2563eb;
+  cursor: help;
+  font-size: 14px;
+}
+.advanced-card__help-popover {
+  display: grid;
+  gap: 8px;
+  max-width: 260px;
+}
+.advanced-card__help-popover-title {
+  font-weight: 700;
+  font-size: 13px;
+}
+.advanced-card__help-popover-item {
+  display: grid;
+  gap: 2px;
+}
+.advanced-card__help-popover-item strong {
+  font-size: 12px;
+}
+.advanced-card__help-popover-item span {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #e2e8f0;
+}
+.advanced-card__explain-item p {
+  margin: 0;
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.advanced-card__quality-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.advanced-card__quality-item {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #ffffff;
+}
+.advanced-card__quality-item strong {
+  overflow: hidden;
+  color: #0f172a;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.advanced-card__quality-note {
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.5;
 }
 .advanced-card__actions {
   justify-content: flex-end;
@@ -446,6 +854,29 @@ onBeforeUnmount(() => {
     grid-template-columns: 1fr;
   }
   .advanced-card__variable {
+    flex-wrap: wrap;
+    align-items: stretch;
+  }
+  .advanced-card__variable :deep(.el-input),
+  .advanced-card__variable-mode,
+  .advanced-card__variable-change,
+  .advanced-card__variable-percent {
+    flex: 1 1 100%;
+    width: 100%;
+  }
+  .advanced-card__scenario-grid {
+    grid-template-columns: 1fr;
+  }
+  .advanced-card__sensitivity-head,
+  .advanced-card__sensitivity-row {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+  .advanced-card__sensitivity-head strong,
+  .advanced-card__sensitivity-row > strong {
+    justify-self: start;
+  }
+  .advanced-card__quality-grid {
     grid-template-columns: 1fr;
   }
   .advanced-card__chart {

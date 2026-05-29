@@ -57,6 +57,87 @@ public class AdvancedAnalysisController {
         return ApiResponse.success(advancedAnalysisService.whatIf(request));
     }
 
+    @PostMapping("/alert-rules")
+    public ApiResponse<Object> saveAlertRule(@RequestBody Map<String, Object> request) {
+        String action = text(request.getOrDefault("action", "save"));
+        if ("list".equalsIgnoreCase(action)) {
+            return ApiResponse.success(advancedAnalysisService.listAlertRules());
+        }
+        if ("detail".equalsIgnoreCase(action)) {
+            long id = parseLong(request.get("id"));
+            if (id <= 0) {
+                return ApiResponse.badRequest("预警规则 ID 无效");
+            }
+            return ApiResponse.success(advancedAnalysisService.getAlertRule(id));
+        }
+        if ("update".equalsIgnoreCase(action)) {
+            long id = parseLong(request.get("id"));
+            if (id <= 0) {
+                return ApiResponse.badRequest("预警规则 ID 无效");
+            }
+            return ApiResponse.success(advancedAnalysisService.updateAlertRule(id, request));
+        }
+        return ApiResponse.success(advancedAnalysisService.saveAlertRule(request));
+    }
+
+    @PostMapping("/alert-rules/status")
+    public ApiResponse<Map<String, Object>> updateAlertRuleStatus(@RequestBody Map<String, Object> request) {
+        long id = parseLong(request.get("id"));
+        if (id <= 0) {
+            return ApiResponse.badRequest("预警规则 ID 无效");
+        }
+        return ApiResponse.success(advancedAnalysisService.updateAlertRuleStatus(id, request));
+    }
+
+    @PostMapping("/alert-rules/delete")
+    public ApiResponse<Map<String, Object>> deleteAlertRule(@RequestBody Map<String, Object> request) {
+        long id = parseLong(request.get("id"));
+        if (id <= 0) {
+            return ApiResponse.badRequest("预警规则 ID 无效");
+        }
+        return ApiResponse.success(advancedAnalysisService.deleteAlertRule(id));
+    }
+
+    @PostMapping("/alert-events/run")
+    public ApiResponse<Map<String, Object>> runAlertDetection(@RequestBody Map<String, Object> request) {
+        return ApiResponse.success(advancedAnalysisService.runAlertRuleDetection(request));
+    }
+
+    @PostMapping("/alert-events")
+    public ApiResponse<Object> listAlertEvents(@RequestBody Map<String, Object> request) {
+        return ApiResponse.success(advancedAnalysisService.listAlertEvents(request));
+    }
+
+    @PostMapping("/plans")
+    public ApiResponse<Object> plans(@RequestBody Map<String, Object> request) {
+        String action = text(request.getOrDefault("action", "save"));
+        if ("list".equalsIgnoreCase(action)) {
+            return ApiResponse.success(advancedAnalysisService.listPlans(request));
+        }
+        if ("detail".equalsIgnoreCase(action)) {
+            long id = parseLong(request.get("id"));
+            if (id <= 0) {
+                return ApiResponse.badRequest("方案 ID 无效");
+            }
+            return ApiResponse.success(advancedAnalysisService.getPlan(id));
+        }
+        if ("recalculate".equalsIgnoreCase(action)) {
+            long id = parseLong(request.get("id"));
+            if (id <= 0) {
+                return ApiResponse.badRequest("方案 ID 无效");
+            }
+            return ApiResponse.success(advancedAnalysisService.recalculatePlan(id));
+        }
+        if ("delete".equalsIgnoreCase(action)) {
+            long id = parseLong(request.get("id"));
+            if (id <= 0) {
+                return ApiResponse.badRequest("方案 ID 无效");
+            }
+            return ApiResponse.success(advancedAnalysisService.deletePlan(id));
+        }
+        return ApiResponse.success(advancedAnalysisService.savePlan(request));
+    }
+
     private Map<String, Object> fallbackParse(String question) {
         String normalized = question == null ? "" : question.trim().toLowerCase();
         String intent = "";
@@ -95,5 +176,13 @@ public class AdvancedAnalysisController {
 
     private String text(Object value) {
         return value == null ? "" : String.valueOf(value).trim();
+    }
+
+    private long parseLong(Object value) {
+        try {
+            return Long.parseLong(text(value));
+        } catch (Exception ignored) {
+            return 0L;
+        }
     }
 }
