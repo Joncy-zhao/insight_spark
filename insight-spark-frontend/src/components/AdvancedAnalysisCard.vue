@@ -61,6 +61,25 @@
     </section>
 
     <section v-if="analysis.type === 'whatIf'" class="advanced-card__controls">
+      <div v-if="whatIfFormulaText" class="advanced-card__formula">
+        <span>业务公式（可选）</span>
+        <el-input
+          v-model="draft.formula"
+          placeholder="例如：profit = sales_amt - cost_amt"
+          clearable
+          @change="emitRecalculate"
+        />
+        <small v-if="whatIfResolvedFormulaText">字段口径：{{ whatIfResolvedFormulaText }}</small>
+      </div>
+      <div v-else class="advanced-card__formula advanced-card__formula--empty">
+        <span>业务公式（可选）</span>
+        <el-input
+          v-model="draft.formula"
+          placeholder="不填写则使用历史相关性估计，例如：profit = sales_amt - cost_amt"
+          clearable
+          @change="emitRecalculate"
+        />
+      </div>
       <div class="advanced-card__variable-list">
         <div
           v-for="(variable, index) in draft.variables"
@@ -179,6 +198,30 @@
       </div>
     </section>
 
+    <section v-if="hasResultExplanation" class="advanced-card__result-explain">
+      <div class="advanced-card__result-head">
+        <div>
+          <span>结果说明</span>
+          <strong>{{ explanationSourceLabel }}</strong>
+        </div>
+        <el-button size="small" text type="primary" @click="copyResultExplanation">复制</el-button>
+      </div>
+      <div class="advanced-card__result-grid">
+        <div v-if="calculationExplanationRows.length" class="advanced-card__result-block">
+          <h4>算法计算结果</h4>
+          <ul>
+            <li v-for="item in calculationExplanationRows" :key="item">{{ item }}</li>
+          </ul>
+        </div>
+        <div v-if="suggestionExplanationRows.length" class="advanced-card__result-block">
+          <h4>{{ suggestionExplanationTitle }}</h4>
+          <ul>
+            <li v-for="item in suggestionExplanationRows" :key="item">{{ item }}</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
     <section v-if="analysis.type !== 'forecast' || forecastInsightRows.length" class="advanced-card__insights">
       <div
         v-for="item in (analysis.type === 'forecast' ? forecastInsightRows : analysis.insights)"
@@ -210,6 +253,7 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { ElMessage } from 'element-plus'
 import { QuestionFilled } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 
@@ -241,11 +285,27 @@ const draft = reactive({
   beta: props.analysis?.params?.beta ?? props.analysis?.params?.algorithmParams?.beta ?? 0.28,
   gamma: props.analysis?.params?.gamma ?? props.analysis?.params?.algorithmParams?.gamma ?? 0.20,
   seasonLength: props.analysis?.params?.seasonLength ?? props.analysis?.params?.algorithmParams?.seasonLength ?? 0,
+  formula: props.analysis?.params?.formula || props.analysis?.formula || '',
   variables: (props.analysis?.params?.variables || []).map(item => ({ ...item })),
   operator: props.analysis?.params?.operator || 'lt',
   threshold: props.analysis?.params?.threshold ?? 100000,
   channel: props.analysis?.params?.channel || 'both'
 })
+
+const syncDraftFromAnalysis = () => {
+  draft.horizon = props.analysis?.params?.horizon || 3
+  draft.algorithm = props.analysis?.params?.algorithm || 'Prophet'
+  draft.confidence = props.analysis?.params?.confidence || '95%'
+  draft.alpha = props.analysis?.params?.alpha ?? props.analysis?.params?.algorithmParams?.alpha ?? 0.55
+  draft.beta = props.analysis?.params?.beta ?? props.analysis?.params?.algorithmParams?.beta ?? 0.28
+  draft.gamma = props.analysis?.params?.gamma ?? props.analysis?.params?.algorithmParams?.gamma ?? 0.20
+  draft.seasonLength = props.analysis?.params?.seasonLength ?? props.analysis?.params?.algorithmParams?.seasonLength ?? 0
+  draft.formula = props.analysis?.params?.formula || props.analysis?.formula || ''
+  draft.variables = (props.analysis?.params?.variables || []).map(item => ({ ...item }))
+  draft.operator = props.analysis?.params?.operator || 'lt'
+  draft.threshold = props.analysis?.params?.threshold ?? 100000
+  draft.channel = props.analysis?.params?.channel || 'both'
+}
 
 const typeLabel = computed(() => {
   if (props.analysis.type === 'forecast') return '时序预测'
@@ -317,6 +377,10 @@ const whatIfScenarioRows = computed(() => {
     }))
 })
 
+const whatIfFormulaText = computed(() => String(draft.formula || props.analysis?.formula || '').trim())
+
+const whatIfResolvedFormulaText = computed(() => String(props.analysis?.params?.resolvedFormula || props.analysis?.resolvedFormula || '').trim())
+
 const formatQualityNumber = (value) => {
   const number = Number(value)
   if (!Number.isFinite(number)) return value ?? '-'
@@ -357,11 +421,19 @@ const forecastAlgorithmHelpItems = computed(() => {
 
 const forecastQualityRows = computed(() => {
   const quality = props.analysis?.dataQuality || {}
+  const hasValue = (item) => {
+    if (item.value === undefined || item.value === null || item.value === '') return false
+    if (item.hideWhenZero && Number(item.value) === 0) return false
+    return true
+  }
   return [
     { label: '历史点数', value: quality.points },
     { label: '均值', value: formatQualityNumber(quality.average) },
-    { label: '标准差', value: formatQualityNumber(quality.stdDev) }
-  ].filter(item => item.value !== undefined && item.value !== null && item.value !== '')
+    { label: '标准差', value: formatQualityNumber(quality.stdDev) },
+    { label: '补齐缺失点', value: quality.filledMissingPoints, hideWhenZero: true },
+    { label: '合并重复点', value: quality.mergedDuplicatePoints, hideWhenZero: true },
+    { label: '异常处理点', value: quality.outlierAdjustedPoints, hideWhenZero: true }
+  ].filter(hasValue)
 })
 
 const forecastQualityMessage = computed(() => props.analysis?.dataQuality?.message || '')
@@ -370,6 +442,124 @@ const forecastInsightRows = computed(() => {
   const insights = Array.isArray(props.analysis?.insights) ? props.analysis.insights : []
   return insights.filter(item => !['历史点数', '真实序列点数'].includes(String(item?.label || '').trim()))
 })
+
+const normalizeTextList = (value) => {
+  if (Array.isArray(value)) {
+    return value.map(item => String(item || '').trim()).filter(Boolean)
+  }
+  const text = String(value || '').trim()
+  return text ? [text] : []
+}
+
+const findInsightValue = (label) => {
+  const insights = Array.isArray(props.analysis?.insights) ? props.analysis.insights : []
+  const matched = insights.find(item => String(item?.label || '').trim() === label)
+  return matched?.value
+}
+
+const buildFallbackExplanation = () => {
+  const type = props.analysis?.type
+  if (type === 'forecast') {
+    const forecastRows = Array.isArray(props.analysis?.series)
+      ? props.analysis.series.filter(item => item?.forecast != null)
+      : []
+    const lastForecast = forecastRows[forecastRows.length - 1]?.forecast ?? findInsightValue('末期预测')
+    return {
+      source: 'rule',
+      sourceLabel: '规则解释',
+      calculation: [
+        `当前使用${draft.algorithm || '预测算法'}生成预测曲线，展示历史值、预测值和置信区间。`,
+        lastForecast != null ? `末期预测值为 ${formatAxisValue(lastForecast)}。` : '',
+        forecastQualityMessage.value || ''
+      ].filter(Boolean),
+      suggestions: [
+        '请优先关注预测值是否持续落在置信区间内。',
+        '当历史点数偏少或波动较大时，建议补充更多周期数据后重新计算。'
+      ]
+    }
+  }
+  if (type === 'whatIf') {
+    const recommended = whatIfScenarioRows.value.find(item => item.name === '推荐方案')?.valueText
+    const topVariable = whatIfSensitivityRows.value[0]
+    const formula = whatIfFormulaText.value
+    return {
+      source: 'rule',
+      sourceLabel: '规则解释',
+      calculation: [
+        formula ? `当前基于业务公式「${formula}」和多场景变量变化生成推演结果。` : '当前基于变量变化、历史相关性和多场景拟合生成推演结果。',
+        recommended ? `推荐方案结果为 ${recommended}。` : '',
+        topVariable ? `敏感性最高的变量是「${topVariable.name}」，影响方向为${topVariable.direction}。` : ''
+      ].filter(Boolean),
+      suggestions: [
+        topVariable ? `优先复核「${topVariable.name}」的业务可控性。` : '建议补充更直接的业务变量后重新推演。',
+        formula ? '请确认公式字段单位、聚合方式和业务口径一致。' : '推演结果用于方案比较，不等同于因果结论，落地前建议结合业务公式或实验数据校验。'
+      ]
+    }
+  }
+  if (type === 'alert') {
+    const operator = draft.operator === 'gt' ? '高于阈值' : draft.operator === 'zscore' ? 'Z-Score 异常波动' : '低于阈值'
+    return {
+      source: 'rule',
+      sourceLabel: '规则解释',
+      calculation: [
+        `当前预警规则采用${operator}判断。`,
+        `阈值配置为 ${draft.operator === 'zscore' ? 'Z-Score >= 3' : formatAxisValue(draft.threshold)}。`,
+        `通知渠道为 ${props.analysis?.params?.channel || '邮件 + 钉钉'}。`
+      ],
+      suggestions: [
+        '触发预警后建议先核对异常时段原始数据，再判断是否为真实业务波动。',
+        '若误报较多，可调整阈值、过滤条件或检测粒度后重新保存规则。'
+      ]
+    }
+  }
+  return {}
+}
+
+const resultExplanation = computed(() => {
+  const raw = props.analysis?.explanation && typeof props.analysis.explanation === 'object'
+    ? props.analysis.explanation
+    : buildFallbackExplanation()
+  const calculation = normalizeTextList(raw?.calculation || raw?.calculationResults || raw?.algorithmResults)
+  const suggestions = normalizeTextList(raw?.suggestions || raw?.recommendations || raw?.aiSuggestions)
+  return {
+    source: String(raw?.source || 'rule').trim(),
+    sourceLabel: String(raw?.sourceLabel || '').trim(),
+    calculation,
+    suggestions
+  }
+})
+
+const calculationExplanationRows = computed(() => resultExplanation.value.calculation)
+
+const suggestionExplanationRows = computed(() => resultExplanation.value.suggestions)
+
+const hasResultExplanation = computed(() =>
+  calculationExplanationRows.value.length > 0 || suggestionExplanationRows.value.length > 0
+)
+
+const explanationSourceLabel = computed(() => {
+  if (resultExplanation.value.sourceLabel) return resultExplanation.value.sourceLabel
+  return resultExplanation.value.source === 'llm' ? 'AI 解释' : '规则解释'
+})
+
+const suggestionExplanationTitle = computed(() =>
+  resultExplanation.value.source === 'llm' ? 'AI 解释建议' : '规则解释建议'
+)
+
+const copyResultExplanation = async () => {
+  const lines = [
+    '算法计算结果',
+    ...calculationExplanationRows.value.map(item => `- ${item}`),
+    suggestionExplanationTitle.value,
+    ...suggestionExplanationRows.value.map(item => `- ${item}`)
+  ].filter(Boolean)
+  try {
+    await navigator.clipboard.writeText(lines.join('\n'))
+    ElMessage.success('结果说明已复制')
+  } catch (error) {
+    ElMessage.error('复制失败，请检查浏览器剪贴板权限')
+  }
+}
 
 const formatAxisValue = (value) => {
   const number = Number(value)
@@ -529,6 +719,9 @@ const emitRecalculate = () => {
       beta: draft.beta,
       gamma: draft.gamma,
       seasonLength: draft.seasonLength,
+      tableName: props.analysis?.params?.tableName || props.analysis?.tableName || '',
+      targetMetric: props.analysis?.params?.targetMetric || '',
+      formula: draft.formula,
       variables: draft.variables.map(item => ({ ...item })),
       operator: draft.operator,
       threshold: draft.threshold,
@@ -546,7 +739,10 @@ const exportImage = () => {
   link.click()
 }
 
-watch(() => props.analysis, renderChart, { deep: true })
+watch(() => props.analysis, () => {
+  syncDraftFromAnalysis()
+  renderChart()
+}, { deep: true })
 
 onMounted(renderChart)
 
@@ -652,6 +848,38 @@ onBeforeUnmount(() => {
 .advanced-card__variable-list {
   display: grid;
   gap: 8px;
+}
+.advanced-card__formula {
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid #d1fae5;
+  border-radius: 8px;
+  background: #f0fdfa;
+}
+.advanced-card__formula--empty {
+  border-color: #e2e8f0;
+  background: #f8fafc;
+}
+.advanced-card__formula span {
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 700;
+}
+.advanced-card__formula--empty span {
+  color: #475569;
+}
+.advanced-card__formula strong {
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.advanced-card__formula small {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
 }
 .advanced-card__variable {
   display: flex;
@@ -840,6 +1068,60 @@ onBeforeUnmount(() => {
   font-size: 12px;
   line-height: 1.5;
 }
+.advanced-card__result-explain {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #d1fae5;
+  border-radius: 8px;
+  background: #f7fefa;
+}
+.advanced-card__result-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.advanced-card__result-head > div {
+  display: grid;
+  gap: 2px;
+}
+.advanced-card__result-head span {
+  color: #64748b;
+  font-size: 12px;
+}
+.advanced-card__result-head strong {
+  color: #0f172a;
+  font-size: 14px;
+}
+.advanced-card__result-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.advanced-card__result-block {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #dcfce7;
+  border-radius: 8px;
+  background: #ffffff;
+}
+.advanced-card__result-block h4 {
+  margin: 0 0 8px;
+  color: #0f172a;
+  font-size: 13px;
+}
+.advanced-card__result-block ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 16px;
+}
+.advanced-card__result-block li {
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.55;
+}
 .advanced-card__actions {
   justify-content: flex-end;
 }
@@ -877,6 +1159,9 @@ onBeforeUnmount(() => {
     justify-self: start;
   }
   .advanced-card__quality-grid {
+    grid-template-columns: 1fr;
+  }
+  .advanced-card__result-grid {
     grid-template-columns: 1fr;
   }
   .advanced-card__chart {

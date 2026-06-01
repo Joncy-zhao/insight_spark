@@ -28,6 +28,11 @@
         <small>最近事件记录</small>
       </article>
       <article class="metric-card is-cyan">
+        <span>推送记录</span>
+        <strong>{{ pushLogs.length }}</strong>
+        <small>邮件/钉钉尝试记录</small>
+      </article>
+      <article class="metric-card is-purple">
         <span>方案资产</span>
         <strong>{{ plans.length }}</strong>
         <small>预测/推演保存记录</small>
@@ -53,6 +58,15 @@
             </el-table-column>
             <el-table-column label="周期" width="120">
               <template #default="{ row }">{{ cycleLabel(row.detectionCycle) }}</template>
+            </el-table-column>
+            <el-table-column label="调度状态" min-width="210">
+              <template #default="{ row }">
+                <div class="schedule-meta">
+                  <span>上次检测：{{ formatScheduleTime(row.lastCheckedAt) }}</span>
+                  <span>下次检测：{{ nextDetectionText(row) }}</span>
+                  <span>上次触发：{{ formatTriggerTime(row.lastTriggeredAt) }}</span>
+                </div>
+              </template>
             </el-table-column>
             <el-table-column label="渠道" width="140">
               <template #default="{ row }">{{ channelLabel(row.channels) }}</template>
@@ -81,7 +95,7 @@
           <div class="panel-head">
             <div>
               <h2>预警事件</h2>
-              <p>展示阈值和 Z-Score 检测生成的事件，后续可扩展确认、关闭和推送重试。</p>
+              <p>展示阈值和 Z-Score 检测生成的事件，支持确认、关闭、重开和处理备注。</p>
             </div>
           </div>
           <el-table :data="events" border v-loading="loading" empty-text="暂无预警事件">
@@ -94,8 +108,109 @@
             <el-table-column label="触发原因" min-width="320">
               <template #default="{ row }">{{ row.reason || '-' }}</template>
             </el-table-column>
-            <el-table-column prop="status" label="状态" width="100" />
+            <el-table-column label="状态" width="110">
+              <template #default="{ row }">
+                <el-tag :type="eventStatusTagType(row.status)" effect="light">
+                  {{ eventStatusLabel(row.status) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="处理备注" min-width="180">
+              <template #default="{ row }">
+                <span class="event-note" :title="row.handleNote || ''">{{ row.handleNote || '-' }}</span>
+              </template>
+            </el-table-column>
             <el-table-column prop="createdAt" label="创建时间" width="180" />
+            <el-table-column label="操作" width="250" fixed="right">
+              <template #default="{ row }">
+                <el-button size="small" text type="primary" @click="openEventSnapshot(row)">快照</el-button>
+                <el-button
+                  v-if="row.status === 'OPEN'"
+                  size="small"
+                  text
+                  @click="openEventStatusDialog(row, 'ACK')"
+                >
+                  确认
+                </el-button>
+                <el-button
+                  v-if="row.status !== 'CLOSED'"
+                  size="small"
+                  text
+                  type="success"
+                  @click="openEventStatusDialog(row, 'CLOSED')"
+                >
+                  关闭
+                </el-button>
+                <el-button
+                  v-if="row.status === 'CLOSED'"
+                  size="small"
+                  text
+                  @click="openEventStatusDialog(row, 'OPEN')"
+                >
+                  重开
+                </el-button>
+                <el-button size="small" text @click="openEventStatusDialog(row, row.status || 'ACK')">备注</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </section>
+      </el-tab-pane>
+
+      <el-tab-pane label="推送记录" name="push">
+        <section class="manage-panel">
+          <div class="panel-head">
+            <div>
+              <h2>预警推送记录</h2>
+              <p>记录邮件/钉钉推送尝试、失败原因和重试结果；外部渠道未配置时不会影响预警事件生成。</p>
+            </div>
+            <el-button type="primary" :loading="loading" @click="loadAll">刷新</el-button>
+          </div>
+          <div class="push-config-grid">
+            <article v-for="item in pushConfigList" :key="item.channel" class="push-config-card">
+              <span>{{ pushChannelLabel(item.channel) }}</span>
+              <strong>{{ item.available ? '可用' : '未配置' }}</strong>
+              <small>{{ item.message }}</small>
+              <em v-if="item.target">{{ item.target }}</em>
+            </article>
+          </div>
+          <el-table :data="pushLogs" border v-loading="loading" empty-text="暂无推送记录">
+            <el-table-column prop="id" label="ID" width="80" />
+            <el-table-column prop="eventId" label="事件ID" width="90" />
+            <el-table-column prop="ruleId" label="规则ID" width="90" />
+            <el-table-column label="渠道" width="100">
+              <template #default="{ row }">{{ pushChannelLabel(row.channel) }}</template>
+            </el-table-column>
+            <el-table-column label="状态" width="110">
+              <template #default="{ row }">
+                <el-tag :type="pushStatusTagType(row.status)" effect="light">
+                  {{ pushStatusLabel(row.status) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="尝试" width="90">
+              <template #default="{ row }">{{ row.attemptCount || 0 }} 次</template>
+            </el-table-column>
+            <el-table-column prop="title" label="标题" min-width="220" />
+            <el-table-column label="失败原因" min-width="260">
+              <template #default="{ row }">
+                <span class="event-note" :title="row.errorMessage || ''">{{ row.errorMessage || '-' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="lastAttemptAt" label="最近尝试" width="180" />
+            <el-table-column prop="nextRetryAt" label="建议重试" width="180" />
+            <el-table-column label="操作" width="110" fixed="right">
+              <template #default="{ row }">
+                <el-button
+                  size="small"
+                  text
+                  type="primary"
+                  :loading="retryingPushId === row.id"
+                  @click="retryPush(row)"
+                >
+                  重试
+                </el-button>
+              </template>
+            </el-table-column>
           </el-table>
         </section>
       </el-tab-pane>
@@ -129,9 +244,20 @@
               <template #default="{ row }">v{{ row.versionNo || 1 }}</template>
             </el-table-column>
             <el-table-column prop="updatedAt" label="更新时间" width="180" />
-            <el-table-column label="操作" width="220" fixed="right">
+            <el-table-column label="操作" width="410" fixed="right">
               <template #default="{ row }">
                 <el-button size="small" text type="primary" @click="openPlan(row)">详情</el-button>
+                <el-button size="small" text @click="renamePlan(row)">重命名</el-button>
+                <el-button size="small" text type="warning" @click="openPlanVersions(row)">版本</el-button>
+                <el-button
+                  size="small"
+                  text
+                  type="success"
+                  :disabled="!canPinPlan(row)"
+                  @click="openPinPlanDialog(row)"
+                >
+                  钉入看板
+                </el-button>
                 <el-button size="small" text type="success" @click="recalculatePlan(row)">复算</el-button>
                 <el-button size="small" text type="danger" @click="removePlan(row)">删除</el-button>
               </template>
@@ -164,6 +290,100 @@
       <template #footer>
         <el-button @click="planDetailVisible = false">关闭</el-button>
         <el-button type="primary" :loading="planRecalculating" @click="recalculateSelectedPlan">重新计算</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="planVersionVisible"
+      :title="versionDialogTitle"
+      width="980px"
+      destroy-on-close
+    >
+      <div v-if="selectedPlan" class="plan-version-panel">
+        <el-alert
+          v-if="versionCompareSummary.length"
+          :closable="false"
+          type="info"
+          show-icon
+          :title="versionCompareTitle"
+          class="version-alert"
+        />
+        <div class="plan-version-panel__toolbar">
+          <el-select v-model="versionCompareForm.leftVersion" placeholder="左侧版本" style="width: 180px">
+            <el-option
+              v-for="item in planVersions"
+              :key="`left-${item.versionNo}`"
+              :label="`v${item.versionNo} · ${item.planName || '未命名'}`"
+              :value="item.versionNo"
+            />
+          </el-select>
+          <el-select v-model="versionCompareForm.rightVersion" placeholder="右侧版本" style="width: 180px">
+            <el-option
+              v-for="item in planVersions"
+              :key="`right-${item.versionNo}`"
+              :label="`v${item.versionNo} · ${item.planName || '未命名'}`"
+              :value="item.versionNo"
+            />
+          </el-select>
+          <el-button type="primary" :loading="versionComparing" @click="compareSelectedPlanVersions">对比</el-button>
+          <el-button @click="loadPlanVersions(selectedPlan, true)">刷新版本</el-button>
+        </div>
+        <el-table :data="planVersions" border empty-text="暂无版本记录">
+          <el-table-column prop="versionNo" label="版本" width="90" />
+          <el-table-column prop="planName" label="名称" min-width="220" />
+          <el-table-column prop="createdAt" label="时间" width="180" />
+          <el-table-column label="操作" width="140">
+            <template #default="{ row }">
+              <el-button size="small" text @click="applyVersionToCompare(row.versionNo, 'left')">设为左侧</el-button>
+              <el-button size="small" text @click="applyVersionToCompare(row.versionNo, 'right')">设为右侧</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div v-if="versionCompareResult" class="plan-version-compare">
+          <div class="plan-version-compare__col">
+            <h4>左侧版本</h4>
+            <AdvancedAnalysisCard
+              v-if="leftVersionAnalysis"
+              :analysis="leftVersionAnalysis"
+              :show-save-action="false"
+              :show-pin-action="false"
+            />
+          </div>
+          <div class="plan-version-compare__col">
+            <h4>右侧版本</h4>
+            <AdvancedAnalysisCard
+              v-if="rightVersionAnalysis"
+              :analysis="rightVersionAnalysis"
+              :show-save-action="false"
+              :show-pin-action="false"
+            />
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="planVersionVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="pinPlanVisible" title="钉入我的看板" width="520px" destroy-on-close>
+      <el-form label-position="top">
+        <el-form-item label="预测图表">
+          <el-input :model-value="pinPlanTarget?.planName || '-'" disabled />
+        </el-form-item>
+        <el-form-item label="目标看板">
+          <el-select v-model="pinDashboardId" class="full-width" placeholder="请选择看板">
+            <el-option
+              v-for="dashboard in dashboardOptions"
+              :key="dashboard.id"
+              :label="dashboard.name + (dashboard.isPublic ? '（公开）' : '')"
+              :value="dashboard.id"
+            />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="pinPlanVisible = false">取消</el-button>
+        <el-button type="primary" :loading="pinningPlan" @click="pinPlanToDashboard">确认钉入</el-button>
       </template>
     </el-dialog>
 
@@ -227,27 +447,105 @@
         <el-button type="primary" :loading="saving" @click="submitEditor">保存修改</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="eventStatusVisible" :title="eventStatusDialogTitle" width="520px" destroy-on-close>
+      <el-form label-position="top">
+        <el-form-item label="预警事件">
+          <el-input :model-value="eventStatusTarget ? formatEventTitle(eventStatusTarget) : '-'" disabled />
+        </el-form-item>
+        <el-form-item label="处理状态">
+          <el-select v-model="eventStatusForm.status" class="full-width">
+            <el-option label="待处理" value="OPEN" />
+            <el-option label="已确认" value="ACK" />
+            <el-option label="已关闭" value="CLOSED" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="处理备注">
+          <el-input
+            v-model.trim="eventStatusForm.handleNote"
+            type="textarea"
+            :rows="4"
+            maxlength="1000"
+            show-word-limit
+            placeholder="记录确认结论、处置动作、关闭原因等"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="eventStatusVisible = false">取消</el-button>
+        <el-button type="primary" :loading="eventStatusSaving" @click="submitEventStatus">保存</el-button>
+      </template>
+    </el-dialog>
+    <el-dialog
+      v-model="eventSnapshotVisible"
+      title="预警图表快照"
+      width="860px"
+      destroy-on-close
+      class="alert-snapshot-dialog"
+    >
+      <div v-if="eventSnapshotTarget" class="alert-snapshot">
+        <div class="alert-snapshot__summary">
+          <div>
+            <span>触发时间桶</span>
+            <strong>{{ eventSnapshotTarget.bucketName || '-' }}</strong>
+          </div>
+          <div>
+            <span>实际值</span>
+            <strong>{{ formatNumber(eventSnapshotTarget.actualValue) }}</strong>
+          </div>
+          <div>
+            <span>阈值/基线</span>
+            <strong>{{ snapshotThresholdText }}</strong>
+          </div>
+          <div>
+            <span>Z-Score</span>
+            <strong>{{ formatNumber(eventSnapshotTarget.zScore) }}</strong>
+          </div>
+        </div>
+        <div ref="eventSnapshotChartRef" class="alert-snapshot__chart"></div>
+        <div class="alert-snapshot__reason">
+          {{ eventSnapshotTarget.reason || '暂无触发原因说明' }}
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="eventSnapshotVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
 <script setup>
-import { computed, inject, onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import * as echarts from 'echarts'
 import AdvancedAnalysisCard from '../../components/AdvancedAnalysisCard.vue'
 import {
+  compareAdvancedAnalysisPlanVersions,
+  compareLatestAdvancedAnalysisPlanVersions,
   deleteAdvancedAnalysisPlan,
   deleteAdvancedAlertRule,
+  fetchAdvancedAlertPushConfig,
   fetchAdvancedAnalysisFieldMeta,
   getAdvancedAnalysisPlan,
+  getAdvancedAlertEvent,
   getAdvancedAlertRule,
   listAdvancedAnalysisPlans,
   listAdvancedAlertEvents,
+  listAdvancedAlertPushLogs,
   listAdvancedAlertRules,
+  listAdvancedAnalysisPlanVersions,
   recalculateAdvancedAnalysisPlan,
+  renameAdvancedAnalysisPlan,
+  retryAdvancedAlertPush,
   runAdvancedAlertDetection,
+  updateAdvancedAlertEventStatus,
   updateAdvancedAlertRule,
   updateAdvancedAlertRuleStatus
 } from '../../api/advancedAnalysis'
+import {
+  listDashboards,
+  pinChartToDashboard
+} from '../../api/dashboard'
 
 const workbench = inject('workbench', null)
 
@@ -256,12 +554,39 @@ const loading = ref(false)
 const saving = ref(false)
 const rules = ref([])
 const events = ref([])
+const pushLogs = ref([])
+const pushConfig = ref({})
 const plans = ref([])
 const selectedPlan = ref(null)
 const planDetailVisible = ref(false)
+const planVersionVisible = ref(false)
 const planRecalculating = ref(false)
+const versionComparing = ref(false)
+const planVersions = ref([])
+const versionCompareResult = ref(null)
+const pinPlanVisible = ref(false)
+const pinningPlan = ref(false)
+const pinPlanTarget = ref(null)
+const dashboardOptions = ref([])
+const pinDashboardId = ref('')
 const editorVisible = ref(false)
 const editorMeta = ref({ timeFields: [], numericFields: [] })
+const eventStatusVisible = ref(false)
+const eventStatusSaving = ref(false)
+const eventStatusTarget = ref(null)
+const eventSnapshotVisible = ref(false)
+const eventSnapshotTarget = ref(null)
+const eventSnapshotChartRef = ref(null)
+let eventSnapshotChart = null
+const retryingPushId = ref('')
+const versionCompareForm = reactive({
+  leftVersion: '',
+  rightVersion: ''
+})
+const eventStatusForm = reactive({
+  status: 'ACK',
+  handleNote: ''
+})
 const editorForm = ref({
   id: '',
   tableName: '',
@@ -278,7 +603,61 @@ const editorForm = ref({
 
 const activeRuleCount = computed(() => rules.value.filter(item => item.status === 'ACTIVE').length)
 
+const pushConfigList = computed(() => {
+  const config = pushConfig.value || {}
+  return ['email', 'dingtalk'].map(channel => ({
+    channel,
+    available: Boolean(config[channel]?.available),
+    message: config[channel]?.message || '未获取配置状态',
+    target: config[channel]?.target || ''
+  }))
+})
+
 const selectedPlanAnalysis = computed(() => normalizePlanAnalysis(selectedPlan.value))
+
+const versionDialogTitle = computed(() => `${selectedPlan.value?.planName || '方案'} 版本历史`)
+
+const versionCompareSummary = computed(() => {
+  const summary = versionCompareResult.value?.summary
+  return Array.isArray(summary) ? summary : []
+})
+
+const versionCompareTitle = computed(() => {
+  const summaryText = versionCompareSummary.value
+    .map(item => `${item.label}: ${item.value}`)
+    .join(' · ')
+  if (summaryText) {
+    return summaryText
+  }
+  const leftVersion = versionCompareResult.value?.left?.versionNo
+  const rightVersion = versionCompareResult.value?.right?.versionNo
+  if (leftVersion && rightVersion) {
+    return `版本对比：v${leftVersion} vs v${rightVersion}`
+  }
+  return '版本对比结果'
+})
+
+const leftVersionAnalysis = computed(() => snapshotToAnalysis(versionCompareResult.value?.left))
+const rightVersionAnalysis = computed(() => snapshotToAnalysis(versionCompareResult.value?.right))
+
+const eventStatusDialogTitle = computed(() => {
+  const label = eventStatusLabel(eventStatusForm.status)
+  return label ? `处理预警事件 - ${label}` : '处理预警事件'
+})
+
+const snapshotThresholdText = computed(() => {
+  const snapshot = eventSnapshotTarget.value?.chartSnapshot || {}
+  const threshold = snapshot.threshold ?? eventSnapshotTarget.value?.threshold
+  const baseline = snapshot.baseline ?? eventSnapshotTarget.value?.baselineValue
+  const parts = []
+  if (threshold !== undefined && threshold !== null && threshold !== '') {
+    parts.push(`阈值 ${formatNumber(threshold)}`)
+  }
+  if (baseline !== undefined && baseline !== null && baseline !== '') {
+    parts.push(`基线 ${formatNumber(baseline)}`)
+  }
+  return parts.length ? parts.join(' / ') : '-'
+})
 
 const fieldLabel = (field) => {
   const displayName = String(field?.displayName || field?.businessName || '').trim()
@@ -295,6 +674,121 @@ const formatNumber = (value) => {
 
 const cycleLabel = (cycle) => ({ hourly: '每小时', daily: '每日', weekly: '每周', monthly: '每月' }[cycle] || '每日')
 
+const formatScheduleTime = (value) => {
+  const text = String(value || '').trim()
+  if (!text) return '尚未检测'
+  return text.replace('T', ' ').slice(0, 19)
+}
+
+const formatTriggerTime = (value) => {
+  const text = String(value || '').trim()
+  if (!text) return '暂无触发'
+  return formatScheduleTime(text)
+}
+
+const nextDetectionText = (rule = {}) => {
+  const checkedAt = String(rule.lastCheckedAt || '').trim()
+  if (!checkedAt) return '待 Agent 首次检测'
+  const date = new Date(checkedAt.replace(' ', 'T'))
+  if (Number.isNaN(date.getTime())) return '按周期待检测'
+  const cycle = String(rule.detectionCycle || 'daily')
+  if (cycle === 'hourly') date.setHours(date.getHours() + 1)
+  else if (cycle === 'weekly') date.setDate(date.getDate() + 7)
+  else if (cycle === 'monthly') date.setMonth(date.getMonth() + 1)
+  else date.setDate(date.getDate() + 1)
+  const now = new Date()
+  if (date.getTime() <= now.getTime()) return '已到期，等待 Agent 轮询'
+  return date.toLocaleString('zh-CN', { hour12: false })
+}
+
+const eventStatusLabel = (status) => {
+  const value = String(status || 'OPEN').toUpperCase()
+  if (value === 'ACK') return '已确认'
+  if (value === 'CLOSED') return '已关闭'
+  return '待处理'
+}
+
+const eventStatusTagType = (status) => {
+  const value = String(status || 'OPEN').toUpperCase()
+  if (value === 'ACK') return 'warning'
+  if (value === 'CLOSED') return 'success'
+  return 'danger'
+}
+
+const pushChannelLabel = (channel) => {
+  const value = String(channel || '').toLowerCase()
+  if (value === 'dingtalk') return '钉钉'
+  if (value === 'email') return '邮件'
+  return value || '-'
+}
+
+const pushStatusLabel = (status) => {
+  const value = String(status || 'PENDING').toUpperCase()
+  if (value === 'SUCCESS') return '成功'
+  if (value === 'FAILED') return '失败'
+  return '待推送'
+}
+
+const pushStatusTagType = (status) => {
+  const value = String(status || 'PENDING').toUpperCase()
+  if (value === 'SUCCESS') return 'success'
+  if (value === 'FAILED') return 'danger'
+  return 'warning'
+}
+
+const formatEventTitle = (event = {}) => {
+  return `#${event.id || '-'} / 规则#${event.ruleId || '-'} / ${event.bucketName || '-'} / ${formatNumber(event.actualValue)}`
+}
+
+const formatAxisValue = (value) => {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return value
+  if (Math.abs(number) >= 10000) return `${(number / 10000).toFixed(1)}万`
+  return `${number}`
+}
+
+const buildSnapshotOption = (event = {}) => {
+  const snapshot = event.chartSnapshot || {}
+  const rows = Array.isArray(snapshot.data) && snapshot.data.length
+    ? snapshot.data
+    : [{ name: event.bucketName || '-', value: Number(event.actualValue || 0), triggered: true }]
+  const threshold = snapshot.threshold ?? event.threshold
+  const baseline = snapshot.baseline ?? event.baselineValue
+  const markLineData = []
+  if (threshold !== undefined && threshold !== null && threshold !== '') {
+    markLineData.push({ name: '阈值', yAxis: Number(threshold), lineStyle: { color: '#ef4444', type: 'dashed' } })
+  }
+  if (baseline !== undefined && baseline !== null && baseline !== '') {
+    markLineData.push({ name: '历史基线', yAxis: Number(baseline), lineStyle: { color: '#64748b', type: 'dotted' } })
+  }
+  return {
+    tooltip: { trigger: 'axis' },
+    legend: { top: 4, data: ['检测值'] },
+    grid: { left: 54, right: 28, top: 48, bottom: 42, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: rows.map(item => item.name),
+      axisLabel: { hideOverlap: true }
+    },
+    yAxis: { type: 'value', axisLabel: { formatter: formatAxisValue } },
+    series: [
+      {
+        name: '检测值',
+        type: 'line',
+        smooth: true,
+        data: rows.map(item => ({
+          value: Number(item.value || 0),
+          itemStyle: item.triggered ? { color: '#ef4444' } : { color: '#2563eb' },
+          symbolSize: item.triggered ? 10 : 6
+        })),
+        lineStyle: { color: '#2563eb', width: 2 },
+        areaStyle: { color: 'rgba(37, 99, 235, 0.08)' },
+        markLine: markLineData.length ? { symbol: 'none', data: markLineData } : undefined
+      }
+    ]
+  }
+}
+
 const channelLabel = (channels = []) => {
   const values = Array.isArray(channels) ? channels : [channels]
   const labels = values.map(item => item === 'email' ? '邮件' : item === 'dingtalk' ? '钉钉' : '').filter(Boolean)
@@ -308,6 +802,12 @@ const formatRuleTitle = (rule) => {
 }
 
 const planTypeLabel = (type) => type === 'forecast' ? '时序预测' : type === 'whatIf' ? 'What-if 推演' : '方案'
+
+const canPinPlan = (plan) => {
+  if (plan?.planType !== 'forecast') return false
+  const chartId = plan?.queryHistoryId ?? plan?.chartId ?? plan?.result?.queryHistoryId ?? plan?.result?.chartId
+  return Number.isFinite(Number(chartId)) && Number(chartId) > 0
+}
 
 const normalizePlanAnalysis = (plan) => {
   if (!plan) return null
@@ -340,6 +840,7 @@ const normalizePlanAnalysis = (plan) => {
         algorithmParams: result.algorithmParams || {}
       },
       dataQuality: result.dataQuality || null,
+      explanation: result.explanation || null,
       series: Array.isArray(result.series) ? result.series : [],
       insights: Array.isArray(result.insights)
         ? result.insights.map(item => ({ label: String(item.label || ''), value: String(item.value ?? '') }))
@@ -357,8 +858,12 @@ const normalizePlanAnalysis = (plan) => {
     status: `已保存 v${plan.versionNo || 1}`,
     params: {
       targetMetric: result.targetMetric || plan.request?.targetMetric || '',
+      formula: result.formula || plan.request?.formula || '',
+      resolvedFormula: result.resolvedFormula || '',
+      calculationMode: result.calculationMode || (result.formula || plan.request?.formula ? 'formula' : 'correlation'),
       variables: Array.isArray(result.variables) ? result.variables : (plan.request?.variables || [])
     },
+    explanation: result.explanation || null,
     series: Array.isArray(result.series) ? result.series : [],
     insights: Array.isArray(result.insights)
       ? result.insights.map(item => ({ label: String(item.label || ''), value: String(item.value ?? '') }))
@@ -369,13 +874,17 @@ const normalizePlanAnalysis = (plan) => {
 const loadAll = async () => {
   loading.value = true
   try {
-    const [ruleRows, eventRows, planRows] = await Promise.all([
+    const [ruleRows, eventRows, pushRows, pushConfigRows, planRows] = await Promise.all([
       listAdvancedAlertRules(),
       listAdvancedAlertEvents(),
+      listAdvancedAlertPushLogs(),
+      fetchAdvancedAlertPushConfig(),
       listAdvancedAnalysisPlans()
     ])
     rules.value = Array.isArray(ruleRows) ? ruleRows.filter(item => item.status !== 'DELETED') : []
     events.value = Array.isArray(eventRows) ? eventRows : []
+    pushLogs.value = Array.isArray(pushRows) ? pushRows : []
+    pushConfig.value = pushConfigRows || {}
     plans.value = Array.isArray(planRows) ? planRows : []
   } catch (error) {
     ElMessage.error(`加载预测与情景模拟数据失败：${error.message || '未知原因'}`)
@@ -419,6 +928,63 @@ const recalculateSelectedPlan = async () => {
   await recalculatePlan(selectedPlan.value)
 }
 
+const renamePlan = async (plan) => {
+  if (!plan?.id) return
+  try {
+    const { value } = await ElMessageBox.prompt('请输入新的方案名称', '重命名方案', {
+      confirmButtonText: '保存',
+      cancelButtonText: '取消',
+      inputValue: plan.planName || '',
+      inputPlaceholder: '例如：华东销售额未来 3 个月预测',
+      inputValidator: value => {
+        const name = String(value || '').trim()
+        if (!name) return '方案名称不能为空'
+        if (name.length > 200) return '方案名称不能超过 200 个字符'
+        return true
+      }
+    })
+    const updated = await renameAdvancedAnalysisPlan({ id: plan.id, planName: String(value || '').trim() })
+    const index = plans.value.findIndex(item => String(item.id) === String(plan.id))
+    if (index >= 0) {
+      plans.value.splice(index, 1, updated)
+    }
+    if (selectedPlan.value && String(selectedPlan.value.id) === String(plan.id)) {
+      selectedPlan.value = updated
+    }
+    ElMessage.success('方案名称已更新')
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(`重命名失败：${error.message || '未知原因'}`)
+  }
+}
+
+const snapshotToAnalysis = (snapshot) => {
+  if (!snapshot) return null
+  const basePlan = selectedPlan.value || {}
+  const mergedPlan = {
+    ...basePlan,
+    id: snapshot.planId || basePlan.id || snapshot.id || snapshot.versionNo,
+    planType: snapshot.planType || basePlan.planType,
+    planName: snapshot.planName || basePlan.planName,
+    tableName: basePlan.tableName || snapshot.tableName || snapshot.request?.tableName || snapshot.result?.tableName || '',
+    metricLabel: basePlan.metricLabel || snapshot.metricLabel || snapshot.request?.metric || snapshot.result?.metricField || snapshot.result?.targetMetric || '',
+    timeRangeLabel: basePlan.timeRangeLabel || snapshot.timeRangeLabel || snapshot.request?.granularity || snapshot.result?.granularity || '',
+    versionNo: snapshot.versionNo,
+    request: snapshot.request || {},
+    result: snapshot.result || {},
+    llm: snapshot.llm || {}
+  }
+  const analysis = normalizePlanAnalysis(mergedPlan)
+  if (!analysis) {
+    return null
+  }
+  return {
+    ...analysis,
+    title: `${snapshot.planName || basePlan.planName || analysis.title} / v${snapshot.versionNo || 1}`,
+    status: `版本 v${snapshot.versionNo || 1}`
+  }
+}
+
 const removePlan = async (plan) => {
   if (!plan?.id) return
   try {
@@ -431,6 +997,181 @@ const removePlan = async (plan) => {
     ElMessage.success('方案已删除')
   } catch (error) {
     ElMessage.error(`删除方案失败：${error.message || '未知原因'}`)
+  }
+}
+
+const loadDashboardOptions = async () => {
+  const rows = await listDashboards()
+  dashboardOptions.value = Array.isArray(rows)
+    ? rows.map(item => ({
+        id: Number(item.id),
+        name: String(item.name || `看板#${item.id}`),
+        isPublic: Boolean(item.isPublic)
+      })).filter(item => Number.isFinite(item.id) && item.id > 0)
+    : []
+  if (!pinDashboardId.value && dashboardOptions.value.length) {
+    pinDashboardId.value = dashboardOptions.value[0].id
+  }
+}
+
+const openPinPlanDialog = async (plan) => {
+  if (!canPinPlan(plan)) {
+    ElMessage.warning('当前方案缺少可钉入看板的预测图表记录，请先保存或复算真实预测方案')
+    return
+  }
+  try {
+    await loadDashboardOptions()
+    if (!dashboardOptions.value.length) {
+      ElMessage.warning('暂无可用看板，请先到“我的看板”创建')
+      return
+    }
+    pinPlanTarget.value = plan
+    pinPlanVisible.value = true
+  } catch (error) {
+    ElMessage.error(`加载看板列表失败：${error.message || '未知原因'}`)
+  }
+}
+
+const pinPlanToDashboard = async () => {
+  const plan = pinPlanTarget.value
+  const dashboardId = Number(pinDashboardId.value)
+  const chartId = Number(plan?.queryHistoryId ?? plan?.chartId ?? plan?.result?.queryHistoryId ?? plan?.result?.chartId)
+  if (!plan || !Number.isFinite(dashboardId) || dashboardId <= 0) {
+    ElMessage.warning('请选择目标看板')
+    return
+  }
+  if (!Number.isFinite(chartId) || chartId <= 0) {
+    ElMessage.warning('当前方案缺少可绑定的图表记录')
+    return
+  }
+  pinningPlan.value = true
+  try {
+    await pinChartToDashboard(dashboardId, {
+      chartId,
+      title: String(plan.planName || '预测图表').slice(0, 80),
+      chartType: 'line',
+      tableName: plan.tableName || '',
+      fieldMapping: {
+        dimension: '预测周期',
+        dimensionKey: 'name',
+        metric: plan.metricLabel || '预测值',
+        metricKey: 'value'
+      }
+    })
+    pinPlanVisible.value = false
+    ElMessage.success('预测图表已钉入看板')
+  } catch (error) {
+    ElMessage.error(`钉入看板失败：${error.message || '未知原因'}`)
+  } finally {
+    pinningPlan.value = false
+  }
+}
+
+const normalizeVersionSelection = (versions, preserveSelection = false) => {
+  const versionNos = versions
+    .map(item => Number(item.versionNo))
+    .filter(item => Number.isFinite(item) && item > 0)
+  if (!versionNos.length) {
+    versionCompareForm.leftVersion = ''
+    versionCompareForm.rightVersion = ''
+    return
+  }
+  const latestVersion = versionNos[0]
+  const previousVersion = versionNos.find(item => item !== latestVersion) || latestVersion
+  if (
+    preserveSelection &&
+    versionNos.includes(Number(versionCompareForm.leftVersion)) &&
+    versionNos.includes(Number(versionCompareForm.rightVersion))
+  ) {
+    return
+  }
+  versionCompareForm.leftVersion = previousVersion
+  versionCompareForm.rightVersion = latestVersion
+}
+
+const loadPlanVersions = async (plan, preserveSelection = false) => {
+  const targetPlan = plan?.id ? plan : plan?.value || null
+  if (!targetPlan?.id) {
+    return
+  }
+  try {
+    const [versionsResult, compareResult] = await Promise.allSettled([
+      listAdvancedAnalysisPlanVersions(targetPlan.id),
+      compareLatestAdvancedAnalysisPlanVersions(targetPlan.id)
+    ])
+    if (versionsResult.status === 'rejected') {
+      throw versionsResult.reason
+    }
+    const rows = Array.isArray(versionsResult.value)
+      ? versionsResult.value
+          .map(item => ({
+            ...item,
+            versionNo: Number(item.versionNo || 0)
+          }))
+          .filter(item => Number.isFinite(item.versionNo) && item.versionNo > 0)
+      : []
+    rows.sort((a, b) => b.versionNo - a.versionNo)
+    planVersions.value = rows
+    normalizeVersionSelection(rows, preserveSelection)
+
+    if (
+      compareResult.status === 'fulfilled' &&
+      compareResult.value &&
+      compareResult.value.left &&
+      compareResult.value.right
+    ) {
+      versionCompareResult.value = compareResult.value
+    } else if (!preserveSelection) {
+      versionCompareResult.value = null
+    }
+  } catch (error) {
+    ElMessage.error(`加载版本失败：${error.message || '未知原因'}`)
+  }
+}
+
+const openPlanVersions = async (plan) => {
+  if (!plan?.id) return
+  selectedPlan.value = plan
+  planVersionVisible.value = true
+  versionCompareResult.value = null
+  await loadPlanVersions(plan)
+}
+
+const applyVersionToCompare = (versionNo, side) => {
+  const normalizedVersion = Number(versionNo)
+  if (!Number.isFinite(normalizedVersion) || normalizedVersion <= 0) return
+  if (side !== 'left' && side !== 'right') return
+  versionCompareForm[`${side}Version`] = normalizedVersion
+}
+
+const compareSelectedPlanVersions = async () => {
+  const plan = selectedPlan.value
+  if (!plan?.id) return
+  const leftVersion = Number(versionCompareForm.leftVersion)
+  const rightVersion = Number(versionCompareForm.rightVersion)
+  if (!Number.isFinite(leftVersion) || !Number.isFinite(rightVersion) || leftVersion <= 0 || rightVersion <= 0) {
+    ElMessage.warning('请先选择两个有效版本')
+    return
+  }
+  if (leftVersion === rightVersion) {
+    ElMessage.warning('左右版本不能相同')
+    return
+  }
+  versionComparing.value = true
+  try {
+    const result = await compareAdvancedAnalysisPlanVersions({
+      id: plan.id,
+      leftVersion,
+      rightVersion
+    })
+    versionCompareResult.value = result && result.left && result.right ? result : null
+    if (!versionCompareResult.value && result?.message) {
+      ElMessage.info(result.message)
+    }
+  } catch (error) {
+    ElMessage.error(`版本对比失败：${error.message || '未知原因'}`)
+  } finally {
+    versionComparing.value = false
   }
 }
 
@@ -509,15 +1250,106 @@ const removeRule = async (rule) => {
 
 const runDetection = async (rule) => {
   try {
-    const result = await runAdvancedAlertDetection({ ruleId: rule.id })
+    const result = await runAdvancedAlertDetection({ ruleId: rule.id, force: true })
     await loadAll()
-    ElMessage.success(`检测完成，新增 ${result?.createdEvents || 0} 条预警事件`)
+    ElMessage.success(`检测完成，检查 ${result?.checkedRules || 0} 条规则，新增 ${result?.createdEvents || 0} 条预警事件，刷新 ${result?.refreshedEvents || 0} 条快照`)
   } catch (error) {
     ElMessage.error(`检测失败：${error.message || '未知原因'}`)
   }
 }
 
+const renderEventSnapshotChart = async () => {
+  await nextTick()
+  if (!eventSnapshotChartRef.value || !eventSnapshotTarget.value) return
+  if (!eventSnapshotChart) {
+    eventSnapshotChart = echarts.init(eventSnapshotChartRef.value)
+  }
+  eventSnapshotChart.setOption(buildSnapshotOption(eventSnapshotTarget.value), true)
+  eventSnapshotChart.resize()
+}
+
+const openEventSnapshot = async (event) => {
+  if (!event?.id) return
+  try {
+    eventSnapshotTarget.value = await getAdvancedAlertEvent(event.id)
+    const index = events.value.findIndex(item => String(item.id) === String(event.id))
+    if (index >= 0) {
+      events.value.splice(index, 1, eventSnapshotTarget.value)
+    }
+    eventSnapshotVisible.value = true
+    await renderEventSnapshotChart()
+  } catch (error) {
+    ElMessage.error(`打开快照失败：${error.message || '未知原因'}`)
+  }
+}
+
+const retryPush = async (row) => {
+  if (!row?.id) return
+  retryingPushId.value = row.id
+  try {
+    const updated = await retryAdvancedAlertPush(row.id)
+    const index = pushLogs.value.findIndex(item => String(item.id) === String(row.id))
+    if (index >= 0) {
+      pushLogs.value.splice(index, 1, updated)
+    }
+    ElMessage.success(`推送重试完成：${pushStatusLabel(updated?.status)}`)
+  } catch (error) {
+    ElMessage.error(`推送重试失败：${error.message || '未知原因'}`)
+  } finally {
+    retryingPushId.value = ''
+  }
+}
+
+const openEventStatusDialog = (event, status = 'ACK') => {
+  if (!event?.id) return
+  eventStatusTarget.value = event
+  eventStatusForm.status = String(status || event.status || 'ACK').toUpperCase()
+  eventStatusForm.handleNote = String(event.handleNote || '')
+  eventStatusVisible.value = true
+}
+
+const submitEventStatus = async () => {
+  const event = eventStatusTarget.value
+  if (!event?.id) return
+  eventStatusSaving.value = true
+  try {
+    const updated = await updateAdvancedAlertEventStatus({
+      id: event.id,
+      status: eventStatusForm.status,
+      handleNote: eventStatusForm.handleNote
+    })
+    const index = events.value.findIndex(item => String(item.id) === String(event.id))
+    if (index >= 0) {
+      events.value.splice(index, 1, updated)
+    }
+    eventStatusVisible.value = false
+    ElMessage.success('预警事件处理状态已更新')
+  } catch (error) {
+    ElMessage.error(`更新预警事件失败：${error.message || '未知原因'}`)
+  } finally {
+    eventStatusSaving.value = false
+  }
+}
+
+watch(eventSnapshotVisible, (visible) => {
+  if (visible) {
+    renderEventSnapshotChart()
+    return
+  }
+  if (eventSnapshotChart) {
+    eventSnapshotChart.dispose()
+    eventSnapshotChart = null
+  }
+})
+
 onMounted(loadAll)
+
+onBeforeUnmount(() => {
+  if (eventSnapshotChart) {
+    eventSnapshotChart.dispose()
+    eventSnapshotChart = null
+  }
+})
 </script>
 
 <style scoped>
@@ -553,7 +1385,7 @@ onMounted(loadAll)
 }
 .advanced-manage-metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 12px;
 }
 .metric-card {
@@ -576,6 +1408,10 @@ onMounted(loadAll)
   border-color: #a5f3fc;
   background: #ecfeff;
 }
+.metric-card.is-purple {
+  border-color: #ddd6fe;
+  background: #f5f3ff;
+}
 .metric-card span,
 .metric-card small {
   color: #64748b;
@@ -597,6 +1433,89 @@ onMounted(loadAll)
   color: #0f172a;
   font-weight: 700;
   line-height: 1.5;
+}
+.schedule-meta {
+  display: grid;
+  gap: 3px;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.event-note {
+  display: block;
+  overflow: hidden;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.push-config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.push-config-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+.push-config-card span,
+.push-config-card small,
+.push-config-card em {
+  color: #64748b;
+  font-size: 12px;
+  font-style: normal;
+}
+.push-config-card strong {
+  color: #0f172a;
+  font-size: 18px;
+}
+.alert-snapshot {
+  display: grid;
+  gap: 12px;
+}
+.alert-snapshot__summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.alert-snapshot__summary > div {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+.alert-snapshot__summary span {
+  color: #64748b;
+  font-size: 12px;
+}
+.alert-snapshot__summary strong {
+  color: #0f172a;
+  font-size: 15px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.alert-snapshot__chart {
+  width: 100%;
+  height: 320px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #ffffff;
+}
+.alert-snapshot__reason {
+  padding: 10px 12px;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 13px;
+  line-height: 1.6;
 }
 .rule-editor-form {
   display: grid;
@@ -627,6 +1546,38 @@ onMounted(loadAll)
   color: #64748b;
   font-size: 12px;
 }
+.plan-version-panel {
+  display: grid;
+  gap: 12px;
+}
+.version-alert {
+  margin-bottom: 2px;
+}
+.plan-version-panel__toolbar {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.plan-version-compare {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+.plan-version-compare__col {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+.plan-version-compare__col h4 {
+  margin: 0;
+  color: #0f172a;
+}
+.plan-version-compare__col :deep(.advanced-card) {
+  width: 100%;
+  margin-top: 0;
+}
 @media (max-width: 900px) {
   .advanced-manage-header,
   .panel-head {
@@ -634,7 +1585,10 @@ onMounted(loadAll)
     flex-direction: column;
   }
   .advanced-manage-metrics,
-  .form-grid {
+  .form-grid,
+  .push-config-grid,
+  .plan-version-compare,
+  .alert-snapshot__summary {
     grid-template-columns: 1fr;
   }
 }

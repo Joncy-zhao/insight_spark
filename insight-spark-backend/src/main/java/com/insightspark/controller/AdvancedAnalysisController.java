@@ -105,7 +105,38 @@ public class AdvancedAnalysisController {
 
     @PostMapping("/alert-events")
     public ApiResponse<Object> listAlertEvents(@RequestBody Map<String, Object> request) {
+        String action = text(request.getOrDefault("action", "list"));
+        if ("status".equalsIgnoreCase(action) || "update".equalsIgnoreCase(action)) {
+            long id = parseLong(request.get("id"));
+            if (id <= 0) {
+                return ApiResponse.badRequest("预警事件 ID 无效");
+            }
+            return ApiResponse.success(advancedAnalysisService.updateAlertEventStatus(id, request));
+        }
+        if ("detail".equalsIgnoreCase(action)) {
+            long id = parseLong(request.get("id"));
+            if (id <= 0) {
+                return ApiResponse.badRequest("预警事件 ID 无效");
+            }
+            return ApiResponse.success(advancedAnalysisService.getAlertEvent(id));
+        }
         return ApiResponse.success(advancedAnalysisService.listAlertEvents(request));
+    }
+
+    @PostMapping("/alert-push")
+    public ApiResponse<Object> alertPush(@RequestBody Map<String, Object> request) {
+        String action = text(request.getOrDefault("action", "list"));
+        if ("config".equalsIgnoreCase(action) || "status".equalsIgnoreCase(action)) {
+            return ApiResponse.success(advancedAnalysisService.alertPushConfigStatus());
+        }
+        if ("retry".equalsIgnoreCase(action)) {
+            long id = parseLong(request.get("id"));
+            if (id <= 0) {
+                return ApiResponse.badRequest("预警推送记录 ID 无效");
+            }
+            return ApiResponse.success(advancedAnalysisService.retryAlertPushLog(id));
+        }
+        return ApiResponse.success(advancedAnalysisService.listAlertPushLogs(request));
     }
 
     @PostMapping("/plans")
@@ -134,6 +165,34 @@ public class AdvancedAnalysisController {
                 return ApiResponse.badRequest("方案 ID 无效");
             }
             return ApiResponse.success(advancedAnalysisService.deletePlan(id));
+        }
+        if ("rename".equalsIgnoreCase(action)) {
+            long id = parseLong(request.get("id"));
+            if (id <= 0) {
+                return ApiResponse.badRequest("方案 ID 无效");
+            }
+            return ApiResponse.success(advancedAnalysisService.renamePlan(id, request));
+        }
+        if ("versions".equalsIgnoreCase(action)) {
+            long id = parseLong(request.get("id"));
+            if (id <= 0) {
+                return ApiResponse.badRequest("方案 ID 无效");
+            }
+            return ApiResponse.success(advancedAnalysisService.listPlanVersions(id));
+        }
+        if ("compare".equalsIgnoreCase(action)) {
+            long id = parseLong(request.get("id"));
+            if (id <= 0) {
+                return ApiResponse.badRequest("方案 ID 无效");
+            }
+            return ApiResponse.success(advancedAnalysisService.comparePlanVersions(id, request));
+        }
+        if ("compare-latest".equalsIgnoreCase(action)) {
+            long id = parseLong(request.get("id"));
+            if (id <= 0) {
+                return ApiResponse.badRequest("方案 ID 无效");
+            }
+            return ApiResponse.success(advancedAnalysisService.latestPlanVersionDiff(id));
         }
         return ApiResponse.success(advancedAnalysisService.savePlan(request));
     }

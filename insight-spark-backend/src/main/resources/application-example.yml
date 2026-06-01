@@ -1,0 +1,64 @@
+server:
+  port: 8080
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+
+spring:
+  messages:
+    encoding: UTF-8
+  servlet:
+    multipart:
+      max-file-size: 300MB
+      max-request-size: 300MB
+  datasource:
+    url: jdbc:mysql://localhost:3306/insight_spark?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai
+    username: root
+    password: your_mysql_password
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+logging:
+  charset:
+    console: UTF-8
+    file: UTF-8
+
+mybatis-plus:
+  configuration:
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+
+insight:
+  ai-service-url: http://localhost:8000
+  neo4j:
+    enabled: true
+    http-url: http://localhost:7474/db/neo4j/tx/commit
+    username: neo4j
+    password: your_neo4j_password
+  redis:
+    enabled: true
+    host: localhost
+    port: 6379
+    database: 6
+  advanced-alert:
+    agent-cron: "0 */15 * * * *"
+
+    # 钉钉群自定义机器人 Webhook。若机器人开启关键词校验，建议关键词包含“预警”。
+    # 如启用加签，当前版本还需继续补充 timestamp/sign 拼接逻辑。
+    dingtalk-webhook: "https://oapi.dingtalk.com/robot/send?access_token=your_dingtalk_access_token"
+
+    # 邮件推送配置。QQ 邮箱 smtp-password 填 SMTP 授权码，不是邮箱登录密码。
+    email-target: "receiver@example.com"
+    email-from: "sender@qq.com"
+    smtp-host: "smtp.qq.com"
+    smtp-port: 587
+    smtp-username: "sender@qq.com"
+    smtp-password: "your_email_smtp_authorization_code"
+    smtp-auth: true
+    smtp-starttls: true
+    smtp-ssl: false
+
+    # 如果使用 QQ 邮箱 SSL 端口，可改为：
+    # smtp-port: 465
+    # smtp-starttls: false
+    # smtp-ssl: true

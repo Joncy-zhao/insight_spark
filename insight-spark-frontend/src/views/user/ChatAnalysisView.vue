@@ -1318,8 +1318,9 @@
           <el-dialog
               v-model="whatIfConfirmVisible"
               title="确认推演参数"
-              width="640px"
+              width="860px"
               destroy-on-close
+              class="whatif-confirm-dialog"
           >
             <el-form label-position="top" class="forecast-confirm-form">
               <el-alert
@@ -1338,6 +1339,14 @@
                   />
                 </el-select>
               </el-form-item>
+              <el-form-item label="业务公式（可选）">
+                <el-input
+                    v-model.trim="whatIfConfirmForm.formula"
+                    placeholder="例如：profit = sales_amt - cost_amt，支持字段显示名/源字段名/列名"
+                    clearable
+                />
+                <div class="forecast-confirm-hint">填写后将按业务公式计算基准与情景结果；不填写时继续使用历史相关性估计。</div>
+              </el-form-item>
               <div class="whatif-variable-toolbar">
                 <div class="whatif-variable-toolbar__title">变量列表</div>
                 <el-button size="small" plain @click="addWhatIfConfirmVariable">新增变量</el-button>
@@ -1348,29 +1357,52 @@
                     :key="`${variable.name || 'variable'}-${index}`"
                     class="whatif-variable-item"
                 >
-                  <el-select
-                      v-model="variable.field"
-                      class="whatif-variable-item__field"
-                      filterable
-                      placeholder="变量字段"
-                  >
-                    <el-option
-                        v-for="field in whatIfConfirmMeta.numericFields"
-                        :key="field.columnName"
-                        :label="formatAdvancedFieldLabel(field)"
-                        :value="field.columnName"
-                    />
-                  </el-select>
-                  <el-input v-model="variable.name" class="whatif-variable-item__name" placeholder="变量名称" />
-                  <el-select v-model="variable.mode" class="whatif-variable-item__mode" placeholder="方式">
-                    <el-option label="百分比" value="percent" />
-                    <el-option label="绝对值" value="absolute" />
-                    <el-option label="设为固定值" value="set" />
-                  </el-select>
-                  <el-input-number v-model="variable.change" class="whatif-variable-item__change" :min="-100" :max="100" :step="1" />
-                  <el-input-number v-model="variable.min" class="whatif-variable-item__limit" placeholder="最小值" :controls="false" />
-                  <el-input-number v-model="variable.max" class="whatif-variable-item__limit" placeholder="最大值" :controls="false" />
-                  <el-button text type="danger" @click="removeWhatIfConfirmVariable(index)">删除</el-button>
+                  <div class="whatif-variable-item__main">
+                    <el-form-item label="变量字段">
+                      <el-select
+                          v-model="variable.field"
+                          class="full-width"
+                          filterable
+                          placeholder="变量字段"
+                      >
+                        <el-option
+                            v-for="field in whatIfConfirmMeta.numericFields"
+                            :key="field.columnName"
+                            :label="formatAdvancedFieldLabel(field)"
+                            :value="field.columnName"
+                        />
+                      </el-select>
+                    </el-form-item>
+                    <el-form-item label="变量名称">
+                      <el-input v-model="variable.name" class="full-width" placeholder="例如：销售额" />
+                    </el-form-item>
+                    <el-form-item label="调整方式">
+                      <el-select v-model="variable.mode" class="full-width" placeholder="方式">
+                        <el-option label="百分比" value="percent" />
+                        <el-option label="绝对值" value="absolute" />
+                        <el-option label="设为固定值" value="set" />
+                      </el-select>
+                    </el-form-item>
+                    <el-form-item label="调整值">
+                      <el-input-number
+                          v-model="variable.change"
+                          class="full-width"
+                          :controls="false"
+                          :min="variable.mode === 'percent' ? -100 : undefined"
+                          :max="variable.mode === 'percent' ? 100 : undefined"
+                          :step="1"
+                      />
+                    </el-form-item>
+                  </div>
+                  <div class="whatif-variable-item__limits">
+                    <el-form-item label="最小值（可选）">
+                      <el-input-number v-model="variable.min" class="full-width" placeholder="最小值" :controls="false" />
+                    </el-form-item>
+                    <el-form-item label="最大值（可选）">
+                      <el-input-number v-model="variable.max" class="full-width" placeholder="最大值" :controls="false" />
+                    </el-form-item>
+                    <el-button class="whatif-variable-item__delete" plain type="danger" @click="removeWhatIfConfirmVariable(index)">删除变量</el-button>
+                  </div>
                 </div>
               </div>
             </el-form>
@@ -1772,6 +1804,7 @@ const whatIfConfirmVisible = ref(false)
 const whatIfConfirmMeta = ref({ numericFields: [] })
 const whatIfConfirmForm = ref({
   targetMetric: '',
+  formula: '',
   variables: []
 })
 let whatIfConfirmResolver = null
@@ -1905,6 +1938,56 @@ const formatAlertRuleMeta = (rule = {}) => {
   return parts.join(' / ')
 }
 
+const buildForecastCardExplanation = ({ algorithm, historyPoints, forecastPoints, lastForecast, source = '当前上下文' } = {}) => ({
+  source: 'rule',
+  sourceLabel: '规则解释',
+  calculation: [
+    `当前使用${algorithm || '预测算法'}生成预测曲线，数据来源为${source}。`,
+    historyPoints ? `历史序列包含 ${historyPoints} 个有效点，向前预测 ${forecastPoints || 0} 个点。` : '',
+    lastForecast != null ? `末期预测值为 ${formatAdvancedNumber(lastForecast)}。` : ''
+  ].filter(Boolean),
+  suggestions: [
+    '请同时关注预测值和置信区间，上下界差距越大代表未来不确定性越高。',
+    '若数据点偏少或近期波动较大，建议补充更长周期数据后重新计算。'
+  ]
+})
+
+const buildWhatIfCardExplanation = ({ base, scenario, recommended, variables = [], formula = '' } = {}) => {
+  const delta = base ? ((Number(scenario || 0) - Number(base || 0)) / Math.abs(Number(base || 0))) * 100 : 0
+  const topVariable = Array.isArray(variables) ? variables[0] : null
+  return {
+    source: 'rule',
+    sourceLabel: '规则解释',
+    calculation: [
+      base != null ? `基准方案为 ${formatAdvancedNumber(base)}，中性方案为 ${formatAdvancedNumber(scenario)}。` : '当前基于变量变化生成多场景推演结果。',
+      formula ? `本次推演使用业务公式「${formula}」计算目标结果。` : '',
+      recommended != null ? `推荐方案为 ${formatAdvancedNumber(recommended)}，中性方案相对基准变化 ${delta >= 0 ? '+' : ''}${delta.toFixed(2)}%。` : '',
+      topVariable ? `变量「${topVariable.name || topVariable.field || '变量'}」参与本次推演，建议结合敏感性排序判断优先级。` : ''
+    ].filter(Boolean),
+    suggestions: [
+      '优先评估推荐方案在预算、库存、交付和合规上的可执行性。',
+      formula ? '请确认公式字段单位、聚合方式和业务口径一致。' : '推演结果用于方案比较，不等同于因果结论，落地前建议结合业务公式或实验数据校验。'
+    ]
+  }
+}
+
+const buildAlertCardExplanation = ({ operator = 'lt', threshold, channels = [], detectionCycle = 'daily' } = {}) => {
+  const operatorText = operator === 'gt' ? '高于阈值' : operator === 'zscore' ? 'Z-Score 异常波动' : '低于阈值'
+  return {
+    source: 'rule',
+    sourceLabel: '规则解释',
+    calculation: [
+      `当前预警规则采用${operatorText}判断，检测周期为${alertCycleLabel(detectionCycle)}。`,
+      `阈值配置为 ${operator === 'zscore' ? 'Z-Score >= 3' : formatAdvancedNumber(threshold)}。`,
+      `通知渠道为 ${formatAlertChannel(channels)}。`
+    ],
+    suggestions: [
+      '触发预警后建议先核对异常时段原始数据，再判断是否为真实业务波动。',
+      '若误报较多，可调整阈值、过滤条件或检测粒度后重新保存规则。'
+    ]
+  }
+}
+
 const formatAlertEventTitle = (event = {}) => {
   const value = formatAdvancedNumber(event.actualValue)
   return `规则 #${event.ruleId || '-'} / ${event.bucketName || '-'} / 实际值 ${value}`
@@ -1921,6 +2004,15 @@ const inferWhatIfVariables = (text) => {
     { name: '销量', change: 10 },
     { name: '成本', change: -5 }
   ]
+}
+
+const inferWhatIfFormula = (text, llmIntent = {}) => {
+  const explicit = String(llmIntent.formula || llmIntent.businessFormula || '').trim()
+  if (explicit) return explicit
+  const content = String(text || '').trim()
+  const match = content.match(/(?:公式|按|按照)\s*[:：]?(.+?[=＝].+?)(?:，|。|；|;|$)/)
+  if (match?.[1]) return match[1].trim()
+  return ''
 }
 
 const buildForecastSeries = (params = {}) => {
@@ -2172,6 +2264,14 @@ const pickFieldName = (fields = [], preferred = '', fallback = '') => {
   return String(matched?.columnName || fallback || fields[0]?.columnName || '').trim()
 }
 
+const pickFieldNameStrict = (fields = [], preferred = '', fallback = '') => {
+  const scored = fields
+    .map((field, index) => ({ field, index, score: scoreFieldMatch(field, preferred) }))
+    .filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+  return String(scored[0]?.field?.columnName || fallback || '').trim()
+}
+
 const confirmForecastParams = (fieldMeta, defaults = {}) => new Promise((resolve) => {
   forecastConfirmMeta.value = {
     timeFields: Array.isArray(fieldMeta?.timeFields) ? fieldMeta.timeFields : [],
@@ -2219,9 +2319,10 @@ const confirmWhatIfParams = (fieldMeta, defaults = {}) => new Promise((resolve) 
   whatIfConfirmMeta.value = { numericFields }
   whatIfConfirmForm.value = {
     targetMetric: defaults.targetMetric || numericFields[0]?.columnName || '',
+    formula: defaults.formula || '',
     variables: (defaults.variables?.length ? defaults.variables : [{ field: numericFields[1]?.columnName || numericFields[0]?.columnName || '', name: '变量', change: 10, mode: 'percent' }])
       .map(item => ({
-        field: item.field || pickFieldName(numericFields, item.name, ''),
+        field: item.field || pickFieldNameStrict(numericFields, item.name, ''),
         name: item.name || item.field || '变量',
         mode: item.mode || 'percent',
         change: Number(item.change ?? 0),
@@ -2264,6 +2365,7 @@ const submitWhatIfConfirm = () => {
   if (whatIfConfirmResolver) {
     whatIfConfirmResolver({
       targetMetric: whatIfConfirmForm.value.targetMetric,
+      formula: String(whatIfConfirmForm.value.formula || '').trim(),
       variables
     })
     whatIfConfirmResolver = null
@@ -2335,6 +2437,8 @@ const cancelAlertConfirm = () => {
 
 const buildAnalysisFromRealForecast = (result, text, params, llmIntent, fieldMeta = {}) => {
   const metric = String(llmIntent?.metric || result?.metricField || '').trim() || inferMetricFromQuestion(text)
+  const forecastRows = Array.isArray(result?.series) ? result.series.filter(item => item?.forecast != null) : []
+  const historyRows = Array.isArray(result?.series) ? result.series.filter(item => item?.history != null) : []
   return {
     id: `advanced-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     type: 'forecast',
@@ -2361,6 +2465,13 @@ const buildAnalysisFromRealForecast = (result, text, params, llmIntent, fieldMet
       sourceSeries: Array.isArray(params.sourceSeries) ? params.sourceSeries : []
     },
     dataQuality: result?.dataQuality || null,
+    explanation: result?.explanation || buildForecastCardExplanation({
+      algorithm: result?.algorithm || params.algorithm,
+      historyPoints: historyRows.length,
+      forecastPoints: forecastRows.length,
+      lastForecast: forecastRows[forecastRows.length - 1]?.forecast,
+      source: params.sourceSeries?.length ? '上一轮查询结果' : '真实数据源'
+    }),
     series: Array.isArray(result?.series) ? result.series : [],
     insights: Array.isArray(result?.insights)
       ? result.insights.map(item => ({ label: String(item.label || ''), value: String(item.value ?? '') }))
@@ -2370,11 +2481,18 @@ const buildAnalysisFromRealForecast = (result, text, params, llmIntent, fieldMet
 
 const buildAnalysisFromRealWhatIf = (result, text, params, llmIntent, fieldMeta = {}) => {
   const metric = String(llmIntent?.metric || result?.targetMetric || '').trim() || inferMetricFromQuestion(text)
+  const series = Array.isArray(result?.series) ? result.series : []
+  const base = series.find(item => item.name === '基准方案')?.value ?? series[0]?.value
+  const scenario = series.find(item => item.name === '中性方案')?.value ?? series[1]?.value
+  const recommended = series.find(item => item.name === '推荐方案')?.value ?? series[series.length - 1]?.value
+  const formula = String(result?.formula || params.formula || '').trim()
   return {
     id: `advanced-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     type: 'whatIf',
     title: `${metric}情景推演`,
-    summary: '已基于真实历史数据估计变量影响，结果用于情景比较和方案筛选。',
+    summary: formula
+      ? '已基于真实历史数据与业务公式计算情景结果，结果用于方案比较和口径验证。'
+      : '已基于真实历史数据估计变量影响，结果用于情景比较和方案筛选。',
     tableName: result?.tableName || selectedTableName?.value || '',
     metric: formatAnalysisMetricLabel(result?.targetMetric || llmIntent?.targetMetricField || metric, metric, fieldMeta?.numericFields),
     timeRange: '当前分析周期',
@@ -2382,9 +2500,19 @@ const buildAnalysisFromRealWhatIf = (result, text, params, llmIntent, fieldMeta 
     params: {
       tableName: result?.tableName || params.tableName || selectedTableName?.value || '',
       targetMetric: result?.targetMetric || params.targetMetric || '',
+      formula,
+      resolvedFormula: result?.resolvedFormula || '',
+      calculationMode: result?.calculationMode || (formula ? 'formula' : 'correlation'),
       variables: (Array.isArray(result?.variables) && result.variables.length ? result.variables : params.variables || []).map(item => ({ ...item }))
     },
-    series: Array.isArray(result?.series) ? result.series : [],
+    explanation: result?.explanation || buildWhatIfCardExplanation({
+      base,
+      scenario,
+      recommended,
+      variables: Array.isArray(result?.variables) ? result.variables : params.variables,
+      formula
+    }),
+    series,
     insights: Array.isArray(result?.insights)
       ? result.insights.map(item => ({ label: String(item.label || ''), value: String(item.value ?? '') }))
       : []
@@ -2418,6 +2546,12 @@ const buildAnalysisFromSavedAlertRule = (rule, text, params, llmIntent, fieldMet
       timeField: rule?.timeField || params.timeField || '',
       metricField: rule?.metricField || params.metricField || ''
     },
+    explanation: buildAlertCardExplanation({
+      operator,
+      threshold,
+      channels: Array.isArray(rule?.channels) ? rule.channels : params.channels || [],
+      detectionCycle: rule?.detectionCycle || params.detectionCycle || 'daily'
+    }),
     series,
     insights: [
       { label: '规则ID', value: rule?.id || '-' },
@@ -2504,16 +2638,17 @@ const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = 
         : (normalizeLlmVariables(llmIntent.variables).length ? normalizeLlmVariables(llmIntent.variables) : inferWhatIfVariables(text))
       const targetMetric = pickFieldName(
         fieldMeta?.numericFields || [],
-        llmIntent.targetMetricField || llmIntent.metric || lastAnalysis?.value?.fieldMapping?.metricKey || '',
+        params.targetMetric || llmIntent.targetMetricField || llmIntent.metric || lastAnalysis?.value?.fieldMapping?.metricKey || '',
         ''
       )
       const numericFields = fieldMeta?.numericFields || []
       const defaultVariables = variables.map(variable => {
-        const field = pickFieldName(numericFields, variable.field || variable.name, '')
-        return field ? { ...variable, field } : null
-      }).filter(Boolean)
+        const field = pickFieldNameStrict(numericFields, variable.field || variable.name, '')
+        return { ...variable, field }
+      })
       const confirmedWhatIf = await confirmWhatIfParams(fieldMeta, {
         targetMetric,
+        formula: params.formula || inferWhatIfFormula(text, llmIntent),
         variables: defaultVariables
       })
       if (!confirmedWhatIf) {
@@ -2526,11 +2661,13 @@ const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = 
       const result = await runAdvancedWhatIf({
         tableName,
         targetMetric: confirmedWhatIf.targetMetric,
+        formula: confirmedWhatIf.formula || '',
         variables: normalizedVariables
       })
       return buildAnalysisFromRealWhatIf(result, text, {
         tableName,
         targetMetric: confirmedWhatIf.targetMetric,
+        formula: confirmedWhatIf.formula || '',
         variables: normalizedVariables
       }, llmIntent, fieldMeta)
     }
@@ -2558,6 +2695,9 @@ const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = 
     }
   } catch (error) {
     console.warn('advanced analysis real compute fallback:', error)
+    if (type === 'whatIf' && String(params.formula || llmIntent.formula || llmIntent.businessFormula || '').trim()) {
+      throw error
+    }
     if (type === 'forecast') {
       return createAdvancedAnalysis(type, text, params, {
         ...llmIntent,
@@ -2595,6 +2735,13 @@ const createAdvancedAnalysis = (type, text, params = {}, llmIntent = {}) => {
       timeRange: mergedParams.horizon === '6m' ? '未来 6 个月' : mergedParams.horizon === '30d' ? '未来 30 天' : mergedParams.horizon === '7d' ? '未来 7 天' : '未来 3 个月',
       status: llmIntent.simulated ? '模拟生成' : '已生成',
       params: mergedParams,
+      explanation: buildForecastCardExplanation({
+        algorithm: mergedParams.algorithm,
+        historyPoints: series.filter(item => item.history != null).length,
+        forecastPoints: forecastRows.length,
+        lastForecast,
+        source: llmIntent.simulated ? '模拟数据' : '当前对话上下文'
+      }),
       series,
       insights: [
         { label: '末期预测', value: formatAdvancedNumber(lastForecast) },
@@ -2612,16 +2759,20 @@ const createAdvancedAnalysis = (type, text, params = {}, llmIntent = {}) => {
     const scenario = series.find(item => item.name === '中性方案')?.value || series[1]?.value || 0
     const recommended = series.find(item => item.name === '推荐方案')?.value || series[series.length - 1]?.value || 0
     const delta = base ? ((scenario - base) / base) * 100 : 0
+    const formula = params.formula || inferWhatIfFormula(text, llmIntent)
     return {
       id,
       type,
       title: `${metric}情景推演`,
-      summary: '已根据变量变化生成基准、保守、中性、乐观和推荐方案，可继续调整变量重新计算。',
+      summary: formula
+        ? '已根据变量变化和业务公式生成基准、保守、中性、乐观和推荐方案。'
+        : '已根据变量变化生成基准、保守、中性、乐观和推荐方案，可继续调整变量重新计算。',
       tableName,
       metric,
       timeRange: '当前分析周期',
       status: '已生成',
-      params: { variables },
+      params: { variables, formula },
+      explanation: buildWhatIfCardExplanation({ base, scenario, recommended, variables, formula }),
       series,
       insights: [
         { label: '模拟变化', value: `${delta >= 0 ? '+' : ''}${delta.toFixed(1)}%` },
@@ -2649,6 +2800,12 @@ const createAdvancedAnalysis = (type, text, params = {}, llmIntent = {}) => {
       threshold,
       channel: params.channel || llmIntent.channel || 'both'
     },
+    explanation: buildAlertCardExplanation({
+      operator,
+      threshold,
+      channels: [params.channel || llmIntent.channel || 'both'],
+      detectionCycle: params.detectionCycle || llmIntent.detectionCycle || 'daily'
+    }),
     series,
     insights: [
       { label: '阈值', value: formatAdvancedNumber(threshold) },
@@ -2793,6 +2950,7 @@ const buildAdvancedPlanRequest = (analysis = {}) => {
     return {
       tableName: params.tableName || analysis.tableName || '',
       targetMetric: params.targetMetric || '',
+      formula: params.formula || '',
       variables: Array.isArray(params.variables) ? params.variables.map(item => ({ ...item })) : []
     }
   }
@@ -4904,6 +5062,20 @@ onBeforeUnmount(() => {
   display: grid;
   gap: 12px;
 }
+.whatif-confirm-dialog :deep(.el-dialog) {
+  max-width: calc(100vw - 32px);
+}
+.whatif-confirm-dialog :deep(.el-dialog__body) {
+  max-height: min(72vh, 720px);
+  overflow-y: auto;
+  padding-right: 22px;
+}
+.forecast-confirm-hint {
+  margin-top: 6px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
 .forecast-confirm-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -4926,14 +5098,40 @@ onBeforeUnmount(() => {
 }
 .whatif-variable-item {
   display: grid;
-  grid-template-columns: minmax(120px, 1fr) minmax(96px, 1fr) 108px 118px 96px 96px auto;
-  gap: 10px;
-  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
 }
-.whatif-variable-item__field,
-.whatif-variable-item__name,
-.whatif-variable-item__mode,
-.whatif-variable-item__limit {
+.whatif-variable-item__main {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.35fr) minmax(150px, 1fr) minmax(118px, 0.7fr) minmax(120px, 0.8fr);
+  gap: 10px;
+  align-items: end;
+}
+.whatif-variable-item__limits {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(120px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+.whatif-variable-item__delete {
+  min-width: 86px;
+}
+.whatif-variable-item :deep(.el-form-item) {
+  margin-bottom: 0;
+}
+.whatif-variable-item :deep(.el-input-number) {
+  width: 100%;
+}
+.whatif-variable-item :deep(.el-input-number .el-input__inner) {
+  text-align: left;
+}
+.whatif-variable-item__main,
+.whatif-variable-item__limits,
+.whatif-variable-item :deep(.el-input),
+.whatif-variable-item :deep(.el-select) {
   min-width: 0;
 }
 .forecast-confirm-form :deep(.el-form-item) {
@@ -5048,8 +5246,12 @@ onBeforeUnmount(() => {
   .forecast-confirm-grid {
     grid-template-columns: 1fr;
   }
-  .whatif-variable-item {
+  .whatif-variable-item__main,
+  .whatif-variable-item__limits {
     grid-template-columns: 1fr;
+  }
+  .whatif-variable-item__delete {
+    width: 100%;
   }
   .chat-followup-banner {
     flex-direction: column;
