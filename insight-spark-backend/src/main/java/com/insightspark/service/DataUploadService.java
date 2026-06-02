@@ -544,7 +544,13 @@ public class DataUploadService {
             int safePage = Math.max(1, page);
             int safeLimit = Math.max(1, Math.min(pageSize, 100));
             int offset = (safePage - 1) * safeLimit;
-            rows = jdbcTemplate.queryForList("SELECT * FROM `" + tableName + "` LIMIT " + safeLimit + " OFFSET " + offset);
+            String sql = sqlAuditService.applyDataRowPolicies(tableName,
+                    "SELECT * FROM `" + tableName + "` LIMIT " + safeLimit + " OFFSET " + offset);
+            long startedAt = System.currentTimeMillis();
+            rows = jdbcTemplate.queryForList(sql);
+            sqlAuditService.record("上传表数据预览", tableName, "upload-preview", sql,
+                    sqlAuditService.inspect(sql, tableName), "SUCCESS",
+                    System.currentTimeMillis() - startedAt, null);
         }
         return sqlAuditService.maskRowsByFields(rows, listFields(tableName));
     }
@@ -580,7 +586,13 @@ public class DataUploadService {
             rows = preview(tableName, 1, 50_000);
         } else {
             String columnSql = String.join(", ", columns.stream().map(this::quoteColumn).toList());
-            rows = jdbcTemplate.queryForList("SELECT " + columnSql + " FROM `" + tableName + "` LIMIT 50000");
+            String sql = sqlAuditService.applyDataRowPolicies(tableName,
+                    "SELECT " + columnSql + " FROM `" + tableName + "` LIMIT 50000");
+            long startedAt = System.currentTimeMillis();
+            rows = jdbcTemplate.queryForList(sql);
+            sqlAuditService.record("上传表数据导出", tableName, "upload-export", sql,
+                    sqlAuditService.inspect(sql, tableName), "SUCCESS",
+                    System.currentTimeMillis() - startedAt, null);
         }
         rows = sqlAuditService.maskRows(tableName, rows);
 
@@ -3044,9 +3056,9 @@ public class DataUploadService {
         String sourceKey = tableName;
 
         long nullCount = readLongValue(datasourceService.executeQueryWithoutAudit(sourceKey,
-                "SELECT COUNT(*) AS v FROM `" + physicalTable + "` WHERE " + quotedColumn + " IS NULL OR " + quotedColumn + " = ''"), "v");
+                "SELECT COUNT(*) AS v FROM `" + physicalTable + "` WHERE " + quotedColumn + " IS NULL"), "v");
         long distinctCount = readLongValue(datasourceService.executeQueryWithoutAudit(sourceKey,
-                "SELECT COUNT(DISTINCT " + quotedColumn + ") AS v FROM `" + physicalTable + "` WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != ''"), "v");
+                "SELECT COUNT(DISTINCT " + quotedColumn + ") AS v FROM `" + physicalTable + "` WHERE " + quotedColumn + " IS NOT NULL"), "v");
         long nonNullCount = Math.max(0, totalCount - nullCount);
 
         Map<String, Object> stats = new LinkedHashMap<>();
@@ -3060,24 +3072,26 @@ public class DataUploadService {
 
         String fieldType = resolveFieldType(tableName, columnName);
         if ("NUMBER".equals(fieldType)) {
+            String numericExpr = "CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))";
+            String numericStatsSql = "SELECT " + String.join(", ",
+                    "MIN(" + numericExpr + ") AS min_value",
+                    "MAX(" + numericExpr + ") AS max_value",
+                    "AVG(" + numericExpr + ") AS avg_value",
+                    "STD(" + numericExpr + ") AS std_dev"
+            ) + " FROM `" + physicalTable + "` " +
+                    "WHERE " + quotedColumn + " IS NOT NULL " +
+                    "AND TRIM(" + quotedColumn + ") <> '' " +
+                    "AND TRIM(" + quotedColumn + ") REGEXP '^-?[0-9]+(\\\\.[0-9]+)?$'";
             Map<String, Object> numStats = firstRow(datasourceService.executeQueryWithoutAudit(sourceKey,
-                    "SELECT " +
-                            "MIN(CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))) AS minValue, " +
-                            "MAX(CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))) AS maxValue, " +
-                            "AVG(CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))) AS avgValue, " +
-                            "STD(CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))) AS stdDev " +
-                            "FROM `" + physicalTable + "` " +
-                            "WHERE " + quotedColumn + " IS NOT NULL " +
-                            "AND TRIM(" + quotedColumn + ") <> '' " +
-                            "AND TRIM(" + quotedColumn + ") REGEXP '^-?[0-9]+(\\\\.[0-9]+)?$'"));
-            stats.put("min", numStats.get("minValue"));
-            stats.put("max", numStats.get("maxValue"));
-            stats.put("avg", numStats.get("avgValue"));
-            stats.put("stdDev", numStats.get("stdDev"));
+                    numericStatsSql));
+            stats.put("min", numStats.get("min_value"));
+            stats.put("max", numStats.get("max_value"));
+            stats.put("avg", numStats.get("avg_value"));
+            stats.put("stdDev", numStats.get("std_dev"));
         } else if ("DATE".equals(fieldType)) {
             Map<String, Object> dateStats = firstRow(datasourceService.executeQueryWithoutAudit(sourceKey,
                     "SELECT MIN(" + quotedColumn + ") AS minDate, MAX(" + quotedColumn + ") AS maxDate " +
-                            "FROM `" + physicalTable + "` WHERE " + quotedColumn + " IS NOT NULL AND " + quotedColumn + " != ''"));
+                            "FROM `" + physicalTable + "` WHERE " + quotedColumn + " IS NOT NULL"));
             stats.put("minDate", dateStats.get("minDate"));
             stats.put("maxDate", dateStats.get("maxDate"));
         }
@@ -3247,22 +3261,23 @@ public class DataUploadService {
         String quotedColumn = quoteColumn(columnName);
         String physicalTable = datasourceService.physicalTableName(tableName);
         String sourceKey = tableName;
+        String numericExpr = "CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))";
+        String numericStatsSql = "SELECT " + String.join(", ",
+                "AVG(" + numericExpr + ") AS avg_value",
+                "STD(" + numericExpr + ") AS std_dev"
+        ) + " FROM `" + physicalTable + "` " +
+                "WHERE " + quotedColumn + " IS NOT NULL " +
+                "AND TRIM(" + quotedColumn + ") <> '' " +
+                "AND TRIM(" + quotedColumn + ") REGEXP '^-?[0-9]+(\\\\.[0-9]+)?$'";
         Map<String, Object> numStats = firstRow(datasourceService.executeQueryWithoutAudit(sourceKey,
-                "SELECT " +
-                        "AVG(CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))) AS avgValue, " +
-                        "STD(CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))) AS stdDev " +
-                        "FROM `" + physicalTable + "` " +
-                        "WHERE " + quotedColumn + " IS NOT NULL " +
-                        "AND TRIM(" + quotedColumn + ") <> '' " +
-                        "AND TRIM(" + quotedColumn + ") REGEXP '^-?[0-9]+(\\\\.[0-9]+)?$'"));
-        Double avg = toNullableDouble(numStats.get("avgValue"));
-        Double stdDev = toNullableDouble(numStats.get("stdDev"));
+                numericStatsSql));
+        Double avg = toNullableDouble(numStats.get("avg_value"));
+        Double stdDev = toNullableDouble(numStats.get("std_dev"));
         if (avg == null || stdDev == null || stdDev == 0) {
             return List.of();
         }
         double lowerBound = avg - 3 * stdDev;
         double upperBound = avg + 3 * stdDev;
-        String numericExpr = "CAST(NULLIF(TRIM(" + quotedColumn + "), '') AS DECIMAL(20,4))";
         List<Map<String, Object>> anomalies = datasourceService.executeQueryWithoutAudit(sourceKey,
                 "SELECT " + quotedColumn + " AS value FROM `" + physicalTable + "` " +
                         "WHERE " + quotedColumn + " IS NOT NULL " +

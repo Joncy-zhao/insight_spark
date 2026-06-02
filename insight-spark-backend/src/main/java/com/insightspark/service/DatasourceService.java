@@ -13,6 +13,7 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -25,6 +26,7 @@ import java.util.regex.Pattern;
 public class DatasourceService {
 
     private static final Pattern SAFE_ROW_POLICY = Pattern.compile("^[\\p{L}\\p{N}_\\s`\"'.=<>!%(),:-]+$");
+    private static final Pattern SAFE_IDENTIFIER = Pattern.compile("^[\\p{L}\\p{N}_.$]+$");
     private static final int QUERY_TIMEOUT_SECONDS = 5;
     private static final int MAX_QUERY_ROWS = 500;
 
@@ -96,6 +98,21 @@ public class DatasourceService {
         addColumnIfMissing("is_official_schema_field", "synonyms", "`synonyms` VARCHAR(1000) NULL");
         addColumnIfMissing("is_official_schema_field", "kg_sync_enabled", "`kg_sync_enabled` TINYINT(1) NOT NULL DEFAULT 1");
         addColumnIfMissing("is_official_schema_field", "kg_sync_rule", "`kg_sync_rule` VARCHAR(1000) NULL");
+
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS `is_official_schema_relation` (
+                  `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+                  `datasource_id` BIGINT NOT NULL,
+                  `table_name` VARCHAR(128) NOT NULL,
+                  `column_name` VARCHAR(128) NOT NULL,
+                  `referenced_table_name` VARCHAR(128) NOT NULL,
+                  `referenced_column_name` VARCHAR(128) NOT NULL,
+                  `constraint_name` VARCHAR(255) NULL,
+                  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  UNIQUE KEY `uk_official_schema_relation` (`datasource_id`, `table_name`, `column_name`, `referenced_table_name`, `referenced_column_name`),
+                  INDEX `idx_official_schema_relation_ds` (`datasource_id`, `table_name`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='官方数据源外键关系';
+                """);
 
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS `is_official_row_policy` (
@@ -314,8 +331,10 @@ public class DatasourceService {
         String dbType = Objects.toString(datasource.get("db_type"), "MYSQL").toUpperCase();
         int tableCount = 0;
         int fieldCount = 0;
+        int relationCount = 0;
         jdbcTemplate.update("DELETE FROM is_official_schema_field WHERE datasource_id = ?", datasourceId);
         jdbcTemplate.update("DELETE FROM is_official_schema_table WHERE datasource_id = ?", datasourceId);
+        jdbcTemplate.update("DELETE FROM is_official_schema_relation WHERE datasource_id = ?", datasourceId);
 
         try (Connection connection = openConnection(datasourceId);
              Statement statement = connection.createStatement()) {
@@ -344,11 +363,24 @@ public class DatasourceService {
                     fieldCount++;
                 }
             }
+            try (ResultSet relations = statement.executeQuery(buildForeignKeyMetaSql(dbType, databaseName))) {
+                while (relations.next()) {
+                    jdbcTemplate.update("""
+                            INSERT INTO is_official_schema_relation(datasource_id, table_name, column_name,
+                                                                    referenced_table_name, referenced_column_name, constraint_name)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                            ON DUPLICATE KEY UPDATE constraint_name = VALUES(constraint_name)
+                            """, datasourceId, relations.getString("table_name"), relations.getString("column_name"),
+                            relations.getString("referenced_table_name"), relations.getString("referenced_column_name"),
+                            relations.getString("constraint_name"));
+                    relationCount++;
+                }
+            }
             jdbcTemplate.update("UPDATE is_official_datasource SET last_sync_at = NOW() WHERE id = ?", datasourceId);
             if (knowledgeGraphService != null) {
                 knowledgeGraphService.syncGraph();
             }
-            return Map.of("tableCount", tableCount, "fieldCount", fieldCount);
+            return Map.of("tableCount", tableCount, "fieldCount", fieldCount, "relationCount", relationCount);
         } catch (Exception e) {
             throw new IllegalArgumentException("Schema 解析失败：" + e.getMessage());
         }
@@ -367,8 +399,16 @@ public class DatasourceService {
     public List<Map<String, Object>> listSchemaTables(Long datasourceId) {
         return jdbcTemplate.queryForList("""
                 SELECT id, datasource_id AS datasourceId, table_name AS tableName, table_comment AS tableComment,
-                       table_rows AS tableRows, created_at AS createdAt
+                       table_rows AS tableRows,
+                       (
+                           SELECT COUNT(*)
+                           FROM is_official_schema_field f
+                           WHERE f.datasource_id = t.datasource_id
+                             AND f.table_name = t.table_name
+                       ) AS fieldCount,
+                       created_at AS createdAt
                 FROM is_official_schema_table
+                t
                 WHERE datasource_id = ?
                 ORDER BY table_name ASC
                 """, datasourceId);
@@ -385,6 +425,17 @@ public class DatasourceService {
                 WHERE datasource_id = ? AND table_name = ?
                 ORDER BY ordinal_position ASC
                 """, datasourceId, tableName);
+    }
+
+    public List<Map<String, Object>> listSchemaRelations(Long datasourceId) {
+        return jdbcTemplate.queryForList("""
+                SELECT id, datasource_id AS datasourceId, table_name AS tableName, column_name AS columnName,
+                       referenced_table_name AS referencedTableName, referenced_column_name AS referencedColumnName,
+                       constraint_name AS constraintName, created_at AS createdAt
+                FROM is_official_schema_relation
+                WHERE datasource_id = ?
+                ORDER BY table_name ASC, column_name ASC
+                """, datasourceId);
     }
 
     public void updateFieldMeta(Long fieldId, Map<String, Object> request) {
@@ -415,8 +466,9 @@ public class DatasourceService {
 
     public List<Map<String, Object>> listPermissions(Long datasourceId) {
         return jdbcTemplate.queryForList("""
-                SELECT id, datasource_id AS datasourceId, table_name AS tableName, principal_type AS principalType,
-                       principal_id AS principalId, permission_type AS permissionType,
+                SELECT id, datasource_id AS datasourceId, table_name AS tableName,
+                       CASE WHEN table_name = '*' THEN 'DATASOURCE' ELSE 'TABLE' END AS scopeType,
+                       principal_type AS principalType, principal_id AS principalId, permission_type AS permissionType,
                        expire_at AS expireAt, created_at AS createdAt
                 FROM is_official_table_permission
                 WHERE datasource_id = ?
@@ -425,24 +477,47 @@ public class DatasourceService {
     }
 
     public Map<String, Object> grantPermission(Long datasourceId, Map<String, Object> request) {
-        String tableName = Objects.toString(request.get("tableName"), "").trim();
+        String tableName = Objects.toString(request.getOrDefault("tableName", "*"), "").trim();
         if (tableName.isBlank()) {
-            throw new IllegalArgumentException("请选择要授权的官方表");
+            tableName = "*";
         }
-        String principalType = Objects.toString(request.getOrDefault("principalType", "USER")).toUpperCase();
+        if (!"*".equals(tableName)) {
+            assertOfficialTableExists(datasourceId, tableName);
+        }
+        String principalType = normalizePrincipalType(request.get("principalType"));
         String principalId = requiredString(request, "principalId");
-        String permissionType = Objects.toString(request.getOrDefault("permissionType", "READ")).toUpperCase();
+        String permissionType = normalizeOfficialPermissionType(request.get("permissionType"));
         jdbcTemplate.update("""
                 INSERT INTO is_official_table_permission(datasource_id, table_name, principal_type, principal_id, permission_type)
                 VALUES (?, ?, ?, ?, ?)
                 ON DUPLICATE KEY UPDATE created_at = CURRENT_TIMESTAMP
                 """, datasourceId, tableName, principalType, principalId, permissionType);
+        if ("*".equals(tableName)) {
+            jdbcTemplate.update("""
+                    INSERT INTO is_official_datasource_permission(datasource_id, principal_type, principal_id, permission_type)
+                    VALUES (?, ?, ?, ?)
+                    ON DUPLICATE KEY UPDATE created_at = CURRENT_TIMESTAMP
+                    """, datasourceId, principalType, principalId, permissionType);
+        }
         return Map.of("datasourceId", datasourceId, "tableName", tableName, "principalType", principalType,
                 "principalId", principalId, "permissionType", permissionType);
     }
 
     public void revokePermission(Long permissionId) {
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT datasource_id AS datasourceId, table_name AS tableName,
+                       principal_type AS principalType, principal_id AS principalId, permission_type AS permissionType
+                FROM is_official_table_permission
+                WHERE id = ?
+                """, permissionId);
         jdbcTemplate.update("DELETE FROM is_official_table_permission WHERE id = ?", permissionId);
+        if (!rows.isEmpty() && "*".equals(Objects.toString(rows.get(0).get("tableName"), ""))) {
+            Map<String, Object> row = rows.get(0);
+            jdbcTemplate.update("""
+                    DELETE FROM is_official_datasource_permission
+                    WHERE datasource_id = ? AND principal_type = ? AND principal_id = ? AND permission_type = ?
+                    """, row.get("datasourceId"), row.get("principalType"), row.get("principalId"), row.get("permissionType"));
+        }
     }
 
     public List<Map<String, Object>> listFederalRelations(Long datasourceId) {
@@ -463,6 +538,12 @@ public class DatasourceService {
         String rightTable = requiredString(request, "rightTable");
         String rightField = requiredString(request, "rightField");
         String relationType = Objects.toString(request.getOrDefault("relationType", "LEFT_JOIN")).toUpperCase();
+        validateFederalRelation(datasourceId, leftTable, leftField, rightSourceType, rightTable, rightField, relationType);
+        jdbcTemplate.update("""
+                DELETE FROM is_federal_relation
+                WHERE datasource_id = ? AND left_table = ? AND left_field = ? AND right_source_type = ?
+                  AND right_table = ? AND right_field = ?
+                """, datasourceId, leftTable, leftField, rightSourceType, rightTable, rightField);
         jdbcTemplate.update("""
                 INSERT INTO is_federal_relation(datasource_id, left_table, left_field, right_source_type, right_table, right_field, relation_type)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -470,6 +551,23 @@ public class DatasourceService {
         return Map.of("datasourceId", datasourceId, "leftTable", leftTable, "leftField", leftField,
                 "rightSourceType", rightSourceType, "rightTable", rightTable, "rightField", rightField,
                 "relationType", relationType);
+    }
+
+    public Map<String, Object> validateFederalRelation(Long datasourceId, Map<String, Object> request) {
+        String leftTable = requiredString(request, "leftTable");
+        String leftField = requiredString(request, "leftField");
+        String rightSourceType = Objects.toString(request.getOrDefault("rightSourceType", "UPLOAD")).toUpperCase();
+        String rightTable = requiredString(request, "rightTable");
+        String rightField = requiredString(request, "rightField");
+        String relationType = Objects.toString(request.getOrDefault("relationType", "LEFT_JOIN")).toUpperCase();
+        validateFederalRelation(datasourceId, leftTable, leftField, rightSourceType, rightTable, rightField, relationType);
+        return Map.of("valid", true, "message", "联邦关联校验通过", "datasourceId", datasourceId,
+                "leftTable", leftTable, "leftField", leftField, "rightSourceType", rightSourceType,
+                "rightTable", rightTable, "rightField", rightField, "relationType", relationType);
+    }
+
+    public void deleteFederalRelation(Long relationId) {
+        jdbcTemplate.update("DELETE FROM is_federal_relation WHERE id = ?", relationId);
     }
 
     public List<Map<String, Object>> executeFederalJoin(String uploadTableName, int limit) {
@@ -492,7 +590,7 @@ public class DatasourceService {
         int safeLimit = Math.max(1, Math.min(limit, 200));
 
         List<Map<String, Object>> uploadRows = jdbcTemplate.queryForList(
-                "SELECT * FROM `" + uploadTableName + "` LIMIT " + safeLimit
+                "SELECT * FROM " + quoteLocalIdentifier(uploadTableName) + " LIMIT " + safeLimit
         );
         Set<String> keys = new LinkedHashSet<>();
         for (Map<String, Object> row : uploadRows) {
@@ -505,11 +603,9 @@ public class DatasourceService {
             return uploadRows;
         }
 
-        Map<String, Object> datasource = findDatasource(datasourceId);
-        String quote = "POSTGRESQL".equalsIgnoreCase(Objects.toString(datasource.get("db_type"))) ? "\"" : "`";
         String inValues = keys.stream().map(this::sqlString).reduce((a, b) -> a + "," + b).orElse("''");
-        String officialSql = "SELECT * FROM " + quote + officialTable + quote
-                + " WHERE " + quote + officialField + quote + " IN (" + inValues + ") LIMIT " + safeLimit;
+        String officialSql = "SELECT * FROM " + quoteIdentifier(datasourceId, officialTable)
+                + " WHERE " + quoteIdentifier(datasourceId, officialField) + " IN (" + inValues + ") LIMIT " + safeLimit;
         List<Map<String, Object>> officialRows = executeQuery("official:" + datasourceId + ":" + officialTable, officialSql);
         Map<String, Map<String, Object>> officialByKey = new LinkedHashMap<>();
         for (Map<String, Object> row : officialRows) {
@@ -531,6 +627,12 @@ public class DatasourceService {
     }
 
     public List<Map<String, Object>> listEnabledQueryTables() {
+        List<String> roles = effectiveRolesForCurrentUser();
+        String rolePlaceholders = placeholders(roles.size());
+        List<Object> args = new ArrayList<>();
+        args.add(AuthContext.role());
+        args.add(AuthContext.userId());
+        args.addAll(roles);
         return jdbcTemplate.queryForList("""
                 SELECT CONCAT('official:', d.id, ':', t.table_name) AS tableName,
                        CONCAT(d.name, ' / ', COALESCE(NULLIF(t.table_comment, ''), t.table_name)) AS displayName,
@@ -547,10 +649,11 @@ public class DatasourceService {
                     WHERE p.datasource_id = d.id AND (p.table_name = t.table_name OR p.table_name = '*')
                       AND p.permission_type = 'READ'
                       AND (p.expire_at IS NULL OR p.expire_at > NOW())
-                      AND ((p.principal_type = 'USER' AND p.principal_id = ?) OR (p.principal_type = 'ROLE' AND p.principal_id = ?))
+                      AND ((p.principal_type = 'USER' AND p.principal_id = ?) OR (p.principal_type = 'ROLE' AND p.principal_id IN (""" + rolePlaceholders + """
+                      )))
                   ))
                 ORDER BY d.created_at DESC, t.table_name ASC
-                """, AuthContext.role(), AuthContext.userId(), AuthContext.role());
+                """, args.toArray());
     }
 
     public List<Map<String, Object>> listQueryFields(String sourceKey) {
@@ -582,11 +685,14 @@ public class DatasourceService {
         int safePage = Math.max(1, page);
         int safeLimit = Math.max(1, Math.min(pageSize, 100));
         int offset = (safePage - 1) * safeLimit;
-        return executeQuery(sourceKey, "SELECT * FROM `" + source.tableName() + "` LIMIT " + safeLimit + " OFFSET " + offset);
+        String table = quoteIdentifier(source.datasourceId(), source.tableName());
+        return executeQuery(sourceKey, "SELECT * FROM " + table + " LIMIT " + safeLimit + " OFFSET " + offset);
     }
 
     public long countQueryTable(String sourceKey) {
-        List<Map<String, Object>> rows = executeQuery(sourceKey, "SELECT COUNT(*) AS total FROM `" + parseSourceKey(sourceKey).tableName() + "`");
+        OfficialSource source = parseSourceKey(sourceKey);
+        String table = quoteIdentifier(source.datasourceId(), source.tableName());
+        List<Map<String, Object>> rows = executeQuery(sourceKey, "SELECT COUNT(*) AS total FROM " + table);
         if (rows.isEmpty() || rows.get(0).get("total") == null) {
             return 0;
         }
@@ -617,7 +723,10 @@ public class DatasourceService {
         if (tableName.isBlank()) {
             tableName = "*";
         }
-        String principalType = Objects.toString(request.getOrDefault("principalType", "USER")).toUpperCase();
+        if (!"*".equals(tableName)) {
+            assertOfficialTableExists(datasourceId, tableName);
+        }
+        String principalType = normalizePrincipalType(request.get("principalType"));
         String principalId = requiredString(request, "principalId");
         String filterExpression = sanitizeRowPolicy(requiredString(request, "filterExpression"));
         boolean enabled = parseBooleanFlag(request.getOrDefault("enabled", true));
@@ -677,10 +786,12 @@ public class DatasourceService {
         String officialTable = Objects.toString(relation.get("leftTable"));
         String officialField = Objects.toString(relation.get("leftField"));
         String uploadField = resolveUploadColumn(uploadTable, Objects.toString(relation.get("rightField")));
-        String uploadSql = "SELECT `" + uploadField + "` AS join_id, COUNT(*) AS upload_count FROM `" + uploadTable
-                + "` GROUP BY `" + uploadField + "` LIMIT 200";
-        String officialSql = "SELECT `" + officialField + "` AS join_id, * FROM `" + officialTable
-                + "` WHERE `" + officialField + "` IN (:joinIds) LIMIT 500";
+        String uploadColumn = quoteLocalIdentifier(uploadField);
+        String uploadSql = "SELECT " + uploadColumn + " AS join_id, COUNT(*) AS upload_count FROM "
+                + quoteLocalIdentifier(uploadTable) + " GROUP BY " + uploadColumn + " LIMIT 200";
+        String officialColumn = quoteIdentifier(datasourceId, officialField);
+        String officialSql = "SELECT " + officialColumn + " AS join_id, * FROM " + quoteIdentifier(datasourceId, officialTable)
+                + " WHERE " + officialColumn + " IN (:joinIds) LIMIT 500";
         String executionPlan = "Agent 将先执行上传表聚合 SQL，提取 join_id 集合，再对官方库执行只读 SELECT，最后在 Java 内存中按 join_id 合并结果。";
         return Map.of(
                 "question", question,
@@ -699,20 +810,21 @@ public class DatasourceService {
         OfficialSource source = parseSourceKey(sourceKey);
         assertCanAccessOfficialSource(sourceKey);
 
-        SqlAuditService.AuditResult auditResult = sqlAuditService.inspect(sql, sourceKey);
+        String dialectSql = adaptSqlDialect(source, sql);
+        SqlAuditService.AuditResult auditResult = sqlAuditService.inspect(dialectSql, sourceKey);
         if (auditResult.blocked()) {
             if (needAudit) {
-                sqlAuditService.record("官方数据源查询", sourceKey, "official-datasource", sql,
+                sqlAuditService.record("官方数据源查询", sourceKey, "official-datasource", dialectSql,
                         auditResult, "BLOCKED", 0L, auditResult.riskReason());
             }
             throw new IllegalArgumentException("SQL 安全审计未通过：" + auditResult.riskReason());
         }
 
-        String guardedSql = applyRowPolicies(source, sql);
+        String guardedSql = applyRowPolicies(source, dialectSql);
         String safeSql = sqlAuditService.ensureLimit(guardedSql, MAX_QUERY_ROWS);
         String executionGuard = "queryTimeoutSeconds=" + QUERY_TIMEOUT_SECONDS
                 + ";maxRows=" + MAX_QUERY_ROWS
-                + ";rowPolicyApplied=" + !Objects.equals(guardedSql, sql);
+                + ";rowPolicyApplied=" + !Objects.equals(guardedSql, dialectSql);
         long startedAt = System.currentTimeMillis();
 
         try (SqlAuditService.QueryPermit ignored = sqlAuditService.acquireQueryPermit("official-datasource");
@@ -753,14 +865,22 @@ public class DatasourceService {
         if (AuthContext.isAdmin()) {
             return sql;
         }
+        List<String> roles = effectiveRolesForCurrentUser();
+        String rolePlaceholders = placeholders(roles.size());
+        List<Object> args = new ArrayList<>();
+        args.add(source.datasourceId());
+        args.add(source.tableName());
+        args.add(AuthContext.userId());
+        args.addAll(roles);
         List<String> filters = jdbcTemplate.queryForList("""
                 SELECT filter_expression
                 FROM is_official_row_policy
                 WHERE datasource_id = ? AND (table_name = ? OR table_name = '*') AND enabled = 1
                   AND ((principal_type = 'USER' AND principal_id = ?)
-                    OR (principal_type = 'ROLE' AND principal_id = ?))
+                    OR (principal_type = 'ROLE' AND principal_id IN (""" + rolePlaceholders + """
+                    )))
                 ORDER BY created_at ASC
-                """, String.class, source.datasourceId(), source.tableName(), AuthContext.userId(), AuthContext.role());
+                """, String.class, args.toArray());
         if (filters.isEmpty()) {
             return sql;
         }
@@ -810,10 +930,12 @@ public class DatasourceService {
         long datasourceId = Long.parseLong(String.valueOf(relation.get("datasourceId")));
         String officialTable = String.valueOf(relation.get("leftTable"));
         String officialField = String.valueOf(relation.get("leftField"));
-        String uploadField = String.valueOf(relation.get("rightField"));
+        String uploadField = resolveUploadColumn(uploadTableName, String.valueOf(relation.get("rightField")));
 
-        String aggSql = "SELECT `" + uploadField + "` AS join_id, SUM(CAST(NULLIF(`amount`, '') AS DECIMAL(18,2))) AS total_amount " +
-                "FROM `" + uploadTableName + "` GROUP BY `" + uploadField + "` LIMIT 200";
+        String uploadColumn = quoteLocalIdentifier(uploadField);
+        String aggSql = "SELECT " + uploadColumn + " AS join_id, SUM(CAST(NULLIF("
+                + quoteLocalIdentifier("amount") + ", '') AS DECIMAL(18,2))) AS total_amount "
+                + "FROM " + quoteLocalIdentifier(uploadTableName) + " GROUP BY " + uploadColumn + " LIMIT 200";
         List<Map<String, Object>> uploadRows = jdbcTemplate.queryForList(aggSql);
         if (uploadRows.isEmpty()) {
             return List.of();
@@ -830,8 +952,10 @@ public class DatasourceService {
 
         String sourceKey = "official:" + datasourceId + ":" + officialTable;
         String inClause = joinIds.stream().map(id -> "'" + escapeSql(id) + "'").reduce((a,b)->a+","+b).orElse("''");
+        String officialColumn = quoteIdentifier(datasourceId, officialField);
         List<Map<String, Object>> officialRows = executeQuery(sourceKey,
-                "SELECT `" + officialField + "` AS join_id, * FROM `" + officialTable + "` WHERE `" + officialField + "` IN (" + inClause + ") LIMIT 500");
+                "SELECT " + officialColumn + " AS join_id, * FROM " + quoteIdentifier(datasourceId, officialTable)
+                        + " WHERE " + officialColumn + " IN (" + inClause + ") LIMIT 500");
 
         Map<String, Map<String, Object>> officialIndex = new LinkedHashMap<>();
         for (Map<String, Object> row : officialRows) {
@@ -958,6 +1082,27 @@ public class DatasourceService {
                "WHERE table_schema = '" + escapeSql(databaseName) + "' ORDER BY table_name, ordinal_position";
     }
 
+    private String buildForeignKeyMetaSql(String dbType, String databaseName) {
+        if ("POSTGRESQL".equalsIgnoreCase(dbType) || "POSTGRES".equalsIgnoreCase(dbType)) {
+            return "SELECT tc.table_name, kcu.column_name, ccu.table_name AS referenced_table_name,\n" +
+                   "       ccu.column_name AS referenced_column_name, tc.constraint_name\n" +
+                   "FROM information_schema.table_constraints tc\n" +
+                   "JOIN information_schema.key_column_usage kcu\n" +
+                   "  ON tc.constraint_catalog = kcu.constraint_catalog AND tc.constraint_schema = kcu.constraint_schema\n" +
+                   " AND tc.constraint_name = kcu.constraint_name\n" +
+                   "JOIN information_schema.constraint_column_usage ccu\n" +
+                   "  ON ccu.constraint_catalog = tc.constraint_catalog AND ccu.constraint_schema = tc.constraint_schema\n" +
+                   " AND ccu.constraint_name = tc.constraint_name\n" +
+                   "WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_catalog = '" + escapeSql(databaseName) + "'\n" +
+                   "  AND tc.table_schema = 'public'\n" +
+                   "ORDER BY tc.table_name, kcu.ordinal_position";
+        }
+        return "SELECT table_name, column_name, referenced_table_name, referenced_column_name, constraint_name\n" +
+               "FROM information_schema.key_column_usage\n" +
+               "WHERE table_schema = '" + escapeSql(databaseName) + "' AND referenced_table_name IS NOT NULL\n" +
+               "ORDER BY table_name, ordinal_position";
+    }
+
     private String normalizeDbType(String dbType) {
         String normalized = dbType == null ? "MYSQL" : dbType.trim().toUpperCase();
         if ("POSTGRES".equals(normalized)) {
@@ -993,7 +1138,7 @@ public class DatasourceService {
                 || lower.contains(";")
                 || lower.contains("--")
                 || lower.contains("/*")
-                || lower.matches(".*\\b(drop|delete|update|insert|alter|truncate|create|grant|revoke|execute)\\b.*")) {
+                || lower.matches(".*\\b(drop|delete|update|insert|alter|truncate|create|grant|revoke|execute|select|from|join|union|where|having|group|order|limit)\\b.*")) {
             throw new IllegalArgumentException("行级隔离表达式仅支持安全的只读 WHERE 条件");
         }
         return text;
@@ -1040,6 +1185,214 @@ public class DatasourceService {
         return "'" + escapeSql(value) + "'";
     }
 
+    private void assertOfficialTableExists(Long datasourceId, String tableName) {
+        validateIdentifier("官方表", tableName);
+        Integer count = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*)
+                FROM is_official_schema_table
+                WHERE datasource_id = ? AND table_name = ?
+                """, Integer.class, datasourceId, tableName);
+        if (count == null || count == 0) {
+            throw new IllegalArgumentException("官方表不存在或尚未解析 Schema：" + tableName);
+        }
+    }
+
+    private String normalizePrincipalType(Object value) {
+        String normalized = Objects.toString(value, "USER").trim().toUpperCase();
+        if (normalized.isBlank()) {
+            normalized = "USER";
+        }
+        if (!List.of("USER", "ROLE").contains(normalized)) {
+            throw new IllegalArgumentException("授权对象类型只能是 USER 或 ROLE");
+        }
+        return normalized;
+    }
+
+    private String normalizeOfficialPermissionType(Object value) {
+        String normalized = Objects.toString(value, "READ").trim().toUpperCase();
+        if (normalized.isBlank() || List.of("READ", "VIEW", "SELECT", "EDIT").contains(normalized)) {
+            return "READ";
+        }
+        throw new IllegalArgumentException("官方数据源仅支持只读 READ 权限");
+    }
+
+    private void validateFederalRelation(Long datasourceId,
+                                         String leftTable,
+                                         String leftField,
+                                         String rightSourceType,
+                                         String rightTable,
+                                         String rightField,
+                                         String relationType) {
+        validateIdentifier("官方表", leftTable);
+        validateIdentifier("官方字段", leftField);
+        validateIdentifier("右侧表", rightTable);
+        validateDisplayValue("右侧字段", rightField);
+
+        if (!List.of("LEFT_JOIN", "INNER_JOIN").contains(relationType)) {
+            throw new IllegalArgumentException("联邦关联类型仅支持 LEFT_JOIN 或 INNER_JOIN");
+        }
+        if (!"UPLOAD".equals(rightSourceType)) {
+            throw new IllegalArgumentException("右侧来源目前仅支持 UPLOAD");
+        }
+
+        assertOfficialTableExists(datasourceId, leftTable);
+        Integer officialFieldCount = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*)
+                FROM is_official_schema_field
+                WHERE datasource_id = ? AND table_name = ? AND column_name = ?
+                """, Integer.class, datasourceId, leftTable, leftField);
+        if (officialFieldCount == null || officialFieldCount == 0) {
+            throw new IllegalArgumentException("官方表关联字段不存在：" + leftTable + "." + leftField);
+        }
+
+        Integer uploadTableCount = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*)
+                FROM is_data_table
+                WHERE table_name = ? AND status IN ('ACTIVE', 'PENDING_CLEANING')
+                """, Integer.class, rightTable);
+        if (uploadTableCount == null || uploadTableCount == 0) {
+            throw new IllegalArgumentException("上传表不存在或不可用：" + rightTable);
+        }
+        String resolvedUploadColumn = resolveUploadColumn(rightTable, rightField);
+        validateIdentifier("上传字段", resolvedUploadColumn);
+    }
+
+    private List<String> effectiveRolesForCurrentUser() {
+        return effectiveRolesFor(assignedRolesFor(AuthContext.userId(), AuthContext.role()));
+    }
+
+    private List<String> assignedRolesFor(String userId, String fallbackRole) {
+        LinkedHashSet<String> roles = new LinkedHashSet<>();
+        if (tableExists("is_user_role")) {
+            jdbcTemplate.queryForList("""
+                    SELECT role_code AS roleCode
+                    FROM is_user_role
+                    WHERE user_id = ?
+                    ORDER BY created_at ASC
+                    """, userId).forEach(row -> {
+                String role = Objects.toString(row.get("roleCode"), "").trim();
+                if (!role.isBlank()) {
+                    roles.add(role);
+                }
+            });
+        }
+        String fallback = Objects.toString(fallbackRole, "").trim();
+        if (!fallback.isBlank()) {
+            roles.add(fallback);
+        }
+        if (roles.isEmpty()) {
+            roles.add("USER");
+        }
+        return new ArrayList<>(roles);
+    }
+
+    private List<String> effectiveRolesFor(List<String> assignedRoles) {
+        LinkedHashSet<String> resolved = new LinkedHashSet<>();
+        for (String role : assignedRoles) {
+            collectRoleWithParents(role, resolved, new LinkedHashSet<>());
+        }
+        if (resolved.isEmpty()) {
+            resolved.add("USER");
+        }
+        return new ArrayList<>(resolved);
+    }
+
+    private void collectRoleWithParents(String roleCode, Set<String> resolved, Set<String> visiting) {
+        String role = Objects.toString(roleCode, "").trim();
+        if (role.isBlank() || resolved.contains(role) || visiting.contains(role)) {
+            return;
+        }
+        visiting.add(role);
+        resolved.add(role);
+        if (tableExists("is_role")) {
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                    SELECT parent_role_code AS parentRoleCode
+                    FROM is_role
+                    WHERE role_code = ? AND enabled = 1
+                    LIMIT 1
+                    """, role);
+            if (!rows.isEmpty()) {
+                collectRoleWithParents(Objects.toString(rows.get(0).get("parentRoleCode"), ""), resolved, visiting);
+            }
+        }
+    }
+
+    private boolean tableExists(String tableName) {
+        try {
+            Integer count = jdbcTemplate.queryForObject("""
+                    SELECT COUNT(*)
+                    FROM information_schema.tables
+                    WHERE table_schema = DATABASE() AND table_name = ?
+                    """, Integer.class, tableName);
+            return count != null && count > 0;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private String placeholders(int count) {
+        return String.join(",", Collections.nCopies(Math.max(1, count), "?"));
+    }
+
+    private String quoteIdentifier(Long datasourceId, String identifier) {
+        Map<String, Object> datasource = findDatasource(datasourceId);
+        String dbType = Objects.toString(datasource.get("db_type"), "MYSQL");
+        return quoteIdentifierForDb(dbType, identifier);
+    }
+
+    private String quoteLocalIdentifier(String identifier) {
+        return quoteIdentifierForDb("MYSQL", identifier);
+    }
+
+    private String quoteIdentifierForDb(String dbType, String identifier) {
+        validateIdentifier("标识符", identifier);
+        boolean postgres = "POSTGRESQL".equalsIgnoreCase(dbType) || "POSTGRES".equalsIgnoreCase(dbType);
+        String quote = postgres ? "\"" : "`";
+        String escapedQuote = postgres ? "\"\"" : "``";
+        String[] parts = identifier.split("\\.");
+        List<String> quoted = new ArrayList<>();
+        for (String part : parts) {
+            if (part.isBlank() || !SAFE_IDENTIFIER.matcher(part).matches()) {
+                throw new IllegalArgumentException("不安全的数据库标识符：" + identifier);
+            }
+            quoted.add(quote + part.replace(quote, escapedQuote) + quote);
+        }
+        return String.join(".", quoted);
+    }
+
+    private String adaptSqlDialect(OfficialSource source, String sql) {
+        String text = Objects.toString(sql, "").trim();
+        if (text.isBlank()) {
+            throw new IllegalArgumentException("SQL 不能为空");
+        }
+        Map<String, Object> datasource = findDatasource(source.datasourceId());
+        String dbType = Objects.toString(datasource.get("db_type"), "MYSQL");
+        if ("POSTGRESQL".equalsIgnoreCase(dbType) || "POSTGRES".equalsIgnoreCase(dbType)) {
+            return text.replace('`', '"');
+        }
+        return text;
+    }
+
+    private void validateIdentifier(String label, String value) {
+        String text = Objects.toString(value, "").trim();
+        if (text.isBlank() || !SAFE_IDENTIFIER.matcher(text).matches()
+                || text.contains("..")
+                || text.contains("*")) {
+            throw new IllegalArgumentException(label + "包含不安全字符：" + value);
+        }
+    }
+
+    private void validateDisplayValue(String label, String value) {
+        String text = Objects.toString(value, "").trim();
+        if (text.isBlank()
+                || text.contains(";")
+                || text.contains("--")
+                || text.contains("/*")
+                || text.contains("*/")) {
+            throw new IllegalArgumentException(label + "包含不安全字符：" + value);
+        }
+    }
+
     private String resolveUploadColumn(String tableName, String fieldName) {
         List<String> columns = jdbcTemplate.queryForList("""
                 SELECT column_name
@@ -1055,16 +1408,41 @@ public class DatasourceService {
     }
 
     private boolean hasOfficialTablePermission(OfficialSource source, String permissionType) {
-        Integer count = jdbcTemplate.queryForObject("""
+        List<String> roles = effectiveRolesForCurrentUser();
+        String rolePlaceholders = placeholders(roles.size());
+        List<Object> args = new ArrayList<>();
+        args.add(source.datasourceId());
+        args.add(source.tableName());
+        args.add(permissionType);
+        args.add(AuthContext.userId());
+        args.addAll(roles);
+        Integer tableCount = jdbcTemplate.queryForObject("""
                 SELECT COUNT(*)
                 FROM is_official_table_permission
                 WHERE datasource_id = ? AND (table_name = ? OR table_name = '*') AND permission_type = ?
                   AND (expire_at IS NULL OR expire_at > NOW())
                   AND ((principal_type = 'USER' AND principal_id = ?)
-                    OR (principal_type = 'ROLE' AND principal_id = ?))
-                """, Integer.class, source.datasourceId(), source.tableName(), permissionType,
-                AuthContext.userId(), AuthContext.role());
-        return count != null && count > 0;
+                    OR (principal_type = 'ROLE' AND principal_id IN (""" + rolePlaceholders + """
+                    )))
+                """, Integer.class, args.toArray());
+        if (tableCount != null && tableCount > 0) {
+            return true;
+        }
+        List<Object> dsArgs = new ArrayList<>();
+        dsArgs.add(source.datasourceId());
+        dsArgs.add(permissionType);
+        dsArgs.add(AuthContext.userId());
+        dsArgs.addAll(roles);
+        Integer datasourceCount = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*)
+                FROM is_official_datasource_permission
+                WHERE datasource_id = ? AND permission_type = ?
+                  AND (expire_at IS NULL OR expire_at > NOW())
+                  AND ((principal_type = 'USER' AND principal_id = ?)
+                    OR (principal_type = 'ROLE' AND principal_id IN (""" + rolePlaceholders + """
+                    )))
+                """, Integer.class, dsArgs.toArray());
+        return datasourceCount != null && datasourceCount > 0;
     }
 
     private OfficialSource parseSourceKey(String sourceKey) {

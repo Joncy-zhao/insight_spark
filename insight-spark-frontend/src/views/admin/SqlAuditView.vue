@@ -16,15 +16,15 @@
         <div class="metric-icon">SQL</div>
         <div>
           <span>今日审计 SQL</span>
-          <strong>{{ totalSqlCount }}</strong>
-          <small>全量留痕 {{ auditLogs.length }} 条</small>
+          <strong>{{ auditStats.todayCount ?? totalSqlCount }}</strong>
+          <small>全量留痕 {{ auditStats.total ?? auditLogs.length }} 条</small>
         </div>
       </article>
       <article class="metric-card metric-card--orange">
         <div class="metric-icon">盾</div>
         <div>
           <span>风险拦截</span>
-          <strong>{{ blockedCount }}</strong>
+          <strong>{{ auditStats.blockedCount ?? blockedCount }}</strong>
           <small>危险操作与越权访问</small>
         </div>
       </article>
@@ -32,7 +32,7 @@
         <div class="metric-icon">慢</div>
         <div>
           <span>慢 SQL</span>
-          <strong>{{ slowCount }}</strong>
+          <strong>{{ auditStats.slowCount ?? slowCount }}</strong>
           <small>超时、限流、扫描行数治理</small>
         </div>
       </article>
@@ -69,6 +69,20 @@
             <el-button type="primary" @click="loadAuditLogs">刷新</el-button>
           </div>
         </div>
+        <div class="audit-filter-row">
+          <el-input v-model="auditAdvancedFilters.userId" placeholder="操作人" clearable />
+          <el-input v-model="auditAdvancedFilters.tableName" placeholder="数据表" clearable />
+          <el-input v-model="auditAdvancedFilters.keyword" placeholder="后端关键词" clearable />
+          <el-select v-model="auditAdvancedFilters.cacheHit" placeholder="缓存命中" clearable>
+            <el-option label="命中" :value="true" />
+            <el-option label="未命中" :value="false" />
+          </el-select>
+          <el-select v-model="auditAdvancedFilters.slowQuery" placeholder="慢 SQL" clearable>
+            <el-option label="是" :value="true" />
+            <el-option label="否" :value="false" />
+          </el-select>
+          <el-button @click="loadAuditLogs">筛选</el-button>
+        </div>
 
         <el-table :data="pagedLogs" height="420" empty-text="暂无 SQL 审计日志" class="audit-table">
           <el-table-column prop="createdAt" label="时间" min-width="160" />
@@ -96,9 +110,10 @@
               <el-tag :type="statusTagType(row.executeStatus)" size="small">{{ statusLabel(row.executeStatus) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="90" fixed="right">
+          <el-table-column label="操作" width="130" fixed="right">
             <template #default="{ row }">
               <el-button link type="primary" @click="showLogDetail(row)">详情</el-button>
+              <el-button v-if="row.riskLevel === 'BLOCKED' || row.executeStatus === 'BLOCKED'" link type="success" @click="reviewAuditLog(row)">处置</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -148,6 +163,7 @@
             </div>
           </div>
           <el-button class="full-btn" type="primary" @click="rulesDrawerVisible = true">规则配置</el-button>
+          <el-button class="full-btn" @click="rowPolicyDrawerVisible = true">上传表行级策略</el-button>
         </section>
       </aside>
     </div>
@@ -163,9 +179,10 @@
           <el-table-column prop="userId" label="操作人" width="90" />
           <el-table-column prop="riskReason" label="风险原因" min-width="180" show-overflow-tooltip />
           <el-table-column prop="matchedRules" label="SQL类型" width="120" show-overflow-tooltip />
-          <el-table-column label="操作" width="70">
+          <el-table-column label="操作" width="120">
             <template #default="{ row }">
               <el-button link type="primary" @click="showLogDetail(row)">详情</el-button>
+              <el-button link type="success" @click="reviewAuditLog(row)">处置</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -190,16 +207,16 @@
       <section class="audit-panel">
         <div class="panel-head compact">
           <h2>缓存关联审计</h2>
-          <span>最近命中 {{ auditCacheOverview.lastHitAt || '-' }}</span>
+          <el-button link type="primary" @click="cacheDrawerVisible = true">缓存明细</el-button>
         </div>
         <div class="cache-kpis">
           <div><strong>{{ auditCacheOverview.cacheCount ?? 0 }}</strong><span>缓存中 SQL</span></div>
           <div><strong>{{ auditCacheOverview.hitCount ?? 0 }}</strong><span>累计命中</span></div>
           <div><strong>{{ auditCacheOverview.redisStatus || 'LOCAL' }}</strong><span>Redis 状态</span></div>
         </div>
-        <el-table :data="cacheLogs" height="165" empty-text="暂无缓存审计">
+        <el-table :data="cacheAuditPreviewRows" height="165" empty-text="暂无缓存审计">
           <el-table-column prop="cacheKey" label="缓存Key" min-width="170" show-overflow-tooltip />
-          <el-table-column prop="cacheAuditStatus" label="审计" width="90" />
+          <el-table-column prop="redisStatus" label="状态" width="90" />
           <el-table-column prop="riskLevel" label="风险" width="80" />
         </el-table>
       </section>
@@ -212,6 +229,8 @@
           <div><span>执行状态</span><strong>{{ currentLog.executeStatus }}</strong></div>
           <div><span>缓存Key</span><strong>{{ currentLog.cacheKey || '-' }}</strong></div>
           <div><span>命中规则</span><strong>{{ currentLog.matchedRules || '-' }}</strong></div>
+          <div><span>处置状态</span><strong>{{ currentLog.reviewStatus || 'OPEN' }}</strong></div>
+          <div><span>处置人</span><strong>{{ currentLog.reviewedBy || '-' }}</strong></div>
         </div>
         <div class="detail-block">
           <h3>生成 SQL</h3>
@@ -242,6 +261,9 @@ sql={{ currentLog.cacheSql || '-' }}</pre>
           </div>
         </div>
         <el-alert v-if="currentLog.errorMessage" type="error" :closable="false" :title="currentLog.errorMessage" />
+        <div v-if="currentLog.riskLevel === 'BLOCKED' || currentLog.executeStatus === 'BLOCKED'" class="detail-actions">
+          <el-button type="success" @click="reviewAuditLog(currentLog)">标记已处置</el-button>
+        </div>
       </template>
     </el-dialog>
 
@@ -284,6 +306,12 @@ sql={{ currentLog.cacheSql || '-' }}</pre>
           <el-form-item label="启用">
             <el-switch v-model="sensitiveRuleForm.enabled" />
           </el-form-item>
+          <el-form-item label="访问动作">
+            <el-select v-model="sensitiveRuleForm.accessAction" class="full-width">
+              <el-option label="脱敏放行" value="MASK" />
+              <el-option label="直接拦截" value="BLOCK" />
+            </el-select>
+          </el-form-item>
           <el-form-item label=" ">
             <el-button type="primary" @click="saveSensitiveRule">保存规则</el-button>
           </el-form-item>
@@ -292,6 +320,7 @@ sql={{ currentLog.cacheSql || '-' }}</pre>
       <el-table :data="sensitiveRules" height="calc(100vh - 180px)">
         <el-table-column prop="fieldKeyword" label="关键词" min-width="160" />
         <el-table-column prop="maskType" label="脱敏类型" width="130" />
+        <el-table-column prop="accessAction" label="访问动作" width="110" />
         <el-table-column label="启用" width="90">
           <template #default="{ row }">
             <el-switch v-model="row.enabled" @change="updateSensitiveRuleStatus(row)" />
@@ -301,6 +330,65 @@ sql={{ currentLog.cacheSql || '-' }}</pre>
         <el-table-column label="操作" width="90">
           <template #default="{ row }">
             <el-button link type="danger" @click="deleteSensitiveRule(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-drawer>
+
+    <el-drawer v-model="cacheDrawerVisible" title="缓存关联审计" size="62%">
+      <el-table :data="auditCacheAudits" height="100%" empty-text="暂无缓存审计">
+        <el-table-column prop="cacheKey" label="缓存Key" min-width="210" show-overflow-tooltip />
+        <el-table-column prop="tableName" label="数据表" min-width="140" show-overflow-tooltip />
+        <el-table-column prop="hitCount" label="命中" width="80" />
+        <el-table-column prop="riskLevel" label="风险" width="90" />
+        <el-table-column prop="redisStatus" label="状态" width="110" />
+        <el-table-column prop="lastHitAt" label="最近命中" min-width="160" />
+        <el-table-column label="操作" width="90" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="danger" :disabled="row.redisStatus === 'QUARANTINED'" @click="quarantineAuditCache(row)">隔离</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-drawer>
+
+    <el-drawer v-model="rowPolicyDrawerVisible" title="上传表行级策略" size="58%">
+      <section class="sensitive-create-card">
+        <h3>新增行级策略</h3>
+        <el-form label-position="top" class="row-policy-form">
+          <el-form-item label="上传表名">
+            <el-input v-model="auditRowPolicyForm.tableName" placeholder="biz_data_..." clearable />
+          </el-form-item>
+          <el-form-item label="对象类型">
+            <el-select v-model="auditRowPolicyForm.principalType" class="full-width">
+              <el-option label="用户" value="USER" />
+              <el-option label="角色" value="ROLE" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="对象 ID">
+            <el-input v-model="auditRowPolicyForm.principalId" placeholder="用户ID或角色编码" clearable />
+          </el-form-item>
+          <el-form-item label="WHERE 条件">
+            <el-input v-model="auditRowPolicyForm.filterExpression" placeholder="owner_id = 'u001'" clearable />
+          </el-form-item>
+          <el-form-item label="启用">
+            <el-switch v-model="auditRowPolicyForm.enabled" />
+          </el-form-item>
+          <el-form-item label=" ">
+            <el-button type="primary" @click="saveAuditRowPolicy">保存策略</el-button>
+          </el-form-item>
+        </el-form>
+      </section>
+      <el-table :data="auditRowPolicies" height="calc(100vh - 220px)" empty-text="暂无行级策略">
+        <el-table-column prop="tableName" label="表名" min-width="140" />
+        <el-table-column prop="principalType" label="对象" width="80" />
+        <el-table-column prop="principalId" label="对象ID" min-width="120" />
+        <el-table-column prop="filterExpression" label="过滤条件" min-width="180" show-overflow-tooltip />
+        <el-table-column prop="enabled" label="启用" width="80">
+          <template #default="{ row }">{{ row.enabled ? '是' : '否' }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="90">
+          <template #default="{ row }">
+            <el-button link type="danger" @click="deleteAuditRowPolicy(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -336,7 +424,12 @@ const {
   auditRiskLevel,
   sensitiveRules,
   auditCacheOverview,
+  auditStats,
+  auditCacheAudits,
+  auditRowPolicies,
+  auditAdvancedFilters,
   sensitiveRuleForm,
+  auditRowPolicyForm,
   manualAuditSql,
   manualAuditResult,
   loadAuditLogs,
@@ -349,6 +442,10 @@ const {
   updateSensitiveRuleStatus,
   deleteSensitiveRule,
   submitManualAudit,
+  reviewAuditLog,
+  quarantineAuditCache,
+  saveAuditRowPolicy,
+  deleteAuditRowPolicy,
   exportSqlLogs
 } = inject('workbench')
 
@@ -358,6 +455,8 @@ const logPageSize = ref(10)
 const detailVisible = ref(false)
 const rulesDrawerVisible = ref(false)
 const sensitiveDrawerVisible = ref(false)
+const cacheDrawerVisible = ref(false)
+const rowPolicyDrawerVisible = ref(false)
 const submitDialogVisible = ref(false)
 const currentLog = ref(null)
 
@@ -388,6 +487,10 @@ const slowCount = computed(() => auditLogs.value.filter(row => Boolean(row.slowQ
 const warnPercent = computed(() => percent(warnCount.value))
 const blockedPercent = computed(() => percent(blockedCount.value))
 const cacheLogs = computed(() => auditLogs.value.filter(row => row.cacheKey).slice(0, 6))
+const cacheAuditPreviewRows = computed(() => {
+  if (auditCacheAudits.value?.length) return auditCacheAudits.value.slice(0, 6)
+  return cacheLogs.value
+})
 const sensitivePreviewRows = computed(() => {
   const rows = []
   auditLogs.value.forEach(log => {
@@ -811,9 +914,18 @@ function statusLabel(status) {
 
 .sensitive-create-form {
   display: grid;
-  grid-template-columns: minmax(220px, 1.4fr) minmax(160px, 1fr) 72px 100px;
+  grid-template-columns: minmax(220px, 1.4fr) minmax(150px, 1fr) 72px minmax(120px, 0.8fr) 100px;
   gap: 12px;
   align-items: end;
+}
+
+.audit-filter-row,
+.row-policy-form {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(120px, 1fr));
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 12px;
 }
 
 .full-width {
@@ -850,6 +962,8 @@ function statusLabel(status) {
   }
 
   .audit-toolbar,
+  .audit-filter-row,
+  .row-policy-form,
   .sensitive-rule-form,
   .sensitive-inline-form,
   .sensitive-split,

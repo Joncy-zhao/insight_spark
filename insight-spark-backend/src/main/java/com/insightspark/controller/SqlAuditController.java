@@ -29,8 +29,14 @@ public class SqlAuditController {
     @GetMapping("/sql-logs")
     public ApiResponse<List<Map<String, Object>>> listSqlLogs(@RequestParam(required = false) String riskLevel,
                                                               @RequestParam(required = false) String executeStatus,
+                                                              @RequestParam(required = false) String userId,
+                                                              @RequestParam(required = false) String tableName,
+                                                              @RequestParam(required = false) Boolean cacheHit,
+                                                              @RequestParam(required = false) Boolean slowQuery,
+                                                              @RequestParam(required = false) String keyword,
                                                               @RequestParam(defaultValue = "50") int limit) {
-        return ApiResponse.success(sqlAuditService.listLogs(riskLevel, executeStatus, limit));
+        return ApiResponse.success(sqlAuditService.listLogs(riskLevel, executeStatus, userId, tableName,
+                cacheHit, slowQuery, keyword, limit));
     }
 
     @GetMapping("/rules")
@@ -46,6 +52,17 @@ public class SqlAuditController {
     @GetMapping("/cache/overview")
     public ApiResponse<Map<String, Object>> cacheOverview() {
         return ApiResponse.success(sqlAuditService.cacheOverview());
+    }
+
+    @GetMapping("/cache/audits")
+    public ApiResponse<List<Map<String, Object>>> listCacheAudits(@RequestParam(defaultValue = "50") int limit) {
+        return ApiResponse.success(sqlAuditService.listCacheAudits(limit));
+    }
+
+    @PostMapping("/cache/{cacheKey}/quarantine")
+    public ApiResponse<Void> quarantineCache(@PathVariable String cacheKey, @RequestBody Map<String, Object> request) {
+        sqlAuditService.quarantineCache(cacheKey, String.valueOf(request.getOrDefault("reason", "管理员隔离违规缓存")));
+        return ApiResponse.success(null);
     }
 
     @GetMapping("/sensitive-rules")
@@ -87,6 +104,28 @@ public class SqlAuditController {
     @PostMapping("/submit")
     public ApiResponse<Map<String, Object>> submitAudit(@RequestBody Map<String, Object> request) {
         return ApiResponse.success(sqlAuditService.submitSqlAudit(request));
+    }
+
+    @PostMapping("/sql-logs/{id}/review")
+    public ApiResponse<Void> reviewLog(@PathVariable Long id, @RequestBody Map<String, Object> request) {
+        sqlAuditService.reviewLog(id, request);
+        return ApiResponse.success(null);
+    }
+
+    @GetMapping("/data-row-policies")
+    public ApiResponse<List<Map<String, Object>>> listDataRowPolicies(@RequestParam(required = false) String tableName) {
+        return ApiResponse.success(sqlAuditService.listDataRowPolicies(tableName));
+    }
+
+    @PostMapping("/data-row-policies")
+    public ApiResponse<Map<String, Object>> saveDataRowPolicy(@RequestBody Map<String, Object> request) {
+        return ApiResponse.success(sqlAuditService.saveDataRowPolicy(request));
+    }
+
+    @PostMapping("/data-row-policies/{id}/delete")
+    public ApiResponse<Void> deleteDataRowPolicy(@PathVariable Long id) {
+        sqlAuditService.deleteDataRowPolicy(id);
+        return ApiResponse.success(null);
     }
 
     @GetMapping("/sql-logs/export")

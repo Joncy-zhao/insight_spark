@@ -212,6 +212,32 @@ public class KnowledgeGraphService {
             }
         }
 
+        List<Map<String, Object>> officialRelations = jdbcTemplate.queryForList("""
+                SELECT datasource_id AS datasourceId, table_name AS tableName, column_name AS columnName,
+                       referenced_table_name AS referencedTableName, referenced_column_name AS referencedColumnName,
+                       constraint_name AS constraintName
+                FROM is_official_schema_relation
+                """);
+        for (Map<String, Object> relation : officialRelations) {
+            String datasourceId = Objects.toString(relation.get("datasourceId"), "");
+            String tableName = Objects.toString(relation.get("tableName"), "");
+            String columnName = Objects.toString(relation.get("columnName"), "");
+            String referencedTableName = Objects.toString(relation.get("referencedTableName"), "");
+            String referencedColumnName = Objects.toString(relation.get("referencedColumnName"), "");
+            String fieldKey = "official_table:" + datasourceId + ":" + tableName + ":field:" + columnName;
+            String referencedFieldKey = "official_table:" + datasourceId + ":" + referencedTableName + ":field:" + referencedColumnName;
+            String relationKey = "official_fk:" + datasourceId + ":" + tableName + "." + columnName
+                    + "->" + referencedTableName + "." + referencedColumnName;
+            String label = tableName + "." + columnName + " -> " + referencedTableName + "." + referencedColumnName;
+            String content = "官方库外键关系；约束：" + Objects.toString(relation.get("constraintName"), "");
+            nodeCount += upsertNode(relationKey, "OFFICIAL_FOREIGN_KEY", label, "OFFICIAL", datasourceId, content, 2.2);
+            edgeCount += upsertEdge(fieldKey, relationKey, "FOREIGN_KEY_FROM", 1.6);
+            edgeCount += upsertEdge(relationKey, referencedFieldKey, "FOREIGN_KEY_TO", 1.6);
+            edgeCount += upsertEdge(fieldKey, referencedFieldKey, "REFERENCES_FIELD", 1.8);
+            edgeCount += upsertEdge("official_table:" + datasourceId + ":" + tableName,
+                    "official_table:" + datasourceId + ":" + referencedTableName, "REFERENCES_TABLE", 1.4);
+        }
+
         List<Map<String, Object>> federalRelations = jdbcTemplate.queryForList("""
                 SELECT datasource_id AS datasourceId, left_table AS leftTable, left_field AS leftField,
                        right_source_type AS rightSourceType, right_table AS rightTable, right_field AS rightField,
@@ -242,6 +268,15 @@ public class KnowledgeGraphService {
         Map<String, Integer> metricSync = syncBusinessMetricNodes();
         nodeCount += metricSync.getOrDefault("node", 0);
         edgeCount += metricSync.getOrDefault("edge", 0);
+
+        jdbcTemplate.update("""
+                UPDATE is_official_datasource
+                SET last_sync_at = NOW()
+                WHERE id IN (
+                    SELECT datasource_id
+                    FROM is_official_schema_table
+                )
+                """);
 
         return Map.of("nodeUpsertCount", nodeCount, "edgeUpsertCount", edgeCount);
     }

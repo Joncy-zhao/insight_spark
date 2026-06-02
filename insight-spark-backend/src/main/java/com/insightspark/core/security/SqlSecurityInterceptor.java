@@ -6,11 +6,14 @@ import com.alibaba.druid.sql.ast.statement.SQLDeleteStatement;
 import com.alibaba.druid.sql.ast.statement.SQLDropTableStatement;
 import com.alibaba.druid.sql.ast.statement.SQLUpdateStatement;
 import com.alibaba.druid.util.JdbcConstants;
+import com.insightspark.service.SqlAuditService;
 import org.apache.ibatis.executor.statement.StatementHandler;
 import org.apache.ibatis.mapping.BoundSql;
 import org.apache.ibatis.plugin.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.sql.Connection;
@@ -28,6 +31,9 @@ import java.util.Properties;
 public class SqlSecurityInterceptor implements Interceptor {
 
     private static final Logger log = LoggerFactory.getLogger(SqlSecurityInterceptor.class);
+
+    @Autowired
+    private ObjectProvider<SqlAuditService> sqlAuditServiceProvider;
 
     @Override
     public Object intercept(Invocation invocation) throws Throwable {
@@ -53,6 +59,7 @@ public class SqlSecurityInterceptor implements Interceptor {
                 // 规则 1：绝对禁止 DROP TABLE (删表)
                 if (stmt instanceof SQLDropTableStatement) {
                     log.error("❌ 拦截到危险操作：禁止执行 DROP TABLE！SQL: {}", originalSql);
+                    recordBlocked(originalSql, "拦截危险操作：DROP TABLE", "DROP_TABLE");
                     throw new RuntimeException("安全告警：系统已拦截恶意删表操作 (DROP TABLE)！");
                 }
 
@@ -60,12 +67,14 @@ public class SqlSecurityInterceptor implements Interceptor {
                 // 在 BI 系统中，数据只能被分析，绝不能被普通的查询接口删除
                 if (stmt instanceof SQLDeleteStatement) {
                     log.error("❌ 拦截到危险操作：禁止执行 DELETE！SQL: {}", originalSql);
+                    recordBlocked(originalSql, "拦截危险操作：DELETE", "DELETE");
                     throw new RuntimeException("安全告警：系统已拦截恶意删数据操作 (DELETE)！");
                 }
 
                 // 规则 3：绝对禁止 UPDATE (改数据)
                 if (stmt instanceof SQLUpdateStatement) {
                     log.error("❌ 拦截到危险操作：禁止执行 UPDATE！SQL: {}", originalSql);
+                    recordBlocked(originalSql, "拦截危险操作：UPDATE", "UPDATE");
                     throw new RuntimeException("安全告警：系统已拦截恶意改数据操作 (UPDATE)！");
                 }
             }
@@ -75,6 +84,7 @@ public class SqlSecurityInterceptor implements Interceptor {
         } catch (com.alibaba.druid.sql.parser.ParserException e) {
             // 如果连解析都解析不了，说明 SQL 语法有问题，也可能有注入风险，直接拦截
             log.error("❌ 拦截到语法错误或无法解析的异常 SQL: {}", originalSql);
+            recordBlocked(originalSql, "SQL 语法解析失败，已拦截：" + e.getMessage(), "AST_PARSE");
             throw new RuntimeException("安全告警：检测到非法或无法解析的 SQL 语法！");
         }
 
@@ -91,5 +101,17 @@ public class SqlSecurityInterceptor implements Interceptor {
     @Override
     public void setProperties(Properties properties) {
         // 可以在这里接收配置文件传来的参数
+    }
+
+    private void recordBlocked(String sql, String reason, String ruleCode) {
+        try {
+            SqlAuditService service = sqlAuditServiceProvider == null ? null : sqlAuditServiceProvider.getIfAvailable();
+            if (service != null) {
+                service.recordBlocked("MyBatis 执行前安全拦截", "", "mybatis-interceptor",
+                        sql, reason, List.of(ruleCode));
+            }
+        } catch (Exception e) {
+            log.debug("记录 SQL 拦截审计失败: {}", e.getMessage());
+        }
     }
 }

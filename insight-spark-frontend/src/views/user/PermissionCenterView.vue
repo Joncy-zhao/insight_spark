@@ -475,6 +475,17 @@ const rbacRoleDetails = computed(() => {
   }]
 })
 
+const effectiveRoleSummary = computed(() => {
+  const roles = rbacRoleDetails.value.filter(item => item.roleCode)
+  const baseRole = roleCode.value
+  const primary = roles.find(item => item.roleCode !== baseRole) || roles[0] || { roleCode: baseRole }
+  const count = roles.length || 1
+  return {
+    value: primary.roleCode,
+    note: count > 1 ? `基础身份 ${baseRole} · 共 ${count} 个角色` : `基础身份 ${baseRole}`
+  }
+})
+
 const metricCards = computed(() => [
   {
     label: '当前用户',
@@ -484,9 +495,9 @@ const metricCards = computed(() => [
     tone: 'blue'
   },
   {
-    label: '当前角色',
-    value: roleCode.value,
-    note: roleDisplay.value,
+    label: '当前生效角色',
+    value: effectiveRoleSummary.value.value,
+    note: effectiveRoleSummary.value.note,
     icon: UserFilled,
     tone: 'green'
   },

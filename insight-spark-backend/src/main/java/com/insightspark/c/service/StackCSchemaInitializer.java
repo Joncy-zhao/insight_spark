@@ -1,16 +1,18 @@
 package com.insightspark.c.service;
 
 import jakarta.annotation.PostConstruct;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
-@Slf4j
 @Service
 @DependsOn("authService")
 public class StackCSchemaInitializer {
+
+    private static final Logger log = LoggerFactory.getLogger(StackCSchemaInitializer.class);
 
     @Autowired
     private JdbcTemplate jdbcTemplate;

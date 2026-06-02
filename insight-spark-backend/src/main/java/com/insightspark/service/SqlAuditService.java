@@ -2,7 +2,6 @@ package com.insightspark.service;
 
 import com.insightspark.core.auth.AuthContext;
 import jakarta.annotation.PostConstruct;
-import lombok.extern.slf4j.Slf4j;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.statement.Statements;
 import net.sf.jsqlparser.statement.Statement;
@@ -12,6 +11,8 @@ import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.ss.usermodel.Workbook;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -25,17 +26,22 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HexFormat;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
-@Slf4j
 @Service
 public class SqlAuditService {
+
+    private static final Logger log = LoggerFactory.getLogger(SqlAuditService.class);
+    private static final Pattern SAFE_ROW_POLICY = Pattern.compile("^[\\p{L}\\p{N}_\\s`\"'.=<>!%(),:-]+$");
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -97,6 +103,10 @@ public class SqlAuditService {
         addColumnIfMissing("is_sql_audit_log", "mask_detail", "`mask_detail` VARCHAR(1000) NULL");
         addColumnIfMissing("is_sql_audit_log", "execution_guard", "`execution_guard` VARCHAR(1000) NULL");
         addColumnIfMissing("is_sql_audit_log", "query_guard_action", "`query_guard_action` VARCHAR(32) NULL");
+        addColumnIfMissing("is_sql_audit_log", "review_status", "`review_status` VARCHAR(32) NOT NULL DEFAULT 'OPEN'");
+        addColumnIfMissing("is_sql_audit_log", "review_note", "`review_note` VARCHAR(1000) NULL");
+        addColumnIfMissing("is_sql_audit_log", "reviewed_by", "`reviewed_by` VARCHAR(64) NULL");
+        addColumnIfMissing("is_sql_audit_log", "reviewed_at", "`reviewed_at` DATETIME NULL");
         addColumnIfTableExists("is_data_field", "field_comment", "`field_comment` VARCHAR(512) NULL");
         addColumnIfTableExists("is_data_field", "synonyms", "`synonyms` VARCHAR(1000) NULL");
         addColumnIfTableExists("is_data_field", "sensitive", "`sensitive` TINYINT(1) NOT NULL DEFAULT 0");
@@ -122,10 +132,12 @@ public class SqlAuditService {
                   `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
                   `field_keyword` VARCHAR(128) NOT NULL UNIQUE,
                   `mask_type` VARCHAR(32) NOT NULL DEFAULT 'MIDDLE',
+                  `access_action` VARCHAR(32) NOT NULL DEFAULT 'MASK',
                   `enabled` TINYINT(1) NOT NULL DEFAULT 1,
                   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='敏感字段识别与脱敏规则';
                 """);
+        addColumnIfMissing("is_sensitive_field_rule", "access_action", "`access_action` VARCHAR(32) NOT NULL DEFAULT 'MASK'");
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS `is_semantic_cache_audit` (
                   `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -137,11 +149,15 @@ public class SqlAuditService {
                   `risk_level` VARCHAR(32) NOT NULL DEFAULT 'SAFE',
                   `risk_reason` VARCHAR(1000) NULL,
                   `redis_status` VARCHAR(32) NOT NULL DEFAULT 'LOCAL',
+                  `quarantine_reason` VARCHAR(1000) NULL,
+                  `quarantined_at` DATETIME NULL,
                   `last_hit_at` DATETIME NULL,
                   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                   UNIQUE KEY `uk_semantic_cache_key` (`cache_key`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Redis语义缓存审计';
                 """);
+        addColumnIfMissing("is_semantic_cache_audit", "quarantine_reason", "`quarantine_reason` VARCHAR(1000) NULL");
+        addColumnIfMissing("is_semantic_cache_audit", "quarantined_at", "`quarantined_at` DATETIME NULL");
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS `is_data_row_policy` (
                   `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -237,6 +253,14 @@ public class SqlAuditService {
             warningReasons.add("访问敏感字段：" + String.join("、", sensitiveFields));
             matchedRules.add("SENSITIVE_FIELD");
         }
+        List<String> blockedSensitiveFields = sensitiveFields.stream()
+                .filter(this::isSensitiveAccessBlocked)
+                .toList();
+        if (!blockedSensitiveFields.isEmpty()) {
+            matchedRules.add("SENSITIVE_FIELD_BLOCK");
+            return AuditResult.blocked("敏感字段策略要求拦截访问：" + String.join("、", blockedSensitiveFields),
+                    matchedRules, sensitiveFields);
+        }
 
         if (!warningReasons.isEmpty()) {
             return new AuditResult("WARN", String.join("；", warningReasons), false, matchedRules, sensitiveFields);
@@ -304,6 +328,19 @@ public class SqlAuditService {
                 safeText(stringDetail(details, "queryGuardAction"), 32)
         );
         recordSemanticCache(question, tableName, sql, auditResult, executeStatus, details);
+    }
+
+    public void recordBlocked(String question, String tableName, String engine, String sql,
+                              String reason, List<String> matchedRules) {
+        AuditResult auditResult = AuditResult.blocked(reason,
+                matchedRules == null ? List.of() : matchedRules,
+                List.of());
+        try {
+            recordDetailed(question, tableName, engine, sql, auditResult,
+                    "BLOCKED", 0L, reason, Map.of("queryGuardAction", "BLOCKED"));
+        } catch (Exception e) {
+            log.warn("写入 SQL 拦截审计日志失败: {}", e.getMessage());
+        }
     }
 
     public Map<String, Object> submitSqlAudit(Map<String, Object> request) {
@@ -421,8 +458,11 @@ public class SqlAuditService {
                        duration_ms AS durationMs, error_message AS errorMessage,
                        generation_trace AS generationTrace, kg_match_log AS kgMatchLog,
                        cache_key AS cacheKey, cache_hit AS cacheHit, cache_sql AS cacheSql,
-                       cache_audit_status AS cacheAuditStatus, mask_detail AS maskDetail,
+                       cache_audit_status AS cacheAuditStatus, redis_status AS redisStatus,
+                       mask_detail AS maskDetail,
                        execution_guard AS executionGuard, query_guard_action AS queryGuardAction,
+                       review_status AS reviewStatus, review_note AS reviewNote,
+                       reviewed_by AS reviewedBy, reviewed_at AS reviewedAt,
                        created_at AS createdAt
                 FROM is_sql_audit_log
                 WHERE 1 = 1
@@ -498,8 +538,14 @@ public class SqlAuditService {
                        SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) AS enabledRuleCount
                 FROM is_sql_audit_rule
                 """);
+        Long todayCount = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*)
+                FROM is_sql_audit_log
+                WHERE DATE(created_at) = CURDATE()
+                """, Long.class);
         return Map.of(
                 "total", number(totals.get("total")),
+                "todayCount", todayCount == null ? 0 : todayCount,
                 "blockedCount", number(totals.get("blockedCount")),
                 "warnCount", number(totals.get("warnCount")),
                 "sensitiveCount", number(totals.get("sensitiveCount")),
@@ -586,7 +632,8 @@ public class SqlAuditService {
 
     public List<Map<String, Object>> listSensitiveRules() {
         List<Map<String, Object>> rules = jdbcTemplate.queryForList("""
-                SELECT id, field_keyword AS fieldKeyword, mask_type AS maskType, enabled, created_at AS createdAt
+                SELECT id, field_keyword AS fieldKeyword, mask_type AS maskType,
+                       access_action AS accessAction, enabled, created_at AS createdAt
                 FROM is_sensitive_field_rule
                 ORDER BY enabled DESC, field_keyword ASC
                 """);
@@ -601,16 +648,20 @@ public class SqlAuditService {
     public Map<String, Object> saveSensitiveRule(Map<String, Object> request) {
         String keyword = Objects.toString(request.get("fieldKeyword"), "").trim();
         String maskType = Objects.toString(request.getOrDefault("maskType", "MIDDLE")).trim().toUpperCase(Locale.ROOT);
+        String accessAction = normalizeSensitiveAccessAction(request.getOrDefault("accessAction", "MASK"));
         boolean enabled = Boolean.parseBoolean(Objects.toString(request.getOrDefault("enabled", "true")));
         if (keyword.isBlank()) {
             throw new IllegalArgumentException("fieldKeyword is required");
         }
         jdbcTemplate.update("""
-                INSERT INTO is_sensitive_field_rule(field_keyword, mask_type, enabled)
-                VALUES (?, ?, ?)
-                ON DUPLICATE KEY UPDATE mask_type = VALUES(mask_type), enabled = VALUES(enabled)
-                """, keyword, maskType, enabled);
-        return Map.of("fieldKeyword", keyword, "maskType", maskType, "enabled", enabled);
+                INSERT INTO is_sensitive_field_rule(field_keyword, mask_type, access_action, enabled)
+                VALUES (?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE mask_type = VALUES(mask_type),
+                                        access_action = VALUES(access_action),
+                                        enabled = VALUES(enabled)
+                """, keyword, maskType, accessAction, enabled);
+        return Map.of("fieldKeyword", keyword, "maskType", maskType,
+                "accessAction", accessAction, "enabled", enabled);
     }
 
     public void updateSensitiveRuleStatus(Long id, boolean enabled) {
@@ -645,6 +696,144 @@ public class SqlAuditService {
         );
     }
 
+    public List<Map<String, Object>> listCacheAudits(Integer limit) {
+        int safeLimit = Math.max(1, Math.min(limit == null ? 50 : limit, 200));
+        return jdbcTemplate.queryForList("""
+                SELECT cache_key AS cacheKey, question, table_name AS tableName, cached_sql AS cachedSql,
+                       hit_count AS hitCount, risk_level AS riskLevel, risk_reason AS riskReason,
+                       redis_status AS redisStatus, quarantine_reason AS quarantineReason,
+                       quarantined_at AS quarantinedAt, last_hit_at AS lastHitAt, created_at AS createdAt
+                FROM is_semantic_cache_audit
+                ORDER BY COALESCE(last_hit_at, created_at) DESC
+                LIMIT ?
+                """, safeLimit);
+    }
+
+    public void quarantineCache(String cacheKey, String reason) {
+        if (cacheKey == null || cacheKey.isBlank()) {
+            throw new IllegalArgumentException("cacheKey is required");
+        }
+        jdbcTemplate.update("""
+                UPDATE is_semantic_cache_audit
+                SET risk_level = 'BLOCKED',
+                    risk_reason = ?,
+                    redis_status = 'QUARANTINED',
+                    quarantine_reason = ?,
+                    quarantined_at = NOW()
+                WHERE cache_key = ?
+                """, safeText(reason, 1000), safeText(reason, 1000), cacheKey);
+        redisDelete(cacheKey);
+    }
+
+    public void reviewLog(Long id, Map<String, Object> request) {
+        if (id == null) {
+            throw new IllegalArgumentException("id is required");
+        }
+        String status = Objects.toString(request.getOrDefault("reviewStatus", "REVIEWED"), "REVIEWED")
+                .trim().toUpperCase(Locale.ROOT);
+        if (!List.of("OPEN", "REVIEWED", "RESOLVED", "IGNORED").contains(status)) {
+            throw new IllegalArgumentException("reviewStatus must be OPEN, REVIEWED, RESOLVED or IGNORED");
+        }
+        String note = Objects.toString(request.getOrDefault("reviewNote", ""), "");
+        jdbcTemplate.update("""
+                UPDATE is_sql_audit_log
+                SET review_status = ?, review_note = ?, reviewed_by = ?, reviewed_at = NOW()
+                WHERE id = ?
+                """, status, safeText(note, 1000), AuthContext.userId(), id);
+    }
+
+    public List<Map<String, Object>> listDataRowPolicies(String tableName) {
+        List<Object> args = new ArrayList<>();
+        StringBuilder sql = new StringBuilder("""
+                SELECT id, table_name AS tableName, principal_type AS principalType,
+                       principal_id AS principalId, filter_expression AS filterExpression,
+                       enabled, created_at AS createdAt
+                FROM is_data_row_policy
+                WHERE 1 = 1
+                """);
+        if (tableName != null && !tableName.isBlank()) {
+            sql.append(" AND table_name = ?");
+            args.add(tableName);
+        }
+        sql.append(" ORDER BY created_at DESC LIMIT 100");
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql.toString(), args.toArray());
+        for (Map<String, Object> row : rows) {
+            if (row.get("enabled") instanceof Number number) {
+                row.put("enabled", number.intValue() == 1);
+            }
+        }
+        return rows;
+    }
+
+    public Map<String, Object> saveDataRowPolicy(Map<String, Object> request) {
+        String tableName = Objects.toString(request.get("tableName"), "").trim();
+        if (tableName.isBlank()) {
+            throw new IllegalArgumentException("tableName is required");
+        }
+        Integer count = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM is_data_table
+                WHERE table_name = ? AND status IN ('ACTIVE', 'PENDING_CLEANING')
+                """, Integer.class, tableName);
+        if (count == null || count == 0) {
+            throw new IllegalArgumentException("上传表不存在或不可用：" + tableName);
+        }
+        String principalType = Objects.toString(request.getOrDefault("principalType", "USER"), "USER")
+                .trim().toUpperCase(Locale.ROOT);
+        if (!List.of("USER", "ROLE").contains(principalType)) {
+            throw new IllegalArgumentException("principalType must be USER or ROLE");
+        }
+        String principalId = Objects.toString(request.get("principalId"), "").trim();
+        if (principalId.isBlank()) {
+            throw new IllegalArgumentException("principalId is required");
+        }
+        String filterExpression = sanitizeRowPolicy(Objects.toString(request.get("filterExpression"), ""));
+        if (filterExpression.isBlank()) {
+            throw new IllegalArgumentException("filterExpression is required");
+        }
+        boolean enabled = Boolean.parseBoolean(Objects.toString(request.getOrDefault("enabled", "true")));
+        jdbcTemplate.update("""
+                INSERT INTO is_data_row_policy(table_name, principal_type, principal_id, filter_expression, enabled)
+                VALUES (?, ?, ?, ?, ?)
+                """, tableName, principalType, principalId, filterExpression, enabled);
+        return Map.of("tableName", tableName, "principalType", principalType,
+                "principalId", principalId, "filterExpression", filterExpression, "enabled", enabled);
+    }
+
+    public void deleteDataRowPolicy(Long id) {
+        jdbcTemplate.update("DELETE FROM is_data_row_policy WHERE id = ?", id);
+    }
+
+    public String applyDataRowPolicies(String tableName, String sql) {
+        if (AuthContext.isAdmin() || tableName == null || tableName.isBlank()) {
+            return sql;
+        }
+        List<String> roles = effectiveRolesForCurrentUser();
+        String rolePlaceholders = placeholders(roles.size());
+        List<Object> args = new ArrayList<>();
+        args.add(tableName);
+        args.add(AuthContext.userId());
+        args.addAll(roles);
+        List<String> filters = jdbcTemplate.queryForList("""
+                SELECT filter_expression
+                FROM is_data_row_policy
+                WHERE table_name = ? AND enabled = 1
+                  AND ((principal_type = 'USER' AND principal_id = ?)
+                    OR (principal_type = 'ROLE' AND principal_id IN (""" + rolePlaceholders + """
+                    )))
+                ORDER BY created_at ASC
+                """, String.class, args.toArray());
+        if (filters.isEmpty()) {
+            return sql;
+        }
+        String combined = filters.stream()
+                .map(this::sanitizeRowPolicy)
+                .filter(item -> !item.isBlank())
+                .map(item -> "(" + item + ")")
+                .reduce((a, b) -> a + " AND " + b)
+                .orElse("");
+        return combined.isBlank() ? sql : appendWhereClause(sql, combined);
+    }
+
     public String semanticCacheKey(String question, String tableName) {
         String raw = Objects.toString(tableName, "") + "\n" + Objects.toString(question, "").trim().toLowerCase(Locale.ROOT);
         try {
@@ -659,6 +848,20 @@ public class SqlAuditService {
         if (cacheKey == null || cacheKey.isBlank()) {
             return Map.of();
         }
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT cache_key AS cacheKey, cached_sql AS cachedSql, risk_level AS riskLevel,
+                       risk_reason AS riskReason, redis_status AS redisStatus, hit_count AS hitCount,
+                       last_hit_at AS lastHitAt
+                FROM is_semantic_cache_audit
+                WHERE cache_key = ?
+                """, cacheKey);
+        if (!rows.isEmpty()) {
+            Map<String, Object> cached = rows.get(0);
+            if ("QUARANTINED".equalsIgnoreCase(Objects.toString(cached.get("redisStatus"), ""))
+                    || "BLOCKED".equalsIgnoreCase(Objects.toString(cached.get("riskLevel"), ""))) {
+                return Map.of();
+            }
+        }
         String redisSql = redisGet(cacheKey);
         if (redisSql != null && !redisSql.isBlank()) {
             return Map.of(
@@ -670,13 +873,6 @@ public class SqlAuditService {
                     "hitCount", 1
             );
         }
-        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
-                SELECT cache_key AS cacheKey, cached_sql AS cachedSql, risk_level AS riskLevel,
-                       risk_reason AS riskReason, redis_status AS redisStatus, hit_count AS hitCount,
-                       last_hit_at AS lastHitAt
-                FROM is_semantic_cache_audit
-                WHERE cache_key = ?
-                """, cacheKey);
         return rows.isEmpty() ? Map.of() : rows.get(0);
     }
 
@@ -690,9 +886,14 @@ public class SqlAuditService {
         if (result.blocked()) {
             jdbcTemplate.update("""
                     UPDATE is_semantic_cache_audit
-                    SET risk_level = 'BLOCKED', risk_reason = ?, redis_status = 'QUARANTINED'
+                    SET risk_level = 'BLOCKED',
+                        risk_reason = ?,
+                        redis_status = 'QUARANTINED',
+                        quarantine_reason = ?,
+                        quarantined_at = NOW()
                     WHERE cache_key = ?
-                    """, safeText(result.riskReason(), 1000), cacheKey);
+                    """, safeText(result.riskReason(), 1000), safeText(result.riskReason(), 1000), cacheKey);
+            redisDelete(cacheKey);
         }
         return result;
     }
@@ -756,6 +957,7 @@ public class SqlAuditService {
         insertRule("LIMIT_REQUIRED", "结果集 LIMIT 检查", "WARN", "缺少 LIMIT 时标记为大结果集风险", null);
         insertRule("NO_SELECT_STAR", "禁止 SELECT *", "WARN", "使用 SELECT * 时提示限制字段范围", null);
         insertRule("SENSITIVE_FIELD", "敏感字段访问识别", "WARN", "识别 SQL 是否访问敏感字段", null);
+        insertRule("SENSITIVE_FIELD_BLOCK", "敏感字段强制拦截", "BLOCKED", "字段规则 accessAction=BLOCK 时直接拦截敏感字段访问", null);
         insertRule("SLOW_QUERY", "慢查询识别", "WARN", "执行耗时超过阈值时标记为慢查询", 3000L);
         insertRule("SLOW_QUERY_BREAKER", "慢查询熔断阈值", "BLOCKED", "执行耗时超过阈值时记录熔断风险，提示管理员优化 SQL", 8000L);
         insertRule("QUERY_TIMEOUT_MS", "查询超时熔断", "BLOCKED", "执行前设置查询超时，超时由数据库驱动中断", 5000L);
@@ -785,8 +987,8 @@ public class SqlAuditService {
 
     private void insertSensitiveRule(String keyword, String maskType) {
         jdbcTemplate.update("""
-                INSERT INTO is_sensitive_field_rule(field_keyword, mask_type, enabled)
-                VALUES (?, ?, 1)
+                INSERT INTO is_sensitive_field_rule(field_keyword, mask_type, access_action, enabled)
+                VALUES (?, ?, 'MASK', 1)
                 ON DUPLICATE KEY UPDATE mask_type = VALUES(mask_type)
                 """, keyword, maskType);
     }
@@ -921,6 +1123,137 @@ public class SqlAuditService {
             }
         }
         return matched;
+    }
+
+    private boolean isSensitiveAccessBlocked(String sensitiveFieldLabel) {
+        String text = Objects.toString(sensitiveFieldLabel, "").toLowerCase(Locale.ROOT);
+        if (text.isBlank()) {
+            return false;
+        }
+        List<Map<String, Object>> rules = jdbcTemplate.queryForList("""
+                SELECT field_keyword AS fieldKeyword, access_action AS accessAction
+                FROM is_sensitive_field_rule
+                WHERE enabled = 1 AND UPPER(access_action) = 'BLOCK'
+                """);
+        for (Map<String, Object> rule : rules) {
+            String keyword = Objects.toString(rule.get("fieldKeyword"), "").trim().toLowerCase(Locale.ROOT);
+            if (!keyword.isBlank() && text.contains(keyword)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String normalizeSensitiveAccessAction(Object value) {
+        String action = Objects.toString(value, "MASK").trim().toUpperCase(Locale.ROOT);
+        if (action.isBlank()) {
+            return "MASK";
+        }
+        if (!List.of("MASK", "BLOCK").contains(action)) {
+            throw new IllegalArgumentException("accessAction must be MASK or BLOCK");
+        }
+        return action;
+    }
+
+    private String sanitizeRowPolicy(String expression) {
+        String text = Objects.toString(expression, "").trim();
+        String lower = text.toLowerCase(Locale.ROOT);
+        if (text.isBlank()) {
+            return "";
+        }
+        if (!SAFE_ROW_POLICY.matcher(text).matches()
+                || lower.contains(";")
+                || lower.contains("--")
+                || lower.contains("/*")
+                || lower.matches(".*\\b(drop|delete|update|insert|alter|truncate|create|grant|revoke|execute|select|from|join|union|where|having|group|order|limit)\\b.*")) {
+            throw new IllegalArgumentException("行级隔离表达式仅支持安全的只读 WHERE 条件");
+        }
+        return text;
+    }
+
+    private String appendWhereClause(String sql, String filter) {
+        String trimmed = Objects.toString(sql, "").trim().replaceAll(";+$", "");
+        String lower = trimmed.toLowerCase(Locale.ROOT);
+        int insertAt = lower.indexOf(" group by ");
+        if (insertAt < 0) insertAt = lower.indexOf(" order by ");
+        if (insertAt < 0) insertAt = lower.indexOf(" limit ");
+        String head = insertAt < 0 ? trimmed : trimmed.substring(0, insertAt);
+        String tail = insertAt < 0 ? "" : trimmed.substring(insertAt);
+        String connector = head.toLowerCase(Locale.ROOT).contains(" where ") ? " AND " : " WHERE ";
+        return head + connector + filter + tail;
+    }
+
+    private List<String> effectiveRolesForCurrentUser() {
+        LinkedHashSet<String> roles = new LinkedHashSet<>();
+        if (tableExists("is_user_role")) {
+            jdbcTemplate.queryForList("""
+                    SELECT role_code AS roleCode
+                    FROM is_user_role
+                    WHERE user_id = ?
+                    ORDER BY created_at ASC
+                    """, AuthContext.userId()).forEach(row -> {
+                String role = Objects.toString(row.get("roleCode"), "").trim();
+                if (!role.isBlank()) {
+                    roles.add(role);
+                }
+            });
+        }
+        String currentRole = AuthContext.role();
+        if (currentRole != null && !currentRole.isBlank()) {
+            roles.add(currentRole);
+        }
+        if (roles.isEmpty()) {
+            roles.add("USER");
+        }
+        return effectiveRolesFor(new ArrayList<>(roles));
+    }
+
+    private List<String> effectiveRolesFor(List<String> assignedRoles) {
+        LinkedHashSet<String> resolved = new LinkedHashSet<>();
+        for (String role : assignedRoles) {
+            collectRoleWithParents(role, resolved, new LinkedHashSet<>());
+        }
+        if (resolved.isEmpty()) {
+            resolved.add("USER");
+        }
+        return new ArrayList<>(resolved);
+    }
+
+    private void collectRoleWithParents(String roleCode, Set<String> resolved, Set<String> visiting) {
+        String role = Objects.toString(roleCode, "").trim();
+        if (role.isBlank() || resolved.contains(role) || visiting.contains(role)) {
+            return;
+        }
+        visiting.add(role);
+        resolved.add(role);
+        if (tableExists("is_role")) {
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                    SELECT parent_role_code AS parentRoleCode
+                    FROM is_role
+                    WHERE role_code = ? AND enabled = 1
+                    LIMIT 1
+                    """, role);
+            if (!rows.isEmpty()) {
+                collectRoleWithParents(Objects.toString(rows.get(0).get("parentRoleCode"), ""), resolved, visiting);
+            }
+        }
+    }
+
+    private String placeholders(int count) {
+        return String.join(",", java.util.Collections.nCopies(Math.max(1, count), "?"));
+    }
+
+    private boolean tableExists(String tableName) {
+        try {
+            Integer count = jdbcTemplate.queryForObject("""
+                    SELECT COUNT(*)
+                    FROM information_schema.tables
+                    WHERE table_schema = DATABASE() AND table_name = ?
+                    """, Integer.class, tableName);
+            return count != null && count > 0;
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private String csvCell(String value) {
@@ -1240,6 +1573,17 @@ public class SqlAuditService {
         } catch (Exception e) {
             log.debug("Redis SETEX failed: {}", e.getMessage());
             return false;
+        }
+    }
+
+    private void redisDelete(String key) {
+        if (!redisEnabled || key == null || key.isBlank()) {
+            return;
+        }
+        try {
+            redisCommand("DEL", key);
+        } catch (Exception e) {
+            log.debug("Redis DEL failed: {}", e.getMessage());
         }
     }
 

@@ -91,6 +91,11 @@ public class DatasourceController {
         return ApiResponse.success(datasourceService.listSchemaFields(datasourceId, tableName));
     }
 
+    @GetMapping("/{datasourceId}/schema/relations")
+    public ApiResponse<List<Map<String, Object>>> schemaRelations(@PathVariable Long datasourceId) {
+        return ApiResponse.success(datasourceService.listSchemaRelations(datasourceId));
+    }
+
     @PostMapping("/schema/fields/{fieldId}")
     public ApiResponse<Void> updateField(@PathVariable Long fieldId, @RequestBody Map<String, Object> request) {
         datasourceService.updateFieldMeta(fieldId, request);
@@ -129,6 +134,21 @@ public class DatasourceController {
         } catch (Exception e) {
             return ApiResponse.badRequest(e.getMessage());
         }
+    }
+
+    @PostMapping("/{datasourceId}/federal-relations/validate")
+    public ApiResponse<Map<String, Object>> validateFederalRelation(@PathVariable Long datasourceId, @RequestBody Map<String, Object> request) {
+        try {
+            return ApiResponse.success(datasourceService.validateFederalRelation(datasourceId, request));
+        } catch (Exception e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    @PostMapping("/federal-relations/{relationId}/delete")
+    public ApiResponse<Void> deleteFederalRelation(@PathVariable Long relationId) {
+        datasourceService.deleteFederalRelation(relationId);
+        return ApiResponse.success(null);
     }
 
     @PostMapping("/{datasourceId}/federal-sql")

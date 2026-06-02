@@ -627,7 +627,7 @@ public class ChatBiService {
 
     private Map<String, Object> rebuildQueryFromTableProfile(String activeTable, String queryTableName, String question,
             List<Map<String, Object>> fields, String chartType) {
-        List<Map<String, Object>> previewRows = queryTablePreview(queryTableName, 20);
+        List<Map<String, Object>> previewRows = queryTablePreview(activeTable, queryTableName, 20);
         if (previewRows.isEmpty()) {
             return null;
         }
@@ -642,6 +642,7 @@ public class ChatBiService {
                 + "FROM `" + queryTableName + "` WHERE `" + dimensionKey + "` IS NOT NULL AND `" + dimensionKey
                 + "` <> '' "
                 + "GROUP BY `" + dimensionKey + "` ORDER BY metric_value DESC LIMIT 30";
+        sql = sqlAuditService.applyDataRowPolicies(activeTable, sql);
         List<Map<String, Object>> data = jdbcTemplate.queryForList(sql);
         data = attachDimensionKey(data, Map.of("dimensionKey", dimensionKey));
         data = sqlAuditService.maskRows(activeTable, data);
@@ -656,8 +657,10 @@ public class ChatBiService {
                 "data", data);
     }
 
-    private List<Map<String, Object>> queryTablePreview(String tableName, int limit) {
-        return jdbcTemplate.queryForList("SELECT * FROM `" + tableName + "` LIMIT " + Math.max(1, Math.min(limit, 20)));
+    private List<Map<String, Object>> queryTablePreview(String activeTable, String tableName, int limit) {
+        String sql = "SELECT * FROM `" + tableName + "` LIMIT " + Math.max(1, Math.min(limit, 20));
+        sql = sqlAuditService.applyDataRowPolicies(activeTable, sql);
+        return jdbcTemplate.queryForList(sql);
     }
 
     private Map<String, Object> inferBestColumnsFromPreview(String question, List<Map<String, Object>> fields,
@@ -818,7 +821,9 @@ public class ChatBiService {
         try {
             jdbcTemplate.setQueryTimeout(5);
             int safeMaxRows = Math.max(1, Math.min(maxRows, 1000));
-            List<Map<String, Object>> rows = jdbcTemplate.queryForList(sqlAuditService.ensureLimit(sql, safeMaxRows));
+            String guardedSql = sqlAuditService.applyDataRowPolicies(tableName,
+                    sqlAuditService.ensureLimit(sql, safeMaxRows));
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList(guardedSql);
             ensureNotCancelled("上传表查询后");
             return rows.size() <= safeMaxRows ? rows : rows.subList(0, safeMaxRows);
         } finally {
