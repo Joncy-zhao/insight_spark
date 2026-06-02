@@ -71,9 +71,11 @@
         <PermissionCenterView v-if="isPermissionModule" />
         <DatasourceManageView v-if="activeModule === 'datasource'" />
         <DiagnosisReportView v-if="activeModule === 'diagnosis'" />
+        <AdvancedAnalysisManageView v-if="activeModule === 'advancedAnalysis'" />
         <KnowledgeGraphView v-if="activeModule === 'knowledgeGraph'" />
         <SqlAuditView v-if="activeModule === 'audit'" />
         <AdminChatHistoryView v-if="activeModule === 'adminChatHistory'" />
+        <AdminChatQueryLabView v-if="activeModule === 'adminChatQueryLab'" />
         <UserWorkbenchView v-if="activeModule === 'workbench'" />
         <UserDashboardView v-if="activeModule === 'dashboard'" />
         <BusinessCollaborationView v-if="activeModule === 'collaboration'" />
@@ -82,7 +84,7 @@
         <StackCSystemConfigView v-if="activeModule === 'stackCConfig'" />
         <PerformanceGovernanceView v-if="activeModule === 'performanceGovernance'" />
         <PlaceholderView
-            v-if="!['upload', 'chat', 'audit', 'adminChatHistory', 'permission', 'permissionAdmin', 'datasource', 'diagnosis', 'knowledgeGraph', 'workbench', 'dashboard', 'collaboration', 'adminWorkbench', 'adminDashboard', 'stackCConfig', 'performanceGovernance'].includes(activeModule)"
+            v-if="!['upload', 'chat', 'audit', 'adminChatHistory', 'adminChatQueryLab', 'permission', 'permissionAdmin', 'datasource', 'diagnosis', 'advancedAnalysis', 'knowledgeGraph', 'workbench', 'dashboard', 'collaboration', 'adminWorkbench', 'adminDashboard', 'stackCConfig', 'performanceGovernance'].includes(activeModule)"
         />
       </el-main>
     </el-container>
@@ -151,6 +153,7 @@ import {
   Microphone,
   Refresh,
   Search,
+  SetUp,
   Setting,
   Share,
   Upload
@@ -165,6 +168,7 @@ import DiagnosisReportView from './views/user/DiagnosisReportView.vue'
 import KnowledgeGraphView from './views/admin/KnowledgeGraphView.vue'
 import SqlAuditView from './views/admin/SqlAuditView.vue'
 import AdminChatHistoryView from './views/admin/AdminChatHistoryView.vue'
+import AdminChatQueryLabView from './views/admin/AdminChatQueryLabView.vue'
 import StackCSystemConfigView from './views/admin/StackCSystemConfigView.vue'
 import PerformanceGovernanceView from './views/admin/PerformanceGovernanceView.vue'
 import AdminWorkbenchView from './views/admin/AdminWorkbenchView.vue'
@@ -172,6 +176,7 @@ import AdminDashboardView from './views/admin/AdminDashboardView.vue'
 import UserWorkbenchView from './views/user/UserWorkbenchView.vue'
 import UserDashboardView from './views/user/UserDashboardView.vue'
 import BusinessCollaborationView from './views/user/BusinessCollaborationView.vue'
+import AdvancedAnalysisManageView from './views/user/AdvancedAnalysisManageView.vue'
 import PlaceholderView from './views/PlaceholderView.vue'
 import AuthView from './views/AuthView.vue'
 import { authToken, currentUser, isAuthenticated, clearSession, restoreSessionHeader } from './store/session'
@@ -186,6 +191,7 @@ const moduleIconMap = {
   dashboard: DataBoard,
   adminDashboard: Histogram,
   collaboration: Share,
+  advancedAnalysis: DataAnalysis,
   businessDictionary: Operation,
   upload: Upload,
   chat: ChatDotRound,
@@ -196,6 +202,7 @@ const moduleIconMap = {
   knowledgeGraph: Share,
   audit: DataAnalysis,
   adminChatHistory: Monitor,
+  adminChatQueryLab: SetUp,
   stackCConfig: Setting,
   performanceGovernance: Cpu,
   default: Grid
@@ -243,6 +250,7 @@ const navigationTabs = ref([])
 const nextTabOrder = ref(1)
 const tables = ref([])
 const selectedTableName = ref('')
+const advancedAlertContext = ref(null)
 const uploadFile = ref(null)
 const uploadFiles = ref([])
 const uploadMergeMode = ref('SAME_HEADER')
@@ -457,7 +465,7 @@ const visibleMenuGroups = computed(() => {
       .filter(group => group.modules.length)
 })
 const isPermissionModule = computed(() => activeModule.value === 'permission' || activeModule.value === 'permissionAdmin')
-const isAdminModule = computed(() => ['datasource', 'permissionAdmin', 'knowledgeGraph', 'audit', 'adminChatHistory', 'stackCConfig', 'adminWorkbench', 'adminDashboard', 'performanceGovernance'].includes(activeModule.value))
+const isAdminModule = computed(() => ['datasource', 'permissionAdmin', 'knowledgeGraph', 'audit', 'adminChatHistory', 'adminChatQueryLab', 'stackCConfig', 'adminWorkbench', 'adminDashboard', 'performanceGovernance'].includes(activeModule.value))
 const isAdminUser = computed(() => currentUser.value?.role === 'ADMIN')
 const portalLabel = computed(() => isAdminUser.value ? '管理员门户' : '用户门户')
 const homeModuleKey = computed(() => isAdminUser.value ? 'adminWorkbench' : 'workbench')
@@ -5053,6 +5061,7 @@ provide('workbench', {
   diagnoseFromLastAnalysis,
   tables,
   selectedTableName,
+  advancedAlertContext,
   uploadFile,
   uploadFiles,
   uploadMergeMode,

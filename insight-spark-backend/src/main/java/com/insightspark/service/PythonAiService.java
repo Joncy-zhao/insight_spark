@@ -24,6 +24,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.ArrayList;
 import java.util.Optional;
 
 @Service
@@ -32,6 +33,7 @@ public class PythonAiService {
     private static final Logger log = LoggerFactory.getLogger(PythonAiService.class);
 
     private final RestTemplate restTemplate;
+    private final RestTemplate advancedExplainRestTemplate;
 
     @Value("${insight.ai-service-url:http://localhost:8000}")
     private String aiServiceUrl;
@@ -41,12 +43,47 @@ public class PythonAiService {
         requestFactory.setConnectTimeout(5000);
         requestFactory.setReadTimeout(120000);
         this.restTemplate = new RestTemplate(requestFactory);
+
+        SimpleClientHttpRequestFactory explainRequestFactory = new SimpleClientHttpRequestFactory();
+        explainRequestFactory.setConnectTimeout(5000);
+        explainRequestFactory.setReadTimeout(90000);
+        this.advancedExplainRestTemplate = new RestTemplate(explainRequestFactory);
     }
 
     public Optional<Map<String, Object>> textToSql(String question, String tableName, List<Map<String, Object>> fields,
                                                    List<Map<String, Object>> previewRows,
                                                    Map<String, Object> graphPath,
                                                    Map<String, Object> graphSqlHints) {
+        return textToSql(question, tableName, fields, previewRows, graphPath, graphSqlHints, Map.of());
+    }
+
+    @SuppressWarnings("unchecked")
+    public List<Map<String, Object>> listModels() {
+        try {
+            Map<String, Object> response = restTemplate.getForObject(aiServiceUrl + "/ai/models", Map.class);
+            Object models = response == null ? null : response.get("models");
+            if (models instanceof List<?> list) {
+                List<Map<String, Object>> result = new ArrayList<>();
+                for (Object item : list) {
+                    if (item instanceof Map<?, ?> map) {
+                        result.add(new LinkedHashMap<>((Map<String, Object>) map));
+                    }
+                }
+                if (!result.isEmpty()) {
+                    return result;
+                }
+            }
+        } catch (RestClientException e) {
+            log.warn("Python AI 模型配置不可用，使用后端默认模型列表: {}", e.getMessage());
+        }
+        return List.of();
+    }
+
+    public Optional<Map<String, Object>> textToSql(String question, String tableName, List<Map<String, Object>> fields,
+                                                   List<Map<String, Object>> previewRows,
+                                                   Map<String, Object> graphPath,
+                                                   Map<String, Object> graphSqlHints,
+                                                   Map<String, Object> modelOptions) {
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("question", question);
         request.put("tableName", tableName);
@@ -55,6 +92,10 @@ public class PythonAiService {
         request.put("graphPath", graphPath == null ? Map.of() : graphPath);
         request.put("graphContext", graphPath == null ? List.of() : graphPath.getOrDefault("ragContext", List.of()));
         request.put("graphSqlHints", graphSqlHints == null ? Map.of() : graphSqlHints);
+        request.put("modelConfig", modelOptions == null ? Map.of() : modelOptions);
+        request.put("modelId", modelOptions == null ? "gpt-4" : modelOptions.getOrDefault("modelId", "gpt-4"));
+        request.put("temperature", modelOptions == null ? 0.2D : modelOptions.getOrDefault("temperature", 0.2D));
+        request.put("timeoutSeconds", modelOptions == null ? 30 : modelOptions.getOrDefault("timeoutSeconds", 30));
 
         try {
             Map<String, Object> response = restTemplate.postForObject(
@@ -133,6 +174,55 @@ public class PythonAiService {
             return Optional.empty();
         } catch (RestClientException e) {
             log.warn("Python AI 业务模型修改不可用: {}", e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    public Optional<Map<String, Object>> parseAdvancedAnalysisIntent(String question, String tableName,
+                                                                     Map<String, Object> context) {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("question", question);
+        request.put("tableName", tableName);
+        request.put("context", context == null ? Map.of() : context);
+
+        try {
+            Map<String, Object> response = restTemplate.postForObject(
+                    aiServiceUrl + "/ai/advanced-analysis/parse",
+                    request,
+                    Map.class
+            );
+            return response == null ? Optional.empty() : Optional.of(response);
+        } catch (HttpClientErrorException e) {
+            log.warn("Python AI 预测推演意图解析失败: {}", e.getResponseBodyAsString());
+            return Optional.empty();
+        } catch (RestClientException e) {
+            log.warn("Python AI 预测推演意图解析不可用: {}", e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    public Optional<Map<String, Object>> explainAdvancedAnalysis(String type,
+                                                                 String question,
+                                                                 Map<String, Object> result,
+                                                                 Map<String, Object> context) {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("type", type);
+        request.put("question", question == null ? "" : question);
+        request.put("result", result == null ? Map.of() : result);
+        request.put("context", context == null ? Map.of() : context);
+
+        try {
+            Map<String, Object> response = advancedExplainRestTemplate.postForObject(
+                    aiServiceUrl + "/ai/advanced-analysis/explain",
+                    request,
+                    Map.class
+            );
+            return response == null ? Optional.empty() : Optional.of(response);
+        } catch (HttpClientErrorException e) {
+            log.warn("Python AI 预测推演结果解释失败: {}", e.getResponseBodyAsString());
+            return Optional.empty();
+        } catch (RestClientException e) {
+            log.warn("Python AI 预测推演结果解释不可用: {}", e.getMessage());
             return Optional.empty();
         }
     }

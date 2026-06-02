@@ -43,6 +43,13 @@ export const menuGroups = [
         subtitle: '自然语言生成 SQL，经 GraphRAG 上下文、SQL 审计和权限校验后渲染 ECharts 图表。'
       },
       {
+        key: 'advancedAnalysis',
+        role: 'USER',
+        index: '8',
+        title: '预测与情景模拟',
+        subtitle: '管理时序预测方案、What-if 推演、预警规则、预警事件和后续推送记录。'
+      },
+      {
         key: 'permission',
         role: 'USER',
         index: '6',
@@ -103,6 +110,13 @@ export const menuGroups = [
         index: '7',
         title: '管理员对话历史',
         subtitle: '全平台对话查询、SQL 生成、知识图谱匹配、推理过程与性能审计统一查看。'
+      },
+      {
+        key: 'adminChatQueryLab',
+        role: 'ADMIN',
+        index: '8',
+        title: '对话查询实验室',
+        subtitle: '跨数据源验证 Text-to-SQL、GraphRAG、SQL 安全、权限穿透和图表渲染效果。'
       },
       {
         key: 'stackCConfig',

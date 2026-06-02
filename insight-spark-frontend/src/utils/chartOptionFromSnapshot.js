@@ -155,11 +155,15 @@ export function applyOptionTemplateDefaults(built, template) {
   const mergedTop = defaultsDeep({ ...bRest }, tRest)
   const out = { ...built, ...mergedTop }
   if (Array.isArray(bs)) {
-    out.series = bs.map((seriesItem, i) =>
+    const mergedSeries = bs.map((seriesItem, i) =>
       ts?.[i] != null && typeof ts[i] === 'object' && typeof seriesItem === 'object'
         ? defaultsDeep({ ...seriesItem }, ts[i])
         : seriesItem
     )
+    if (Array.isArray(ts) && ts.length > bs.length) {
+      mergedSeries.push(...ts.slice(bs.length).filter(item => item && typeof item === 'object'))
+    }
+    out.series = mergedSeries
   } else {
     out.series = bs
   }

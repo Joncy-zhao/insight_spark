@@ -89,6 +89,9 @@
                 </div>
               </div>
               <div class="chat-thread-actions">
+                <el-button size="small" plain type="primary" class="chat-thread-history-btn" @click="openAdvancedAnalysisManagePage">
+                  预测与情景模拟
+                </el-button>
                 <el-button size="small" plain class="chat-thread-history-btn" @click="openHistoryDrawer">
                   历史产物
                 </el-button>
@@ -201,6 +204,19 @@
                       </div>
                     </div>
                     <div class="bubble">{{ msg.content }}</div>
+                    <div v-if="msg.advancedAnalysis" class="advanced-dialog-entry">
+                      <div class="advanced-dialog-entry__main">
+                        <div class="advanced-dialog-entry__type">{{ advancedAnalysisTypeLabel(msg.advancedAnalysis.type) }}</div>
+                        <div class="advanced-dialog-entry__title">{{ msg.advancedAnalysis.title }}</div>
+                        <div class="advanced-dialog-entry__summary">{{ msg.advancedAnalysis.summary }}</div>
+                      </div>
+                      <el-tag size="small" effect="light" :type="msg.advancedAnalysis.status === '模拟生成' ? 'warning' : 'success'">
+                        {{ msg.advancedAnalysis.status || '已生成' }}
+                      </el-tag>
+                      <el-button size="small" type="primary" plain @click="openAdvancedAnalysisDialog(msg.advancedAnalysis)">
+                        查看详情
+                      </el-button>
+                    </div>
                     <div v-if="msg.fieldBindingResults?.length" class="field-binding-card">
                       <div class="field-binding-card__header">{{ msg.fieldBindingTitle || '字段变更结果' }}</div>
                       <div
@@ -288,10 +304,10 @@
                     v-model="question"
                     placeholder="试试问我：按省份统计销售额、按日期看趋势、分类占比等..."
                     :disabled="loading"
-                    @keyup.enter="sendQuestion"
+                    @keyup.enter="sendChatQuestion"
                 >
                   <template #append>
-                    <el-button type="primary" :loading="loading" @click="sendQuestion">
+                    <el-button type="primary" :loading="loading" @click="sendChatQuestion">
                       <span v-if="!loading">🚀 发送分析</span>
                       <span v-else>思考中...</span>
                     </el-button>
@@ -656,6 +672,7 @@
 
               <div class="history-summary">
                 <span>共 {{ recentChatQueryTotal }} 条</span>
+                <el-button size="small" plain @click="advancedHistoryVisible = true">高级分析记录</el-button>
                 <span v-if="recentChatQueryError" class="history-summary__error">{{ recentChatQueryError }}</span>
               </div>
 
@@ -1021,6 +1038,476 @@
               </div>
             </div>
           </el-drawer>
+          <el-drawer
+              v-model="advancedHistoryVisible"
+              title="预测与情景模拟记录"
+              size="520px"
+              destroy-on-close
+          >
+            <div class="advanced-history">
+              <section class="advanced-alert-rule-manager">
+                <div class="advanced-alert-rule-manager__head">
+                  <div>
+                    <h4>预警规则</h4>
+                    <p>管理已保存的离线预警规则</p>
+                  </div>
+                  <el-button size="small" plain :loading="advancedAlertRulesLoading" @click="loadAdvancedAlertRules">刷新</el-button>
+                </div>
+                <div v-if="advancedAlertRules.length" class="advanced-alert-rule-list">
+                  <article
+                      v-for="rule in advancedAlertRules"
+                      :key="rule.id"
+                      class="advanced-alert-rule-item"
+                  >
+                    <div class="advanced-alert-rule-item__main">
+                      <strong>{{ formatAlertRuleTitle(rule) }}</strong>
+                      <span>{{ formatAlertRuleMeta(rule) }}</span>
+                    </div>
+                    <el-tag size="small" effect="light" :type="rule.status === 'ACTIVE' ? 'success' : 'info'">
+                      {{ rule.status === 'ACTIVE' ? '已启用' : rule.status === 'DISABLED' ? '已停用' : rule.status }}
+                    </el-tag>
+                    <div class="advanced-alert-rule-item__actions">
+                  <el-button size="small" text type="primary" @click="editAdvancedAlertRule(rule)">编辑</el-button>
+                      <el-button size="small" text type="success" @click="runAdvancedAlertRuleDetection(rule)">检测</el-button>
+                      <el-button size="small" text @click="toggleAdvancedAlertRule(rule)">
+                        {{ rule.status === 'ACTIVE' ? '停用' : '启用' }}
+                      </el-button>
+                      <el-button size="small" text type="danger" @click="removeAdvancedAlertRule(rule)">删除</el-button>
+                    </div>
+                  </article>
+                </div>
+                <div v-else class="advanced-alert-rule-empty">
+                  暂无已保存的预警规则。
+                </div>
+              </section>
+              <section class="advanced-alert-event-manager">
+                <div class="advanced-alert-rule-manager__head">
+                  <div>
+                    <h4>预警事件</h4>
+                    <p>展示离线检测生成的异常事件</p>
+                  </div>
+                  <el-button size="small" plain :loading="advancedAlertEventsLoading" @click="loadAdvancedAlertEvents">刷新</el-button>
+                </div>
+                <div v-if="advancedAlertEvents.length" class="advanced-alert-rule-list">
+                  <article
+                      v-for="event in advancedAlertEvents"
+                      :key="event.id"
+                      class="advanced-alert-event-item"
+                  >
+                    <div class="advanced-alert-rule-item__main">
+                      <strong>{{ formatAlertEventTitle(event) }}</strong>
+                      <span>{{ event.reason }}</span>
+                    </div>
+                    <el-tag size="small" effect="light" type="warning">{{ event.status || 'OPEN' }}</el-tag>
+                  </article>
+                </div>
+                <div v-else class="advanced-alert-rule-empty">
+                  暂无预警事件。
+                </div>
+              </section>
+              <div v-if="advancedAnalysisHistory.length" class="advanced-history__list">
+                <article
+                    v-for="item in advancedAnalysisHistory"
+                    :key="item.id"
+                    class="advanced-history__item"
+                >
+                  <div class="advanced-history__head">
+                    <div>
+                      <div class="advanced-history__type">{{ advancedAnalysisTypeLabel(item.type) }}</div>
+                      <h4>{{ item.title }}</h4>
+                    </div>
+                    <el-tag size="small" effect="light">{{ item.createdAt }}</el-tag>
+                  </div>
+                  <p>{{ item.summary }}</p>
+                  <div class="advanced-history__meta">
+                    <span>{{ item.tableName || '当前对话上下文' }}</span>
+                    <span>{{ item.metric || '自动推断指标' }}</span>
+                  </div>
+                  <div class="advanced-history__actions">
+                    <el-button size="small" type="primary" plain @click="restoreAdvancedAnalysis(item)">回到对话</el-button>
+                    <el-button size="small" plain @click="removeAdvancedAnalysisHistory(item)">删除</el-button>
+                  </div>
+                </article>
+              </div>
+              <div v-else class="advanced-history__empty">
+                暂无已保存的预测、推演或预警记录。
+              </div>
+            </div>
+          </el-drawer>
+          <el-dialog
+              v-model="alertRuleEditorVisible"
+              title="编辑预警规则"
+              width="640px"
+              destroy-on-close
+          >
+            <el-form label-position="top" class="forecast-confirm-form">
+              <div class="forecast-confirm-grid">
+                <el-form-item label="时间字段">
+                  <el-select v-model="alertRuleEditorForm.timeField" class="full-width" filterable>
+                    <el-option
+                        v-for="field in alertRuleEditorMeta.timeFields"
+                        :key="field.columnName"
+                        :label="formatAdvancedFieldLabel(field)"
+                        :value="field.columnName"
+                    />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="指标字段">
+                  <el-select v-model="alertRuleEditorForm.metricField" class="full-width" filterable>
+                    <el-option
+                        v-for="field in alertRuleEditorMeta.numericFields"
+                        :key="field.columnName"
+                        :label="formatAdvancedFieldLabel(field)"
+                        :value="field.columnName"
+                    />
+                  </el-select>
+                </el-form-item>
+              </div>
+              <el-form-item label="过滤条件（可选）">
+                <el-input v-model.trim="alertRuleEditorForm.filterExpression" placeholder="例如：region = '华东'" />
+              </el-form-item>
+              <div class="forecast-confirm-grid">
+                <el-form-item label="聚合粒度">
+                  <el-select v-model="alertRuleEditorForm.granularity">
+                    <el-option label="按日" value="day" />
+                    <el-option label="按周" value="week" />
+                    <el-option label="按月" value="month" />
+                    <el-option label="按季度" value="quarter" />
+                    <el-option label="按年" value="year" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="检测周期">
+                  <el-select v-model="alertRuleEditorForm.detectionCycle">
+                    <el-option label="每小时" value="hourly" />
+                    <el-option label="每日" value="daily" />
+                    <el-option label="每周" value="weekly" />
+                    <el-option label="每月" value="monthly" />
+                  </el-select>
+                </el-form-item>
+              </div>
+              <div class="forecast-confirm-grid">
+                <el-form-item label="判断条件">
+                  <el-select v-model="alertRuleEditorForm.operator">
+                    <el-option label="低于阈值" value="lt" />
+                    <el-option label="高于阈值" value="gt" />
+                    <el-option label="Z-Score 异常波动" value="zscore" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="阈值">
+                  <el-input-number
+                      v-model="alertRuleEditorForm.threshold"
+                      :min="0"
+                      :disabled="alertRuleEditorForm.operator === 'zscore'"
+                  />
+                </el-form-item>
+              </div>
+              <el-form-item label="通知渠道">
+                <el-checkbox-group v-model="alertRuleEditorForm.channels">
+                  <el-checkbox label="email">邮件</el-checkbox>
+                  <el-checkbox label="dingtalk">钉钉</el-checkbox>
+                </el-checkbox-group>
+              </el-form-item>
+            </el-form>
+            <template #footer>
+              <el-button @click="alertRuleEditorVisible = false">取消</el-button>
+              <el-button type="primary" :loading="alertRuleEditorSaving" @click="submitAlertRuleEditor">保存修改</el-button>
+            </template>
+          </el-dialog>
+          <el-dialog
+              v-model="advancedAnalysisDialogVisible"
+              :title="activeAdvancedAnalysis ? advancedAnalysisTypeLabel(activeAdvancedAnalysis.type) : '高级分析'"
+              width="860px"
+              destroy-on-close
+              class="advanced-analysis-dialog"
+          >
+            <AdvancedAnalysisCard
+              v-if="activeAdvancedAnalysis"
+              :analysis="activeAdvancedAnalysis"
+              :explain-loading="advancedAnalysisExplainingId === activeAdvancedAnalysis.id"
+              @recalculate="recalculateAdvancedAnalysis"
+              @save="saveAdvancedAnalysis"
+              @pin="pinAdvancedAnalysis"
+              @manage-alerts="openAdvancedAnalysisManagePage"
+              @explain="explainAdvancedAnalysis"
+            />
+          </el-dialog>
+          <el-dialog
+              v-model="forecastConfirmVisible"
+              title="确认预测参数"
+              width="560px"
+              destroy-on-close
+          >
+            <el-form label-position="top" class="forecast-confirm-form">
+              <el-alert
+                  title="系统已根据数据源字段和自然语言推断预测参数，请确认后执行真实预测。"
+                  type="info"
+                  :closable="false"
+                  show-icon
+              />
+              <el-alert
+                  v-if="!forecastConfirmMeta.timeFields.length"
+                  title="当前数据源没有可识别的日期/时间字段，无法基于真实时间序列预测。请切换包含日期字段的数据源，或先做按月/按日统计后再预测。"
+                  type="warning"
+                  :closable="false"
+                  show-icon
+              />
+              <el-form-item label="时间字段">
+                <el-select v-model="forecastConfirmForm.timeField" class="full-width" filterable placeholder="请选择时间字段">
+                  <el-option
+                      v-for="field in forecastConfirmMeta.timeFields"
+                      :key="field.columnName"
+                      :label="formatAdvancedFieldLabel(field)"
+                      :value="field.columnName"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="指标字段">
+                <el-select v-model="forecastConfirmForm.metricField" class="full-width" filterable placeholder="请选择指标字段">
+                  <el-option
+                      v-for="field in forecastConfirmMeta.numericFields"
+                      :key="field.columnName"
+                      :label="formatAdvancedFieldLabel(field)"
+                      :value="field.columnName"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="过滤条件（可选）">
+                <el-input
+                    v-model.trim="forecastConfirmForm.filterExpression"
+                    placeholder="支持显示名/源字段名，例如：region = '华东' AND channel = '直营网'"
+                />
+              </el-form-item>
+              <div class="forecast-confirm-grid">
+                <el-form-item label="聚合粒度">
+                  <el-select v-model="forecastConfirmForm.granularity">
+                    <el-option label="按日" value="day" />
+                    <el-option label="按周" value="week" />
+                    <el-option label="按月" value="month" />
+                    <el-option label="按季度" value="quarter" />
+                    <el-option label="按年" value="year" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="预测点数">
+                  <el-input-number v-model="forecastConfirmForm.horizon" :min="1" :max="60" />
+                </el-form-item>
+              </div>
+              <el-form-item label="算法">
+                <el-select v-model="forecastConfirmForm.algorithm" class="full-width">
+                  <el-option label="Prophet-like" value="Prophet" />
+                  <el-option label="Holt-Winters" value="Holt-Winters" />
+                </el-select>
+              </el-form-item>
+              <div v-if="forecastConfirmForm.algorithm === 'Holt-Winters'" class="forecast-confirm-grid">
+                <el-form-item label="Alpha">
+                  <el-input-number v-model="forecastConfirmForm.alpha" :min="0.01" :max="0.99" :step="0.01" />
+                </el-form-item>
+                <el-form-item label="Beta">
+                  <el-input-number v-model="forecastConfirmForm.beta" :min="0.01" :max="0.99" :step="0.01" />
+                </el-form-item>
+                <el-form-item label="Gamma">
+                  <el-input-number v-model="forecastConfirmForm.gamma" :min="0.01" :max="0.99" :step="0.01" />
+                </el-form-item>
+                <el-form-item label="季节周期">
+                  <el-input-number v-model="forecastConfirmForm.seasonLength" :min="0" :max="60" />
+                </el-form-item>
+              </div>
+            </el-form>
+            <template #footer>
+              <el-button @click="cancelForecastConfirm">取消</el-button>
+              <el-button type="primary" :disabled="!forecastConfirmMeta.timeFields.length" @click="submitForecastConfirm">执行真实预测</el-button>
+            </template>
+          </el-dialog>
+          <el-dialog
+              v-model="whatIfConfirmVisible"
+              title="确认推演参数"
+              width="860px"
+              destroy-on-close
+              class="whatif-confirm-dialog"
+          >
+            <el-form label-position="top" class="forecast-confirm-form">
+              <el-alert
+                  title="系统已根据数据源字段和自然语言推断推演参数，请确认后执行真实推演。"
+                  type="info"
+                  :closable="false"
+                  show-icon
+              />
+              <el-form-item label="目标指标">
+                <el-select v-model="whatIfConfirmForm.targetMetric" class="full-width" filterable placeholder="请选择目标指标">
+                  <el-option
+                      v-for="field in whatIfConfirmMeta.numericFields"
+                      :key="field.columnName"
+                      :label="formatAdvancedFieldLabel(field)"
+                      :value="field.columnName"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="业务公式（可选）">
+                <el-input
+                    v-model.trim="whatIfConfirmForm.formula"
+                    placeholder="例如：SAFE_DIVIDE(profit, sales_amt, 0)，支持 IF/ABS/MIN/MAX/ROUND"
+                    clearable
+                />
+                <div class="forecast-confirm-hint">填写后将按业务公式计算基准与情景结果；支持字段显示名/源字段名/列名、IF 条件、ABS/MIN/MAX/ROUND/SAFE_DIVIDE。</div>
+              </el-form-item>
+              <el-form-item v-if="whatIfConfirmForm.formula" label="公式计算口径">
+                <el-select v-model="whatIfConfirmForm.formulaScope" class="full-width">
+                  <el-option label="聚合口径（字段均值计算）" value="aggregate" />
+                  <el-option label="按行口径（逐行计算后求平均）" value="row" />
+                </el-select>
+                <div class="forecast-confirm-hint">聚合口径兼容原有方案；按行口径适合利润率、转化率等需要逐行先算再汇总的公式。</div>
+              </el-form-item>
+              <div class="whatif-variable-toolbar">
+                <div class="whatif-variable-toolbar__title">变量列表</div>
+                <el-button size="small" plain @click="addWhatIfConfirmVariable">新增变量</el-button>
+              </div>
+              <div class="whatif-variable-list">
+                <div
+                    v-for="(variable, index) in whatIfConfirmForm.variables"
+                    :key="`${variable.name || 'variable'}-${index}`"
+                    class="whatif-variable-item"
+                >
+                  <div class="whatif-variable-item__main">
+                    <el-form-item label="变量字段">
+                      <el-select
+                          v-model="variable.field"
+                          class="full-width"
+                          filterable
+                          placeholder="变量字段"
+                      >
+                        <el-option
+                            v-for="field in whatIfConfirmMeta.numericFields"
+                            :key="field.columnName"
+                            :label="formatAdvancedFieldLabel(field)"
+                            :value="field.columnName"
+                        />
+                      </el-select>
+                    </el-form-item>
+                    <el-form-item label="变量名称">
+                      <el-input v-model="variable.name" class="full-width" placeholder="例如：销售额" />
+                    </el-form-item>
+                    <el-form-item label="调整方式">
+                      <el-select v-model="variable.mode" class="full-width" placeholder="方式">
+                        <el-option label="百分比" value="percent" />
+                        <el-option label="绝对值" value="absolute" />
+                        <el-option label="设为固定值" value="set" />
+                      </el-select>
+                    </el-form-item>
+                    <el-form-item label="调整值">
+                      <el-input-number
+                          v-model="variable.change"
+                          class="full-width"
+                          :controls="false"
+                          :min="variable.mode === 'percent' ? -100 : undefined"
+                          :max="variable.mode === 'percent' ? 100 : undefined"
+                          :step="1"
+                      />
+                    </el-form-item>
+                  </div>
+                  <div class="whatif-variable-item__limits">
+                    <el-form-item label="最小值（可选）">
+                      <el-input-number v-model="variable.min" class="full-width" placeholder="最小值" :controls="false" />
+                    </el-form-item>
+                    <el-form-item label="最大值（可选）">
+                      <el-input-number v-model="variable.max" class="full-width" placeholder="最大值" :controls="false" />
+                    </el-form-item>
+                    <el-button class="whatif-variable-item__delete" plain type="danger" @click="removeWhatIfConfirmVariable(index)">删除变量</el-button>
+                  </div>
+                </div>
+              </div>
+            </el-form>
+            <template #footer>
+              <el-button @click="cancelWhatIfConfirm">取消</el-button>
+              <el-button type="primary" @click="submitWhatIfConfirm">执行真实推演</el-button>
+            </template>
+          </el-dialog>
+          <el-dialog
+              v-model="alertConfirmVisible"
+              title="确认预警规则"
+              width="640px"
+              destroy-on-close
+          >
+            <el-form label-position="top" class="forecast-confirm-form">
+              <el-alert
+                  title="系统已根据自然语言生成预警规则草案，请确认字段、阈值和通知渠道后保存。"
+                  type="info"
+                  :closable="false"
+                  show-icon
+              />
+              <div class="forecast-confirm-grid">
+                <el-form-item label="时间字段">
+                  <el-select v-model="alertConfirmForm.timeField" class="full-width" filterable placeholder="请选择时间字段">
+                    <el-option
+                        v-for="field in alertConfirmMeta.timeFields"
+                        :key="field.columnName"
+                        :label="formatAdvancedFieldLabel(field)"
+                        :value="field.columnName"
+                    />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="指标字段">
+                  <el-select v-model="alertConfirmForm.metricField" class="full-width" filterable placeholder="请选择指标字段">
+                    <el-option
+                        v-for="field in alertConfirmMeta.numericFields"
+                        :key="field.columnName"
+                        :label="formatAdvancedFieldLabel(field)"
+                        :value="field.columnName"
+                    />
+                  </el-select>
+                </el-form-item>
+              </div>
+              <el-form-item label="过滤条件（可选）">
+                <el-input
+                    v-model.trim="alertConfirmForm.filterExpression"
+                    placeholder="例如：region = '华东' AND channel = '直营网'"
+                />
+              </el-form-item>
+              <div class="forecast-confirm-grid">
+                <el-form-item label="聚合粒度">
+                  <el-select v-model="alertConfirmForm.granularity">
+                    <el-option label="按日" value="day" />
+                    <el-option label="按周" value="week" />
+                    <el-option label="按月" value="month" />
+                    <el-option label="按季度" value="quarter" />
+                    <el-option label="按年" value="year" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="检测周期">
+                  <el-select v-model="alertConfirmForm.detectionCycle">
+                    <el-option label="每小时" value="hourly" />
+                    <el-option label="每日" value="daily" />
+                    <el-option label="每周" value="weekly" />
+                    <el-option label="每月" value="monthly" />
+                  </el-select>
+                </el-form-item>
+              </div>
+              <div class="forecast-confirm-grid">
+                <el-form-item label="判断条件">
+                  <el-select v-model="alertConfirmForm.operator">
+                    <el-option label="低于阈值" value="lt" />
+                    <el-option label="高于阈值" value="gt" />
+                    <el-option label="Z-Score 异常波动" value="zscore" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="阈值">
+                  <el-input-number
+                      v-model="alertConfirmForm.threshold"
+                      :min="0"
+                      :disabled="alertConfirmForm.operator === 'zscore'"
+                  />
+                </el-form-item>
+              </div>
+              <el-form-item label="通知渠道">
+                <el-checkbox-group v-model="alertConfirmForm.channels">
+                  <el-checkbox label="email">邮件</el-checkbox>
+                  <el-checkbox label="dingtalk">钉钉</el-checkbox>
+                </el-checkbox-group>
+              </el-form-item>
+            </el-form>
+            <template #footer>
+              <el-button @click="cancelAlertConfirm">取消</el-button>
+              <el-button type="primary" :disabled="!alertConfirmMeta.timeFields.length" @click="submitAlertConfirm">保存预警规则</el-button>
+            </template>
+          </el-dialog>
 </section>
 </template>
 
@@ -1028,7 +1515,26 @@
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { ArrowLeftBold, ArrowRightBold, Close, Edit, Management, Microphone, Refresh, Search, Setting, Share, View } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
+import { ElMessage } from 'element-plus'
 import BusinessDictionaryView from '../../components/BusinessDictionaryView.vue'
+import AdvancedAnalysisCard from '../../components/AdvancedAnalysisCard.vue'
+import {
+  explainAdvancedAnalysisResult,
+  fetchAdvancedAnalysisFieldMeta,
+  deleteAdvancedAlertRule,
+  getAdvancedAlertRule,
+  listAdvancedAlertEvents,
+  listAdvancedAlertRules,
+  saveAdvancedAnalysisPlan,
+  saveAdvancedAlertRule,
+  parseAdvancedAnalysisIntent,
+  runAdvancedForecast,
+  runAdvancedForecastFromSeries,
+  runAdvancedAlertDetection,
+  runAdvancedWhatIf,
+  updateAdvancedAlertRule,
+  updateAdvancedAlertRuleStatus
+} from '../../api/advancedAnalysis'
 
 const localVoiceGenderOptions = [
   { label: '男声', value: 'male' },
@@ -1039,6 +1545,7 @@ const {
   API_BASE,
   accessibleTables,
   activeModule,
+  advancedAlertContext,
   adminPermissionRequests,
   adminRequestStatus,
   auditExecuteStatus,
@@ -1266,6 +1773,1919 @@ const currentChatSession = computed(() =>
 )
 
 const chatContentMode = ref('messages')
+const advancedHistoryVisible = ref(false)
+const advancedAnalysisHistory = ref([])
+const advancedAlertRules = ref([])
+const advancedAlertRulesLoading = ref(false)
+const advancedAlertEvents = ref([])
+const advancedAlertEventsLoading = ref(false)
+const alertRuleEditorVisible = ref(false)
+const alertRuleEditorSaving = ref(false)
+const alertRuleEditorMeta = ref({ timeFields: [], numericFields: [] })
+const alertRuleEditorForm = ref({
+  id: '',
+  tableName: '',
+  timeField: '',
+  metricField: '',
+  filterExpression: '',
+  granularity: 'day',
+  operator: 'lt',
+  threshold: 100000,
+  detectionCycle: 'daily',
+  channels: ['email', 'dingtalk']
+})
+const advancedAnalysisDialogVisible = ref(false)
+const activeAdvancedAnalysis = ref(null)
+const advancedAnalysisExplainingId = ref('')
+const forecastConfirmVisible = ref(false)
+const forecastConfirmMeta = ref({ timeFields: [], numericFields: [] })
+const forecastConfirmForm = ref({
+  tableName: '',
+  timeField: '',
+  metricField: '',
+  granularity: 'month',
+  horizon: 3,
+  algorithm: 'Holt-Winters',
+  alpha: 0.55,
+  beta: 0.28,
+  gamma: 0.20,
+  seasonLength: 0
+})
+let forecastConfirmResolver = null
+const whatIfConfirmVisible = ref(false)
+const whatIfConfirmMeta = ref({ numericFields: [] })
+const whatIfConfirmForm = ref({
+  targetMetric: '',
+  formula: '',
+  variables: []
+})
+let whatIfConfirmResolver = null
+const alertConfirmVisible = ref(false)
+const alertConfirmMeta = ref({ timeFields: [], numericFields: [] })
+const alertConfirmForm = ref({
+  tableName: '',
+  timeField: '',
+  metricField: '',
+  filterExpression: '',
+  granularity: 'day',
+  operator: 'lt',
+  threshold: 100000,
+  detectionCycle: 'daily',
+  channels: ['email', 'dingtalk']
+})
+let alertConfirmResolver = null
+
+const advancedAnalysisTypeLabel = (type) => {
+  if (type === 'forecast') return '时序预测'
+  if (type === 'whatIf') return 'What-if 推演'
+  if (type === 'alert') return '离线智能预警'
+  return '高级分析'
+}
+
+const formatAdvancedNumber = (value) => {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '--'
+  if (Math.abs(number) >= 10000) return `${(number / 10000).toFixed(1)}万`
+  return number.toLocaleString('zh-CN', { maximumFractionDigits: 0 })
+}
+
+const formatAdvancedFieldLabel = (field) => {
+  const displayName = String(field?.displayName || field?.businessName || '').trim()
+  const columnName = String(field?.columnName || '').trim()
+  if (displayName && columnName && displayName !== columnName) {
+    return `${displayName}（${columnName}）`
+  }
+  return displayName || columnName || '未命名字段'
+}
+
+const formatAnalysisMetricLabel = (fieldName, fallback = '指标', fields = []) => {
+  const field = String(fieldName || '').trim()
+  if (!field) return fallback
+  const matched = Array.isArray(fields)
+    ? fields.find(item => String(item?.columnName || '').trim() === field)
+    : null
+  if (matched) {
+    return formatAdvancedFieldLabel(matched)
+  }
+  const prettified = field
+    .replace(/^col[_-]?/i, '')
+    .replace(/[_-]+/g, ' ')
+    .trim()
+  if (!prettified) return fallback
+  return /[A-Za-z]/.test(prettified) ? prettified.toUpperCase() : prettified
+}
+
+const inferAdvancedIntent = (text) => {
+  const content = String(text || '').trim().toLowerCase()
+  if (!content) return ''
+  if (/预测|预估|未来|走势|forecast|prophet|holt/.test(content)) return 'forecast'
+  if (/what-?if|如果|若|假设|提升|下降|降低|增长|推演|模拟|利润变化/.test(content)) return 'whatIf'
+  if (/预警|提醒|告警|低于|高于|超过|异常|阈值|通知|钉钉|邮件|z-?score/.test(content)) return 'alert'
+  return ''
+}
+
+const inferMetricFromQuestion = (text) => {
+  const content = String(text || '')
+  const candidates = ['销售额', '利润', '成本', '销量', '收入', '转化率', '退货率', '客单价']
+  return candidates.find(item => content.includes(item)) || String(lastAnalysis?.value?.fieldMapping?.metric || '').trim() || '核心指标'
+}
+
+const inferForecastHorizon = (text) => {
+  const content = String(text || '')
+  if (/6\s*个?月|半年/.test(content)) return '6m'
+  if (/3\s*个?月|季度/.test(content)) return '3m'
+  if (/30\s*天|一个月|1\s*个?月/.test(content)) return '30d'
+  if (/7\s*天|一周|1\s*周/.test(content)) return '7d'
+  return '3m'
+}
+
+const inferAlertThreshold = (text) => {
+  const content = String(text || '')
+  const match = content.match(/(\d+(?:\.\d+)?)\s*(万|千|k|w)?/)
+  if (!match) return 100000
+  const raw = Number(match[1])
+  if (!Number.isFinite(raw)) return 100000
+  const unit = String(match[2] || '').toLowerCase()
+  if (unit === '万' || unit === 'w') return raw * 10000
+  if (unit === '千' || unit === 'k') return raw * 1000
+  return raw
+}
+
+const alertCycleLabel = (cycle = 'daily') => {
+  const labels = {
+    hourly: '每小时检测',
+    daily: '每日检测',
+    weekly: '每周检测',
+    monthly: '每月检测'
+  }
+  return labels[cycle] || '每日检测'
+}
+
+const formatAlertChannel = (channels = []) => {
+  const values = Array.isArray(channels) ? channels : [channels]
+  const labels = values.map(item => {
+    if (item === 'email') return '邮件'
+    if (item === 'dingtalk') return '钉钉'
+    if (item === 'both') return '邮件 + 钉钉'
+    return ''
+  }).filter(Boolean)
+  return labels.length ? [...new Set(labels)].join(' + ') : '邮件 + 钉钉'
+}
+
+const formatAlertRuleTitle = (rule = {}) => {
+  const metric = String(rule.metricField || '指标').trim()
+  const operatorMap = { lt: '低于', gt: '高于', zscore: '异常波动' }
+  const operator = operatorMap[rule.operator] || '触发'
+  const threshold = rule.operator === 'zscore' ? 'Z-Score' : formatAdvancedNumber(rule.threshold)
+  return `${metric} ${operator} ${threshold}`
+}
+
+const formatAlertRuleMeta = (rule = {}) => {
+  const parts = [
+    rule.tableName,
+    alertCycleLabel(rule.detectionCycle),
+    formatAlertChannel(rule.channels),
+    rule.filterExpression ? `过滤：${rule.filterExpression}` : ''
+  ].filter(Boolean)
+  return parts.join(' / ')
+}
+
+const buildForecastCardExplanation = ({ algorithm, historyPoints, forecastPoints, lastForecast, source = '当前上下文' } = {}) => ({
+  source: 'rule',
+  sourceLabel: '规则解释',
+  calculation: [
+    `当前使用${algorithm || '预测算法'}生成预测曲线，数据来源为${source}。`,
+    historyPoints ? `历史序列包含 ${historyPoints} 个有效点，向前预测 ${forecastPoints || 0} 个点。` : '',
+    lastForecast != null ? `末期预测值为 ${formatAdvancedNumber(lastForecast)}。` : ''
+  ].filter(Boolean),
+  suggestions: [
+    '请同时关注预测值和置信区间，上下界差距越大代表未来不确定性越高。',
+    '若数据点偏少或近期波动较大，建议补充更长周期数据后重新计算。'
+  ]
+})
+
+const buildWhatIfCardExplanation = ({ base, scenario, recommended, variables = [], formula = '' } = {}) => {
+  const delta = base ? ((Number(scenario || 0) - Number(base || 0)) / Math.abs(Number(base || 0))) * 100 : 0
+  const topVariable = Array.isArray(variables) ? variables[0] : null
+  return {
+    source: 'rule',
+    sourceLabel: '规则解释',
+    calculation: [
+      base != null ? `基准方案为 ${formatAdvancedNumber(base)}，中性方案为 ${formatAdvancedNumber(scenario)}。` : '当前基于变量变化生成多场景推演结果。',
+      formula ? `本次推演使用业务公式「${formula}」计算目标结果。` : '',
+      recommended != null ? `推荐方案为 ${formatAdvancedNumber(recommended)}，中性方案相对基准变化 ${delta >= 0 ? '+' : ''}${delta.toFixed(2)}%。` : '',
+      topVariable ? `变量「${topVariable.name || topVariable.field || '变量'}」参与本次推演，建议结合敏感性排序判断优先级。` : ''
+    ].filter(Boolean),
+    suggestions: [
+      '优先评估推荐方案在预算、库存、交付和合规上的可执行性。',
+      formula ? '请确认公式字段单位、聚合方式和业务口径一致。' : '推演结果用于方案比较，不等同于因果结论，落地前建议结合业务公式或实验数据校验。'
+    ]
+  }
+}
+
+const buildAlertCardExplanation = ({ operator = 'lt', threshold, channels = [], detectionCycle = 'daily' } = {}) => {
+  const operatorText = operator === 'gt' ? '高于阈值' : operator === 'zscore' ? 'Z-Score 异常波动' : '低于阈值'
+  return {
+    source: 'rule',
+    sourceLabel: '规则解释',
+    calculation: [
+      `当前预警规则采用${operatorText}判断，检测周期为${alertCycleLabel(detectionCycle)}。`,
+      `阈值配置为 ${operator === 'zscore' ? 'Z-Score >= 3' : formatAdvancedNumber(threshold)}。`,
+      `通知渠道为 ${formatAlertChannel(channels)}。`
+    ],
+    suggestions: [
+      '触发预警后建议先核对异常时段原始数据，再判断是否为真实业务波动。',
+      '若误报较多，可调整阈值、过滤条件或检测粒度后重新保存规则。'
+    ]
+  }
+}
+
+const formatAlertEventTitle = (event = {}) => {
+  const value = formatAdvancedNumber(event.actualValue)
+  return `规则 #${event.ruleId || '-'} / ${event.bucketName || '-'} / 实际值 ${value}`
+}
+
+const inferWhatIfVariables = (text) => {
+  const content = String(text || '')
+  const matches = [...content.matchAll(/([\u4e00-\u9fa5A-Za-z]+?)(提升|增长|上涨|下降|降低|减少)\s*(\d+(?:\.\d+)?)\s*%/g)]
+  const variables = matches.map(match => ({
+    name: match[1].replace(/[如果若假设]/g, '').trim() || '变量',
+    change: ['下降', '降低', '减少'].includes(match[2]) ? -Number(match[3]) : Number(match[3])
+  })).filter(item => item.name && Number.isFinite(item.change))
+  return variables.length ? variables : [
+    { name: '销量', change: 10 },
+    { name: '成本', change: -5 }
+  ]
+}
+
+const whatIfFormulaFunctionPattern = /\b(?:SAFE_DIVIDE|IF|ABS|MIN|MAX|ROUND|DIVIDE)\s*\(/i
+
+const hasExplicitWhatIfFormulaIntent = (text = '') => {
+  const content = normalizeWhatIfFormulaSyntax(text).replace(/\s+/g, ' ').trim()
+  if (!content) return false
+  if (whatIfFormulaFunctionPattern.test(content)) return true
+  if (/(?:业务公式|指标公式|公式|按|按照)\s*[:：]?.+[=]/.test(content)) return true
+  if (/(?:按|按照)\s+[\s\S]*[+\-*\/][\s\S]*/.test(content)) return true
+  const directMatch = content.match(/([\u4e00-\u9fa5A-Za-z_][\u4e00-\u9fa5A-Za-z0-9_\s]*)=([\s\S]+)$/)
+  if (!directMatch) return false
+  const rightExpression = directMatch[2] || ''
+  return (
+    /[+\-*\/()]/.test(rightExpression)
+    || /^[+-]?\d+(?:\.\d+)?%?$/.test(rightExpression.trim())
+    || whatIfFormulaFunctionPattern.test(rightExpression)
+  )
+}
+
+const inferWhatIfFormula = (text, llmIntent = {}) => {
+  const content = String(text || '').replace(/\s+/g, ' ').trim()
+  const hasExplicitFormula = hasExplicitWhatIfFormulaIntent(content)
+  const explicit = hasExplicitFormula ? String(llmIntent.formula || llmIntent.businessFormula || '').trim() : ''
+  if (explicit) return trimWhatIfFormulaTail(explicit)
+  if (!hasExplicitFormula) return ''
+  const match = content.match(/(?:公式|按|按照)\s*[:：]?([\s\S]+?[=＝][\s\S]+)$/)
+  if (match?.[1]) return trimWhatIfFormulaTail(match[1])
+  const directMatch = content.match(/([\u4e00-\u9fa5A-Za-z_][\u4e00-\u9fa5A-Za-z0-9_\s]*)[=＝]([\s\S]+)$/)
+  if (directMatch?.[0]) return trimWhatIfFormulaTail(directMatch[0])
+  const functionMatch = content.match(/\b(?:SAFE_DIVIDE|IF|ABS|MIN|MAX|ROUND|DIVIDE)\s*\([\s\S]+\)/i)
+  if (functionMatch?.[0]) return trimWhatIfFormulaTail(functionMatch[0])
+  return ''
+}
+
+const buildForecastSeries = (params = {}) => {
+  const horizon = String(params.horizon || '3m')
+  const futureCount = horizon === '7d' ? 7 : horizon === '30d' ? 8 : horizon === '6m' ? 6 : 3
+  const historyCount = 10
+  const base = 86000
+  const rows = []
+  for (let index = 0; index < historyCount; index += 1) {
+    const value = Math.round(base + index * 4200 + Math.sin(index / 1.7) * 7600)
+    rows.push({
+      name: `历史${index + 1}`,
+      history: value,
+      forecast: null,
+      upper: null,
+      lower: null
+    })
+  }
+  const lastValue = rows[rows.length - 1].history
+  for (let index = 1; index <= futureCount; index += 1) {
+    const forecast = Math.round(lastValue * (1 + index * 0.045) + Math.sin(index) * 3800)
+    rows.push({
+      name: `未来${index}`,
+      history: null,
+      forecast,
+      upper: Math.round(forecast * 1.12),
+      lower: Math.round(forecast * 0.88)
+    })
+  }
+  return rows
+}
+
+const buildWhatIfSeries = (variables = []) => {
+  const base = Number(lastAnalysis?.value?.data?.[0]?.value || 120000)
+  const effect = variables.reduce((sum, variable) => {
+    const name = String(variable.name || '')
+    const change = Number(variable.change || 0)
+    const mode = variable.mode || 'percent'
+    const normalizedChange = mode === 'absolute'
+      ? (base ? change / Math.abs(base) * 100 : change)
+      : mode === 'set'
+        ? (base ? (change - base) / Math.abs(base) * 100 : change)
+        : change
+    const weight = /成本|费用/.test(name) ? -0.42 : /价格|客单价/.test(name) ? 0.36 : 0.58
+    return sum + normalizedChange * weight
+  }, 0)
+  const conservative = Math.max(0, Math.round(base * (1 + effect * 0.5 / 100)))
+  const scenario = Math.max(0, Math.round(base * (1 + effect / 100)))
+  const optimistic = Math.max(0, Math.round(base * (1 + effect * 1.35 / 100)))
+  const optimized = Math.round(Math.max(conservative, scenario, optimistic))
+  return [
+    { name: '基准方案', value: Math.round(base) },
+    { name: '保守方案', value: conservative },
+    { name: '中性方案', value: scenario },
+    { name: '乐观方案', value: optimistic },
+    { name: '推荐方案', value: optimized }
+  ]
+}
+
+const buildAlertSeries = (threshold = 100000) => {
+  const base = Number(threshold) || 100000
+  return Array.from({ length: 12 }, (_, index) => {
+    const value = Math.round(base * (0.82 + index * 0.025 + Math.sin(index / 1.2) * 0.16))
+    return { name: `第${index + 1}期`, value }
+  })
+}
+
+const normalizeAdvancedIntentType = (type) => {
+  const value = String(type || '').trim()
+  if (['forecast', 'timeSeriesForecast', 'prediction'].includes(value)) return 'forecast'
+  if (['whatIf', 'simulation', 'scenario'].includes(value)) return 'whatIf'
+  if (['alert', 'warning', 'anomaly'].includes(value)) return 'alert'
+  return ''
+}
+
+const normalizeLlmVariables = (items) => {
+  if (!Array.isArray(items)) return []
+  return items.map(item => ({
+    name: String(item?.name || item?.variable || item?.label || '').trim(),
+    field: String(item?.field || item?.columnName || '').trim(),
+    change: Number(item?.change ?? item?.changePercent ?? item?.delta ?? 0)
+  })).filter(item => item.name && Number.isFinite(item.change))
+}
+
+const normalizeHorizonCount = (horizon) => {
+  const value = String(horizon || '').trim()
+  if (value === '7d') return 7
+  if (value === '30d') return 8
+  if (value === '6m') return 6
+  return 3
+}
+
+const parseChartNumber = (value) => {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  const parsed = Number(String(value ?? '').replace(/,/g, '').trim())
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+const getRowValueByCandidates = (row, candidates = []) => {
+  if (!row || typeof row !== 'object') return undefined
+  for (const key of candidates) {
+    if (key && Object.prototype.hasOwnProperty.call(row, key)) {
+      return row[key]
+    }
+  }
+  return undefined
+}
+
+const resolveLastAnalysisTimeSeries = () => {
+  const analysis = lastAnalysis?.value
+  const rows = Array.isArray(analysis?.data) ? analysis.data : []
+  if (rows.length < 3) return []
+  const mapping = analysis?.fieldMapping || {}
+  const dimensionKey = String(mapping.dimensionKey || '').trim()
+  const metricKey = String(mapping.metricKey || '').trim()
+  const dimensionCandidates = [
+    dimensionKey,
+    'name',
+    'dim_name',
+    'dimension',
+    'bucket_name',
+    'date',
+    'month',
+    'time'
+  ].filter(Boolean)
+  const metricCandidates = [
+    metricKey,
+    'value',
+    'metric_value',
+    'metric',
+    'sales_amt',
+    'amount',
+    'total'
+  ].filter(Boolean)
+  return rows.map((row, index) => {
+    const name = String(getRowValueByCandidates(row, dimensionCandidates) ?? '').trim()
+    const value = parseChartNumber(getRowValueByCandidates(row, metricCandidates))
+    return {
+      name: name || `历史${index + 1}`,
+      value
+    }
+  }).filter(item => item.name && item.value != null)
+}
+
+const nextSeriesName = (lastName, offset) => {
+  const text = String(lastName || '').trim()
+  const monthMatch = text.match(/^(\d{4})-(\d{1,2})$/)
+  if (monthMatch) {
+    const date = new Date(Number(monthMatch[1]), Number(monthMatch[2]) - 1 + offset, 1)
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+  }
+  const dayMatch = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
+  if (dayMatch) {
+    const date = new Date(Number(dayMatch[1]), Number(dayMatch[2]) - 1, Number(dayMatch[3]) + offset)
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+  }
+  return `未来${offset}`
+}
+
+const buildForecastSeriesFromChartData = (params = {}) => {
+  const historyRows = resolveLastAnalysisTimeSeries()
+  if (historyRows.length < 3) return []
+  const futureCount = normalizeHorizonCount(params.horizon)
+  const first = historyRows[0].value
+  const last = historyRows[historyRows.length - 1].value
+  const trend = historyRows.length > 1 ? (last - first) / (historyRows.length - 1) : 0
+  const average = historyRows.reduce((sum, item) => sum + item.value, 0) / historyRows.length
+  const std = Math.sqrt(historyRows.reduce((sum, item) => sum + Math.pow(item.value - average, 2), 0) / historyRows.length)
+  const alpha = 0.55
+  let level = first
+  historyRows.forEach(item => {
+    level = alpha * item.value + (1 - alpha) * level
+  })
+  const rows = historyRows.map(item => ({
+    name: item.name,
+    history: item.value,
+    forecast: null,
+    upper: null,
+    lower: null
+  }))
+  for (let index = 1; index <= futureCount; index += 1) {
+    const forecast = Math.max(0, Math.round(level + trend * index))
+    const band = Math.max(Math.abs(forecast) * 0.12, std * 1.2)
+    rows.push({
+      name: nextSeriesName(historyRows[historyRows.length - 1].name, index),
+      history: null,
+      forecast,
+      upper: Math.round(forecast + band),
+      lower: Math.max(0, Math.round(forecast - band))
+    })
+  }
+  return rows
+}
+
+const normalizeFieldText = (value) => String(value || '')
+  .trim()
+  .toLowerCase()
+  .replace(/[`"'“”‘’（）()\[\]{}<>《》\s_-]+/g, '')
+
+const fieldSearchValues = (field) => [
+  field?.columnName,
+  field?.displayName,
+  field?.sourceFieldName,
+  field?.fieldComment,
+  field?.businessName,
+  field?.synonyms
+].map(value => String(value || '').trim()).filter(Boolean)
+
+const fieldSemanticGroups = [
+  ['\u9500\u552e\u989d', '\u9500\u552e\u91d1\u989d', '\u9500\u552e\u6536\u5165', '\u9500\u552e', '\u8425\u6536', '\u6536\u5165', 'salesamt', 'saleamt', 'salesamount', 'sales', 'revenue', 'amount', 'amt', 'gmv'],
+  ['\u5229\u6da6', '\u6bdb\u5229', '\u51c0\u5229', 'profit', 'margin'],
+  ['\u6210\u672c', '\u8d39\u7528', '\u652f\u51fa', 'cost', 'expense'],
+  ['\u9500\u91cf', '\u6570\u91cf', '\u4ef6\u6570', '\u8ba2\u5355\u91cf', 'quantity', 'qty', 'volume', 'count', 'orders'],
+  ['\u5355\u4ef7', '\u5ba2\u5355\u4ef7', '\u4ef7\u683c', 'price', 'unitprice', 'arpu'],
+  ['\u65e5\u671f', '\u65f6\u95f4', '\u4e0b\u5355\u65f6\u95f4', '\u8ba2\u5355\u65f6\u95f4', 'date', 'time', 'day', 'month', 'orderdate', 'createdat', 'createtime'],
+  ['\u533a\u57df', '\u5730\u533a', '\u5927\u533a', '\u57ce\u5e02', '\u7701\u4efd', 'region', 'area', 'city', 'province'],
+  ['\u6e20\u9053', '\u6765\u6e90', 'channel', 'source'],
+  ['\u54c1\u7c7b', '\u7c7b\u522b', '\u5206\u7c7b', '\u7c7b\u578b', 'category', 'type', 'class']
+]
+
+const scoreFieldMatch = (field, target = '') => {
+  const preferred = normalizeFieldText(target)
+  if (!preferred) return 0
+  const values = fieldSearchValues(field)
+  const normalizedValues = values.map(normalizeFieldText).filter(Boolean)
+  let score = 0
+  normalizedValues.forEach(value => {
+    if (value === preferred) score = Math.max(score, 100)
+    else if (value.includes(preferred) || preferred.includes(value)) score = Math.max(score, 80)
+  })
+  const joinedFieldText = normalizedValues.join(' ')
+  fieldSemanticGroups.forEach(group => {
+    const normalizedGroup = group.map(normalizeFieldText)
+    const targetHit = normalizedGroup.some(term => term && (preferred.includes(term) || term.includes(preferred)))
+    if (!targetHit) return
+    const fieldHit = normalizedGroup.some(term => term && joinedFieldText.includes(term))
+    if (fieldHit) score = Math.max(score, 70)
+  })
+  return score
+}
+
+const formulaFieldAliasValues = (field) => {
+  const values = fieldSearchValues(field)
+  const normalizedValues = values.map(normalizeFieldText).filter(Boolean)
+  const joinedFieldText = normalizedValues.join(' ')
+  const semanticValues = []
+  fieldSemanticGroups.forEach(group => {
+    const normalizedGroup = group.map(normalizeFieldText)
+    const fieldHit = normalizedGroup.some(term => term && joinedFieldText.includes(term))
+    if (fieldHit) semanticValues.push(...group)
+  })
+  return [...new Set([...values, ...semanticValues].map(value => String(value || '').trim()).filter(Boolean))]
+}
+
+const fieldNameMatches = (field, target) => scoreFieldMatch(field, target) > 0
+
+const pickFieldName = (fields = [], preferred = '', fallback = '') => {
+  const scored = fields
+    .map((field, index) => ({ field, index, score: scoreFieldMatch(field, preferred) }))
+    .filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+  const matched = scored[0]?.field
+  return String(matched?.columnName || fallback || fields[0]?.columnName || '').trim()
+}
+
+const pickFieldNameStrict = (fields = [], preferred = '', fallback = '') => {
+  const scored = fields
+    .map((field, index) => ({ field, index, score: scoreFieldMatch(field, preferred) }))
+    .filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+  return String(scored[0]?.field?.columnName || fallback || '').trim()
+}
+
+const whatIfFormulaStopWords = [
+  '推演',
+  '预测',
+  '变化',
+  '会怎么',
+  '会怎样',
+  '怎么办',
+  '结果',
+  '分析',
+  '测算',
+  '模拟',
+  '时',
+  '如果',
+  '若',
+  '假设',
+  '并',
+  '请'
+]
+
+const normalizeWhatIfFormulaSyntax = (value = '') => String(value || '')
+  .replace(/＝/g, '=')
+  .replace(/[（]/g, '(')
+  .replace(/[）]/g, ')')
+  .replace(/，/g, ',')
+  .replace(/\bSAFE[\s-]+DIVIDE\b/gi, 'SAFE_DIVIDE')
+
+const unsafeWhatIfFormulaPattern = /\b(select|from|where|drop|delete|update|insert|alter|union|sleep|benchmark)\b/i
+
+const hasUnsafeWhatIfFormulaText = (value = '') => {
+  const text = normalizeWhatIfFormulaSyntax(value).replace(/\s+/g, ' ').trim()
+  if (!text || !unsafeWhatIfFormulaPattern.test(text)) return false
+  return /(?:公式|按|按照)/.test(text) || /=/.test(text)
+}
+
+const trimWhatIfFormulaTail = (value = '') => {
+  let formula = normalizeWhatIfFormulaSyntax(value)
+    .replace(/[。；;、]/g, ' ')
+    .replace(/\s*,\s*/g, ', ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  for (const word of whatIfFormulaStopWords) {
+    const index = formula.indexOf(word)
+    if (index > 0) {
+      formula = formula.slice(0, index).trim()
+    }
+  }
+  formula = formula
+    .replace(/\s*(提升|增长|上涨|下降|降低|减少)\s*$/g, '')
+    .replace(/[\s,，。；;、]+$/g, '')
+    .trim()
+  return formula
+}
+
+const hasWhatIfFormulaExpression = (text = '', params = {}, llmIntent = {}) => {
+  const explicit = String(params.formula || '').trim()
+  if (explicit) return true
+  const content = String(text || '').trim()
+  return Boolean(
+    inferWhatIfFormula(content, llmIntent)
+    || hasExplicitWhatIfFormulaIntent(content)
+  )
+}
+
+const assertWhatIfFormulaAllowed = (formula = '') => {
+  const expression = normalizeWhatIfFormulaSyntax(formula).trim()
+  if (!expression) return
+  if (unsafeWhatIfFormulaPattern.test(expression)) {
+    throw new Error('业务公式仅支持字段、数字、函数、条件和安全运算符，不能包含 SQL 语句')
+  }
+}
+
+const assertWhatIfInstructionAllowed = (text = '', params = {}, llmIntent = {}) => {
+  const explicit = String(params.formula || '').trim()
+  if (hasUnsafeWhatIfFormulaText(text) || hasUnsafeWhatIfFormulaText(explicit)) {
+    throw new Error('业务公式仅支持字段、数字、函数、条件和安全运算符，不能包含 SQL 语句')
+  }
+  assertWhatIfFormulaAllowed(explicit || inferWhatIfFormula(text, llmIntent))
+}
+
+const stripWhatIfFormulaDisplayName = (formula = '') => {
+  const expression = String(formula || '').trim()
+  let depth = 0
+  for (let index = 0; index < expression.length; index += 1) {
+    const ch = expression[index]
+    if (ch === '(') {
+      depth += 1
+      continue
+    }
+    if (ch === ')') {
+      depth = Math.max(0, depth - 1)
+      continue
+    }
+    if (depth !== 0 || ch !== '=') continue
+    const previous = index > 0 ? expression[index - 1] : ''
+    const next = index + 1 < expression.length ? expression[index + 1] : ''
+    if (['>', '<', '!', '='].includes(previous) || next === '=') continue
+    return expression.slice(index + 1).trim()
+  }
+  return expression
+}
+
+const rewriteWhatIfFormulaToColumns = (formula = '', fields = []) => {
+  let expression = stripWhatIfFormulaDisplayName(trimWhatIfFormulaTail(formula))
+  if (!expression) return ''
+  const aliasEntries = []
+  fields.forEach(field => {
+    const column = String(field?.columnName || '').trim()
+    if (!column) return
+    formulaFieldAliasValues(field).forEach(alias => {
+      const text = String(alias || '').trim()
+      if (!text || text === column) return
+      aliasEntries.push({ text, column })
+    })
+  })
+  aliasEntries
+    .sort((a, b) => b.text.length - a.text.length)
+    .forEach(({ text, column }) => {
+      const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      expression = expression.replace(new RegExp(escaped, 'gi'), column)
+    })
+  return trimWhatIfFormulaTail(expression)
+}
+
+const extractWhatIfFormulaFields = (formula = '', fields = []) => {
+  const expression = rewriteWhatIfFormulaToColumns(formula, fields)
+  if (!expression) return []
+  const tokens = [...expression.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)].map(match => match[0])
+  const functionNames = new Set(['IF', 'ABS', 'MIN', 'MAX', 'ROUND', 'DIVIDE', 'SAFE_DIVIDE'])
+  const columns = new Set((fields || []).map(field => String(field?.columnName || '').trim()).filter(Boolean))
+  return [...new Set(tokens.filter(token => columns.has(token) && !functionNames.has(token.toUpperCase())))]
+}
+
+const completeWhatIfVariablesFromFormula = (variables = [], formula = '', fields = []) => {
+  const rows = Array.isArray(variables) ? variables.map(item => ({ ...item })) : []
+  const existing = new Set(rows.map(item => String(item.field || '').trim()).filter(Boolean))
+  extractWhatIfFormulaFields(formula, fields).forEach(column => {
+    if (existing.has(column)) return
+    const fieldMeta = fields.find(field => String(field.columnName || '') === column)
+    rows.push({
+      field: column,
+      name: fieldMeta?.displayName || fieldMeta?.sourceFieldName || column,
+      mode: 'percent',
+      change: 0,
+      min: null,
+      max: null,
+      formulaOnly: true
+    })
+    existing.add(column)
+  })
+  return rows
+}
+
+const confirmForecastParams = (fieldMeta, defaults = {}) => new Promise((resolve) => {
+  forecastConfirmMeta.value = {
+    timeFields: Array.isArray(fieldMeta?.timeFields) ? fieldMeta.timeFields : [],
+    numericFields: Array.isArray(fieldMeta?.numericFields) ? fieldMeta.numericFields : []
+  }
+  forecastConfirmForm.value = {
+    tableName: defaults.tableName || '',
+    timeField: defaults.timeField || forecastConfirmMeta.value.timeFields[0]?.columnName || '',
+    metricField: defaults.metricField || forecastConfirmMeta.value.numericFields[0]?.columnName || '',
+    filterExpression: defaults.filterExpression || '',
+    granularity: defaults.granularity || 'month',
+    horizon: defaults.horizon || 3,
+    algorithm: defaults.algorithm || 'Holt-Winters',
+    alpha: defaults.alpha ?? 0.55,
+    beta: defaults.beta ?? 0.28,
+    gamma: defaults.gamma ?? 0.20,
+    seasonLength: defaults.seasonLength ?? 0
+  }
+  forecastConfirmResolver = resolve
+  forecastConfirmVisible.value = true
+})
+
+const submitForecastConfirm = () => {
+  if (!forecastConfirmForm.value.timeField || !forecastConfirmForm.value.metricField) {
+    ElMessage.warning('请选择时间字段和指标字段')
+    return
+  }
+  forecastConfirmVisible.value = false
+  if (forecastConfirmResolver) {
+    forecastConfirmResolver({ ...forecastConfirmForm.value })
+    forecastConfirmResolver = null
+  }
+}
+
+const cancelForecastConfirm = () => {
+  forecastConfirmVisible.value = false
+  if (forecastConfirmResolver) {
+    forecastConfirmResolver(null)
+    forecastConfirmResolver = null
+  }
+}
+
+const confirmWhatIfParams = (fieldMeta, defaults = {}) => new Promise((resolve) => {
+  const numericFields = Array.isArray(fieldMeta?.numericFields) ? fieldMeta.numericFields : []
+  whatIfConfirmMeta.value = { numericFields }
+  whatIfConfirmForm.value = {
+    targetMetric: defaults.targetMetric || numericFields[0]?.columnName || '',
+    formula: defaults.formula || '',
+    formulaScope: defaults.formulaScope || 'aggregate',
+    variables: (defaults.variables?.length ? defaults.variables : [{ field: numericFields[1]?.columnName || numericFields[0]?.columnName || '', name: '变量', change: 10, mode: 'percent' }])
+      .map(item => ({
+        field: item.field || pickFieldNameStrict(numericFields, item.name, ''),
+        name: item.name || formatAdvancedFieldLabel(numericFields.find(field => field.columnName === item.field)) || item.field || '变量',
+        mode: item.mode || 'percent',
+        change: Number(item.change ?? 0),
+        min: item.min ?? null,
+        max: item.max ?? null
+      }))
+  }
+  whatIfConfirmResolver = resolve
+  whatIfConfirmVisible.value = true
+})
+
+const addWhatIfConfirmVariable = () => {
+  const firstField = whatIfConfirmMeta.value.numericFields?.[0]?.columnName || ''
+  whatIfConfirmForm.value.variables.push({ field: firstField, name: '变量', mode: 'percent', change: 10, min: null, max: null })
+}
+
+const removeWhatIfConfirmVariable = (index) => {
+  whatIfConfirmForm.value.variables.splice(index, 1)
+}
+
+const submitWhatIfConfirm = () => {
+  if (!whatIfConfirmForm.value.targetMetric) {
+    ElMessage.warning('请选择目标指标')
+    return
+  }
+  const formula = rewriteWhatIfFormulaToColumns(
+    whatIfConfirmForm.value.formula || '',
+    whatIfConfirmMeta.value.numericFields || []
+  )
+  try {
+    assertWhatIfFormulaAllowed(formula || whatIfConfirmForm.value.formula || '')
+  } catch (error) {
+    ElMessage.error(error.message || '业务公式不合法')
+    return
+  }
+  const variables = completeWhatIfVariablesFromFormula(
+    whatIfConfirmForm.value.variables,
+    formula,
+    whatIfConfirmMeta.value.numericFields || []
+  )
+    .filter(item => item.field && Number.isFinite(Number(item.change)))
+    .map(item => ({
+      ...item,
+      mode: item.mode || 'percent',
+      change: Number(item.change),
+      min: item.min === null || item.min === '' ? null : Number(item.min),
+      max: item.max === null || item.max === '' ? null : Number(item.max)
+    }))
+  if (!variables.length) {
+    ElMessage.warning('请至少配置一个有效变量')
+    return
+  }
+  whatIfConfirmVisible.value = false
+  if (whatIfConfirmResolver) {
+    whatIfConfirmResolver({
+      targetMetric: whatIfConfirmForm.value.targetMetric,
+      formula,
+      formulaScope: formula ? whatIfConfirmForm.value.formulaScope || 'aggregate' : 'aggregate',
+      variables
+    })
+    whatIfConfirmResolver = null
+  }
+}
+
+const cancelWhatIfConfirm = () => {
+  whatIfConfirmVisible.value = false
+  if (whatIfConfirmResolver) {
+    whatIfConfirmResolver(null)
+    whatIfConfirmResolver = null
+  }
+}
+
+const confirmAlertParams = (fieldMeta, defaults = {}) => new Promise((resolve) => {
+  alertConfirmMeta.value = {
+    timeFields: Array.isArray(fieldMeta?.timeFields) ? fieldMeta.timeFields : [],
+    numericFields: Array.isArray(fieldMeta?.numericFields) ? fieldMeta.numericFields : []
+  }
+  const channel = String(defaults.channel || '').trim()
+  alertConfirmForm.value = {
+    tableName: defaults.tableName || '',
+    timeField: defaults.timeField || alertConfirmMeta.value.timeFields[0]?.columnName || '',
+    metricField: defaults.metricField || alertConfirmMeta.value.numericFields[0]?.columnName || '',
+    filterExpression: defaults.filterExpression || '',
+    granularity: defaults.granularity || 'day',
+    operator: defaults.operator || 'lt',
+    threshold: Number(defaults.threshold ?? 100000),
+    detectionCycle: defaults.detectionCycle || 'daily',
+    channels: Array.isArray(defaults.channels) && defaults.channels.length
+      ? defaults.channels
+      : channel === 'email'
+        ? ['email']
+        : channel === 'dingtalk'
+          ? ['dingtalk']
+          : ['email', 'dingtalk']
+  }
+  alertConfirmResolver = resolve
+  alertConfirmVisible.value = true
+})
+
+const submitAlertConfirm = () => {
+  if (!alertConfirmForm.value.timeField || !alertConfirmForm.value.metricField) {
+    ElMessage.warning('请选择时间字段和指标字段')
+    return
+  }
+  if (alertConfirmForm.value.operator !== 'zscore' && !Number.isFinite(Number(alertConfirmForm.value.threshold))) {
+    ElMessage.warning('请填写有效阈值')
+    return
+  }
+  if (!alertConfirmForm.value.channels.length) {
+    ElMessage.warning('请至少选择一个通知渠道')
+    return
+  }
+  alertConfirmVisible.value = false
+  if (alertConfirmResolver) {
+    alertConfirmResolver({ ...alertConfirmForm.value })
+    alertConfirmResolver = null
+  }
+}
+
+const cancelAlertConfirm = () => {
+  alertConfirmVisible.value = false
+  if (alertConfirmResolver) {
+    alertConfirmResolver(null)
+    alertConfirmResolver = null
+  }
+}
+
+const buildAnalysisFromRealForecast = (result, text, params, llmIntent, fieldMeta = {}) => {
+  const metric = String(llmIntent?.metric || result?.metricField || '').trim() || inferMetricFromQuestion(text)
+  const forecastRows = Array.isArray(result?.series) ? result.series.filter(item => item?.forecast != null) : []
+  const historyRows = Array.isArray(result?.series) ? result.series.filter(item => item?.history != null) : []
+  return {
+    id: `advanced-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    type: 'forecast',
+    title: `${metric}趋势预测`,
+    summary: '已基于真实历史数据生成预测结果，预测值与置信区间由后端算法计算。',
+    tableName: result?.tableName || selectedTableName?.value || '',
+    metric: formatAnalysisMetricLabel(result?.metricField || llmIntent?.metricField || metric, metric, fieldMeta?.numericFields),
+    timeRange: result?.granularity || params.horizon || '自定义周期',
+    status: '真实计算',
+    params: {
+      horizon: params.horizon,
+      algorithm: result?.algorithm || params.algorithm || 'Holt-Winters',
+      confidence: result?.confidence || params.confidence || '95%',
+      algorithmParams: result?.algorithmParams || {},
+      alpha: result?.algorithmParams?.alpha ?? params.alpha,
+      beta: result?.algorithmParams?.beta ?? params.beta,
+      gamma: result?.algorithmParams?.gamma ?? params.gamma,
+      seasonLength: result?.algorithmParams?.seasonLength ?? params.seasonLength,
+      filterExpression: params.filterExpression || '',
+      tableName: result?.tableName || params.tableName || selectedTableName?.value || '',
+      timeField: result?.timeField || params.timeField || '',
+      metricField: result?.metricField || params.metricField || '',
+      granularity: result?.granularity || params.granularity || 'month',
+      sourceSeries: Array.isArray(params.sourceSeries) ? params.sourceSeries : []
+    },
+    dataQuality: result?.dataQuality || null,
+    explanation: result?.explanation || buildForecastCardExplanation({
+      algorithm: result?.algorithm || params.algorithm,
+      historyPoints: historyRows.length,
+      forecastPoints: forecastRows.length,
+      lastForecast: forecastRows[forecastRows.length - 1]?.forecast,
+      source: params.sourceSeries?.length ? '上一轮查询结果' : '真实数据源'
+    }),
+    series: Array.isArray(result?.series) ? result.series : [],
+    insights: Array.isArray(result?.insights)
+      ? result.insights.map(item => ({ label: String(item.label || ''), value: String(item.value ?? '') }))
+      : []
+  }
+}
+
+const buildAnalysisFromRealWhatIf = (result, text, params, llmIntent, fieldMeta = {}) => {
+  const metric = String(llmIntent?.metric || result?.targetMetric || '').trim() || inferMetricFromQuestion(text)
+  const series = Array.isArray(result?.series) ? result.series : []
+  const base = series.find(item => item.name === '基准方案')?.value ?? series[0]?.value
+  const scenario = series.find(item => item.name === '中性方案')?.value ?? series[1]?.value
+  const recommended = series.find(item => item.name === '推荐方案')?.value ?? series[series.length - 1]?.value
+  const formula = String(result?.formula || params.formula || '').trim()
+  const formulaScope = formula ? String(result?.formulaScope || params.formulaScope || 'aggregate').trim() || 'aggregate' : 'aggregate'
+  return {
+    id: `advanced-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    type: 'whatIf',
+    title: `${metric}情景推演`,
+    summary: formula
+      ? '已基于真实历史数据与业务公式计算情景结果，结果用于方案比较和口径验证。'
+      : '已基于真实历史数据估计变量影响，结果用于情景比较和方案筛选。',
+    tableName: result?.tableName || selectedTableName?.value || '',
+    metric: formatAnalysisMetricLabel(result?.targetMetric || llmIntent?.targetMetricField || metric, metric, fieldMeta?.numericFields),
+    timeRange: '当前分析周期',
+    status: '真实计算',
+    params: {
+      tableName: result?.tableName || params.tableName || selectedTableName?.value || '',
+      targetMetric: result?.targetMetric || params.targetMetric || '',
+      formula,
+      formulaScope,
+      resolvedFormula: result?.resolvedFormula || '',
+      calculationMode: result?.calculationMode || (formula ? 'formula' : 'regression'),
+      variables: (Array.isArray(result?.variables) && result.variables.length ? result.variables : params.variables || []).map(item => ({ ...item }))
+    },
+    explanation: result?.explanation || buildWhatIfCardExplanation({
+      base,
+      scenario,
+      recommended,
+      variables: Array.isArray(result?.variables) ? result.variables : params.variables,
+      formula
+    }),
+    series,
+    insights: Array.isArray(result?.insights)
+      ? result.insights.map(item => ({ label: String(item.label || ''), value: String(item.value ?? '') }))
+      : []
+  }
+}
+
+const buildAnalysisFromSavedAlertRule = (rule, text, params, llmIntent, fieldMeta = {}) => {
+  const metric = formatAnalysisMetricLabel(rule?.metricField || params.metricField || llmIntent?.metric || inferMetricFromQuestion(text), inferMetricFromQuestion(text), fieldMeta?.numericFields)
+  const threshold = Number(rule?.threshold ?? params.threshold ?? inferAlertThreshold(text))
+  const operator = rule?.operator || params.operator || 'lt'
+  const series = buildAlertSeries(Number.isFinite(threshold) ? threshold : inferAlertThreshold(text))
+  const abnormalCount = series.filter(item => operator === 'gt' ? item.value > threshold : operator === 'lt' ? item.value < threshold : Math.abs(item.zScore || 0) >= 3).length
+  return {
+    id: `advanced-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    type: 'alert',
+    title: `${metric}预警规则`,
+    summary: '预警规则已保存，后续离线 Agent 可按检测周期轮询数据并生成预警事件。',
+    tableName: rule?.tableName || params.tableName || selectedTableName?.value || '',
+    metric,
+    timeRange: alertCycleLabel(rule?.detectionCycle || params.detectionCycle),
+    status: rule?.status === 'ACTIVE' ? '已启用' : '已保存',
+    ruleId: rule?.id,
+    params: {
+      operator,
+      threshold,
+      granularity: rule?.granularity || params.granularity || 'day',
+      detectionCycle: rule?.detectionCycle || params.detectionCycle || 'daily',
+      channels: Array.isArray(rule?.channels) ? rule.channels : params.channels || [],
+      channel: formatAlertChannel(Array.isArray(rule?.channels) ? rule.channels : params.channels || []),
+      filterExpression: rule?.filterExpression || params.filterExpression || '',
+      timeField: rule?.timeField || params.timeField || '',
+      metricField: rule?.metricField || params.metricField || ''
+    },
+    explanation: buildAlertCardExplanation({
+      operator,
+      threshold,
+      channels: Array.isArray(rule?.channels) ? rule.channels : params.channels || [],
+      detectionCycle: rule?.detectionCycle || params.detectionCycle || 'daily'
+    }),
+    series,
+    insights: [
+      { label: '规则ID', value: rule?.id || '-' },
+      { label: '阈值', value: operator === 'zscore' ? 'Z-Score >= 3' : formatAdvancedNumber(threshold) },
+      { label: '模拟异常', value: `${abnormalCount} 次` },
+      { label: '通知渠道', value: formatAlertChannel(Array.isArray(rule?.channels) ? rule.channels : params.channels || []) }
+    ]
+  }
+}
+
+const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = {}) => {
+  const tableName = selectedTableName?.value || lastAnalysis?.value?.tableName || ''
+  if (type === 'whatIf') {
+    assertWhatIfInstructionAllowed(text, params, llmIntent)
+  }
+  if (!tableName) {
+    return createAdvancedAnalysis(type, text, params, llmIntent)
+  }
+  try {
+    const fieldMeta = await fetchAdvancedAnalysisFieldMeta({ tableName })
+    if (type === 'forecast') {
+      const mergedParams = {
+        horizon: params.horizon || llmIntent.horizon || inferForecastHorizon(text),
+        algorithm: params.algorithm || llmIntent.algorithm || 'Holt-Winters',
+        confidence: params.confidence || llmIntent.confidence || '95%',
+        alpha: params.alpha ?? 0.55,
+        beta: params.beta ?? 0.28,
+        gamma: params.gamma ?? 0.20,
+        seasonLength: params.seasonLength ?? 0
+      }
+      const questionMetric = inferMetricFromQuestion(text)
+      const timeField = String(llmIntent.timeField || lastAnalysis?.value?.fieldMapping?.dimensionKey || text || '').trim()
+      const metricField = String(llmIntent.metricField || llmIntent.targetMetricField || lastAnalysis?.value?.fieldMapping?.metricKey || llmIntent.metric || questionMetric || text || '').trim()
+      const inferredPayload = {
+        tableName,
+        timeField: pickFieldName(fieldMeta?.timeFields || [], timeField, ''),
+        metricField: pickFieldName(fieldMeta?.numericFields || [], metricField, ''),
+        filterExpression: params.filterExpression || llmIntent.filterExpression || '',
+        granularity: llmIntent.granularity || 'month',
+        horizon: normalizeHorizonCount(mergedParams.horizon),
+        algorithm: mergedParams.algorithm,
+        alpha: mergedParams.alpha,
+        beta: mergedParams.beta,
+        gamma: mergedParams.gamma,
+        seasonLength: mergedParams.seasonLength
+      }
+      const confirmedPayload = await confirmForecastParams(fieldMeta, inferredPayload)
+      if (!confirmedPayload) {
+        throw new Error('已取消预测参数确认')
+      }
+      const chartSeries = resolveLastAnalysisTimeSeries()
+      const hasFilterExpression = Boolean(String(confirmedPayload.filterExpression || '').trim())
+      if (!hasFilterExpression && chartSeries.length >= 3) {
+        const result = await runAdvancedForecastFromSeries({
+          tableName,
+          metric: llmIntent.metric || lastAnalysis?.value?.fieldMapping?.metric || inferMetricFromQuestion(text),
+          series: chartSeries,
+          horizon: normalizeHorizonCount(mergedParams.horizon),
+          algorithm: mergedParams.algorithm,
+          alpha: mergedParams.alpha,
+          beta: mergedParams.beta,
+          gamma: mergedParams.gamma,
+          seasonLength: mergedParams.seasonLength
+        })
+        return buildAnalysisFromRealForecast(result, text, { ...mergedParams, sourceSeries: chartSeries }, llmIntent, fieldMeta)
+      }
+      const payload = {
+        ...inferredPayload,
+        ...confirmedPayload
+      }
+      if (!payload.timeField || !payload.metricField) {
+        throw new Error('缺少可用于真实预测的时间字段或数值指标，且上一轮查询结果不足以预测')
+      }
+      const result = await runAdvancedForecast(payload)
+      return buildAnalysisFromRealForecast(result, text, {
+        ...mergedParams,
+        tableName: payload.tableName,
+        timeField: payload.timeField,
+        metricField: payload.metricField,
+        granularity: payload.granularity,
+        filterExpression: payload.filterExpression || ''
+      }, llmIntent, fieldMeta)
+    }
+    if (type === 'whatIf') {
+      const variables = params.variables?.length
+        ? params.variables
+        : (normalizeLlmVariables(llmIntent.variables).length ? normalizeLlmVariables(llmIntent.variables) : inferWhatIfVariables(text))
+      const targetMetric = pickFieldName(
+        fieldMeta?.numericFields || [],
+        params.targetMetric || llmIntent.targetMetricField || llmIntent.metric || lastAnalysis?.value?.fieldMapping?.metricKey || '',
+        ''
+      )
+      const numericFields = fieldMeta?.numericFields || []
+      const defaultVariables = variables.map(variable => {
+        const field = pickFieldNameStrict(numericFields, variable.field || variable.name, '')
+        return { ...variable, field }
+      })
+      const formula = rewriteWhatIfFormulaToColumns(
+        params.formula || inferWhatIfFormula(text, llmIntent),
+        numericFields
+      )
+      assertWhatIfFormulaAllowed(formula)
+      const confirmedWhatIf = await confirmWhatIfParams(fieldMeta, {
+        targetMetric,
+        formula,
+        formulaScope: params.formulaScope || 'aggregate',
+        variables: completeWhatIfVariablesFromFormula(defaultVariables, formula, numericFields)
+      })
+      if (!confirmedWhatIf) {
+        throw new Error('已取消推演参数确认')
+      }
+      const normalizedVariables = confirmedWhatIf.variables
+      if (!confirmedWhatIf.targetMetric || !normalizedVariables.length) {
+        throw new Error('缺少可用于真实推演的目标指标或变量字段')
+      }
+      const result = await runAdvancedWhatIf({
+        tableName,
+        targetMetric: confirmedWhatIf.targetMetric,
+        formula: confirmedWhatIf.formula || '',
+        formulaScope: confirmedWhatIf.formula ? confirmedWhatIf.formulaScope || 'aggregate' : 'aggregate',
+        sourceQuestion: text,
+        variables: normalizedVariables
+      })
+      return buildAnalysisFromRealWhatIf(result, text, {
+        tableName,
+        targetMetric: confirmedWhatIf.targetMetric,
+        formula: confirmedWhatIf.formula || '',
+        formulaScope: confirmedWhatIf.formula ? confirmedWhatIf.formulaScope || 'aggregate' : 'aggregate',
+        variables: normalizedVariables
+      }, llmIntent, fieldMeta)
+    }
+    if (type === 'alert') {
+      const questionMetric = inferMetricFromQuestion(text)
+      const timeField = String(llmIntent.timeField || lastAnalysis?.value?.fieldMapping?.dimensionKey || text || '').trim()
+      const metricField = String(llmIntent.metricField || llmIntent.targetMetricField || lastAnalysis?.value?.fieldMapping?.metricKey || llmIntent.metric || questionMetric || text || '').trim()
+      const operator = params.operator || llmIntent.operator || (/高于|超过|大于/.test(text) ? 'gt' : /异常|z-?score/i.test(text) ? 'zscore' : 'lt')
+      const confirmedAlert = await confirmAlertParams(fieldMeta, {
+        tableName,
+        timeField: pickFieldName(fieldMeta?.timeFields || [], timeField, ''),
+        metricField: pickFieldName(fieldMeta?.numericFields || [], metricField, ''),
+        filterExpression: params.filterExpression || llmIntent.filterExpression || '',
+        granularity: llmIntent.granularity || params.granularity || 'day',
+        operator,
+        threshold: params.threshold ?? llmIntent.threshold ?? inferAlertThreshold(text),
+        detectionCycle: params.detectionCycle || llmIntent.detectionCycle || 'daily',
+        channel: params.channel || llmIntent.channel || 'both'
+      })
+      if (!confirmedAlert) {
+        throw new Error('已取消预警规则确认')
+      }
+      const savedRule = await saveAdvancedAlertRule(confirmedAlert)
+      return buildAnalysisFromSavedAlertRule(savedRule, text, confirmedAlert, llmIntent, fieldMeta)
+    }
+  } catch (error) {
+    console.warn('advanced analysis real compute fallback:', error)
+    if (type === 'whatIf' && hasWhatIfFormulaExpression(text, params, llmIntent)) {
+      throw error
+    }
+    if (type === 'forecast') {
+      return createAdvancedAnalysis(type, text, params, {
+        ...llmIntent,
+        simulated: true,
+        fallbackReason: error.message || '真实预测接口不可用'
+      })
+    }
+    ElMessage.warning(`真实计算暂不可用，已使用前端模拟结果：${error.message || '未知原因'}`)
+  }
+  return createAdvancedAnalysis(type, text, params, llmIntent)
+}
+
+const createAdvancedAnalysis = (type, text, params = {}, llmIntent = {}) => {
+  const metric = String(llmIntent.metric || llmIntent.targetMetric || '').trim() || inferMetricFromQuestion(text)
+  const tableName = String(selectedTableName?.value || lastAnalysis?.value?.tableName || '').trim()
+  const id = `advanced-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  if (type === 'forecast') {
+    const mergedParams = {
+      horizon: params.horizon || llmIntent.horizon || inferForecastHorizon(text),
+      algorithm: params.algorithm || llmIntent.algorithm || 'Prophet',
+      confidence: params.confidence || llmIntent.confidence || '95%'
+    }
+    const series = buildForecastSeries(mergedParams)
+    const forecastRows = series.filter(item => item.forecast != null)
+    const lastForecast = forecastRows[forecastRows.length - 1]?.forecast || 0
+    return {
+      id,
+      type,
+      title: `${metric}趋势预测`,
+      summary: llmIntent.simulated
+        ? `未取得可用真实时间序列，已生成模拟预测卡片用于参数预览。原因：${llmIntent.fallbackReason || '字段不足或数据不可用'}`
+        : `基于当前对话上下文生成${mergedParams.confidence}置信区间预测曲线，可调整周期和算法后重新计算。`,
+      tableName,
+      metric,
+      timeRange: mergedParams.horizon === '6m' ? '未来 6 个月' : mergedParams.horizon === '30d' ? '未来 30 天' : mergedParams.horizon === '7d' ? '未来 7 天' : '未来 3 个月',
+      status: llmIntent.simulated ? '模拟生成' : '已生成',
+      params: mergedParams,
+      explanation: buildForecastCardExplanation({
+        algorithm: mergedParams.algorithm,
+        historyPoints: series.filter(item => item.history != null).length,
+        forecastPoints: forecastRows.length,
+        lastForecast,
+        source: llmIntent.simulated ? '模拟数据' : '当前对话上下文'
+      }),
+      series,
+      insights: [
+        { label: '末期预测', value: formatAdvancedNumber(lastForecast) },
+        { label: '算法', value: mergedParams.algorithm },
+        { label: '置信区间', value: mergedParams.confidence }
+      ]
+    }
+  }
+  if (type === 'whatIf') {
+    const variables = params.variables?.length
+      ? params.variables
+      : (normalizeLlmVariables(llmIntent.variables).length ? normalizeLlmVariables(llmIntent.variables) : inferWhatIfVariables(text))
+    const series = buildWhatIfSeries(variables)
+    const base = series[0]?.value || 0
+    const scenario = series.find(item => item.name === '中性方案')?.value || series[1]?.value || 0
+    const recommended = series.find(item => item.name === '推荐方案')?.value || series[series.length - 1]?.value || 0
+    const delta = base ? ((scenario - base) / base) * 100 : 0
+    const formula = params.formula || inferWhatIfFormula(text, llmIntent)
+    const formulaScope = formula ? params.formulaScope || 'aggregate' : 'aggregate'
+    return {
+      id,
+      type,
+      title: `${metric}情景推演`,
+      summary: formula
+        ? '已根据变量变化和业务公式生成基准、保守、中性、乐观和推荐方案。'
+        : '已根据变量变化生成基准、保守、中性、乐观和推荐方案，可继续调整变量重新计算。',
+      tableName,
+      metric,
+      timeRange: '当前分析周期',
+      status: '已生成',
+      params: { variables, formula, formulaScope },
+      explanation: buildWhatIfCardExplanation({ base, scenario, recommended, variables, formula }),
+      series,
+      insights: [
+        { label: '模拟变化', value: `${delta >= 0 ? '+' : ''}${delta.toFixed(1)}%` },
+        { label: '推荐方案', value: formatAdvancedNumber(recommended) },
+        { label: '场景数', value: '3 个' },
+        { label: '变量数', value: `${variables.length} 个` }
+      ]
+    }
+  }
+  const threshold = params.threshold ?? llmIntent.threshold ?? inferAlertThreshold(text)
+  const operator = params.operator || llmIntent.operator || (/高于|超过|大于/.test(text) ? 'gt' : /异常|z-?score/i.test(text) ? 'zscore' : 'lt')
+  const series = buildAlertSeries(threshold)
+  const abnormalCount = series.filter(item => operator === 'gt' ? item.value > threshold : item.value < threshold).length
+  return {
+    id,
+    type,
+    title: `${metric}预警规则`,
+    summary: '已生成离线批处理 Agent 轮询规则，确认保存后可用于后续异常检测与推送。',
+    tableName,
+    metric,
+    timeRange: '每日上午 9:00 检测',
+    status: '待确认',
+    params: {
+      operator,
+      threshold,
+      channel: params.channel || llmIntent.channel || 'both'
+    },
+    explanation: buildAlertCardExplanation({
+      operator,
+      threshold,
+      channels: [params.channel || llmIntent.channel || 'both'],
+      detectionCycle: params.detectionCycle || llmIntent.detectionCycle || 'daily'
+    }),
+    series,
+    insights: [
+      { label: '阈值', value: formatAdvancedNumber(threshold) },
+      { label: '模拟异常', value: `${abnormalCount} 次` },
+      { label: '检测方式', value: operator === 'zscore' ? 'Z-Score' : '阈值检测' }
+    ]
+  }
+}
+
+const parseAdvancedIntentWithLlm = async (text) => {
+  try {
+    const tableName = selectedTableName?.value || lastAnalysis?.value?.tableName || ''
+    let fieldMeta = null
+    if (tableName) {
+      try {
+        fieldMeta = await fetchAdvancedAnalysisFieldMeta({ tableName })
+      } catch (error) {
+        console.warn('advanced analysis field meta unavailable:', error)
+      }
+    }
+    const parsed = await parseAdvancedAnalysisIntent({
+      question: text,
+      tableName,
+      context: {
+        lastMetric: lastAnalysis?.value?.fieldMapping?.metric || '',
+        lastMetricKey: lastAnalysis?.value?.fieldMapping?.metricKey || '',
+        lastDimension: lastAnalysis?.value?.fieldMapping?.dimension || '',
+        lastDimensionKey: lastAnalysis?.value?.fieldMapping?.dimensionKey || '',
+        chartType: lastAnalysis?.value?.chartType || '',
+        sourceQuestion: lastAnalysis?.value?.sourceQuestion || '',
+        fields: fieldMeta?.fields || [],
+        timeFields: fieldMeta?.timeFields || [],
+        numericFields: fieldMeta?.numericFields || []
+      }
+    })
+    const intent = normalizeAdvancedIntentType(parsed?.intent || parsed?.type)
+    if (!intent) return null
+    return { ...parsed, intent }
+  } catch (error) {
+    console.warn('advanced analysis llm parse fallback:', error)
+    return null
+  }
+}
+
+const pushAdvancedAnalysisMessage = (analysis, userText = '') => {
+  messages.value.push({
+    role: 'system',
+    content: `${advancedAnalysisTypeLabel(analysis.type)}已生成，请在卡片中调整参数、重新计算或保存方案。`,
+    advancedAnalysis: analysis,
+    sourceQuestion: userText,
+    sourceTableName: analysis.tableName || selectedTableName?.value || ''
+  })
+  nextTick(() => {
+    const dom = document.getElementById('chatHistory')
+    if (dom) dom.scrollTop = dom.scrollHeight
+  })
+}
+
+const alertEventStatusLabel = (status) => {
+  const value = String(status || 'OPEN').toUpperCase()
+  if (value === 'ACK') return '已确认'
+  if (value === 'CLOSED') return '已关闭'
+  return '待处理'
+}
+
+const alertPushStatusLabel = (status) => {
+  const value = String(status || 'PENDING').toUpperCase()
+  if (value === 'SUCCESS') return '推送成功'
+  if (value === 'FAILED') return '推送失败'
+  return '待推送'
+}
+
+const alertOperatorLabel = (operator) => {
+  const value = String(operator || 'lt').toLowerCase()
+  if (value === 'gt') return '高于阈值'
+  if (value === 'zscore') return 'Z-Score 异常波动'
+  return '低于阈值'
+}
+
+const findAdvancedField = (fieldName, fieldMeta = {}) => {
+  const name = String(fieldName || '').trim()
+  if (!name) return null
+  const candidates = [
+    ...(Array.isArray(fieldMeta.fields) ? fieldMeta.fields : []),
+    ...(Array.isArray(fieldMeta.timeFields) ? fieldMeta.timeFields : []),
+    ...(Array.isArray(fieldMeta.numericFields) ? fieldMeta.numericFields : []),
+    ...(Array.isArray(fields?.value) ? fields.value : [])
+  ]
+  return candidates.find(item => [
+    item?.columnName,
+    item?.sourceFieldName,
+    item?.displayName,
+    item?.businessName
+  ].some(value => String(value || '').trim() === name)) || null
+}
+
+const formatRestoredAlertField = (fieldName, fieldMeta = {}, fallback = '指标') => {
+  const matched = findAdvancedField(fieldName, fieldMeta)
+  return matched ? formatAdvancedFieldLabel(matched) : formatAnalysisMetricLabel(fieldName, fallback, fieldMeta.fields || fields?.value || [])
+}
+
+const buildRestoredAlertSeries = (event = {}) => {
+  const snapshot = event.chartSnapshot || {}
+  const rows = Array.isArray(snapshot.data) && snapshot.data.length
+    ? snapshot.data
+    : [{ name: event.bucketName || '触发点', value: event.actualValue }]
+  return rows.map(item => ({
+    name: String(item?.name || item?.bucketName || '-'),
+    value: Number(item?.value ?? item?.actualValue ?? 0),
+    triggered: Boolean(item?.triggered)
+  }))
+}
+
+const pushRestoredAdvancedAlertMessage = (analysis, context = {}) => {
+  const eventId = analysis?.params?.eventId || '-'
+  messages.value.push({
+    role: 'user',
+    content: `查看预警事件 #${eventId} 的上下文`,
+    sourceTableName: analysis.tableName || selectedTableName?.value || ''
+  })
+  messages.value.push({
+    role: 'system',
+    content: `已从${context.sourceLabel || '预警管理'}恢复预警上下文，可继续追问触发原因、历史快照或规则调整建议。`,
+    advancedAnalysis: analysis,
+    sourceQuestion: `恢复预警事件 #${eventId}`,
+    sourceTableName: analysis.tableName || selectedTableName?.value || ''
+  })
+  nextTick(() => {
+    const dom = document.getElementById('chatHistory')
+    if (dom) dom.scrollTop = dom.scrollHeight
+  })
+}
+
+const restoreAdvancedAlertContext = async (context) => {
+  if (!context) return
+  if (advancedAlertContext?.value === context) {
+    advancedAlertContext.value = null
+  }
+  const event = context.event || {}
+  const pushLog = context.pushLog || null
+  const tableName = String(event.tableName || '').trim()
+  if (tableName && selectedTableName?.value !== tableName) {
+    selectedTableName.value = tableName
+  }
+  chatContentMode.value = 'messages'
+  let fieldMeta = {}
+  if (tableName) {
+    try {
+      fieldMeta = await fetchAdvancedAnalysisFieldMeta({ tableName })
+    } catch (error) {
+      console.warn('restore alert field meta failed:', error)
+    }
+  }
+  const metricLabel = formatRestoredAlertField(event.metricField, fieldMeta, '预警指标')
+  const timeFieldLabel = formatRestoredAlertField(event.timeField, fieldMeta, '时间字段')
+  const operator = String(event.operator || 'lt').toLowerCase()
+  const thresholdText = operator === 'zscore' ? 'Z-Score >= 3' : formatAdvancedNumber(event.threshold)
+  const chartThreshold = operator === 'zscore'
+    ? Number(event.baselineValue ?? event.actualValue ?? 0)
+    : Number(event.threshold ?? 0)
+  const pushChannel = pushLog?.channel ? formatAlertChannel([pushLog.channel]) : ''
+  const calculation = [
+    event.reason || '已恢复预警事件上下文，异常判断来自后端离线预警结果。',
+    `数据源：${tableName || '-'}，指标：${metricLabel}，时间字段：${timeFieldLabel}，触发时间桶：${event.bucketName || '-'}。`,
+    `判断条件：${alertOperatorLabel(operator)}，实际值 ${formatAdvancedNumber(event.actualValue)}，阈值 ${thresholdText}，历史基线 ${formatAdvancedNumber(event.baselineValue)}，Z-Score ${formatAdvancedNumber(event.zScore)}。`,
+    pushLog ? `推送渠道：${pushChannel || '-'}，推送状态：${alertPushStatusLabel(pushLog.status)}。` : ''
+  ].filter(Boolean)
+  const analysis = {
+    id: `alert-context-${event.id || pushLog?.id || Date.now()}`,
+    type: 'alert',
+    title: `${metricLabel}预警事件`,
+    summary: `已恢复规则 #${event.ruleId || '-'}、数据源、指标和触发原因上下文。`,
+    tableName,
+    metric: metricLabel,
+    timeRange: event.bucketName || '触发时间桶',
+    status: alertEventStatusLabel(event.status),
+    ruleId: event.ruleId,
+    params: {
+      eventId: event.id,
+      ruleId: event.ruleId,
+      tableName,
+      timeField: event.timeField,
+      timeFieldLabel,
+      metricField: event.metricField,
+      metricFieldLabel: metricLabel,
+      bucketName: event.bucketName,
+      operator,
+      threshold: Number.isFinite(chartThreshold) ? chartThreshold : 0,
+      actualValue: event.actualValue,
+      baselineValue: event.baselineValue,
+      zScore: event.zScore,
+      deviationRate: event.deviationRate,
+      channel: pushChannel || '按规则配置',
+      pushStatus: pushLog?.status || '',
+      pushChannel: pushLog?.channel || ''
+    },
+    explanation: {
+      source: 'context',
+      sourceLabel: context.sourceLabel || '预警上下文',
+      calculation,
+      suggestions: [
+        '可以继续追问该事件的触发原因、历史趋势、快照数据或阈值调整建议。',
+        '如需确认、关闭、重开或补充处理备注，请回到“预测与情景模拟”菜单处理预警事件。'
+      ]
+    },
+    series: buildRestoredAlertSeries(event),
+    insights: [
+      { label: '事件ID', value: event.id || '-' },
+      { label: '规则ID', value: event.ruleId || '-' },
+      { label: '触发时间桶', value: event.bucketName || '-' },
+      { label: '实际值', value: formatAdvancedNumber(event.actualValue) },
+      { label: '阈值', value: thresholdText },
+      { label: '推送状态', value: pushLog ? alertPushStatusLabel(pushLog.status) : '未从推送记录恢复' }
+    ]
+  }
+  pushRestoredAdvancedAlertMessage(analysis, context)
+}
+
+if (advancedAlertContext) {
+  watch(advancedAlertContext, async (context) => {
+    if (!context) return
+    await restoreAdvancedAlertContext(context)
+  }, { immediate: true })
+}
+
+const openAdvancedAnalysisDialog = (analysis) => {
+  activeAdvancedAnalysis.value = analysis
+  advancedAnalysisDialogVisible.value = true
+}
+
+const sendChatQuestion = async () => {
+  const text = String(question?.value || '').trim()
+  const localIntent = inferAdvancedIntent(text)
+  if (!localIntent) {
+    await sendQuestion()
+    return
+  }
+  if (!selectedTableName?.value && !lastAnalysis?.value?.tableName) {
+    ElMessage.warning('请先选择数据源，或先完成一轮普通查询后再发起预测/推演/预警')
+    return
+  }
+  if (localIntent === 'whatIf') {
+    try {
+      assertWhatIfInstructionAllowed(text)
+    } catch (error) {
+      ElMessage.error(error.message || '业务公式不合法')
+      return
+    }
+  }
+  const llmIntent = await parseAdvancedIntentWithLlm(text)
+  const intent = llmIntent?.intent || localIntent
+  messages.value.push({
+    role: 'user',
+    content: text,
+    parentTurnId: String(activeBranchParentTurnMeta?.value?.turnId || '').trim() || null
+  })
+  question.value = ''
+  try {
+    const analysis = await createAdvancedAnalysisAsync(intent, text, {}, llmIntent || {})
+    pushAdvancedAnalysisMessage(analysis, text)
+  } catch (error) {
+    const message = error.message || '高级分析生成失败'
+    ElMessage.error(message)
+    messages.value.push({
+      role: 'system',
+      content: `生成预测与情景模拟卡片失败：${message}`,
+      sourceTableName: selectedTableName?.value || lastAnalysis?.value?.tableName || ''
+    })
+  }
+}
+
+const recalculateAdvancedAnalysis = async ({ analysis, params }) => {
+  if (!analysis?.id) return
+  let nextAnalysis
+  try {
+    nextAnalysis = await createAdvancedAnalysisAsync(analysis.type, analysis.title || '', params)
+  } catch (error) {
+    ElMessage.error(`重新计算失败：${error.message || '无法基于真实数据预测'}`)
+    return
+  }
+  nextAnalysis.id = analysis.id
+  nextAnalysis.title = analysis.title
+  const target = (messages.value || []).find(item => item?.advancedAnalysis?.id === analysis.id)
+  if (target) {
+    target.advancedAnalysis = nextAnalysis
+  }
+  if (activeAdvancedAnalysis.value?.id === analysis.id) {
+    activeAdvancedAnalysis.value = nextAnalysis
+  }
+  ElMessage.success('已根据最新参数重新计算')
+}
+
+const applyAdvancedAnalysisUpdate = (analysisId, nextAnalysis) => {
+  if (!analysisId || !nextAnalysis) return
+  const target = (messages.value || []).find(item => item?.advancedAnalysis?.id === analysisId)
+  if (target) {
+    target.advancedAnalysis = nextAnalysis
+  }
+  if (activeAdvancedAnalysis.value?.id === analysisId) {
+    activeAdvancedAnalysis.value = nextAnalysis
+  }
+  const historyIndex = advancedAnalysisHistory.value.findIndex(item => item.id === analysisId)
+  if (historyIndex >= 0) {
+    advancedAnalysisHistory.value.splice(historyIndex, 1, {
+      ...advancedAnalysisHistory.value[historyIndex],
+      ...nextAnalysis
+    })
+  }
+}
+
+const buildAdvancedExplanationPayloadResult = (analysis = {}) => ({
+  type: analysis.type || '',
+  title: analysis.title || '',
+  summary: analysis.summary || '',
+  tableName: analysis.tableName || analysis.params?.tableName || '',
+  metric: analysis.metric || '',
+  timeRange: analysis.timeRange || '',
+  status: analysis.status || '',
+  params: {
+    ...(analysis.params || {}),
+    variables: Array.isArray(analysis.params?.variables)
+      ? analysis.params.variables.map(item => ({ ...item }))
+      : []
+  },
+  formula: analysis.params?.formula || analysis.formula || '',
+  resolvedFormula: analysis.params?.resolvedFormula || analysis.resolvedFormula || '',
+  series: Array.isArray(analysis.series) ? analysis.series.map(item => ({ ...item })) : [],
+  insights: Array.isArray(analysis.insights) ? analysis.insights.map(item => ({ ...item })) : [],
+  explanation: analysis.explanation && typeof analysis.explanation === 'object'
+    ? {
+        source: analysis.explanation.source || '',
+        sourceLabel: analysis.explanation.sourceLabel || '',
+        calculation: Array.isArray(analysis.explanation.calculation) ? [...analysis.explanation.calculation] : [],
+        suggestions: Array.isArray(analysis.explanation.suggestions) ? [...analysis.explanation.suggestions] : []
+      }
+    : null
+})
+
+const explainAdvancedAnalysis = async (analysis) => {
+  if (!analysis?.id) return
+  advancedAnalysisExplainingId.value = analysis.id
+  try {
+    const explanation = await explainAdvancedAnalysisResult({
+      type: analysis.type,
+      question: analysis.title || '',
+      result: buildAdvancedExplanationPayloadResult(analysis),
+      context: {
+        tableName: analysis.tableName || analysis.params?.tableName || selectedTableName?.value || '',
+        metric: analysis.metric || '',
+        source: 'chat-analysis-card'
+      }
+    })
+    const nextAnalysis = {
+      ...analysis,
+      explanation
+    }
+    applyAdvancedAnalysisUpdate(analysis.id, nextAnalysis)
+    ElMessage.success(explanation?.source === 'llm' ? 'AI 解释已生成' : '已生成规则解释兜底')
+  } catch (error) {
+    ElMessage.error(`生成解释失败：${error.message || '未知原因'}`)
+  } finally {
+    advancedAnalysisExplainingId.value = ''
+  }
+}
+
+const buildAdvancedPlanRequest = (analysis = {}) => {
+  const params = analysis.params || {}
+  if (analysis.type === 'forecast') {
+    const sourceSeries = Array.isArray(params.sourceSeries) && params.sourceSeries.length
+      ? params.sourceSeries
+      : []
+    if (sourceSeries.length) {
+      return {
+        tableName: params.tableName || analysis.tableName || '',
+        metric: analysis.metric || params.metricField || '核心指标',
+        series: sourceSeries,
+        horizon: Number(params.horizon || 3),
+        algorithm: params.algorithm || 'Holt-Winters',
+        alpha: params.alpha ?? params.algorithmParams?.alpha ?? 0.55,
+        beta: params.beta ?? params.algorithmParams?.beta ?? 0.28,
+        gamma: params.gamma ?? params.algorithmParams?.gamma ?? 0.20,
+        seasonLength: params.seasonLength ?? params.algorithmParams?.seasonLength ?? 0
+      }
+    }
+    return {
+      tableName: params.tableName || analysis.tableName || '',
+      timeField: params.timeField || '',
+      metricField: params.metricField || '',
+      granularity: params.granularity || 'month',
+      filterExpression: params.filterExpression || '',
+      horizon: Number(params.horizon || 3),
+      algorithm: params.algorithm || 'Holt-Winters',
+      alpha: params.alpha ?? params.algorithmParams?.alpha ?? 0.55,
+      beta: params.beta ?? params.algorithmParams?.beta ?? 0.28,
+      gamma: params.gamma ?? params.algorithmParams?.gamma ?? 0.20,
+      seasonLength: params.seasonLength ?? params.algorithmParams?.seasonLength ?? 0
+    }
+  }
+  if (analysis.type === 'whatIf') {
+    return {
+      tableName: params.tableName || analysis.tableName || '',
+      targetMetric: params.targetMetric || '',
+      formula: params.formula || '',
+      formulaScope: params.formula ? params.formulaScope || 'aggregate' : 'aggregate',
+      variables: Array.isArray(params.variables) ? params.variables.map(item => ({ ...item })) : []
+    }
+  }
+  return {}
+}
+
+const buildAdvancedFieldMappingSnapshot = (analysis = {}) => {
+  const params = analysis.params || {}
+  if (analysis.type === 'forecast') {
+    return {
+      mappingType: 'forecast',
+      confirmed: true,
+      tableName: params.tableName || analysis.tableName || '',
+      timeField: params.timeField || '',
+      metricField: params.metricField || '',
+      metricLabel: analysis.metric || params.metricField || '',
+      granularity: params.granularity || analysis.timeRange || '',
+      filterExpression: params.filterExpression || '',
+      algorithm: params.algorithm || ''
+    }
+  }
+  if (analysis.type === 'whatIf') {
+    return {
+      mappingType: 'whatIf',
+      confirmed: true,
+      tableName: params.tableName || analysis.tableName || '',
+      targetMetric: params.targetMetric || '',
+      metricLabel: analysis.metric || params.targetMetric || '',
+      formula: params.formula || analysis.formula || '',
+      resolvedFormula: params.resolvedFormula || analysis.resolvedFormula || '',
+      formulaScope: params.formula || analysis.formula ? params.formulaScope || 'aggregate' : '',
+      variables: Array.isArray(params.variables) ? params.variables.map(item => ({
+        name: item.name || item.field || '',
+        field: item.field || '',
+        mode: item.mode || 'percent',
+        change: item.change ?? 0,
+        min: item.min ?? null,
+        max: item.max ?? null
+      })) : []
+    }
+  }
+  return {}
+}
+
+const buildAdvancedPlanPayload = (analysis = {}) => ({
+  planType: analysis.type,
+  planName: analysis.title || advancedAnalysisTypeLabel(analysis.type),
+  tableName: analysis.tableName || analysis.params?.tableName || '',
+  metricLabel: analysis.metric || '',
+  timeRangeLabel: analysis.timeRange || '',
+  fieldMapping: buildAdvancedFieldMappingSnapshot(analysis),
+  request: buildAdvancedPlanRequest(analysis),
+  result: {
+    ...analysis,
+    params: analysis.params || {},
+    series: Array.isArray(analysis.series) ? analysis.series : [],
+    insights: Array.isArray(analysis.insights) ? analysis.insights : []
+  },
+  llm: {
+    source: 'chat-card',
+    savedAt: new Date().toISOString()
+  }
+})
+
+const saveAdvancedAnalysis = async (analysis) => {
+  if (!analysis?.id) return
+  if (!['forecast', 'whatIf'].includes(analysis.type)) {
+    ElMessage.info('预警规则已通过规则保存接口持久化，可在预测与情景模拟菜单管理')
+    return
+  }
+  let persistedPlan = null
+  try {
+    persistedPlan = await saveAdvancedAnalysisPlan(buildAdvancedPlanPayload(analysis))
+  } catch (error) {
+    ElMessage.error(`保存方案失败：${error.message || '未知原因'}`)
+    return
+  }
+  const savedAnalysis = {
+    ...analysis,
+    status: '已保存',
+    planId: persistedPlan?.id || analysis.planId
+  }
+  const existsIndex = advancedAnalysisHistory.value.findIndex(item => item.id === analysis.id)
+  const record = {
+    ...savedAnalysis,
+    createdAt: new Date().toLocaleString('zh-CN', { hour12: false }),
+    persistedPlan
+  }
+  if (existsIndex >= 0) {
+    advancedAnalysisHistory.value.splice(existsIndex, 1, record)
+  } else {
+    advancedAnalysisHistory.value.unshift(record)
+  }
+  const target = (messages.value || []).find(item => item?.advancedAnalysis?.id === analysis.id)
+  if (target) {
+    target.advancedAnalysis = savedAnalysis
+  }
+  if (activeAdvancedAnalysis.value?.id === analysis.id) {
+    activeAdvancedAnalysis.value = savedAnalysis
+  }
+  ElMessage.success('已保存到预测与情景模拟方案资产')
+}
+
+watch(advancedHistoryVisible, (visible) => {
+  if (visible) {
+    loadAdvancedAlertRules()
+    loadAdvancedAlertEvents()
+  }
+})
+
+const loadAdvancedAlertRules = async () => {
+  advancedAlertRulesLoading.value = true
+  try {
+    const rows = await listAdvancedAlertRules()
+    advancedAlertRules.value = Array.isArray(rows)
+      ? rows.filter(item => item.status !== 'DELETED')
+      : []
+  } catch (error) {
+    ElMessage.error(`加载预警规则失败：${error.message || '未知原因'}`)
+  } finally {
+    advancedAlertRulesLoading.value = false
+  }
+}
+
+const editAdvancedAlertRule = async (rule) => {
+  if (!rule?.id) return
+  try {
+    const detail = await getAdvancedAlertRule(rule.id)
+    const fieldMeta = await fetchAdvancedAnalysisFieldMeta({ tableName: detail.tableName })
+    alertRuleEditorMeta.value = {
+      timeFields: Array.isArray(fieldMeta?.timeFields) ? fieldMeta.timeFields : [],
+      numericFields: Array.isArray(fieldMeta?.numericFields) ? fieldMeta.numericFields : []
+    }
+    alertRuleEditorForm.value = {
+      id: detail.id,
+      tableName: detail.tableName || '',
+      timeField: detail.timeField || '',
+      metricField: detail.metricField || '',
+      filterExpression: detail.filterExpression || '',
+      granularity: detail.granularity || 'day',
+      operator: detail.operator || 'lt',
+      threshold: Number(detail.threshold ?? 100000),
+      detectionCycle: detail.detectionCycle || 'daily',
+      channels: Array.isArray(detail.channels) && detail.channels.length ? detail.channels : ['email', 'dingtalk'],
+      status: detail.status || 'ACTIVE'
+    }
+    alertRuleEditorVisible.value = true
+  } catch (error) {
+    ElMessage.error(`打开预警规则失败：${error.message || '未知原因'}`)
+  }
+}
+
+const submitAlertRuleEditor = async () => {
+  const form = alertRuleEditorForm.value
+  if (!form.id || !form.timeField || !form.metricField) {
+    ElMessage.warning('请选择时间字段和指标字段')
+    return
+  }
+  if (!form.channels?.length) {
+    ElMessage.warning('请至少选择一个通知渠道')
+    return
+  }
+  alertRuleEditorSaving.value = true
+  try {
+    const updated = await updateAdvancedAlertRule(form)
+    const index = advancedAlertRules.value.findIndex(item => String(item.id) === String(updated.id))
+    if (index >= 0) {
+      advancedAlertRules.value.splice(index, 1, updated)
+    }
+    alertRuleEditorVisible.value = false
+    ElMessage.success('预警规则已更新')
+  } catch (error) {
+    ElMessage.error(`保存预警规则失败：${error.message || '未知原因'}`)
+  } finally {
+    alertRuleEditorSaving.value = false
+  }
+}
+
+const toggleAdvancedAlertRule = async (rule) => {
+  if (!rule?.id) return
+  const nextStatus = rule.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE'
+  try {
+    const updated = await updateAdvancedAlertRuleStatus({ id: rule.id, status: nextStatus })
+    const index = advancedAlertRules.value.findIndex(item => String(item.id) === String(rule.id))
+    if (index >= 0) {
+      advancedAlertRules.value.splice(index, 1, updated)
+    }
+    ElMessage.success(nextStatus === 'ACTIVE' ? '预警规则已启用' : '预警规则已停用')
+  } catch (error) {
+    ElMessage.error(`更新预警规则状态失败：${error.message || '未知原因'}`)
+  }
+}
+
+const removeAdvancedAlertRule = async (rule) => {
+  if (!rule?.id) return
+  try {
+    await deleteAdvancedAlertRule({ id: rule.id })
+    advancedAlertRules.value = advancedAlertRules.value.filter(item => String(item.id) !== String(rule.id))
+    ElMessage.success('预警规则已删除')
+  } catch (error) {
+    ElMessage.error(`删除预警规则失败：${error.message || '未知原因'}`)
+  }
+}
+
+const loadAdvancedAlertEvents = async () => {
+  advancedAlertEventsLoading.value = true
+  try {
+    const rows = await listAdvancedAlertEvents()
+    advancedAlertEvents.value = Array.isArray(rows) ? rows : []
+  } catch (error) {
+    ElMessage.error(`加载预警事件失败：${error.message || '未知原因'}`)
+  } finally {
+    advancedAlertEventsLoading.value = false
+  }
+}
+
+const runAdvancedAlertRuleDetection = async (rule) => {
+  if (!rule?.id) return
+  try {
+    const result = await runAdvancedAlertDetection({ ruleId: rule.id })
+    await loadAdvancedAlertEvents()
+    ElMessage.success(`检测完成，新增 ${result?.createdEvents || 0} 条预警事件`)
+  } catch (error) {
+    ElMessage.error(`执行预警检测失败：${error.message || '未知原因'}`)
+  }
+}
+
+const pinAdvancedAnalysis = (analysis) => {
+  saveAdvancedAnalysis(analysis)
+  ElMessage.success('已生成可钉入看板的预测图表记录')
+}
+
+const restoreAdvancedAnalysis = (analysis) => {
+  advancedHistoryVisible.value = false
+  chatContentMode.value = 'messages'
+  const restored = { ...analysis, id: `advanced-${Date.now()}` }
+  pushAdvancedAnalysisMessage(restored, analysis.title)
+  openAdvancedAnalysisDialog(restored)
+}
+
+const removeAdvancedAnalysisHistory = (analysis) => {
+  advancedAnalysisHistory.value = advancedAnalysisHistory.value.filter(item => item.id !== analysis.id)
+}
 
 const currentChatSessionTitle = computed(() =>
   String(currentChatSession.value?.title || '').trim() || '新对话'
@@ -1313,6 +3733,20 @@ const openHistoryDrawer = async () => {
   historyDrawerVisible.value = true
   await searchRecentChatQueries()
   await loadPinnedHistoryIds()
+}
+
+const openAdvancedHistoryDrawer = async () => {
+  advancedHistoryVisible.value = true
+  await Promise.allSettled([
+    loadAdvancedAlertRules(),
+    loadAdvancedAlertEvents()
+  ])
+}
+
+const openAdvancedAnalysisManagePage = () => {
+  if (activeModule?.value !== undefined) {
+    activeModule.value = 'advancedAnalysis'
+  }
 }
 
 const syncHistorySearch = async () => {
@@ -3036,6 +5470,204 @@ onBeforeUnmount(() => {
   font-family: Consolas, 'Courier New', monospace;
   word-break: break-word;
 }
+.advanced-dialog-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  width: min(620px, 100%);
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.06);
+}
+.advanced-dialog-entry__main {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+.advanced-dialog-entry__type {
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 700;
+}
+.advanced-dialog-entry__title {
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.advanced-dialog-entry__summary {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.advanced-analysis-dialog :deep(.el-dialog__body) {
+  padding-top: 8px;
+}
+.advanced-analysis-dialog :deep(.advanced-card) {
+  width: 100%;
+  margin-top: 0;
+  box-shadow: none;
+}
+.advanced-alert-rule-manager {
+  display: grid;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e2e8f0;
+}
+.advanced-alert-event-manager {
+  display: grid;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e2e8f0;
+}
+.advanced-alert-rule-manager__head,
+.advanced-alert-rule-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.advanced-alert-rule-manager__head h4 {
+  margin: 0;
+  color: #0f172a;
+  font-size: 14px;
+}
+.advanced-alert-rule-manager__head p {
+  margin: 4px 0 0;
+  color: #64748b;
+  font-size: 12px;
+}
+.advanced-alert-rule-list {
+  display: grid;
+  gap: 8px;
+}
+.advanced-alert-rule-item {
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #ffffff;
+}
+.advanced-alert-event-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  background: #fff7ed;
+}
+.advanced-alert-rule-item__main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+.advanced-alert-rule-item__main strong {
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.advanced-alert-rule-item__main span,
+.advanced-alert-rule-empty {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.advanced-alert-rule-item__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 2px;
+}
+.forecast-confirm-form {
+  display: grid;
+  gap: 12px;
+}
+.whatif-confirm-dialog :deep(.el-dialog) {
+  max-width: calc(100vw - 32px);
+}
+.whatif-confirm-dialog :deep(.el-dialog__body) {
+  max-height: min(72vh, 720px);
+  overflow-y: auto;
+  padding-right: 22px;
+}
+.forecast-confirm-hint {
+  margin-top: 6px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.forecast-confirm-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.whatif-variable-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.whatif-variable-toolbar__title {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 700;
+}
+.whatif-variable-list {
+  display: grid;
+  gap: 10px;
+}
+.whatif-variable-item {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+.whatif-variable-item__main {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.35fr) minmax(150px, 1fr) minmax(118px, 0.7fr) minmax(120px, 0.8fr);
+  gap: 10px;
+  align-items: end;
+}
+.whatif-variable-item__limits {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(120px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+.whatif-variable-item__delete {
+  min-width: 86px;
+}
+.whatif-variable-item :deep(.el-form-item) {
+  margin-bottom: 0;
+}
+.whatif-variable-item :deep(.el-input-number) {
+  width: 100%;
+}
+.whatif-variable-item :deep(.el-input-number .el-input__inner) {
+  text-align: left;
+}
+.whatif-variable-item__main,
+.whatif-variable-item__limits,
+.whatif-variable-item :deep(.el-input),
+.whatif-variable-item :deep(.el-select) {
+  min-width: 0;
+}
+.forecast-confirm-form :deep(.el-form-item) {
+  margin-bottom: 0;
+}
 .thinking-details summary {
   cursor: pointer;
   color: #374151;
@@ -3138,6 +5770,20 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 720px) {
+  .advanced-dialog-entry {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+  .forecast-confirm-grid {
+    grid-template-columns: 1fr;
+  }
+  .whatif-variable-item__main,
+  .whatif-variable-item__limits {
+    grid-template-columns: 1fr;
+  }
+  .whatif-variable-item__delete {
+    width: 100%;
+  }
   .chat-followup-banner {
     flex-direction: column;
     align-items: stretch;

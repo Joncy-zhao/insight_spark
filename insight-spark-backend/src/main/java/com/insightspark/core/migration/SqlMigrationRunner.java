@@ -29,7 +29,19 @@ public class SqlMigrationRunner {
     private static final List<String> MIGRATIONS = List.of(
             "db/migration/chat_conversation_migration_20260524.sql",
             "db/migration/dashboard_component_artifact_turn_migration_20260524.sql",
-            "db/migration/admin_chat_history_migration_20260527.sql"
+            "db/migration/admin_chat_history_migration_20260527.sql",
+            "db/migration/admin_chat_query_lab_migration_20260527.sql",
+            "db/migration/admin_chat_query_template_migration_20260528.sql",
+            "db/migration/advanced_alert_rule_migration_20260529.sql",
+            "db/migration/advanced_alert_rule_schedule_migration_20260601.sql",
+            "db/migration/advanced_alert_event_migration_20260529.sql",
+            "db/migration/advanced_alert_event_lifecycle_migration_20260601.sql",
+            "db/migration/advanced_alert_event_explanation_migration_20260602.sql",
+            "db/migration/advanced_alert_push_log_migration_20260601.sql",
+            "db/migration/advanced_alert_org_scope_migration_20260602.sql",
+            "db/migration/advanced_analysis_plan_migration_20260529.sql",
+            "db/migration/advanced_analysis_plan_version_migration_20260601.sql",
+            "db/migration/advanced_analysis_field_mapping_migration_20260602.sql"
     );
 
     private final DataSource dataSource;
@@ -167,6 +179,21 @@ public class SqlMigrationRunner {
         if (normalized.startsWith("ALTER TABLE `IS_DASHBOARD_COMPONENT` ADD COLUMN ")) {
             return;
         }
+        if (normalized.startsWith("ALTER TABLE `IS_ADVANCED_ALERT_EVENT` ADD COLUMN ")) {
+            return;
+        }
+        if (normalized.startsWith("ALTER TABLE `IS_ADVANCED_ALERT_RULE` ADD COLUMN ")) {
+            return;
+        }
+        if (normalized.startsWith("ALTER TABLE `IS_ADVANCED_ALERT_PUSH_LOG` ADD COLUMN ")) {
+            return;
+        }
+        if (normalized.startsWith("ALTER TABLE `IS_ADVANCED_ANALYSIS_PLAN` ADD COLUMN ")) {
+            return;
+        }
+        if (normalized.startsWith("ALTER TABLE `IS_ADVANCED_ANALYSIS_PLAN_VERSION` ADD COLUMN ")) {
+            return;
+        }
         if (normalized.startsWith("SELECT IF(") || normalized.startsWith("SELECT 1")) {
             return;
         }
@@ -182,6 +209,10 @@ public class SqlMigrationRunner {
                 "INSERT ",
                 "REPLACE ",
                 "RENAME ",
+                "ALTER TABLE `IS_ADVANCED_ALERT_RULE` DROP ",
+                "ALTER TABLE `IS_ADVANCED_ALERT_RULE` MODIFY ",
+                "ALTER TABLE `IS_ADVANCED_ALERT_RULE` CHANGE ",
+                "ALTER TABLE `IS_ADVANCED_ALERT_RULE` RENAME ",
                 "ALTER TABLE `IS_CHAT_QUERY_HISTORY` DROP ",
                 "ALTER TABLE `IS_CHAT_QUERY_HISTORY` MODIFY ",
                 "ALTER TABLE `IS_CHAT_QUERY_HISTORY` CHANGE ",

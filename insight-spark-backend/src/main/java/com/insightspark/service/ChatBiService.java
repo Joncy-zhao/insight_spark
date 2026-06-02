@@ -102,7 +102,7 @@ public class ChatBiService {
         ChatQueryRequest safeRequest = request == null ? new ChatQueryRequest() : request;
         String question = Objects.toString(safeRequest.getQuestion(), "").trim();
         String tableName = resolvePreferredTableName(safeRequest);
-        Map<String, Object> response = executeChat(question, tableName);
+        Map<String, Object> response = executeChat(question, tableName, safeRequest.getFilters());
         response.put("question", question);
         response.put("conversationId", safeRequest.getConversationId());
         response.put("parentTurnId", safeRequest.getParentTurnId());
@@ -113,13 +113,21 @@ public class ChatBiService {
     }
 
     public Map<String, Object> executeChat(String question, String tableName) {
+        return executeChat(question, tableName, Map.of());
+    }
+
+    public Map<String, Object> executeChat(String question, String tableName, Map<String, Object> executionOptions) {
         log.info("Received chat question: {}", question);
         ensureNotCancelled("请求初始化");
+        Map<String, Object> safeOptions = executionOptions == null ? Map.of() : executionOptions;
+        String selectedModelId = Objects.toString(safeOptions.getOrDefault("modelId", "gpt-4"), "gpt-4").trim();
+        String selectedModelName = Objects.toString(safeOptions.getOrDefault("modelName", selectedModelId), selectedModelId).trim();
 
         String activeTable = (tableName == null || tableName.isBlank()) ? dataUploadService.latestTableName()
                 : tableName;
         List<String> generationTrace = new ArrayList<>();
         generationTrace.add("activeTable=" + activeTable);
+        generationTrace.add("selectedModel=" + selectedModelId);
         String cacheKey = sqlAuditService.semanticCacheKey(question, activeTable);
         Map<String, Object> cachedSqlAudit = sqlAuditService.findSemanticCache(cacheKey);
         boolean cacheHit = !cachedSqlAudit.isEmpty();
@@ -203,7 +211,7 @@ public class ChatBiService {
         ensureNotCancelled("样例数据预览");
         Map<String, Object> graphSqlHints = knowledgeGraphService.buildSqlMappingHints(question, activeTable, graphContext);
         Optional<Map<String, Object>> aiResult = cacheHit ? Optional.empty() : pythonAiService.textToSql(question, queryTableName, fields,
-                previewRows, graphPath, graphSqlHints);
+                previewRows, graphPath, graphSqlHints, safeOptions);
         ensureNotCancelled("SQL 生成");
 
         String generatedSql;
@@ -359,6 +367,9 @@ public class ChatBiService {
         response.put("chartType", chartType);
         response.put("fieldMapping", fieldMapping);
         response.put("engine", engine);
+        response.put("modelId", selectedModelId);
+        response.put("modelName", selectedModelName);
+        response.put("modelCategory", safeOptions.getOrDefault("modelCategory", ""));
         response.put("cacheHit", cacheHit);
         response.put("fallbackUsed", engine.startsWith("java-fallback") || fallbackExecuted);
         response.put("fallbackReason", fallbackReason);
