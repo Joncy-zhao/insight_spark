@@ -142,6 +142,13 @@ class AdvancedAnalysisParseRequest(BaseModel):
     context: dict[str, Any] = {}
 
 
+class AdvancedAnalysisExplainRequest(BaseModel):
+    type: str
+    question: str = ""
+    result: dict[str, Any] = {}
+    context: dict[str, Any] = {}
+
+
 class TtsRequest(BaseModel):
     text: str
     voiceGender: str = "female"
@@ -330,6 +337,20 @@ def advanced_analysis_parse(payload: AdvancedAnalysisParseRequest) -> dict[str, 
         if ai_result:
             return normalize_advanced_analysis_parse_result(ai_result, payload)
     return build_rule_based_advanced_analysis_parse_result(payload)
+
+
+@app.post("/ai/advanced-analysis/explain")
+def advanced_analysis_explain(payload: AdvancedAnalysisExplainRequest) -> dict[str, Any]:
+    analysis_type = normalize_advanced_intent(payload.type)
+    if analysis_type == "none":
+        raise HTTPException(status_code=400, detail="高级分析类型无效。")
+    if not isinstance(payload.result, dict) or not payload.result:
+        raise HTTPException(status_code=400, detail="缺少后端算法结果，无法生成解释。")
+    if OPENAI_API_KEY:
+        ai_result = call_openai_advanced_analysis_explain(payload)
+        if ai_result:
+            return normalize_advanced_analysis_explain_result(ai_result, payload)
+    return build_rule_based_advanced_analysis_explain_result(payload)
 
 
 @app.post("/ai/tts")
@@ -1468,6 +1489,8 @@ def call_openai_advanced_analysis_parse(payload: AdvancedAnalysisParseRequest) -
         "如果上下文提供 fields/timeFields/numericFields，请优先返回真实 columnName：timeField、metricField、targetMetricField。\n"
         "whatIf 需要给出 metric、variables 数组，变量项包含 name 与 change，change 表示百分比变化，可为负数。\n"
         "whatIf 的 variables 如能匹配真实字段，请给出 field。\n"
+        "whatIf 只有用户显式写出“公式/按/按照”、等号或 SAFE_DIVIDE/IF 等函数表达式时才返回 formula；单纯“某指标提升/下降 x%”不是公式，formula 必须为空。\n"
+        "formula 只保留等号右侧或纯四则/函数表达式，禁止包含“推演/预测/变化”等后续自然语言。\n"
         "alert 需要给出 metric、operator(lt/gt/zscore)、threshold 数值、channel(email/dingtalk/both)。\n"
         f"用户问题：{payload.question}\n"
         f"当前数据源：{payload.tableName}\n"
@@ -1492,7 +1515,45 @@ def call_openai_advanced_analysis_parse(payload: AdvancedAnalysisParseRequest) -
         method="POST",
     )
     try:
-        with request.urlopen(req, timeout=30) as resp:
+        with request.urlopen(req, timeout=10) as resp:
+            payload_json = json.loads(resp.read().decode("utf-8"))
+        content = str(payload_json["choices"][0]["message"]["content"]).strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:json)?\s*", "", content)
+            content = re.sub(r"\s*```$", "", content)
+        parsed = json.loads(content)
+        return parsed if isinstance(parsed, dict) else None
+    except (error.URLError, error.HTTPError, KeyError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def call_openai_advanced_analysis_explain(payload: AdvancedAnalysisExplainRequest) -> dict[str, Any] | None:
+    prompt = build_advanced_analysis_explain_prompt(payload)
+    body = json.dumps({
+        "model": OPENAI_MODEL,
+        "messages": [
+            {"role": "system", "content": (
+                "你是企业 BI 预测、情景推演和预警解释助手。"
+                "只输出严格 JSON，不要 Markdown。"
+                "只能解释后端结果，禁止重新计算或编造数值。"
+            )},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 650,
+    }).encode("utf-8")
+
+    req = request.Request(
+        f"{OPENAI_BASE_URL}/chat/completions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=75) as resp:
             payload_json = json.loads(resp.read().decode("utf-8"))
         content = str(payload_json["choices"][0]["message"]["content"]).strip()
         if content.startswith("```"):
@@ -1517,6 +1578,8 @@ def normalize_advanced_intent(value: Any) -> str:
 
 def normalize_advanced_analysis_parse_result(parsed: dict[str, Any], payload: AdvancedAnalysisParseRequest) -> dict[str, Any]:
     intent = normalize_advanced_intent(parsed.get("intent") or parsed.get("type"))
+    explicit_formula_intent = has_explicit_advanced_formula_intent(payload.question)
+    parsed_formula = normalize_advanced_formula(parsed.get("formula") or parsed.get("businessFormula") or "") if explicit_formula_intent else ""
     result = {
         "intent": intent,
         "metric": str(parsed.get("metric") or parsed.get("targetMetric") or "").strip(),
@@ -1530,6 +1593,7 @@ def normalize_advanced_analysis_parse_result(parsed: dict[str, Any], payload: Ad
         "operator": str(parsed.get("operator") or "").strip(),
         "threshold": parsed.get("threshold"),
         "channel": str(parsed.get("channel") or "").strip(),
+        "formula": parsed_formula,
         "variables": parsed.get("variables") if isinstance(parsed.get("variables"), list) else [],
         "reasoning": parsed.get("reasoning") or "由大模型解析预测/推演/预警意图",
         "model": parsed.get("model") or OPENAI_MODEL,
@@ -1547,7 +1611,41 @@ def normalize_advanced_analysis_parse_result(parsed: dict[str, Any], payload: Ad
         result["channel"] = result["channel"] if result["channel"] in {"email", "dingtalk", "both"} else "both"
     elif intent == "whatIf":
         result["variables"] = normalize_advanced_variables(result["variables"], payload.question)
+        result["formula"] = result["formula"] or infer_advanced_formula(payload.question)
     return result
+
+
+def normalize_text_list(value: Any, max_items: int = 5) -> list[str]:
+    if isinstance(value, list):
+        rows = [str(item or "").strip() for item in value]
+    else:
+        rows = [str(value or "").strip()] if value else []
+    return [item for item in rows if item][:max_items]
+
+
+def normalize_advanced_analysis_explain_result(parsed: dict[str, Any], payload: AdvancedAnalysisExplainRequest) -> dict[str, Any]:
+    calculation = normalize_text_list(
+        parsed.get("calculation") or parsed.get("calculationResults") or parsed.get("algorithmResults"),
+        5,
+    )
+    suggestions = normalize_text_list(
+        parsed.get("suggestions") or parsed.get("recommendations") or parsed.get("aiSuggestions"),
+        5,
+    )
+    fallback = build_rule_based_advanced_analysis_explain_result(payload)
+    if not calculation:
+        calculation = fallback["calculation"]
+    if not suggestions:
+        suggestions = fallback["suggestions"]
+    return {
+        "source": "llm",
+        "sourceLabel": "AI 解释",
+        "calculation": calculation,
+        "suggestions": suggestions,
+        "guardrail": "explanation-only",
+        "model": parsed.get("model") or OPENAI_MODEL,
+        "reasoning": parsed.get("reasoning") or "基于后端算法结果生成自然语言解释",
+    }
 
 
 def build_rule_based_advanced_analysis_parse_result(payload: AdvancedAnalysisParseRequest) -> dict[str, Any]:
@@ -1570,6 +1668,7 @@ def build_rule_based_advanced_analysis_parse_result(payload: AdvancedAnalysisPar
         result.update({"horizon": infer_advanced_horizon(question), "algorithm": "Prophet", "confidence": "95%"})
     elif intent == "whatIf":
         result["variables"] = normalize_advanced_variables([], question)
+        result["formula"] = infer_advanced_formula(question)
     elif intent == "alert":
         result.update({
             "operator": normalize_advanced_operator("", question),
@@ -1577,6 +1676,200 @@ def build_rule_based_advanced_analysis_parse_result(payload: AdvancedAnalysisPar
             "channel": "both",
         })
     return result
+
+
+def normalize_advanced_formula(value: Any) -> str:
+    formula = str(value or "").strip().replace("＝", "=").replace("（", "(").replace("）", ")")
+    if not formula:
+        return ""
+    formula = formula.replace("，", ",")
+    formula = re.sub(r"\bSAFE[\s-]+DIVIDE\b", "SAFE_DIVIDE", formula, flags=re.IGNORECASE)
+    formula = re.sub(r"[。；;、]", " ", formula)
+    formula = re.sub(r"\s*,\s*", ", ", formula)
+    formula = re.sub(r"\s+", " ", formula).strip()
+    for word in ["推演", "预测", "变化", "会怎么", "会怎样", "怎么办", "结果", "分析", "测算", "模拟", "如果", "若", "假设", "并", "请"]:
+        index = formula.find(word)
+        if index > 0:
+            formula = formula[:index].strip()
+    formula = re.sub(r"\s*(提升|增长|上涨|下降|降低|减少)\s*$", "", formula).strip()
+    if "=" in formula:
+        formula = formula.split("=", 1)[1].strip()
+    return formula
+
+
+def has_explicit_advanced_formula_intent(question: str) -> bool:
+    text = str(question or "").strip().replace("＝", "=").replace("（", "(").replace("）", ")")
+    text = re.sub(r"\s+", " ", text)
+    if not text:
+        return False
+    function_pattern = r"\b(?:SAFE_DIVIDE|IF|ABS|MIN|MAX|ROUND|DIVIDE)\s*\("
+    if re.search(function_pattern, text, re.IGNORECASE):
+        return True
+    if re.search(r"(?:业务公式|指标公式|公式|按|按照)\s*[:：]?.+[=]", text):
+        return True
+    if re.search(r"(?:按|按照)\s+.+[+\-*/].+", text):
+        return True
+    direct_match = re.search(r"([\u4e00-\u9fa5A-Za-z_][\u4e00-\u9fa5A-Za-z0-9_\s]*)=(.+)$", text)
+    if not direct_match:
+        return False
+    right_expression = direct_match.group(2).strip()
+    return bool(
+        re.search(r"[+\-*/()]", right_expression)
+        or re.fullmatch(r"[+-]?\d+(?:\.\d+)?%?", right_expression)
+        or re.search(function_pattern, right_expression, re.IGNORECASE)
+    )
+
+
+def infer_advanced_formula(question: str) -> str:
+    text = str(question or "").strip()
+    if not has_explicit_advanced_formula_intent(text):
+        return ""
+    match = re.search(r"(?:公式|按|按照)\s*[:：]?(.+?[=＝].+)$", text)
+    if match:
+        return normalize_advanced_formula(match.group(1))
+    function_match = re.search(r"\b(?:SAFE_DIVIDE|IF|ABS|MIN|MAX|ROUND|DIVIDE)\s*\(.+\)", text, re.IGNORECASE)
+    if function_match:
+        return normalize_advanced_formula(function_match.group(0))
+    expression_match = re.search(r"(?:按|按照)\s+(.+[+\-*/].+)$", text)
+    if expression_match:
+        return normalize_advanced_formula(expression_match.group(1))
+    direct_match = re.search(r"([\u4e00-\u9fa5A-Za-z_][\u4e00-\u9fa5A-Za-z0-9_\s]*)[=＝](.+)$", text)
+    if direct_match:
+        return normalize_advanced_formula(direct_match.group(0))
+    return ""
+
+
+def build_rule_based_advanced_analysis_explain_result(payload: AdvancedAnalysisExplainRequest) -> dict[str, Any]:
+    result = payload.result if isinstance(payload.result, dict) else {}
+    existing = result.get("explanation")
+    if isinstance(existing, dict):
+        calculation = normalize_text_list(
+            existing.get("calculation") or existing.get("calculationResults") or existing.get("algorithmResults"),
+            5,
+        )
+        suggestions = normalize_text_list(
+            existing.get("suggestions") or existing.get("recommendations") or existing.get("aiSuggestions"),
+            5,
+        )
+        if calculation or suggestions:
+            return {
+                "source": "rule",
+                "sourceLabel": "规则解释",
+                "calculation": calculation,
+                "suggestions": suggestions,
+                "guardrail": "explanation-only",
+                "model": "rule-based-fallback",
+            }
+
+    analysis_type = normalize_advanced_intent(payload.type)
+    if analysis_type == "forecast":
+        return build_rule_based_forecast_explain(result)
+    if analysis_type == "whatIf":
+        return build_rule_based_what_if_explain(result)
+    return build_rule_based_alert_explain(result)
+
+
+def build_rule_based_forecast_explain(result: dict[str, Any]) -> dict[str, Any]:
+    rows = result.get("series") if isinstance(result.get("series"), list) else []
+    history_rows = [item for item in rows if isinstance(item, dict) and item.get("history") is not None]
+    forecast_rows = [item for item in rows if isinstance(item, dict) and item.get("forecast") is not None]
+    last_forecast = forecast_rows[-1].get("forecast") if forecast_rows else None
+    algorithm = result.get("algorithm") or result.get("params", {}).get("algorithm") if isinstance(result.get("params"), dict) else ""
+    calculation = [
+        f"当前基于后端{algorithm or '预测算法'}结果生成解释，历史点数 {len(history_rows)}，预测点数 {len(forecast_rows)}。",
+    ]
+    if last_forecast is not None:
+        calculation.append(f"末期预测值为 {last_forecast}，请结合置信区间上下界判断不确定性。")
+    return {
+        "source": "rule",
+        "sourceLabel": "规则解释",
+        "calculation": calculation,
+        "suggestions": [
+            "建议优先核对预测趋势和最近业务动作是否一致。",
+            "如果置信区间较宽，应以保守方案安排预算、库存或运营资源。",
+        ],
+        "guardrail": "explanation-only",
+        "model": "rule-based-fallback",
+    }
+
+
+def build_rule_based_what_if_explain(result: dict[str, Any]) -> dict[str, Any]:
+    rows = result.get("series") if isinstance(result.get("series"), list) else []
+    base = next((item.get("value") for item in rows if isinstance(item, dict) and item.get("name") == "基准方案"), None)
+    recommended = next((item.get("value") for item in rows if isinstance(item, dict) and item.get("name") == "推荐方案"), None)
+    formula = str(result.get("formula") or result.get("params", {}).get("formula") if isinstance(result.get("params"), dict) else "").strip()
+    calculation = ["当前解释基于后端 What-if 推演结果，数值未由 AI 重新计算。"]
+    if base is not None or recommended is not None:
+        calculation.append(f"基准方案为 {base if base is not None else '-'}，推荐方案为 {recommended if recommended is not None else '-'}。")
+    if formula:
+        calculation.append(f"本次推演使用业务公式「{formula}」作为计算口径。")
+    return {
+        "source": "rule",
+        "sourceLabel": "规则解释",
+        "calculation": calculation,
+        "suggestions": [
+            "建议先检查推荐方案变量是否真实可控，再评估执行成本。",
+            "推演结果用于比较方案，不应直接等同于因果结论。",
+        ],
+        "guardrail": "explanation-only",
+        "model": "rule-based-fallback",
+    }
+
+
+def build_rule_based_alert_explain(result: dict[str, Any]) -> dict[str, Any]:
+    params = result.get("params") if isinstance(result.get("params"), dict) else {}
+    event = result.get("event") if isinstance(result.get("event"), dict) else result
+    operator = str(params.get("operator") or event.get("operator") or "").strip()
+    threshold = params.get("threshold", event.get("threshold"))
+    reason = str(event.get("reason") or result.get("reason") or "").strip()
+    calculation = ["当前解释基于后端阈值/Z-Score 预警判断结果，异常结论未由 AI 重新判断。"]
+    if operator or threshold is not None:
+        calculation.append(f"预警条件为 {operator or '-'}，阈值为 {threshold if threshold is not None else '-'}。")
+    if reason:
+        calculation.append(f"触发原因：{reason}")
+    return {
+        "source": "rule",
+        "sourceLabel": "规则解释",
+        "calculation": calculation,
+        "suggestions": [
+            "建议先核对触发时间桶的原始数据和过滤口径。",
+            "处理完成后可在预警事件中记录确认、关闭或重开备注。",
+        ],
+        "guardrail": "explanation-only",
+        "model": "rule-based-fallback",
+    }
+
+
+def compact_json_text(value: Any, max_length: int = 5000) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        text = str(value)
+    if len(text) <= max_length:
+        return text
+    return f"{text[:max_length]}...(已截断)"
+
+
+def build_advanced_analysis_explain_prompt(payload: AdvancedAnalysisExplainRequest) -> str:
+    analysis_type = normalize_advanced_intent(payload.type)
+    type_label = {
+        "forecast": "时序预测",
+        "whatIf": "What-if 情景推演",
+        "alert": "离线智能预警",
+    }.get(analysis_type, "高级分析")
+    return (
+        f"分析类型：{type_label}\n"
+        f"用户问题或方案标题：{payload.question or '未提供'}\n"
+        f"上下文：{compact_json_text(payload.context or {}, 500)}\n"
+        f"后端算法结果：{compact_json_text(payload.result or {}, 1800)}\n\n"
+        "只基于后端算法结果生成业务可读解释，输出严格 JSON：\n"
+        "{\n"
+        '  "calculation": ["计算说明1", "计算说明2"],\n'
+        '  "suggestions": ["建议1", "建议2"],\n'
+        '  "reasoning": "简短说明解释依据"\n'
+        "}\n"
+        "要求：calculation 2-3 条，suggestions 2-3 条；每条不超过 45 字；不存在的数值不要编造。"
+    )
 
 
 def infer_advanced_metric(question: str, context: dict[str, Any] | None = None) -> str:

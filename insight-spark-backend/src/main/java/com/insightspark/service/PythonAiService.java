@@ -33,6 +33,7 @@ public class PythonAiService {
     private static final Logger log = LoggerFactory.getLogger(PythonAiService.class);
 
     private final RestTemplate restTemplate;
+    private final RestTemplate advancedExplainRestTemplate;
 
     @Value("${insight.ai-service-url:http://localhost:8000}")
     private String aiServiceUrl;
@@ -42,6 +43,11 @@ public class PythonAiService {
         requestFactory.setConnectTimeout(5000);
         requestFactory.setReadTimeout(120000);
         this.restTemplate = new RestTemplate(requestFactory);
+
+        SimpleClientHttpRequestFactory explainRequestFactory = new SimpleClientHttpRequestFactory();
+        explainRequestFactory.setConnectTimeout(5000);
+        explainRequestFactory.setReadTimeout(90000);
+        this.advancedExplainRestTemplate = new RestTemplate(explainRequestFactory);
     }
 
     public Optional<Map<String, Object>> textToSql(String question, String tableName, List<Map<String, Object>> fields,
@@ -191,6 +197,32 @@ public class PythonAiService {
             return Optional.empty();
         } catch (RestClientException e) {
             log.warn("Python AI 预测推演意图解析不可用: {}", e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    public Optional<Map<String, Object>> explainAdvancedAnalysis(String type,
+                                                                 String question,
+                                                                 Map<String, Object> result,
+                                                                 Map<String, Object> context) {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("type", type);
+        request.put("question", question == null ? "" : question);
+        request.put("result", result == null ? Map.of() : result);
+        request.put("context", context == null ? Map.of() : context);
+
+        try {
+            Map<String, Object> response = advancedExplainRestTemplate.postForObject(
+                    aiServiceUrl + "/ai/advanced-analysis/explain",
+                    request,
+                    Map.class
+            );
+            return response == null ? Optional.empty() : Optional.of(response);
+        } catch (HttpClientErrorException e) {
+            log.warn("Python AI 预测推演结果解释失败: {}", e.getResponseBodyAsString());
+            return Optional.empty();
+        } catch (RestClientException e) {
+            log.warn("Python AI 预测推演结果解释不可用: {}", e.getMessage());
             return Optional.empty();
         }
     }

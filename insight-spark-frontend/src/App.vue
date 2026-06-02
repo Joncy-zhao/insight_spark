@@ -250,6 +250,7 @@ const navigationTabs = ref([])
 const nextTabOrder = ref(1)
 const tables = ref([])
 const selectedTableName = ref('')
+const advancedAlertContext = ref(null)
 const uploadFile = ref(null)
 const uploadFiles = ref([])
 const uploadMergeMode = ref('SAME_HEADER')
@@ -4973,6 +4974,7 @@ provide('workbench', {
   diagnoseFromLastAnalysis,
   tables,
   selectedTableName,
+  advancedAlertContext,
   uploadFile,
   uploadFiles,
   uploadMergeMode,

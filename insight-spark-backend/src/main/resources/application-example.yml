@@ -44,8 +44,9 @@ insight:
     agent-cron: "0 */15 * * * *"
 
     # 钉钉群自定义机器人 Webhook。若机器人开启关键词校验，建议关键词包含“预警”。
-    # 如启用加签，当前版本还需继续补充 timestamp/sign 拼接逻辑。
+    # 若机器人开启“加签”，请填写 dingtalk-secret，系统会自动追加 timestamp/sign。
     dingtalk-webhook: "https://oapi.dingtalk.com/robot/send?access_token=your_dingtalk_access_token"
+    dingtalk-secret: "your_dingtalk_sign_secret"
 
     # 邮件推送配置。QQ 邮箱 smtp-password 填 SMTP 授权码，不是邮箱登录密码。
     email-target: "receiver@example.com"

@@ -1223,10 +1223,12 @@
             <AdvancedAnalysisCard
               v-if="activeAdvancedAnalysis"
               :analysis="activeAdvancedAnalysis"
+              :explain-loading="advancedAnalysisExplainingId === activeAdvancedAnalysis.id"
               @recalculate="recalculateAdvancedAnalysis"
               @save="saveAdvancedAnalysis"
               @pin="pinAdvancedAnalysis"
               @manage-alerts="openAdvancedAnalysisManagePage"
+              @explain="explainAdvancedAnalysis"
             />
           </el-dialog>
           <el-dialog
@@ -1342,10 +1344,17 @@
               <el-form-item label="业务公式（可选）">
                 <el-input
                     v-model.trim="whatIfConfirmForm.formula"
-                    placeholder="例如：profit = sales_amt - cost_amt，支持字段显示名/源字段名/列名"
+                    placeholder="例如：SAFE_DIVIDE(profit, sales_amt, 0)，支持 IF/ABS/MIN/MAX/ROUND"
                     clearable
                 />
-                <div class="forecast-confirm-hint">填写后将按业务公式计算基准与情景结果；不填写时继续使用历史相关性估计。</div>
+                <div class="forecast-confirm-hint">填写后将按业务公式计算基准与情景结果；支持字段显示名/源字段名/列名、IF 条件、ABS/MIN/MAX/ROUND/SAFE_DIVIDE。</div>
+              </el-form-item>
+              <el-form-item v-if="whatIfConfirmForm.formula" label="公式计算口径">
+                <el-select v-model="whatIfConfirmForm.formulaScope" class="full-width">
+                  <el-option label="聚合口径（字段均值计算）" value="aggregate" />
+                  <el-option label="按行口径（逐行计算后求平均）" value="row" />
+                </el-select>
+                <div class="forecast-confirm-hint">聚合口径兼容原有方案；按行口径适合利润率、转化率等需要逐行先算再汇总的公式。</div>
               </el-form-item>
               <div class="whatif-variable-toolbar">
                 <div class="whatif-variable-toolbar__title">变量列表</div>
@@ -1510,6 +1519,7 @@ import { ElMessage } from 'element-plus'
 import BusinessDictionaryView from '../../components/BusinessDictionaryView.vue'
 import AdvancedAnalysisCard from '../../components/AdvancedAnalysisCard.vue'
 import {
+  explainAdvancedAnalysisResult,
   fetchAdvancedAnalysisFieldMeta,
   deleteAdvancedAlertRule,
   getAdvancedAlertRule,
@@ -1535,6 +1545,7 @@ const {
   API_BASE,
   accessibleTables,
   activeModule,
+  advancedAlertContext,
   adminPermissionRequests,
   adminRequestStatus,
   auditExecuteStatus,
@@ -1785,6 +1796,7 @@ const alertRuleEditorForm = ref({
 })
 const advancedAnalysisDialogVisible = ref(false)
 const activeAdvancedAnalysis = ref(null)
+const advancedAnalysisExplainingId = ref('')
 const forecastConfirmVisible = ref(false)
 const forecastConfirmMeta = ref({ timeFields: [], numericFields: [] })
 const forecastConfirmForm = ref({
@@ -2006,12 +2018,36 @@ const inferWhatIfVariables = (text) => {
   ]
 }
 
+const whatIfFormulaFunctionPattern = /\b(?:SAFE_DIVIDE|IF|ABS|MIN|MAX|ROUND|DIVIDE)\s*\(/i
+
+const hasExplicitWhatIfFormulaIntent = (text = '') => {
+  const content = normalizeWhatIfFormulaSyntax(text).replace(/\s+/g, ' ').trim()
+  if (!content) return false
+  if (whatIfFormulaFunctionPattern.test(content)) return true
+  if (/(?:业务公式|指标公式|公式|按|按照)\s*[:：]?.+[=]/.test(content)) return true
+  if (/(?:按|按照)\s+[\s\S]*[+\-*\/][\s\S]*/.test(content)) return true
+  const directMatch = content.match(/([\u4e00-\u9fa5A-Za-z_][\u4e00-\u9fa5A-Za-z0-9_\s]*)=([\s\S]+)$/)
+  if (!directMatch) return false
+  const rightExpression = directMatch[2] || ''
+  return (
+    /[+\-*\/()]/.test(rightExpression)
+    || /^[+-]?\d+(?:\.\d+)?%?$/.test(rightExpression.trim())
+    || whatIfFormulaFunctionPattern.test(rightExpression)
+  )
+}
+
 const inferWhatIfFormula = (text, llmIntent = {}) => {
-  const explicit = String(llmIntent.formula || llmIntent.businessFormula || '').trim()
-  if (explicit) return explicit
-  const content = String(text || '').trim()
-  const match = content.match(/(?:公式|按|按照)\s*[:：]?(.+?[=＝].+?)(?:，|。|；|;|$)/)
-  if (match?.[1]) return match[1].trim()
+  const content = String(text || '').replace(/\s+/g, ' ').trim()
+  const hasExplicitFormula = hasExplicitWhatIfFormulaIntent(content)
+  const explicit = hasExplicitFormula ? String(llmIntent.formula || llmIntent.businessFormula || '').trim() : ''
+  if (explicit) return trimWhatIfFormulaTail(explicit)
+  if (!hasExplicitFormula) return ''
+  const match = content.match(/(?:公式|按|按照)\s*[:：]?([\s\S]+?[=＝][\s\S]+)$/)
+  if (match?.[1]) return trimWhatIfFormulaTail(match[1])
+  const directMatch = content.match(/([\u4e00-\u9fa5A-Za-z_][\u4e00-\u9fa5A-Za-z0-9_\s]*)[=＝]([\s\S]+)$/)
+  if (directMatch?.[0]) return trimWhatIfFormulaTail(directMatch[0])
+  const functionMatch = content.match(/\b(?:SAFE_DIVIDE|IF|ABS|MIN|MAX|ROUND|DIVIDE)\s*\([\s\S]+\)/i)
+  if (functionMatch?.[0]) return trimWhatIfFormulaTail(functionMatch[0])
   return ''
 }
 
@@ -2092,6 +2128,7 @@ const normalizeLlmVariables = (items) => {
   if (!Array.isArray(items)) return []
   return items.map(item => ({
     name: String(item?.name || item?.variable || item?.label || '').trim(),
+    field: String(item?.field || item?.columnName || '').trim(),
     change: Number(item?.change ?? item?.changePercent ?? item?.delta ?? 0)
   })).filter(item => item.name && Number.isFinite(item.change))
 }
@@ -2253,6 +2290,19 @@ const scoreFieldMatch = (field, target = '') => {
   return score
 }
 
+const formulaFieldAliasValues = (field) => {
+  const values = fieldSearchValues(field)
+  const normalizedValues = values.map(normalizeFieldText).filter(Boolean)
+  const joinedFieldText = normalizedValues.join(' ')
+  const semanticValues = []
+  fieldSemanticGroups.forEach(group => {
+    const normalizedGroup = group.map(normalizeFieldText)
+    const fieldHit = normalizedGroup.some(term => term && joinedFieldText.includes(term))
+    if (fieldHit) semanticValues.push(...group)
+  })
+  return [...new Set([...values, ...semanticValues].map(value => String(value || '').trim()).filter(Boolean))]
+}
+
 const fieldNameMatches = (field, target) => scoreFieldMatch(field, target) > 0
 
 const pickFieldName = (fields = [], preferred = '', fallback = '') => {
@@ -2270,6 +2320,158 @@ const pickFieldNameStrict = (fields = [], preferred = '', fallback = '') => {
     .filter(item => item.score > 0)
     .sort((a, b) => b.score - a.score || a.index - b.index)
   return String(scored[0]?.field?.columnName || fallback || '').trim()
+}
+
+const whatIfFormulaStopWords = [
+  '推演',
+  '预测',
+  '变化',
+  '会怎么',
+  '会怎样',
+  '怎么办',
+  '结果',
+  '分析',
+  '测算',
+  '模拟',
+  '时',
+  '如果',
+  '若',
+  '假设',
+  '并',
+  '请'
+]
+
+const normalizeWhatIfFormulaSyntax = (value = '') => String(value || '')
+  .replace(/＝/g, '=')
+  .replace(/[（]/g, '(')
+  .replace(/[）]/g, ')')
+  .replace(/，/g, ',')
+  .replace(/\bSAFE[\s-]+DIVIDE\b/gi, 'SAFE_DIVIDE')
+
+const unsafeWhatIfFormulaPattern = /\b(select|from|where|drop|delete|update|insert|alter|union|sleep|benchmark)\b/i
+
+const hasUnsafeWhatIfFormulaText = (value = '') => {
+  const text = normalizeWhatIfFormulaSyntax(value).replace(/\s+/g, ' ').trim()
+  if (!text || !unsafeWhatIfFormulaPattern.test(text)) return false
+  return /(?:公式|按|按照)/.test(text) || /=/.test(text)
+}
+
+const trimWhatIfFormulaTail = (value = '') => {
+  let formula = normalizeWhatIfFormulaSyntax(value)
+    .replace(/[。；;、]/g, ' ')
+    .replace(/\s*,\s*/g, ', ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  for (const word of whatIfFormulaStopWords) {
+    const index = formula.indexOf(word)
+    if (index > 0) {
+      formula = formula.slice(0, index).trim()
+    }
+  }
+  formula = formula
+    .replace(/\s*(提升|增长|上涨|下降|降低|减少)\s*$/g, '')
+    .replace(/[\s,，。；;、]+$/g, '')
+    .trim()
+  return formula
+}
+
+const hasWhatIfFormulaExpression = (text = '', params = {}, llmIntent = {}) => {
+  const explicit = String(params.formula || '').trim()
+  if (explicit) return true
+  const content = String(text || '').trim()
+  return Boolean(
+    inferWhatIfFormula(content, llmIntent)
+    || hasExplicitWhatIfFormulaIntent(content)
+  )
+}
+
+const assertWhatIfFormulaAllowed = (formula = '') => {
+  const expression = normalizeWhatIfFormulaSyntax(formula).trim()
+  if (!expression) return
+  if (unsafeWhatIfFormulaPattern.test(expression)) {
+    throw new Error('业务公式仅支持字段、数字、函数、条件和安全运算符，不能包含 SQL 语句')
+  }
+}
+
+const assertWhatIfInstructionAllowed = (text = '', params = {}, llmIntent = {}) => {
+  const explicit = String(params.formula || '').trim()
+  if (hasUnsafeWhatIfFormulaText(text) || hasUnsafeWhatIfFormulaText(explicit)) {
+    throw new Error('业务公式仅支持字段、数字、函数、条件和安全运算符，不能包含 SQL 语句')
+  }
+  assertWhatIfFormulaAllowed(explicit || inferWhatIfFormula(text, llmIntent))
+}
+
+const stripWhatIfFormulaDisplayName = (formula = '') => {
+  const expression = String(formula || '').trim()
+  let depth = 0
+  for (let index = 0; index < expression.length; index += 1) {
+    const ch = expression[index]
+    if (ch === '(') {
+      depth += 1
+      continue
+    }
+    if (ch === ')') {
+      depth = Math.max(0, depth - 1)
+      continue
+    }
+    if (depth !== 0 || ch !== '=') continue
+    const previous = index > 0 ? expression[index - 1] : ''
+    const next = index + 1 < expression.length ? expression[index + 1] : ''
+    if (['>', '<', '!', '='].includes(previous) || next === '=') continue
+    return expression.slice(index + 1).trim()
+  }
+  return expression
+}
+
+const rewriteWhatIfFormulaToColumns = (formula = '', fields = []) => {
+  let expression = stripWhatIfFormulaDisplayName(trimWhatIfFormulaTail(formula))
+  if (!expression) return ''
+  const aliasEntries = []
+  fields.forEach(field => {
+    const column = String(field?.columnName || '').trim()
+    if (!column) return
+    formulaFieldAliasValues(field).forEach(alias => {
+      const text = String(alias || '').trim()
+      if (!text || text === column) return
+      aliasEntries.push({ text, column })
+    })
+  })
+  aliasEntries
+    .sort((a, b) => b.text.length - a.text.length)
+    .forEach(({ text, column }) => {
+      const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      expression = expression.replace(new RegExp(escaped, 'gi'), column)
+    })
+  return trimWhatIfFormulaTail(expression)
+}
+
+const extractWhatIfFormulaFields = (formula = '', fields = []) => {
+  const expression = rewriteWhatIfFormulaToColumns(formula, fields)
+  if (!expression) return []
+  const tokens = [...expression.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)].map(match => match[0])
+  const functionNames = new Set(['IF', 'ABS', 'MIN', 'MAX', 'ROUND', 'DIVIDE', 'SAFE_DIVIDE'])
+  const columns = new Set((fields || []).map(field => String(field?.columnName || '').trim()).filter(Boolean))
+  return [...new Set(tokens.filter(token => columns.has(token) && !functionNames.has(token.toUpperCase())))]
+}
+
+const completeWhatIfVariablesFromFormula = (variables = [], formula = '', fields = []) => {
+  const rows = Array.isArray(variables) ? variables.map(item => ({ ...item })) : []
+  const existing = new Set(rows.map(item => String(item.field || '').trim()).filter(Boolean))
+  extractWhatIfFormulaFields(formula, fields).forEach(column => {
+    if (existing.has(column)) return
+    const fieldMeta = fields.find(field => String(field.columnName || '') === column)
+    rows.push({
+      field: column,
+      name: fieldMeta?.displayName || fieldMeta?.sourceFieldName || column,
+      mode: 'percent',
+      change: 0,
+      min: null,
+      max: null,
+      formulaOnly: true
+    })
+    existing.add(column)
+  })
+  return rows
 }
 
 const confirmForecastParams = (fieldMeta, defaults = {}) => new Promise((resolve) => {
@@ -2320,10 +2522,11 @@ const confirmWhatIfParams = (fieldMeta, defaults = {}) => new Promise((resolve) 
   whatIfConfirmForm.value = {
     targetMetric: defaults.targetMetric || numericFields[0]?.columnName || '',
     formula: defaults.formula || '',
+    formulaScope: defaults.formulaScope || 'aggregate',
     variables: (defaults.variables?.length ? defaults.variables : [{ field: numericFields[1]?.columnName || numericFields[0]?.columnName || '', name: '变量', change: 10, mode: 'percent' }])
       .map(item => ({
         field: item.field || pickFieldNameStrict(numericFields, item.name, ''),
-        name: item.name || item.field || '变量',
+        name: item.name || formatAdvancedFieldLabel(numericFields.find(field => field.columnName === item.field)) || item.field || '变量',
         mode: item.mode || 'percent',
         change: Number(item.change ?? 0),
         min: item.min ?? null,
@@ -2348,7 +2551,21 @@ const submitWhatIfConfirm = () => {
     ElMessage.warning('请选择目标指标')
     return
   }
-  const variables = whatIfConfirmForm.value.variables
+  const formula = rewriteWhatIfFormulaToColumns(
+    whatIfConfirmForm.value.formula || '',
+    whatIfConfirmMeta.value.numericFields || []
+  )
+  try {
+    assertWhatIfFormulaAllowed(formula || whatIfConfirmForm.value.formula || '')
+  } catch (error) {
+    ElMessage.error(error.message || '业务公式不合法')
+    return
+  }
+  const variables = completeWhatIfVariablesFromFormula(
+    whatIfConfirmForm.value.variables,
+    formula,
+    whatIfConfirmMeta.value.numericFields || []
+  )
     .filter(item => item.field && Number.isFinite(Number(item.change)))
     .map(item => ({
       ...item,
@@ -2365,7 +2582,8 @@ const submitWhatIfConfirm = () => {
   if (whatIfConfirmResolver) {
     whatIfConfirmResolver({
       targetMetric: whatIfConfirmForm.value.targetMetric,
-      formula: String(whatIfConfirmForm.value.formula || '').trim(),
+      formula,
+      formulaScope: formula ? whatIfConfirmForm.value.formulaScope || 'aggregate' : 'aggregate',
       variables
     })
     whatIfConfirmResolver = null
@@ -2486,6 +2704,7 @@ const buildAnalysisFromRealWhatIf = (result, text, params, llmIntent, fieldMeta 
   const scenario = series.find(item => item.name === '中性方案')?.value ?? series[1]?.value
   const recommended = series.find(item => item.name === '推荐方案')?.value ?? series[series.length - 1]?.value
   const formula = String(result?.formula || params.formula || '').trim()
+  const formulaScope = formula ? String(result?.formulaScope || params.formulaScope || 'aggregate').trim() || 'aggregate' : 'aggregate'
   return {
     id: `advanced-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     type: 'whatIf',
@@ -2501,8 +2720,9 @@ const buildAnalysisFromRealWhatIf = (result, text, params, llmIntent, fieldMeta 
       tableName: result?.tableName || params.tableName || selectedTableName?.value || '',
       targetMetric: result?.targetMetric || params.targetMetric || '',
       formula,
+      formulaScope,
       resolvedFormula: result?.resolvedFormula || '',
-      calculationMode: result?.calculationMode || (formula ? 'formula' : 'correlation'),
+      calculationMode: result?.calculationMode || (formula ? 'formula' : 'regression'),
       variables: (Array.isArray(result?.variables) && result.variables.length ? result.variables : params.variables || []).map(item => ({ ...item }))
     },
     explanation: result?.explanation || buildWhatIfCardExplanation({
@@ -2564,6 +2784,9 @@ const buildAnalysisFromSavedAlertRule = (rule, text, params, llmIntent, fieldMet
 
 const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = {}) => {
   const tableName = selectedTableName?.value || lastAnalysis?.value?.tableName || ''
+  if (type === 'whatIf') {
+    assertWhatIfInstructionAllowed(text, params, llmIntent)
+  }
   if (!tableName) {
     return createAdvancedAnalysis(type, text, params, llmIntent)
   }
@@ -2646,10 +2869,16 @@ const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = 
         const field = pickFieldNameStrict(numericFields, variable.field || variable.name, '')
         return { ...variable, field }
       })
+      const formula = rewriteWhatIfFormulaToColumns(
+        params.formula || inferWhatIfFormula(text, llmIntent),
+        numericFields
+      )
+      assertWhatIfFormulaAllowed(formula)
       const confirmedWhatIf = await confirmWhatIfParams(fieldMeta, {
         targetMetric,
-        formula: params.formula || inferWhatIfFormula(text, llmIntent),
-        variables: defaultVariables
+        formula,
+        formulaScope: params.formulaScope || 'aggregate',
+        variables: completeWhatIfVariablesFromFormula(defaultVariables, formula, numericFields)
       })
       if (!confirmedWhatIf) {
         throw new Error('已取消推演参数确认')
@@ -2662,12 +2891,15 @@ const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = 
         tableName,
         targetMetric: confirmedWhatIf.targetMetric,
         formula: confirmedWhatIf.formula || '',
+        formulaScope: confirmedWhatIf.formula ? confirmedWhatIf.formulaScope || 'aggregate' : 'aggregate',
+        sourceQuestion: text,
         variables: normalizedVariables
       })
       return buildAnalysisFromRealWhatIf(result, text, {
         tableName,
         targetMetric: confirmedWhatIf.targetMetric,
         formula: confirmedWhatIf.formula || '',
+        formulaScope: confirmedWhatIf.formula ? confirmedWhatIf.formulaScope || 'aggregate' : 'aggregate',
         variables: normalizedVariables
       }, llmIntent, fieldMeta)
     }
@@ -2695,7 +2927,7 @@ const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = 
     }
   } catch (error) {
     console.warn('advanced analysis real compute fallback:', error)
-    if (type === 'whatIf' && String(params.formula || llmIntent.formula || llmIntent.businessFormula || '').trim()) {
+    if (type === 'whatIf' && hasWhatIfFormulaExpression(text, params, llmIntent)) {
       throw error
     }
     if (type === 'forecast') {
@@ -2760,6 +2992,7 @@ const createAdvancedAnalysis = (type, text, params = {}, llmIntent = {}) => {
     const recommended = series.find(item => item.name === '推荐方案')?.value || series[series.length - 1]?.value || 0
     const delta = base ? ((scenario - base) / base) * 100 : 0
     const formula = params.formula || inferWhatIfFormula(text, llmIntent)
+    const formulaScope = formula ? params.formulaScope || 'aggregate' : 'aggregate'
     return {
       id,
       type,
@@ -2771,7 +3004,7 @@ const createAdvancedAnalysis = (type, text, params = {}, llmIntent = {}) => {
       metric,
       timeRange: '当前分析周期',
       status: '已生成',
-      params: { variables, formula },
+      params: { variables, formula, formulaScope },
       explanation: buildWhatIfCardExplanation({ base, scenario, recommended, variables, formula }),
       series,
       insights: [
@@ -2864,6 +3097,173 @@ const pushAdvancedAnalysisMessage = (analysis, userText = '') => {
   })
 }
 
+const alertEventStatusLabel = (status) => {
+  const value = String(status || 'OPEN').toUpperCase()
+  if (value === 'ACK') return '已确认'
+  if (value === 'CLOSED') return '已关闭'
+  return '待处理'
+}
+
+const alertPushStatusLabel = (status) => {
+  const value = String(status || 'PENDING').toUpperCase()
+  if (value === 'SUCCESS') return '推送成功'
+  if (value === 'FAILED') return '推送失败'
+  return '待推送'
+}
+
+const alertOperatorLabel = (operator) => {
+  const value = String(operator || 'lt').toLowerCase()
+  if (value === 'gt') return '高于阈值'
+  if (value === 'zscore') return 'Z-Score 异常波动'
+  return '低于阈值'
+}
+
+const findAdvancedField = (fieldName, fieldMeta = {}) => {
+  const name = String(fieldName || '').trim()
+  if (!name) return null
+  const candidates = [
+    ...(Array.isArray(fieldMeta.fields) ? fieldMeta.fields : []),
+    ...(Array.isArray(fieldMeta.timeFields) ? fieldMeta.timeFields : []),
+    ...(Array.isArray(fieldMeta.numericFields) ? fieldMeta.numericFields : []),
+    ...(Array.isArray(fields?.value) ? fields.value : [])
+  ]
+  return candidates.find(item => [
+    item?.columnName,
+    item?.sourceFieldName,
+    item?.displayName,
+    item?.businessName
+  ].some(value => String(value || '').trim() === name)) || null
+}
+
+const formatRestoredAlertField = (fieldName, fieldMeta = {}, fallback = '指标') => {
+  const matched = findAdvancedField(fieldName, fieldMeta)
+  return matched ? formatAdvancedFieldLabel(matched) : formatAnalysisMetricLabel(fieldName, fallback, fieldMeta.fields || fields?.value || [])
+}
+
+const buildRestoredAlertSeries = (event = {}) => {
+  const snapshot = event.chartSnapshot || {}
+  const rows = Array.isArray(snapshot.data) && snapshot.data.length
+    ? snapshot.data
+    : [{ name: event.bucketName || '触发点', value: event.actualValue }]
+  return rows.map(item => ({
+    name: String(item?.name || item?.bucketName || '-'),
+    value: Number(item?.value ?? item?.actualValue ?? 0),
+    triggered: Boolean(item?.triggered)
+  }))
+}
+
+const pushRestoredAdvancedAlertMessage = (analysis, context = {}) => {
+  const eventId = analysis?.params?.eventId || '-'
+  messages.value.push({
+    role: 'user',
+    content: `查看预警事件 #${eventId} 的上下文`,
+    sourceTableName: analysis.tableName || selectedTableName?.value || ''
+  })
+  messages.value.push({
+    role: 'system',
+    content: `已从${context.sourceLabel || '预警管理'}恢复预警上下文，可继续追问触发原因、历史快照或规则调整建议。`,
+    advancedAnalysis: analysis,
+    sourceQuestion: `恢复预警事件 #${eventId}`,
+    sourceTableName: analysis.tableName || selectedTableName?.value || ''
+  })
+  nextTick(() => {
+    const dom = document.getElementById('chatHistory')
+    if (dom) dom.scrollTop = dom.scrollHeight
+  })
+}
+
+const restoreAdvancedAlertContext = async (context) => {
+  if (!context) return
+  if (advancedAlertContext?.value === context) {
+    advancedAlertContext.value = null
+  }
+  const event = context.event || {}
+  const pushLog = context.pushLog || null
+  const tableName = String(event.tableName || '').trim()
+  if (tableName && selectedTableName?.value !== tableName) {
+    selectedTableName.value = tableName
+  }
+  chatContentMode.value = 'messages'
+  let fieldMeta = {}
+  if (tableName) {
+    try {
+      fieldMeta = await fetchAdvancedAnalysisFieldMeta({ tableName })
+    } catch (error) {
+      console.warn('restore alert field meta failed:', error)
+    }
+  }
+  const metricLabel = formatRestoredAlertField(event.metricField, fieldMeta, '预警指标')
+  const timeFieldLabel = formatRestoredAlertField(event.timeField, fieldMeta, '时间字段')
+  const operator = String(event.operator || 'lt').toLowerCase()
+  const thresholdText = operator === 'zscore' ? 'Z-Score >= 3' : formatAdvancedNumber(event.threshold)
+  const chartThreshold = operator === 'zscore'
+    ? Number(event.baselineValue ?? event.actualValue ?? 0)
+    : Number(event.threshold ?? 0)
+  const pushChannel = pushLog?.channel ? formatAlertChannel([pushLog.channel]) : ''
+  const calculation = [
+    event.reason || '已恢复预警事件上下文，异常判断来自后端离线预警结果。',
+    `数据源：${tableName || '-'}，指标：${metricLabel}，时间字段：${timeFieldLabel}，触发时间桶：${event.bucketName || '-'}。`,
+    `判断条件：${alertOperatorLabel(operator)}，实际值 ${formatAdvancedNumber(event.actualValue)}，阈值 ${thresholdText}，历史基线 ${formatAdvancedNumber(event.baselineValue)}，Z-Score ${formatAdvancedNumber(event.zScore)}。`,
+    pushLog ? `推送渠道：${pushChannel || '-'}，推送状态：${alertPushStatusLabel(pushLog.status)}。` : ''
+  ].filter(Boolean)
+  const analysis = {
+    id: `alert-context-${event.id || pushLog?.id || Date.now()}`,
+    type: 'alert',
+    title: `${metricLabel}预警事件`,
+    summary: `已恢复规则 #${event.ruleId || '-'}、数据源、指标和触发原因上下文。`,
+    tableName,
+    metric: metricLabel,
+    timeRange: event.bucketName || '触发时间桶',
+    status: alertEventStatusLabel(event.status),
+    ruleId: event.ruleId,
+    params: {
+      eventId: event.id,
+      ruleId: event.ruleId,
+      tableName,
+      timeField: event.timeField,
+      timeFieldLabel,
+      metricField: event.metricField,
+      metricFieldLabel: metricLabel,
+      bucketName: event.bucketName,
+      operator,
+      threshold: Number.isFinite(chartThreshold) ? chartThreshold : 0,
+      actualValue: event.actualValue,
+      baselineValue: event.baselineValue,
+      zScore: event.zScore,
+      deviationRate: event.deviationRate,
+      channel: pushChannel || '按规则配置',
+      pushStatus: pushLog?.status || '',
+      pushChannel: pushLog?.channel || ''
+    },
+    explanation: {
+      source: 'context',
+      sourceLabel: context.sourceLabel || '预警上下文',
+      calculation,
+      suggestions: [
+        '可以继续追问该事件的触发原因、历史趋势、快照数据或阈值调整建议。',
+        '如需确认、关闭、重开或补充处理备注，请回到“预测与情景模拟”菜单处理预警事件。'
+      ]
+    },
+    series: buildRestoredAlertSeries(event),
+    insights: [
+      { label: '事件ID', value: event.id || '-' },
+      { label: '规则ID', value: event.ruleId || '-' },
+      { label: '触发时间桶', value: event.bucketName || '-' },
+      { label: '实际值', value: formatAdvancedNumber(event.actualValue) },
+      { label: '阈值', value: thresholdText },
+      { label: '推送状态', value: pushLog ? alertPushStatusLabel(pushLog.status) : '未从推送记录恢复' }
+    ]
+  }
+  pushRestoredAdvancedAlertMessage(analysis, context)
+}
+
+if (advancedAlertContext) {
+  watch(advancedAlertContext, async (context) => {
+    if (!context) return
+    await restoreAdvancedAlertContext(context)
+  }, { immediate: true })
+}
+
 const openAdvancedAnalysisDialog = (analysis) => {
   activeAdvancedAnalysis.value = analysis
   advancedAnalysisDialogVisible.value = true
@@ -2880,6 +3280,14 @@ const sendChatQuestion = async () => {
     ElMessage.warning('请先选择数据源，或先完成一轮普通查询后再发起预测/推演/预警')
     return
   }
+  if (localIntent === 'whatIf') {
+    try {
+      assertWhatIfInstructionAllowed(text)
+    } catch (error) {
+      ElMessage.error(error.message || '业务公式不合法')
+      return
+    }
+  }
   const llmIntent = await parseAdvancedIntentWithLlm(text)
   const intent = llmIntent?.intent || localIntent
   messages.value.push({
@@ -2888,8 +3296,18 @@ const sendChatQuestion = async () => {
     parentTurnId: String(activeBranchParentTurnMeta?.value?.turnId || '').trim() || null
   })
   question.value = ''
-  const analysis = await createAdvancedAnalysisAsync(intent, text, {}, llmIntent || {})
-  pushAdvancedAnalysisMessage(analysis, text)
+  try {
+    const analysis = await createAdvancedAnalysisAsync(intent, text, {}, llmIntent || {})
+    pushAdvancedAnalysisMessage(analysis, text)
+  } catch (error) {
+    const message = error.message || '高级分析生成失败'
+    ElMessage.error(message)
+    messages.value.push({
+      role: 'system',
+      content: `生成预测与情景模拟卡片失败：${message}`,
+      sourceTableName: selectedTableName?.value || lastAnalysis?.value?.tableName || ''
+    })
+  }
 }
 
 const recalculateAdvancedAnalysis = async ({ analysis, params }) => {
@@ -2911,6 +3329,79 @@ const recalculateAdvancedAnalysis = async ({ analysis, params }) => {
     activeAdvancedAnalysis.value = nextAnalysis
   }
   ElMessage.success('已根据最新参数重新计算')
+}
+
+const applyAdvancedAnalysisUpdate = (analysisId, nextAnalysis) => {
+  if (!analysisId || !nextAnalysis) return
+  const target = (messages.value || []).find(item => item?.advancedAnalysis?.id === analysisId)
+  if (target) {
+    target.advancedAnalysis = nextAnalysis
+  }
+  if (activeAdvancedAnalysis.value?.id === analysisId) {
+    activeAdvancedAnalysis.value = nextAnalysis
+  }
+  const historyIndex = advancedAnalysisHistory.value.findIndex(item => item.id === analysisId)
+  if (historyIndex >= 0) {
+    advancedAnalysisHistory.value.splice(historyIndex, 1, {
+      ...advancedAnalysisHistory.value[historyIndex],
+      ...nextAnalysis
+    })
+  }
+}
+
+const buildAdvancedExplanationPayloadResult = (analysis = {}) => ({
+  type: analysis.type || '',
+  title: analysis.title || '',
+  summary: analysis.summary || '',
+  tableName: analysis.tableName || analysis.params?.tableName || '',
+  metric: analysis.metric || '',
+  timeRange: analysis.timeRange || '',
+  status: analysis.status || '',
+  params: {
+    ...(analysis.params || {}),
+    variables: Array.isArray(analysis.params?.variables)
+      ? analysis.params.variables.map(item => ({ ...item }))
+      : []
+  },
+  formula: analysis.params?.formula || analysis.formula || '',
+  resolvedFormula: analysis.params?.resolvedFormula || analysis.resolvedFormula || '',
+  series: Array.isArray(analysis.series) ? analysis.series.map(item => ({ ...item })) : [],
+  insights: Array.isArray(analysis.insights) ? analysis.insights.map(item => ({ ...item })) : [],
+  explanation: analysis.explanation && typeof analysis.explanation === 'object'
+    ? {
+        source: analysis.explanation.source || '',
+        sourceLabel: analysis.explanation.sourceLabel || '',
+        calculation: Array.isArray(analysis.explanation.calculation) ? [...analysis.explanation.calculation] : [],
+        suggestions: Array.isArray(analysis.explanation.suggestions) ? [...analysis.explanation.suggestions] : []
+      }
+    : null
+})
+
+const explainAdvancedAnalysis = async (analysis) => {
+  if (!analysis?.id) return
+  advancedAnalysisExplainingId.value = analysis.id
+  try {
+    const explanation = await explainAdvancedAnalysisResult({
+      type: analysis.type,
+      question: analysis.title || '',
+      result: buildAdvancedExplanationPayloadResult(analysis),
+      context: {
+        tableName: analysis.tableName || analysis.params?.tableName || selectedTableName?.value || '',
+        metric: analysis.metric || '',
+        source: 'chat-analysis-card'
+      }
+    })
+    const nextAnalysis = {
+      ...analysis,
+      explanation
+    }
+    applyAdvancedAnalysisUpdate(analysis.id, nextAnalysis)
+    ElMessage.success(explanation?.source === 'llm' ? 'AI 解释已生成' : '已生成规则解释兜底')
+  } catch (error) {
+    ElMessage.error(`生成解释失败：${error.message || '未知原因'}`)
+  } finally {
+    advancedAnalysisExplainingId.value = ''
+  }
 }
 
 const buildAdvancedPlanRequest = (analysis = {}) => {
@@ -2951,7 +3442,46 @@ const buildAdvancedPlanRequest = (analysis = {}) => {
       tableName: params.tableName || analysis.tableName || '',
       targetMetric: params.targetMetric || '',
       formula: params.formula || '',
+      formulaScope: params.formula ? params.formulaScope || 'aggregate' : 'aggregate',
       variables: Array.isArray(params.variables) ? params.variables.map(item => ({ ...item })) : []
+    }
+  }
+  return {}
+}
+
+const buildAdvancedFieldMappingSnapshot = (analysis = {}) => {
+  const params = analysis.params || {}
+  if (analysis.type === 'forecast') {
+    return {
+      mappingType: 'forecast',
+      confirmed: true,
+      tableName: params.tableName || analysis.tableName || '',
+      timeField: params.timeField || '',
+      metricField: params.metricField || '',
+      metricLabel: analysis.metric || params.metricField || '',
+      granularity: params.granularity || analysis.timeRange || '',
+      filterExpression: params.filterExpression || '',
+      algorithm: params.algorithm || ''
+    }
+  }
+  if (analysis.type === 'whatIf') {
+    return {
+      mappingType: 'whatIf',
+      confirmed: true,
+      tableName: params.tableName || analysis.tableName || '',
+      targetMetric: params.targetMetric || '',
+      metricLabel: analysis.metric || params.targetMetric || '',
+      formula: params.formula || analysis.formula || '',
+      resolvedFormula: params.resolvedFormula || analysis.resolvedFormula || '',
+      formulaScope: params.formula || analysis.formula ? params.formulaScope || 'aggregate' : '',
+      variables: Array.isArray(params.variables) ? params.variables.map(item => ({
+        name: item.name || item.field || '',
+        field: item.field || '',
+        mode: item.mode || 'percent',
+        change: item.change ?? 0,
+        min: item.min ?? null,
+        max: item.max ?? null
+      })) : []
     }
   }
   return {}
@@ -2963,6 +3493,7 @@ const buildAdvancedPlanPayload = (analysis = {}) => ({
   tableName: analysis.tableName || analysis.params?.tableName || '',
   metricLabel: analysis.metric || '',
   timeRangeLabel: analysis.timeRange || '',
+  fieldMapping: buildAdvancedFieldMappingSnapshot(analysis),
   request: buildAdvancedPlanRequest(analysis),
   result: {
     ...analysis,

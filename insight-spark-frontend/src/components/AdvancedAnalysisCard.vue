@@ -75,10 +75,18 @@
         <span>业务公式（可选）</span>
         <el-input
           v-model="draft.formula"
-          placeholder="不填写则使用历史相关性估计，例如：profit = sales_amt - cost_amt"
+          placeholder="不填写则使用多变量岭回归拟合，例如：profit = sales_amt - cost_amt"
           clearable
           @change="emitRecalculate"
         />
+      </div>
+      <div v-if="draft.formula" class="advanced-card__formula advanced-card__formula--scope">
+        <span>公式口径</span>
+        <el-select v-model="draft.formulaScope" @change="emitRecalculate">
+          <el-option label="聚合口径（字段均值）" value="aggregate" />
+          <el-option label="按行口径（逐行求平均）" value="row" />
+        </el-select>
+        <small>按行口径适合利润率、转化率等需要逐行先算再汇总的公式。</small>
       </div>
       <div class="advanced-card__variable-list">
         <div
@@ -204,7 +212,18 @@
           <span>结果说明</span>
           <strong>{{ explanationSourceLabel }}</strong>
         </div>
-        <el-button size="small" text type="primary" @click="copyResultExplanation">复制</el-button>
+        <div class="advanced-card__result-actions">
+          <el-button
+            size="small"
+            text
+            type="primary"
+            :loading="props.explainLoading"
+            @click="$emit('explain', analysis)"
+          >
+            生成 AI 解释
+          </el-button>
+          <el-button size="small" text type="primary" @click="copyResultExplanation">复制</el-button>
+        </div>
       </div>
       <div class="advanced-card__result-grid">
         <div v-if="calculationExplanationRows.length" class="advanced-card__result-block">
@@ -269,10 +288,14 @@ const props = defineProps({
   showPinAction: {
     type: Boolean,
     default: true
+  },
+  explainLoading: {
+    type: Boolean,
+    default: false
   }
 })
 
-const emit = defineEmits(['recalculate', 'save', 'pin', 'manage-alerts'])
+const emit = defineEmits(['recalculate', 'save', 'pin', 'manage-alerts', 'explain'])
 
 const chartRef = ref(null)
 let chartInstance = null
@@ -286,6 +309,7 @@ const draft = reactive({
   gamma: props.analysis?.params?.gamma ?? props.analysis?.params?.algorithmParams?.gamma ?? 0.20,
   seasonLength: props.analysis?.params?.seasonLength ?? props.analysis?.params?.algorithmParams?.seasonLength ?? 0,
   formula: props.analysis?.params?.formula || props.analysis?.formula || '',
+  formulaScope: props.analysis?.params?.formulaScope || props.analysis?.formulaScope || 'aggregate',
   variables: (props.analysis?.params?.variables || []).map(item => ({ ...item })),
   operator: props.analysis?.params?.operator || 'lt',
   threshold: props.analysis?.params?.threshold ?? 100000,
@@ -301,6 +325,7 @@ const syncDraftFromAnalysis = () => {
   draft.gamma = props.analysis?.params?.gamma ?? props.analysis?.params?.algorithmParams?.gamma ?? 0.20
   draft.seasonLength = props.analysis?.params?.seasonLength ?? props.analysis?.params?.algorithmParams?.seasonLength ?? 0
   draft.formula = props.analysis?.params?.formula || props.analysis?.formula || ''
+  draft.formulaScope = props.analysis?.params?.formulaScope || props.analysis?.formulaScope || 'aggregate'
   draft.variables = (props.analysis?.params?.variables || []).map(item => ({ ...item }))
   draft.operator = props.analysis?.params?.operator || 'lt'
   draft.threshold = props.analysis?.params?.threshold ?? 100000
@@ -659,8 +684,13 @@ const buildWhatIfOption = () => {
         name: '业务结果',
         type: 'bar',
         barMaxWidth: 32,
-        data: rows.map(item => item.value),
-        itemStyle: { color: '#14b8a6', borderRadius: [5, 5, 0, 0] }
+        data: rows.map(item => ({
+          value: item.value,
+          itemStyle: {
+            color: Number(item.value) < 0 ? '#f97316' : '#14b8a6',
+            borderRadius: Number(item.value) < 0 ? [0, 0, 5, 5] : [5, 5, 0, 0]
+          }
+        }))
       }
     ]
   }
@@ -722,6 +752,7 @@ const emitRecalculate = () => {
       tableName: props.analysis?.params?.tableName || props.analysis?.tableName || '',
       targetMetric: props.analysis?.params?.targetMetric || '',
       formula: draft.formula,
+      formulaScope: draft.formula ? draft.formulaScope || 'aggregate' : 'aggregate',
       variables: draft.variables.map(item => ({ ...item })),
       operator: draft.operator,
       threshold: draft.threshold,
@@ -1093,6 +1124,12 @@ onBeforeUnmount(() => {
 .advanced-card__result-head strong {
   color: #0f172a;
   font-size: 14px;
+}
+.advanced-card__result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
 }
 .advanced-card__result-grid {
   display: grid;

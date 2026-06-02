@@ -57,6 +57,18 @@ public class AdvancedAnalysisController {
         return ApiResponse.success(advancedAnalysisService.whatIf(request));
     }
 
+    @PostMapping("/explain")
+    public ApiResponse<Map<String, Object>> explain(@RequestBody Map<String, Object> request) {
+        String type = text(request.getOrDefault("type", request.get("analysisType")));
+        String question = text(request.get("question"));
+        Map<String, Object> result = asMap(request.get("result"));
+        if (result.isEmpty()) {
+            result = asMap(request.get("analysis"));
+        }
+        Map<String, Object> context = asMap(request.get("context"));
+        return ApiResponse.success(explainWithFallback(type, question, result, context, request));
+    }
+
     @PostMapping("/alert-rules")
     public ApiResponse<Object> saveAlertRule(@RequestBody Map<String, Object> request) {
         String action = text(request.getOrDefault("action", "save"));
@@ -119,6 +131,46 @@ public class AdvancedAnalysisController {
                 return ApiResponse.badRequest("预警事件 ID 无效");
             }
             return ApiResponse.success(advancedAnalysisService.getAlertEvent(id));
+        }
+        if ("explain".equalsIgnoreCase(action)) {
+            long id = parseLong(request.get("id"));
+            if (id <= 0) {
+                return ApiResponse.badRequest("预警事件 ID 无效");
+            }
+            Map<String, Object> event = advancedAnalysisService.getAlertEvent(id);
+            Map<String, Object> explainRequest = new LinkedHashMap<>();
+            explainRequest.put("type", "alert");
+            explainRequest.put("question", text(request.getOrDefault("question", "解释预警事件 #" + id)));
+            Map<String, Object> params = new LinkedHashMap<>();
+            params.put("tableName", text(event.get("tableName")));
+            params.put("metricField", text(event.get("metricField")));
+            params.put("timeField", text(event.get("timeField")));
+            params.put("operator", text(event.get("operator")));
+            params.put("threshold", event.get("threshold"));
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("type", "alert");
+            result.put("event", event);
+            result.put("params", params);
+            result.put("reason", text(event.get("reason")));
+            result.put("chartSnapshot", event.getOrDefault("chartSnapshot", Map.of()));
+            explainRequest.put("result", result);
+            Map<String, Object> context = new LinkedHashMap<>();
+            context.put("source", "advanced-alert-event");
+            context.put("eventId", id);
+            context.put("ruleId", event.get("ruleId"));
+            context.put("status", text(event.get("status")));
+            explainRequest.put("context", context);
+            Map<String, Object> explanation = explainWithFallback(
+                    "alert",
+                    text(explainRequest.get("question")),
+                    asMap(explainRequest.get("result")),
+                    asMap(explainRequest.get("context")),
+                    explainRequest
+            );
+            Map<String, Object> saveRequest = new LinkedHashMap<>();
+            saveRequest.put("explanation", explanation);
+            saveRequest.put("explanationNote", text(request.get("explanationNote")));
+            return ApiResponse.success(advancedAnalysisService.saveAlertEventExplanation(id, saveRequest));
         }
         return ApiResponse.success(advancedAnalysisService.listAlertEvents(request));
     }
@@ -231,6 +283,35 @@ public class AdvancedAnalysisController {
             return new LinkedHashMap<>((Map<String, Object>) map);
         }
         return Map.of();
+    }
+
+    private Map<String, Object> explainWithFallback(String type,
+                                                    String question,
+                                                    Map<String, Object> result,
+                                                    Map<String, Object> context,
+                                                    Map<String, Object> fallbackRequest) {
+        Map<String, Object> aiResult = pythonAiService.explainAdvancedAnalysis(type, question, result, context)
+                .orElse(Map.of());
+        Map<String, Object> fallback;
+        try {
+            fallback = advancedAnalysisService.fallbackResultExplanation(fallbackRequest);
+        } catch (RuntimeException ignored) {
+            fallback = new LinkedHashMap<>();
+            fallback.put("source", "rule");
+            fallback.put("sourceLabel", "规则解释");
+            fallback.put("calculation", java.util.List.of("当前解释基于后端已返回的算法结果生成，AI 服务不可用或解释内容解析失败。"));
+            fallback.put("suggestions", java.util.List.of("请优先核对业务公式口径、字段单位和变量调整方向，再结合结果卡片数值判断方案。"));
+            fallback.put("guardrail", "explanation-only");
+        }
+        if (!text(aiResult.get("source")).equalsIgnoreCase("llm")) {
+            return fallback;
+        }
+        Map<String, Object> normalized = new LinkedHashMap<>(fallback);
+        normalized.putAll(aiResult);
+        normalized.put("source", "llm");
+        normalized.put("sourceLabel", "AI 解释");
+        normalized.put("guardrail", "explanation-only");
+        return normalized;
     }
 
     private String text(Object value) {

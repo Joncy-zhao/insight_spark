@@ -15,6 +15,9 @@ export const runAdvancedForecastFromSeries = (payload) =>
 export const runAdvancedWhatIf = (payload) =>
   http.post('/api/advanced-analysis/what-if', payload).then(unwrap)
 
+export const explainAdvancedAnalysisResult = (payload) =>
+  http.post('/api/advanced-analysis/explain', payload, { timeout: 90000 }).then(unwrap)
+
 export const saveAdvancedAlertRule = (payload) =>
   http.post('/api/advanced-analysis/alert-rules', payload).then(unwrap)
 
@@ -44,6 +47,9 @@ export const getAdvancedAlertEvent = (id) =>
 
 export const updateAdvancedAlertEventStatus = (payload = {}) =>
   http.post('/api/advanced-analysis/alert-events', { ...payload, action: 'status' }).then(unwrap)
+
+export const explainAdvancedAlertEvent = (payload = {}) =>
+  http.post('/api/advanced-analysis/alert-events', { ...payload, action: 'explain' }, { timeout: 90000 }).then(unwrap)
 
 export const listAdvancedAlertPushLogs = (payload = {}) =>
   http.post('/api/advanced-analysis/alert-push', { ...payload, action: 'list' }).then(unwrap)

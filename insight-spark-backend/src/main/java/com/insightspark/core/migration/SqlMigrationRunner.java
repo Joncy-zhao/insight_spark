@@ -36,9 +36,12 @@ public class SqlMigrationRunner {
             "db/migration/advanced_alert_rule_schedule_migration_20260601.sql",
             "db/migration/advanced_alert_event_migration_20260529.sql",
             "db/migration/advanced_alert_event_lifecycle_migration_20260601.sql",
+            "db/migration/advanced_alert_event_explanation_migration_20260602.sql",
             "db/migration/advanced_alert_push_log_migration_20260601.sql",
+            "db/migration/advanced_alert_org_scope_migration_20260602.sql",
             "db/migration/advanced_analysis_plan_migration_20260529.sql",
-            "db/migration/advanced_analysis_plan_version_migration_20260601.sql"
+            "db/migration/advanced_analysis_plan_version_migration_20260601.sql",
+            "db/migration/advanced_analysis_field_mapping_migration_20260602.sql"
     );
 
     private final DataSource dataSource;
@@ -180,6 +183,15 @@ public class SqlMigrationRunner {
             return;
         }
         if (normalized.startsWith("ALTER TABLE `IS_ADVANCED_ALERT_RULE` ADD COLUMN ")) {
+            return;
+        }
+        if (normalized.startsWith("ALTER TABLE `IS_ADVANCED_ALERT_PUSH_LOG` ADD COLUMN ")) {
+            return;
+        }
+        if (normalized.startsWith("ALTER TABLE `IS_ADVANCED_ANALYSIS_PLAN` ADD COLUMN ")) {
+            return;
+        }
+        if (normalized.startsWith("ALTER TABLE `IS_ADVANCED_ANALYSIS_PLAN_VERSION` ADD COLUMN ")) {
             return;
         }
         if (normalized.startsWith("SELECT IF(") || normalized.startsWith("SELECT 1")) {

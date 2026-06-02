@@ -121,9 +121,10 @@
               </template>
             </el-table-column>
             <el-table-column prop="createdAt" label="创建时间" width="180" />
-            <el-table-column label="操作" width="250" fixed="right">
+            <el-table-column label="操作" width="320" fixed="right">
               <template #default="{ row }">
                 <el-button size="small" text type="primary" @click="openEventSnapshot(row)">快照</el-button>
+                <el-button size="small" text type="primary" @click="goChatWithAlertEvent(row)">回到对话</el-button>
                 <el-button
                   v-if="row.status === 'OPEN'"
                   size="small"
@@ -198,8 +199,17 @@
             </el-table-column>
             <el-table-column prop="lastAttemptAt" label="最近尝试" width="180" />
             <el-table-column prop="nextRetryAt" label="建议重试" width="180" />
-            <el-table-column label="操作" width="110" fixed="right">
+            <el-table-column label="操作" width="170" fixed="right">
               <template #default="{ row }">
+                <el-button
+                  size="small"
+                  text
+                  type="primary"
+                  :loading="restoringPushId === row.id"
+                  @click="goChatWithPushLog(row)"
+                >
+                  回到对话
+                </el-button>
                 <el-button
                   size="small"
                   text
@@ -279,12 +289,30 @@
           <span>v{{ selectedPlan.versionNo || 1 }}</span>
           <span>{{ selectedPlan.updatedAt || selectedPlan.createdAt || '-' }}</span>
         </div>
+        <div v-if="formatPlanFieldMappingRows(selectedPlan).length" class="field-mapping-panel">
+          <div class="field-mapping-panel__head">
+            <span>字段映射快照</span>
+            <strong>用户确认口径</strong>
+          </div>
+          <div class="field-mapping-panel__grid">
+            <div
+              v-for="item in formatPlanFieldMappingRows(selectedPlan)"
+              :key="item.label"
+              class="field-mapping-panel__item"
+            >
+              <span>{{ item.label }}</span>
+              <strong>{{ item.value }}</strong>
+            </div>
+          </div>
+        </div>
         <AdvancedAnalysisCard
           v-if="selectedPlanAnalysis"
           :analysis="selectedPlanAnalysis"
           :show-save-action="false"
           :show-pin-action="false"
+          :explain-loading="advancedAnalysisExplainingId === selectedPlanAnalysis.id"
           @recalculate="recalculateSelectedPlan"
+          @explain="explainPlanAnalysis"
         />
       </div>
       <template #footer>
@@ -342,20 +370,48 @@
         <div v-if="versionCompareResult" class="plan-version-compare">
           <div class="plan-version-compare__col">
             <h4>左侧版本</h4>
+            <div v-if="formatPlanFieldMappingRows(versionCompareResult.left).length" class="field-mapping-panel field-mapping-panel--compact">
+              <div class="field-mapping-panel__grid">
+                <div
+                  v-for="item in formatPlanFieldMappingRows(versionCompareResult.left)"
+                  :key="item.label"
+                  class="field-mapping-panel__item"
+                >
+                  <span>{{ item.label }}</span>
+                  <strong>{{ item.value }}</strong>
+                </div>
+              </div>
+            </div>
             <AdvancedAnalysisCard
               v-if="leftVersionAnalysis"
               :analysis="leftVersionAnalysis"
               :show-save-action="false"
               :show-pin-action="false"
+              :explain-loading="advancedAnalysisExplainingId === leftVersionAnalysis.id"
+              @explain="explainPlanAnalysis"
             />
           </div>
           <div class="plan-version-compare__col">
             <h4>右侧版本</h4>
+            <div v-if="formatPlanFieldMappingRows(versionCompareResult.right).length" class="field-mapping-panel field-mapping-panel--compact">
+              <div class="field-mapping-panel__grid">
+                <div
+                  v-for="item in formatPlanFieldMappingRows(versionCompareResult.right)"
+                  :key="item.label"
+                  class="field-mapping-panel__item"
+                >
+                  <span>{{ item.label }}</span>
+                  <strong>{{ item.value }}</strong>
+                </div>
+              </div>
+            </div>
             <AdvancedAnalysisCard
               v-if="rightVersionAnalysis"
               :analysis="rightVersionAnalysis"
               :show-save-action="false"
               :show-pin-action="false"
+              :explain-loading="advancedAnalysisExplainingId === rightVersionAnalysis.id"
+              @explain="explainPlanAnalysis"
             />
           </div>
         </div>
@@ -506,8 +562,48 @@
         <div class="alert-snapshot__reason">
           {{ eventSnapshotTarget.reason || '暂无触发原因说明' }}
         </div>
+        <section class="alert-explain-panel">
+          <div class="alert-explain-panel__head">
+            <div>
+              <strong>预警解释与处理建议</strong>
+              <span>{{ alertExplanationSourceText }}</span>
+            </div>
+            <el-button
+              size="small"
+              type="primary"
+              :loading="eventExplaining"
+              @click="generateEventExplanation"
+            >
+              生成 AI 解释
+            </el-button>
+          </div>
+          <div v-if="alertExplanation" class="alert-explain-panel__content">
+            <div>
+              <h4>触发解读</h4>
+              <ul>
+                <li v-for="item in alertExplanationCalculation" :key="item">{{ item }}</li>
+              </ul>
+            </div>
+            <div>
+              <h4>建议动作</h4>
+              <ul>
+                <li v-for="item in alertExplanationSuggestions" :key="item">{{ item }}</li>
+              </ul>
+            </div>
+          </div>
+          <el-empty v-else description="暂无解释，可点击生成 AI 解释" :image-size="72" />
+          <el-input
+            v-model.trim="eventExplanationNote"
+            type="textarea"
+            :rows="3"
+            maxlength="1000"
+            show-word-limit
+            placeholder="可补充人工判断、复核结论、跟进动作等解释备注"
+          />
+        </section>
       </div>
       <template #footer>
+        <el-button :loading="eventExplanationSaving" @click="saveEventExplanationNote">保存解释备注</el-button>
         <el-button @click="eventSnapshotVisible = false">关闭</el-button>
       </template>
     </el-dialog>
@@ -524,6 +620,8 @@ import {
   compareLatestAdvancedAnalysisPlanVersions,
   deleteAdvancedAnalysisPlan,
   deleteAdvancedAlertRule,
+  explainAdvancedAlertEvent,
+  explainAdvancedAnalysisResult,
   fetchAdvancedAlertPushConfig,
   fetchAdvancedAnalysisFieldMeta,
   getAdvancedAnalysisPlan,
@@ -561,6 +659,7 @@ const selectedPlan = ref(null)
 const planDetailVisible = ref(false)
 const planVersionVisible = ref(false)
 const planRecalculating = ref(false)
+const advancedAnalysisExplainingId = ref('')
 const versionComparing = ref(false)
 const planVersions = ref([])
 const versionCompareResult = ref(null)
@@ -577,8 +676,12 @@ const eventStatusTarget = ref(null)
 const eventSnapshotVisible = ref(false)
 const eventSnapshotTarget = ref(null)
 const eventSnapshotChartRef = ref(null)
+const eventExplaining = ref(false)
+const eventExplanationSaving = ref(false)
+const eventExplanationNote = ref('')
 let eventSnapshotChart = null
 const retryingPushId = ref('')
+const restoringPushId = ref('')
 const versionCompareForm = reactive({
   leftVersion: '',
   rightVersion: ''
@@ -602,6 +705,28 @@ const editorForm = ref({
 })
 
 const activeRuleCount = computed(() => rules.value.filter(item => item.status === 'ACTIVE').length)
+
+const alertExplanation = computed(() => {
+  const value = eventSnapshotTarget.value?.llmExplanation
+  return value && typeof value === 'object' && Object.keys(value).length ? value : null
+})
+
+const alertExplanationCalculation = computed(() => {
+  const rows = alertExplanation.value?.calculation
+  return Array.isArray(rows) && rows.length ? rows : ['当前暂无可展示的触发解读。']
+})
+
+const alertExplanationSuggestions = computed(() => {
+  const rows = alertExplanation.value?.suggestions
+  return Array.isArray(rows) && rows.length ? rows : ['请先核对触发时间桶原始数据、过滤口径和业务背景。']
+})
+
+const alertExplanationSourceText = computed(() => {
+  if (!alertExplanation.value) return '尚未生成解释'
+  const source = alertExplanation.value.sourceLabel || (alertExplanation.value.source === 'llm' ? 'AI 解释' : '规则解释')
+  const updatedAt = eventSnapshotTarget.value?.explanationUpdatedAt
+  return updatedAt ? `${source} / ${formatScheduleTime(updatedAt)}` : source
+})
 
 const pushConfigList = computed(() => {
   const config = pushConfig.value || {}
@@ -803,6 +928,65 @@ const formatRuleTitle = (rule) => {
 
 const planTypeLabel = (type) => type === 'forecast' ? '时序预测' : type === 'whatIf' ? 'What-if 推演' : '方案'
 
+const compactText = (value) => String(value ?? '').trim()
+
+const formatVariableMapping = (variables = []) => {
+  const rows = Array.isArray(variables) ? variables : []
+  const text = rows
+    .map(item => {
+      const name = compactText(item?.name || item?.field)
+      const field = compactText(item?.field)
+      const mode = compactText(item?.mode)
+      const change = item?.change ?? ''
+      const range = [
+        item?.min !== undefined && item?.min !== null ? `min=${item.min}` : '',
+        item?.max !== undefined && item?.max !== null ? `max=${item.max}` : ''
+      ].filter(Boolean).join(', ')
+      return [name && field && name !== field ? `${name}(${field})` : name || field, mode, change !== '' ? `变化=${change}` : '', range].filter(Boolean).join(' / ')
+    })
+    .filter(Boolean)
+    .join('；')
+  return text || ''
+}
+
+const formatPlanFieldMappingRows = (plan = {}) => {
+  const mapping = plan?.fieldMapping || {}
+  const request = plan?.request || {}
+  const result = plan?.result || {}
+  const params = result?.params || {}
+  const type = compactText(mapping.mappingType || plan.planType)
+  const rows = [
+    { label: '数据源', value: compactText(mapping.tableName || request.tableName || params.tableName || plan.tableName) }
+  ]
+  if (type === 'forecast') {
+    rows.push(
+      { label: '时间字段', value: compactText(mapping.timeField || request.timeField || params.timeField) },
+      { label: '指标字段', value: compactText(mapping.metricField || request.metricField || params.metricField || result.metricField) },
+      { label: '展示指标', value: compactText(mapping.metricLabel || result.metric || plan.metricLabel) },
+      { label: '聚合粒度', value: compactText(mapping.granularity || request.granularity || params.granularity || result.granularity) },
+      { label: '过滤条件', value: compactText(mapping.filterExpression || request.filterExpression || params.filterExpression) || '无' },
+      { label: '算法', value: compactText(mapping.algorithm || request.algorithm || params.algorithm || result.algorithm) }
+    )
+  } else if (type === 'whatIf') {
+    const formulaValue = compactText(mapping.formula || request.formula || params.formula || result.formula)
+    rows.push(
+      { label: '目标指标', value: compactText(mapping.targetMetric || request.targetMetric || params.targetMetric || result.targetMetric) },
+      { label: '展示指标', value: compactText(mapping.metricLabel || plan.metricLabel) },
+      { label: '业务公式', value: formulaValue || '未配置' },
+      { label: '变量映射', value: formatVariableMapping(mapping.variables || request.variables || params.variables || result.variables) || '未配置' }
+    )
+    if (formulaValue) {
+      rows.splice(rows.length - 1, 0, {
+        label: '公式口径',
+        value: compactText(mapping.formulaScope || request.formulaScope || params.formulaScope || result.formulaScope) === 'row'
+          ? '逐行计算后求平均'
+          : '字段均值计算'
+      })
+    }
+  }
+  return rows.filter(item => compactText(item.value))
+}
+
 const canPinPlan = (plan) => {
   if (plan?.planType !== 'forecast') return false
   const chartId = plan?.queryHistoryId ?? plan?.chartId ?? plan?.result?.queryHistoryId ?? plan?.result?.chartId
@@ -859,8 +1043,9 @@ const normalizePlanAnalysis = (plan) => {
     params: {
       targetMetric: result.targetMetric || plan.request?.targetMetric || '',
       formula: result.formula || plan.request?.formula || '',
+      formulaScope: result.formulaScope || plan.request?.formulaScope || 'aggregate',
       resolvedFormula: result.resolvedFormula || '',
-      calculationMode: result.calculationMode || (result.formula || plan.request?.formula ? 'formula' : 'correlation'),
+      calculationMode: result.calculationMode || (result.formula || plan.request?.formula ? 'formula' : 'regression'),
       variables: Array.isArray(result.variables) ? result.variables : (plan.request?.variables || [])
     },
     explanation: result.explanation || null,
@@ -890,6 +1075,18 @@ const loadAll = async () => {
     ElMessage.error(`加载预测与情景模拟数据失败：${error.message || '未知原因'}`)
   } finally {
     loading.value = false
+  }
+}
+
+const syncEventRow = (updated) => {
+  if (!updated?.id) return
+  const index = events.value.findIndex(item => String(item.id) === String(updated.id))
+  if (index >= 0) {
+    events.value.splice(index, 1, updated)
+  }
+  if (eventSnapshotTarget.value?.id && String(eventSnapshotTarget.value.id) === String(updated.id)) {
+    eventSnapshotTarget.value = updated
+    eventExplanationNote.value = String(updated.explanationNote || '')
   }
 }
 
@@ -926,6 +1123,94 @@ const recalculatePlan = async (plan) => {
 const recalculateSelectedPlan = async () => {
   if (!selectedPlan.value?.id) return
   await recalculatePlan(selectedPlan.value)
+}
+
+const applyExplanationToVersionSnapshot = (side, explanation) => {
+  if (!versionCompareResult.value?.[side]) return false
+  versionCompareResult.value = {
+    ...versionCompareResult.value,
+    [side]: {
+      ...versionCompareResult.value[side],
+      result: {
+        ...(versionCompareResult.value[side].result || {}),
+        explanation
+      }
+    }
+  }
+  return true
+}
+
+const applyPlanExplanation = (analysis, explanation) => {
+  const analysisId = String(analysis?.id || '')
+  if (analysisId.startsWith('plan-') && selectedPlan.value) {
+    selectedPlan.value = {
+      ...selectedPlan.value,
+      result: {
+        ...(selectedPlan.value.result || {}),
+        explanation
+      }
+    }
+    const planIndex = plans.value.findIndex(item => String(item.id) === String(selectedPlan.value.id))
+    if (planIndex >= 0) {
+      plans.value.splice(planIndex, 1, selectedPlan.value)
+    }
+    return
+  }
+  const leftId = leftVersionAnalysis.value?.id
+  const rightId = rightVersionAnalysis.value?.id
+  if (analysisId && analysisId === leftId && applyExplanationToVersionSnapshot('left', explanation)) return
+  if (analysisId && analysisId === rightId && applyExplanationToVersionSnapshot('right', explanation)) return
+}
+
+const buildAdvancedExplanationPayloadResult = (analysis = {}) => ({
+  type: analysis.type || '',
+  title: analysis.title || '',
+  summary: analysis.summary || '',
+  tableName: analysis.tableName || analysis.params?.tableName || '',
+  metric: analysis.metric || '',
+  timeRange: analysis.timeRange || '',
+  status: analysis.status || '',
+  params: {
+    ...(analysis.params || {}),
+    variables: Array.isArray(analysis.params?.variables)
+      ? analysis.params.variables.map(item => ({ ...item }))
+      : []
+  },
+  formula: analysis.params?.formula || analysis.formula || '',
+  resolvedFormula: analysis.params?.resolvedFormula || analysis.resolvedFormula || '',
+  series: Array.isArray(analysis.series) ? analysis.series.map(item => ({ ...item })) : [],
+  insights: Array.isArray(analysis.insights) ? analysis.insights.map(item => ({ ...item })) : [],
+  explanation: analysis.explanation && typeof analysis.explanation === 'object'
+    ? {
+        source: analysis.explanation.source || '',
+        sourceLabel: analysis.explanation.sourceLabel || '',
+        calculation: Array.isArray(analysis.explanation.calculation) ? [...analysis.explanation.calculation] : [],
+        suggestions: Array.isArray(analysis.explanation.suggestions) ? [...analysis.explanation.suggestions] : []
+      }
+    : null
+})
+
+const explainPlanAnalysis = async (analysis) => {
+  if (!analysis?.id) return
+  advancedAnalysisExplainingId.value = analysis.id
+  try {
+    const explanation = await explainAdvancedAnalysisResult({
+      type: analysis.type,
+      question: analysis.title || selectedPlan.value?.planName || '',
+      result: buildAdvancedExplanationPayloadResult(analysis),
+      context: {
+        tableName: analysis.tableName || selectedPlan.value?.tableName || '',
+        metric: analysis.metric || selectedPlan.value?.metricLabel || '',
+        source: 'advanced-analysis-manage'
+      }
+    })
+    applyPlanExplanation(analysis, explanation)
+    ElMessage.success(explanation?.source === 'llm' ? 'AI 解释已生成' : '已生成规则解释兜底')
+  } catch (error) {
+    ElMessage.error(`生成解释失败：${error.message || '未知原因'}`)
+  } finally {
+    advancedAnalysisExplainingId.value = ''
+  }
 }
 
 const renamePlan = async (plan) => {
@@ -1046,6 +1331,9 @@ const pinPlanToDashboard = async () => {
   }
   pinningPlan.value = true
   try {
+    const result = plan.result || {}
+    const algorithmParams = result.algorithmParams || {}
+    const fieldMapping = plan.fieldMapping || {}
     await pinChartToDashboard(dashboardId, {
       chartId,
       title: String(plan.planName || '预测图表').slice(0, 80),
@@ -1056,6 +1344,24 @@ const pinPlanToDashboard = async () => {
         dimensionKey: 'name',
         metric: plan.metricLabel || '预测值',
         metricKey: 'value'
+      },
+      advancedAnalysisPlanId: plan.id,
+      advancedAnalysisPlanVersion: plan.versionNo || 1,
+      advancedAnalysisType: plan.planType || 'forecast',
+      advancedAnalysisAction: {
+        type: 'advanced-analysis-plan-recalculate',
+        label: '重新计算预测',
+        planId: plan.id,
+        planVersion: plan.versionNo || 1
+      },
+      forecastMeta: {
+        algorithm: result.algorithm || algorithmParams.algorithm || 'Holt-Winters',
+        confidence: result.confidence || '95%',
+        algorithmParams,
+        granularity: result.granularity || fieldMapping.granularity || '',
+        timeField: result.timeField || fieldMapping.timeField || '',
+        metricField: result.metricField || fieldMapping.metricField || '',
+        filterExpression: result.filterExpression || fieldMapping.filterExpression || ''
       }
     })
     pinPlanVisible.value = false
@@ -1181,6 +1487,62 @@ const goChat = () => {
   }
 }
 
+const setWorkbenchTable = (tableName) => {
+  const value = String(tableName || '').trim()
+  if (value && workbench?.selectedTableName) {
+    workbench.selectedTableName.value = value
+  }
+}
+
+const restoreAlertContextToChat = ({ event, pushLog = null, sourceLabel = '预警事件' } = {}) => {
+  if (!workbench?.activeModule) {
+    ElMessage.warning('当前页面无法访问对话查询上下文')
+    return
+  }
+  const normalizedEvent = event || {}
+  setWorkbenchTable(normalizedEvent.tableName)
+  if (workbench.advancedAlertContext) {
+    workbench.advancedAlertContext.value = {
+      type: 'alert-event',
+      sourceLabel,
+      event: normalizedEvent,
+      pushLog,
+      restoredAt: Date.now()
+    }
+  }
+  workbench.activeModule.value = 'chat'
+}
+
+const goChatWithAlertEvent = async (row) => {
+  if (!row?.id) return
+  try {
+    const detail = await getAdvancedAlertEvent(row.id)
+    const index = events.value.findIndex(item => String(item.id) === String(row.id))
+    if (index >= 0) {
+      events.value.splice(index, 1, detail)
+    }
+    restoreAlertContextToChat({ event: detail || row, sourceLabel: '预警事件列表' })
+  } catch (error) {
+    ElMessage.error(`恢复预警上下文失败：${error.message || '未知原因'}`)
+  }
+}
+
+const goChatWithPushLog = async (row) => {
+  if (!row?.eventId) {
+    ElMessage.warning('该推送记录缺少关联预警事件')
+    return
+  }
+  restoringPushId.value = row.id
+  try {
+    const event = await getAdvancedAlertEvent(row.eventId)
+    restoreAlertContextToChat({ event, pushLog: row, sourceLabel: '推送记录' })
+  } catch (error) {
+    ElMessage.error(`恢复推送上下文失败：${error.message || '未知原因'}`)
+  } finally {
+    restoringPushId.value = ''
+  }
+}
+
 const editRule = async (rule) => {
   if (!rule?.id) return
   try {
@@ -1272,14 +1634,50 @@ const openEventSnapshot = async (event) => {
   if (!event?.id) return
   try {
     eventSnapshotTarget.value = await getAdvancedAlertEvent(event.id)
-    const index = events.value.findIndex(item => String(item.id) === String(event.id))
-    if (index >= 0) {
-      events.value.splice(index, 1, eventSnapshotTarget.value)
-    }
+    eventExplanationNote.value = String(eventSnapshotTarget.value.explanationNote || '')
+    syncEventRow(eventSnapshotTarget.value)
     eventSnapshotVisible.value = true
     await renderEventSnapshotChart()
   } catch (error) {
     ElMessage.error(`打开快照失败：${error.message || '未知原因'}`)
+  }
+}
+
+const generateEventExplanation = async () => {
+  const event = eventSnapshotTarget.value
+  if (!event?.id) return
+  eventExplaining.value = true
+  try {
+    const updated = await explainAdvancedAlertEvent({
+      id: event.id,
+      question: `解释预警事件 ${formatEventTitle(event)}`,
+      explanationNote: eventExplanationNote.value
+    })
+    syncEventRow(updated)
+    ElMessage.success(updated?.llmExplanation?.source === 'llm' ? 'AI 解释已生成并保存' : '已生成规则解释并保存')
+  } catch (error) {
+    ElMessage.error(`生成预警解释失败：${error.message || '未知原因'}`)
+  } finally {
+    eventExplaining.value = false
+  }
+}
+
+const saveEventExplanationNote = async () => {
+  const event = eventSnapshotTarget.value
+  if (!event?.id) return
+  eventExplanationSaving.value = true
+  try {
+    const updated = await updateAdvancedAlertEventStatus({
+      id: event.id,
+      status: event.status || 'OPEN',
+      explanationNote: eventExplanationNote.value
+    })
+    syncEventRow(updated)
+    ElMessage.success('解释备注已保存')
+  } catch (error) {
+    ElMessage.error(`保存解释备注失败：${error.message || '未知原因'}`)
+  } finally {
+    eventExplanationSaving.value = false
   }
 }
 
@@ -1318,10 +1716,7 @@ const submitEventStatus = async () => {
       status: eventStatusForm.status,
       handleNote: eventStatusForm.handleNote
     })
-    const index = events.value.findIndex(item => String(item.id) === String(event.id))
-    if (index >= 0) {
-      events.value.splice(index, 1, updated)
-    }
+    syncEventRow(updated)
     eventStatusVisible.value = false
     ElMessage.success('预警事件处理状态已更新')
   } catch (error) {
@@ -1517,6 +1912,57 @@ onBeforeUnmount(() => {
   font-size: 13px;
   line-height: 1.6;
 }
+.alert-explain-panel {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+.alert-explain-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.alert-explain-panel__head > div {
+  display: grid;
+  gap: 3px;
+}
+.alert-explain-panel__head strong {
+  color: #0f172a;
+  font-size: 14px;
+}
+.alert-explain-panel__head span {
+  color: #64748b;
+  font-size: 12px;
+}
+.alert-explain-panel__content {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.alert-explain-panel__content > div {
+  padding: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #ffffff;
+}
+.alert-explain-panel__content h4 {
+  margin: 0 0 8px;
+  color: #0f172a;
+  font-size: 13px;
+}
+.alert-explain-panel__content ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.55;
+}
 .rule-editor-form {
   display: grid;
   gap: 12px;
@@ -1545,6 +1991,53 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
   color: #64748b;
   font-size: 12px;
+}
+.field-mapping-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+.field-mapping-panel--compact {
+  margin-bottom: 10px;
+  padding: 10px;
+}
+.field-mapping-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #2563eb;
+  font-size: 13px;
+}
+.field-mapping-panel__head strong {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 500;
+}
+.field-mapping-panel__grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.field-mapping-panel__item {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.field-mapping-panel__item span {
+  color: #64748b;
+  font-size: 12px;
+}
+.field-mapping-panel__item strong {
+  overflow: hidden;
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .plan-version-panel {
   display: grid;
@@ -1588,6 +2081,7 @@ onBeforeUnmount(() => {
   .form-grid,
   .push-config-grid,
   .plan-version-compare,
+  .alert-explain-panel__content,
   .alert-snapshot__summary {
     grid-template-columns: 1fr;
   }
