@@ -287,14 +287,27 @@ public class StackCDashboardService {
     public List<Map<String, Object>> listDashboardComponents(long dashboardId) {
         Map<String, Object> dashboard = getById(dashboardId);
         assertCanAccess(dashboard);
-        return jdbcTemplate.queryForList("""
-                SELECT id, dashboard_id AS dashboardId, chart_id AS chartId,
-                       artifact_id AS artifactId, turn_id AS turnId,
-                       position_config AS positionConfig
-                FROM is_dashboard_component
-                WHERE dashboard_id = ?
-                ORDER BY id ASC
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT dc.id, dc.dashboard_id AS dashboardId, dc.chart_id AS chartId,
+                       dc.artifact_id AS artifactId, dc.turn_id AS turnId,
+                       dc.position_config AS positionConfig,
+                       a.artifact_type AS artifactType, a.artifact_json AS artifactJson,
+                       a.chart_type AS artifactChartType, a.risk_level AS artifactRiskLevel
+                FROM is_dashboard_component dc
+                LEFT JOIN is_chat_conversation_artifact a
+                       ON a.id = dc.artifact_id
+                      AND a.artifact_type LIKE 'ADVANCED_%'
+                WHERE dc.dashboard_id = ?
+                ORDER BY dc.id ASC
                 """, dashboardId);
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Map<String, Object> row : rows) {
+            Map<String, Object> item = new LinkedHashMap<>(row);
+            item.put("artifact", parseLayoutJson(Objects.toString(row.get("artifactJson"), "{}")));
+            item.remove("artifactJson");
+            result.add(item);
+        }
+        return result;
     }
 
     /**
@@ -311,6 +324,7 @@ public class StackCDashboardService {
                     FROM is_dashboard_component dc
                     INNER JOIN is_dashboard d ON d.id = dc.dashboard_id
                     WHERE d.status != 'ARCHIVED'
+                      AND dc.chart_id > 0
                     GROUP BY dc.chart_id
                     ORDER BY MAX(dc.id) DESC
                     LIMIT 500
@@ -324,6 +338,7 @@ public class StackCDashboardService {
                 FROM is_dashboard_component dc
                 INNER JOIN is_dashboard d ON d.id = dc.dashboard_id
                 WHERE d.status != 'ARCHIVED'
+                  AND dc.chart_id > 0
                   AND (
                     d.owner_user_id = ?
                     OR d.is_public = 1
@@ -555,6 +570,10 @@ public class StackCDashboardService {
             }
             Long resolvedHistoryId = toLong(artifact.get("historyId"));
             if (resolvedHistoryId == null || resolvedHistoryId <= 0) {
+                String artifactType = Objects.toString(artifact.get("artifactType"), "").trim().toUpperCase();
+                if (artifactType.startsWith("ADVANCED_")) {
+                    return new PinnedTarget(0L, artifactId, toLong(artifact.get("turnId")));
+                }
                 throw new IllegalArgumentException("\u8be5\u5bf9\u8bdd\u4ea7\u7269\u5c1a\u672a\u5173\u8054\u5386\u53f2\u56fe\u8868\uff0c\u6682\u65f6\u65e0\u6cd5\u9489\u5165\u770b\u677f");
             }
             chatQueryHistoryService.assertHistoryChartOwnedByCurrentUser(resolvedHistoryId);

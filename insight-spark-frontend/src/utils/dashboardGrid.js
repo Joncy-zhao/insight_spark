@@ -236,6 +236,186 @@ export function chartUiFromGridItem(item) {
   return o
 }
 
+function parseMaybeJson(raw) {
+  if (!raw) return {}
+  if (typeof raw === 'object') return raw
+  try {
+    const parsed = JSON.parse(String(raw))
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function toNumber(value) {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : 0
+}
+
+function formatAxisValue(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return value
+  if (Math.abs(n) >= 10000) return `${(n / 10000).toFixed(1)}w`
+  return `${n}`
+}
+
+function normalizeAdvancedAnalysisType(value) {
+  const text = String(value || '').toLowerCase()
+  if (text.includes('what')) return 'whatIf'
+  if (text.includes('alert') || text.includes('warning')) return 'alert'
+  return 'forecast'
+}
+
+export function buildAdvancedAnalysisOption(analysis) {
+  const type = normalizeAdvancedAnalysisType(analysis?.type)
+  const rows = Array.isArray(analysis?.series) ? analysis.series : []
+  if (type === 'forecast') {
+    const total = rows.length
+    const forecastCount = rows.filter(item => item && item.forecast != null).length
+    const visibleCount = Math.min(total, Math.max(24, forecastCount + 18))
+    const startValue = total > 24 ? Math.max(0, total - visibleCount) : 0
+    const endValue = Math.max(0, total - 1)
+    return {
+      tooltip: { trigger: 'axis', confine: true },
+      legend: { top: 4, data: ['历史值', '预测值', '置信上界', '置信下界'] },
+      grid: { left: 54, right: 24, top: 48, bottom: 48, containLabel: true },
+      xAxis: {
+        type: 'category',
+        data: rows.map(item => item.name),
+        axisLabel: { hideOverlap: true, interval: 'auto', rotate: rows.length > 48 ? 35 : 0 }
+      },
+      yAxis: { type: 'value', axisLabel: { formatter: formatAxisValue } },
+      dataZoom: [
+        { type: 'inside', startValue, endValue },
+        { type: 'slider', height: 16, bottom: 10, startValue, endValue }
+      ],
+      series: [
+        {
+          name: '历史值',
+          type: 'line',
+          smooth: true,
+          data: rows.map(item => item.history),
+          connectNulls: false,
+          showSymbol: false,
+          lineStyle: { color: '#2563eb', width: 2 },
+          itemStyle: { color: '#2563eb' }
+        },
+        {
+          name: '预测值',
+          type: 'line',
+          smooth: true,
+          data: rows.map(item => item.forecast),
+          connectNulls: false,
+          showSymbol: true,
+          symbolSize: 7,
+          sampling: 'lttb',
+          lineStyle: { color: '#16a34a', width: 2, type: 'dashed' },
+          itemStyle: { color: '#16a34a' }
+        },
+        {
+          name: '置信上界',
+          type: 'line',
+          data: rows.map(item => item.upper),
+          symbol: 'none',
+          showSymbol: false,
+          lineStyle: { color: '#93c5fd', width: 1 },
+          areaStyle: { color: 'rgba(147, 197, 253, 0.18)' }
+        },
+        {
+          name: '置信下界',
+          type: 'line',
+          data: rows.map(item => item.lower),
+          symbol: 'none',
+          showSymbol: false,
+          lineStyle: { color: '#93c5fd', width: 1 }
+        }
+      ]
+    }
+  }
+  if (type === 'whatIf') {
+    return {
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, confine: true },
+      legend: { top: 4 },
+      grid: { left: 54, right: 24, top: 48, bottom: 34, containLabel: true },
+      xAxis: { type: 'category', data: rows.map(item => item.name) },
+      yAxis: { type: 'value', axisLabel: { formatter: formatAxisValue } },
+      series: [{
+        name: '业务结果',
+        type: 'bar',
+        barMaxWidth: 34,
+        data: rows.map(item => ({
+          value: toNumber(item?.value),
+          itemStyle: {
+            color: toNumber(item?.value) < 0 ? '#f97316' : '#14b8a6',
+            borderRadius: toNumber(item?.value) < 0 ? [0, 0, 5, 5] : [5, 5, 0, 0]
+          }
+        }))
+      }]
+    }
+  }
+  const threshold = toNumber(analysis?.params?.threshold ?? analysis?.threshold)
+  return {
+    tooltip: { trigger: 'axis', confine: true },
+    grid: { left: 54, right: 24, top: 36, bottom: 34, containLabel: true },
+    xAxis: { type: 'category', data: rows.map(item => item.name) },
+    yAxis: { type: 'value', axisLabel: { formatter: formatAxisValue } },
+    series: [{
+      name: '检测值',
+      type: 'line',
+      smooth: true,
+      data: rows.map(item => toNumber(item?.value)),
+      markLine: threshold > 0
+        ? {
+            symbol: 'none',
+            data: [{ yAxis: threshold, name: '阈值' }],
+            lineStyle: { color: '#ef4444', type: 'dashed' },
+            label: { formatter: '阈值' }
+          }
+        : undefined,
+      lineStyle: { color: '#f97316', width: 2 },
+      itemStyle: { color: '#f97316' },
+      areaStyle: { color: 'rgba(249, 115, 22, 0.10)' }
+    }]
+  }
+}
+
+export function buildAdvancedAnalysisPreviewCard(comp, item, index, scope) {
+  const artifactType = String(comp?.artifactType || comp?.artifact_type || '').toUpperCase()
+  const artifact = parseMaybeJson(comp?.artifact)
+  const rawAnalysis =
+    artifact?.advancedAnalysis && typeof artifact.advancedAnalysis === 'object'
+      ? artifact.advancedAnalysis
+      : artifact
+  const type = normalizeAdvancedAnalysisType(rawAnalysis?.type || artifact?.type || artifactType)
+  const rows = Array.isArray(rawAnalysis?.series) ? rawAnalysis.series : []
+  if (!artifactType.startsWith('ADVANCED_') && artifact?.module !== 'advancedAnalysis') {
+    return null
+  }
+  if (!rows.length) {
+    return null
+  }
+  const title =
+    String(item?.title || '').trim() ||
+    String(rawAnalysis?.title || artifact?.title || '').trim() ||
+    (type === 'whatIf' ? 'What-if 推演' : type === 'alert' ? '智能预警' : '时序预测')
+  return {
+    _previewKind: 'advancedAnalysis',
+    _renderKey: `${scope}-advanced-${String(comp?.id || comp?.componentId || index)}-${index}`,
+    cardId: String(comp?.id || comp?.componentId || ''),
+    title,
+    chartType: type === 'whatIf' ? 'bar' : 'line',
+    tableName: String(rawAnalysis?.tableName || artifact?.tableName || ''),
+    sql: '',
+    data: rows.map(row => ({
+      name: String(row?.name || row?.label || ''),
+      value: toNumber(row?.forecast ?? row?.value ?? row?.history)
+    })),
+    advancedAnalysis: rawAnalysis,
+    option: buildAdvancedAnalysisOption(rawAnalysis),
+    chartUi: chartUiFromGridItem(item)
+  }
+}
+
 /**
  * 图表预览：旧版内嵌 cards + 网格 items 对应的对话图表（components + charts-batch 载荷）。
  * @param {string} layoutJson
@@ -257,6 +437,11 @@ export function buildUnifiedPreviewCards(layoutJson, components, chartPayloadByI
       return id === cid
     })
     if (!comp) return
+    const advancedCard = buildAdvancedAnalysisPreviewCard(comp, item, index, scope)
+    if (advancedCard) {
+      gridCards.push(advancedCard)
+      return
+    }
     const rawChartId = comp.chartId ?? comp.chart_id ?? comp.CHART_ID
     if (rawChartId == null) return
     const chartIdStr = String(rawChartId).trim()

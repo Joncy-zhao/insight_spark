@@ -34,6 +34,7 @@ public class SqlMigrationRunner {
             "db/migration/admin_chat_query_template_migration_20260528.sql",
             "db/migration/advanced_alert_rule_migration_20260529.sql",
             "db/migration/advanced_alert_rule_schedule_migration_20260601.sql",
+            "db/migration/advanced_alert_rule_name_migration_20260603.sql",
             "db/migration/advanced_alert_event_migration_20260529.sql",
             "db/migration/advanced_alert_event_lifecycle_migration_20260601.sql",
             "db/migration/advanced_alert_event_explanation_migration_20260602.sql",
@@ -41,7 +42,8 @@ public class SqlMigrationRunner {
             "db/migration/advanced_alert_org_scope_migration_20260602.sql",
             "db/migration/advanced_analysis_plan_migration_20260529.sql",
             "db/migration/advanced_analysis_plan_version_migration_20260601.sql",
-            "db/migration/advanced_analysis_field_mapping_migration_20260602.sql"
+            "db/migration/advanced_analysis_field_mapping_migration_20260602.sql",
+            "db/migration/ai_chart_rule_config_migration_20260603.sql"
     );
 
     private final DataSource dataSource;

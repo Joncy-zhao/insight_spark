@@ -21,11 +21,16 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.sql.Timestamp;
+import java.net.Socket;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.LocalDateTime;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
@@ -34,6 +39,7 @@ import java.time.temporal.WeekFields;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -85,6 +91,27 @@ public class AdvancedAnalysisService {
     @Value("${insight.advanced-alert.smtp-ssl:false}")
     private boolean alertSmtpSsl;
 
+    @Value("${insight.redis.enabled:true}")
+    private boolean redisEnabled;
+
+    @Value("${insight.redis.host:localhost}")
+    private String redisHost;
+
+    @Value("${insight.redis.port:6379}")
+    private int redisPort;
+
+    @Value("${insight.redis.password:}")
+    private String redisPassword;
+
+    @Value("${insight.redis.database:0}")
+    private int redisDatabase;
+
+    @Value("${insight.advanced-analysis.forecast-cache-enabled:true}")
+    private boolean forecastCacheEnabled;
+
+    @Value("${insight.advanced-analysis.forecast-cache-ttl-seconds:1800}")
+    private int forecastCacheTtlSeconds;
+
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
@@ -99,6 +126,9 @@ public class AdvancedAnalysisService {
 
     @Autowired
     private ChatQueryHistoryService chatQueryHistoryService;
+
+    @Autowired
+    private KnowledgeGraphService knowledgeGraphService;
 
     public AdvancedAnalysisService() {
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
@@ -140,6 +170,7 @@ public class AdvancedAnalysisService {
     }
 
     public Map<String, Object> forecast(Map<String, Object> request) {
+        long startedAt = System.currentTimeMillis();
         String tableName = required(request, "tableName");
         String timeField = required(request, "timeField");
         String metricField = required(request, "metricField");
@@ -152,6 +183,23 @@ public class AdvancedAnalysisService {
 
         validateField(tableName, timeField, true);
         validateField(tableName, metricField, false);
+
+        String cacheKey = forecastCacheKey("table", Map.of(
+                "tableName", tableName,
+                "timeField", timeField,
+                "metricField", metricField,
+                "granularity", granularity,
+                "horizon", horizon,
+                "algorithm", algorithm,
+                "filterExpression", resolvedFilterExpression,
+                "params", params.toMap()
+        ));
+        Map<String, Object> cached = readForecastCache(cacheKey);
+        if (!cached.isEmpty()) {
+            markForecastCacheHit(cached, cacheKey, startedAt);
+            attachAdvancedGraphContext(cached, firstText(request.get("sourceQuestion"), "预测 " + metricField), tableName);
+            return cached;
+        }
 
         SeriesPreprocessResult preprocess = preprocessSeries(
                 loadSeries(tableName, timeField, metricField, granularity, 240, resolvedFilterExpression),
@@ -183,6 +231,8 @@ public class AdvancedAnalysisService {
         result.put("algorithmParams", params.toMap());
         result.put("confidence", "95%");
         result.put("series", series);
+        result.put("cacheHit", false);
+        result.put("cacheKey", cacheKey);
         result.put("dataQuality", dataQuality(history, preprocess));
         result.put("insights", List.of(
                 Map.of("label", "历史点数", "value", history.size()),
@@ -190,10 +240,14 @@ public class AdvancedAnalysisService {
                 Map.of("label", "末期预测", "value", round(last))
         ));
         result.put("explanation", forecastExplanation(algorithm, granularity, history, forecast, params, "真实数据源", preprocess));
+        result.put("executionTimeMs", elapsedMs(startedAt));
+        attachAdvancedGraphContext(result, firstText(request.get("sourceQuestion"), "预测 " + metricField), tableName);
+        writeForecastCache(cacheKey, result);
         return result;
     }
 
     public Map<String, Object> forecastFromSeries(Map<String, Object> request) {
+        long startedAt = System.currentTimeMillis();
         String tableName = text(request.get("tableName"));
         String metric = text(request.getOrDefault("metric", "核心指标"));
         int horizon = parsePositiveInt(request.get("horizon"), 3);
@@ -212,6 +266,20 @@ public class AdvancedAnalysisService {
         List<Point> history = preprocess.points();
         if (history.size() < 3) {
             throw new IllegalArgumentException("上一轮查询结果不足，至少需要 3 个有效时间点才能预测");
+        }
+        String cacheKey = forecastCacheKey("series", Map.of(
+                "tableName", tableName,
+                "metric", metric,
+                "horizon", horizon,
+                "algorithm", algorithm,
+                "params", params.toMap(),
+                "history", history.stream().map(point -> Map.of("name", point.name(), "value", round(point.value()))).toList()
+        ));
+        Map<String, Object> cached = readForecastCache(cacheKey);
+        if (!cached.isEmpty()) {
+            markForecastCacheHit(cached, cacheKey, startedAt);
+            attachAdvancedGraphContext(cached, firstText(request.get("sourceQuestion"), "预测 " + metric), tableName);
+            return cached;
         }
         List<Point> forecast = forecastSeries(history, horizon, algorithm, params, inferredGranularity);
         List<Map<String, Object>> series = new ArrayList<>();
@@ -232,6 +300,8 @@ public class AdvancedAnalysisService {
         result.put("algorithmParams", params.toMap());
         result.put("confidence", "95%");
         result.put("series", series);
+        result.put("cacheHit", false);
+        result.put("cacheKey", cacheKey);
         result.put("dataQuality", dataQuality(history, preprocess));
         result.put("insights", List.of(
                 Map.of("label", "真实序列点数", "value", history.size()),
@@ -239,6 +309,9 @@ public class AdvancedAnalysisService {
                 Map.of("label", "数据来源", "value", "上一轮查询结果")
         ));
         result.put("explanation", forecastExplanation(algorithm, inferredGranularity, history, forecast, params, "上一轮查询结果", preprocess));
+        result.put("executionTimeMs", elapsedMs(startedAt));
+        attachAdvancedGraphContext(result, firstText(request.get("sourceQuestion"), "预测 " + metric), tableName);
+        writeForecastCache(cacheKey, result);
         return result;
     }
 
@@ -361,6 +434,7 @@ public class AdvancedAnalysisService {
         result.put("insights", insights);
         result.put("fitQuality", regressionFit == null ? Map.of() : regressionFit.quality());
         result.put("explanation", whatIfExplanation(base, conservative, scenario, optimistic, recommended, normalizedVariables, formulaPlan, regressionFit, formulaScope));
+        attachAdvancedGraphContext(result, firstText(request.get("sourceQuestion"), "推演 " + targetMetric), tableName);
         return result;
     }
 
@@ -382,32 +456,34 @@ public class AdvancedAnalysisService {
         if (!"zscore".equals(operator) && (threshold == null || Double.isNaN(threshold))) {
             throw new IllegalArgumentException("阈值预警需要填写有效阈值");
         }
+        String ruleName = alertRuleNameFromRequest(request, tableName, metricField, operator, threshold, filterExpression);
 
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbcTemplate.update(connection -> {
             PreparedStatement ps = connection.prepareStatement("""
                     INSERT INTO is_advanced_alert_rule(
-                      user_id, org_scope, table_name, metric_field, time_field, granularity,
+                      user_id, org_scope, rule_name, table_name, metric_field, time_field, granularity,
                       filter_expression, resolved_filter_expression, operator, threshold_value,
                       detection_cycle, channels_json, status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS JSON), 'ACTIVE')
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS JSON), 'ACTIVE')
                     """, Statement.RETURN_GENERATED_KEYS);
             ps.setString(1, AuthContext.userId());
             ps.setString(2, currentOrgScope());
-            ps.setString(3, tableName);
-            ps.setString(4, metricField);
-            ps.setString(5, timeField);
-            ps.setString(6, granularity);
-            ps.setString(7, filterExpression);
-            ps.setString(8, resolvedFilterExpression);
-            ps.setString(9, operator);
+            ps.setString(3, ruleName);
+            ps.setString(4, tableName);
+            ps.setString(5, metricField);
+            ps.setString(6, timeField);
+            ps.setString(7, granularity);
+            ps.setString(8, filterExpression);
+            ps.setString(9, resolvedFilterExpression);
+            ps.setString(10, operator);
             if (threshold == null || Double.isNaN(threshold)) {
-                ps.setObject(10, null);
+                ps.setObject(11, null);
             } else {
-                ps.setDouble(10, threshold);
+                ps.setDouble(11, threshold);
             }
-            ps.setString(11, detectionCycle);
-            ps.setString(12, toJson(channels));
+            ps.setString(12, detectionCycle);
+            ps.setString(13, toJson(channels));
             return ps;
         }, keyHolder);
         Number key = keyHolder.getKey();
@@ -418,7 +494,7 @@ public class AdvancedAnalysisService {
     public List<Map<String, Object>> listAlertRules() {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
                 SELECT id, user_id AS userId, org_scope AS orgScope,
-                       table_name AS tableName, metric_field AS metricField,
+                       rule_name AS ruleName, table_name AS tableName, metric_field AS metricField,
                        time_field AS timeField, granularity, filter_expression AS filterExpression,
                        resolved_filter_expression AS resolvedFilterExpression, operator,
                        threshold_value AS threshold, detection_cycle AS detectionCycle,
@@ -468,16 +544,25 @@ public class AdvancedAnalysisService {
         if (!"zscore".equals(operator) && (threshold == null || Double.isNaN(threshold))) {
             throw new IllegalArgumentException("阈值预警需要填写有效阈值");
         }
+        String ruleName = alertRuleNameFromRequestWithFallback(
+                request,
+                current.get("ruleName"),
+                tableName,
+                metricField,
+                operator,
+                threshold,
+                filterExpression
+        );
 
         int updated = jdbcTemplate.update("""
                 UPDATE is_advanced_alert_rule
-                SET org_scope = ?, table_name = ?, metric_field = ?, time_field = ?, granularity = ?,
+                SET org_scope = ?, rule_name = ?, table_name = ?, metric_field = ?, time_field = ?, granularity = ?,
                     filter_expression = ?, resolved_filter_expression = ?, operator = ?,
                     threshold_value = ?, detection_cycle = ?, channels_json = CAST(? AS JSON),
                     status = ?
                 WHERE id = ? AND (user_id = ? OR ? = 'ADMIN')
                 """,
-                nextOrgScope, tableName, metricField, timeField, granularity,
+                nextOrgScope, ruleName, tableName, metricField, timeField, granularity,
                 filterExpression, resolvedFilterExpression, operator,
                 threshold == null || Double.isNaN(threshold) ? null : threshold,
                 detectionCycle, toJson(channels), status,
@@ -649,6 +734,8 @@ public class AdvancedAnalysisService {
     public Map<String, Object> retryAlertPushLog(long id) {
         Map<String, Object> log = alertPushLogDetail(id);
         Map<String, Object> event = alertEventDetail(parseLong(log.get("eventId"), 0L));
+        Map<String, Object> rule = alertRuleDetail(parseLong(log.get("ruleId"), 0L));
+        refreshAlertPushLogContent(log, rule, event);
         Map<String, Object> result = attemptAlertPush(log, event);
         return alertPushLogDetail(parseLong(result.get("id"), id));
     }
@@ -871,6 +958,72 @@ public class AdvancedAnalysisService {
         }
         insertPlanVersionSnapshot(detail);
         return detail;
+    }
+
+    public Map<String, Object> recalculatePlanForAdminHistory(long id, Map<String, Object> originDetail) {
+        Map<String, Object> detail = recalculatePlan(id);
+        Map<String, Object> result = asJsonObject(detail.get("result"));
+        long newHistoryId = parseLong(firstText(result.get("queryHistoryId"), result.get("chartId")), 0L);
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("planId", id);
+        response.put("planName", detail.get("planName"));
+        response.put("analysisType", detail.get("planType"));
+        response.put("newHistoryId", newHistoryId);
+        response.put("engine", "advanced-analysis");
+        response.put("chartType", "forecast".equals(text(detail.get("planType"))) ? "line" : "bar");
+        response.put("riskLevel", "SAFE");
+        response.put("cacheHit", result.get("cacheHit"));
+        response.put("message", "高级分析复跑完成");
+        response.put("result", result);
+        response.put("originHistoryId", originDetail == null ? null : originDetail.get("id"));
+        return response;
+    }
+
+    public Map<String, Object> recalculateForecastSnapshotForAdminHistory(Map<String, Object> originDetail) {
+        Map<String, Object> snapshot = asJsonObject(originDetail == null ? null : originDetail.get("chartSnapshot"));
+        Map<String, Object> meta = asJsonObject(snapshot.get("forecastMeta"));
+        Map<String, Object> mapping = asJsonObject(snapshot.get("fieldMapping"));
+        String tableName = firstText(originDetail == null ? null : originDetail.get("queryTableName"), snapshot.get("tableName"), meta.get("tableName"), mapping.get("tableName"));
+        String timeField = firstText(meta.get("timeField"), mapping.get("timeField"));
+        String metricField = firstText(meta.get("metricField"), mapping.get("metricField"), mapping.get("metricKey"));
+        if (tableName.isBlank() || timeField.isBlank() || metricField.isBlank()) {
+            throw new IllegalArgumentException("该预测记录缺少时间字段、指标字段或数据源，无法按预测流程复跑");
+        }
+        Map<String, Object> params = asJsonObject(meta.get("algorithmParams"));
+        Map<String, Object> request = new LinkedHashMap<>(params);
+        request.put("tableName", tableName);
+        request.put("timeField", timeField);
+        request.put("metricField", metricField);
+        request.put("granularity", firstText(meta.get("granularity"), mapping.get("granularity"), "month"));
+        request.put("algorithm", firstText(meta.get("algorithm"), params.get("algorithm"), "Holt-Winters"));
+        request.put("horizon", inferForecastHorizon(snapshot, 3));
+        putIfPresent(request, "filterExpression", firstText(meta.get("filterExpression"), mapping.get("filterExpression")));
+        putIfPresent(request, "sourceQuestion", firstText(originDetail == null ? null : originDetail.get("question"), snapshot.get("message")));
+
+        Map<String, Object> result = forecast(request);
+        Map<String, Object> pseudoPlan = new LinkedHashMap<>();
+        pseudoPlan.put("id", snapshot.get("advancedAnalysisPlanId"));
+        pseudoPlan.put("planName", firstText(originDetail == null ? null : originDetail.get("question"), snapshot.get("message"), "预测复跑结果"));
+        pseudoPlan.put("planType", "forecast");
+        pseudoPlan.put("tableName", tableName);
+        pseudoPlan.put("metricLabel", firstText(mapping.get("metric"), meta.get("metricField"), metricField));
+        pseudoPlan.put("timeRangeLabel", request.get("granularity"));
+        pseudoPlan.put("request", request);
+        pseudoPlan.put("result", result);
+        pseudoPlan.put("fieldMapping", normalizePlanFieldMapping("forecast", request, result, mapping));
+        pseudoPlan.put("versionNo", parsePositiveInt(snapshot.get("advancedAnalysisPlanVersion"), 1) + 1);
+        Long newHistoryId = attachPinnableChartHistory(pseudoPlan);
+        long newId = newHistoryId == null ? 0L : newHistoryId;
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("analysisType", "forecast");
+        response.put("newHistoryId", newId);
+        response.put("engine", "advanced-analysis");
+        response.put("chartType", "line");
+        response.put("riskLevel", "SAFE");
+        response.put("cacheHit", result.get("cacheHit"));
+        response.put("message", "预测记录复跑完成");
+        response.put("result", result);
+        return response;
     }
 
     public List<Map<String, Object>> listPlanVersions(long id) {
@@ -2278,7 +2431,7 @@ public class AdvancedAnalysisService {
         AuthContext.UserPrincipal principal = currentPrincipalOrNull();
         StringBuilder sql = new StringBuilder("""
                 SELECT id, user_id AS userId, org_scope AS orgScope,
-                       table_name AS tableName, metric_field AS metricField,
+                       rule_name AS ruleName, table_name AS tableName, metric_field AS metricField,
                        time_field AS timeField, granularity, filter_expression AS filterExpression,
                        resolved_filter_expression AS resolvedFilterExpression, operator,
                        threshold_value AS threshold, detection_cycle AS detectionCycle,
@@ -2482,6 +2635,7 @@ public class AdvancedAnalysisService {
         snapshot.put("data", data);
         snapshot.put("markLine", markLine);
         snapshot.put("chartOption", chartOption);
+        attachAdvancedGraphContext(snapshot, "预警 " + text(rule.get("metricField")), text(rule.get("tableName")));
         return snapshot;
     }
 
@@ -2552,7 +2706,7 @@ public class AdvancedAnalysisService {
 
     private Map<String, Object> insertAlertPushLog(Map<String, Object> rule, Map<String, Object> event, String channel) {
         String normalizedChannel = normalizePushChannel(channel);
-        String title = buildAlertPushTitle(event);
+        String title = buildAlertPushTitle(rule, event);
         String content = buildAlertPushContent(rule, event);
         String target = pushTarget(normalizedChannel);
         KeyHolder keyHolder = new GeneratedKeyHolder();
@@ -2583,6 +2737,22 @@ public class AdvancedAnalysisService {
         Number key = keyHolder.getKey();
         long id = key == null ? 0L : key.longValue();
         return alertPushLogDetail(id);
+    }
+
+    private void refreshAlertPushLogContent(Map<String, Object> log, Map<String, Object> rule, Map<String, Object> event) {
+        long id = parseLong(log.get("id"), 0L);
+        if (id <= 0 || rule == null || rule.isEmpty() || event == null || event.isEmpty()) {
+            return;
+        }
+        String title = buildAlertPushTitle(rule, event);
+        String content = buildAlertPushContent(rule, event);
+        log.put("title", title);
+        log.put("content", content);
+        jdbcTemplate.update("""
+                UPDATE is_advanced_alert_push_log
+                SET title = ?, content = ?
+                WHERE id = ? AND (user_id = ? OR ? = 'ADMIN')
+                """, title, content, id, AuthContext.userId(), AuthContext.role());
     }
 
     private Map<String, Object> attemptAlertPush(Map<String, Object> log, Map<String, Object> event) {
@@ -2663,11 +2833,7 @@ public class AdvancedAnalysisService {
         message.setFrom(text(alertEmailFrom).isBlank() ? text(alertSmtpUsername) : text(alertEmailFrom));
         message.setTo(text(alertEmailTarget).split("[,，;；\\s]+"));
         message.setSubject(title);
-        message.setText(content + "\n\n"
-                + "事件ID：" + text(event.get("id")) + "\n"
-                + "规则ID：" + text(event.get("ruleId")) + "\n"
-                + "时间桶：" + text(event.get("bucketName")) + "\n"
-                + "状态：请登录系统查看预警图表快照与处理详情。");
+        message.setText(content + "\n\n" + buildAlertPushFooter(event));
         try {
             sender.send(message);
             return Map.of(
@@ -2688,9 +2854,7 @@ public class AdvancedAnalysisService {
         markdown.put("title", title);
         markdown.put("text", "### " + title + "\n\n"
                 + content + "\n\n"
-                + "- 事件ID：" + text(event.get("id")) + "\n"
-                + "- 规则ID：" + text(event.get("ruleId")) + "\n"
-                + "- 时间桶：" + text(event.get("bucketName")));
+                + buildAlertPushFooter(event));
         Map<String, Object> payload = Map.of(
                 "msgtype", "markdown",
                 "markdown", markdown
@@ -2748,26 +2912,20 @@ public class AdvancedAnalysisService {
         return row;
     }
 
-    private String buildAlertPushTitle(Map<String, Object> event) {
-        return "预警触发：规则#" + text(event.get("ruleId")) + " / " + text(event.get("bucketName"));
+    private String buildAlertPushTitle(Map<String, Object> rule, Map<String, Object> event) {
+        return "预警触发 | " + alertRuleDisplayName(rule, event) + " | " + alertValueOrDash(event.get("bucketName"));
     }
 
     private String buildAlertPushContent(Map<String, Object> rule, Map<String, Object> event) {
-        String ruleContent = buildRuleAlertPushContent(rule, event);
-        String aiContent = buildAiAlertPushContent(rule, event);
-        return aiContent.isBlank() ? ruleContent : aiContent;
+        Map<String, Object> explanation = asJsonObject(event.get("llmExplanation"));
+        if (explanation.isEmpty()) {
+            explanation = generateAlertPushExplanation(rule, event);
+        }
+        return buildReadableAlertPushContent(rule, event, explanation);
     }
 
     private String buildRuleAlertPushContent(Map<String, Object> rule, Map<String, Object> event) {
-        return truncate("数据源：" + text(event.get("tableName"))
-                + "；指标：" + text(event.get("metricField"))
-                + "；时间字段：" + text(event.get("timeField"))
-                + "；实际值：" + text(event.get("actualValue"))
-                + "；阈值：" + text(event.get("threshold"))
-                + "；基线：" + text(event.get("baselineValue"))
-                + "；原因：" + text(event.get("reason"))
-                + (text(rule.get("filterExpression")).isBlank() ? "" : "；过滤条件：" + text(rule.get("filterExpression"))),
-                2000);
+        return buildReadableAlertPushContent(rule, event, Map.of());
     }
 
     private String buildAiAlertPushContent(Map<String, Object> rule, Map<String, Object> event) {
@@ -2775,28 +2933,291 @@ public class AdvancedAnalysisService {
         if (explanation.isEmpty()) {
             explanation = generateAlertPushExplanation(rule, event);
         }
-        List<String> calculation = normalizeTextList(explanation.get("calculation"));
-        List<String> suggestions = normalizeTextList(explanation.get("suggestions"));
-        if (calculation.isEmpty() && suggestions.isEmpty()) {
-            return "";
+        return buildReadableAlertPushContent(rule, event, explanation);
+    }
+
+    private String buildReadableAlertPushContent(Map<String, Object> rule, Map<String, Object> event, Map<String, Object> explanation) {
+        String tableName = text(event.get("tableName"));
+        String metricField = text(event.get("metricField"));
+        String timeField = text(event.get("timeField"));
+        String tableLabel = alertTableLabel(tableName);
+        String metricLabel = alertFieldLabel(tableName, metricField, false);
+        String timeFieldLabel = alertFieldLabel(tableName, timeField, true);
+        String ruleName = alertRuleDisplayName(rule, event);
+        String operator = normalizeAlertOperator(text(event.get("operator")));
+        boolean hasThreshold = hasAlertNumber(event.get("threshold"));
+        List<String> reasons = compactAlertPushItems(normalizeTextList(explanation.get("calculation")), 3);
+        if (reasons.isEmpty() && !text(event.get("reason")).isBlank()) {
+            reasons = compactAlertPushItems(List.of(text(event.get("reason"))), 3);
         }
+        List<String> suggestions = compactAlertPushItems(normalizeTextList(explanation.get("suggestions")), 3);
+
         StringBuilder builder = new StringBuilder();
-        builder.append("数据源：").append(text(event.get("tableName")))
-                .append("；指标：").append(text(event.get("metricField")))
-                .append("；时间桶：").append(text(event.get("bucketName")))
-                .append("；实际值：").append(text(event.get("actualValue")));
-        if (!text(event.get("threshold")).isBlank()) {
-            builder.append("；阈值：").append(text(event.get("threshold")));
+        builder.append("【规则名称】\n");
+        builder.append(ruleName).append("\n\n");
+
+        builder.append("【预警摘要】\n");
+        builder.append(metricLabel)
+                .append(" 在 ")
+                .append(alertValueOrDash(event.get("bucketName")))
+                .append(" 触发")
+                .append(alertOperatorLabel(operator))
+                .append("预警，实际值 ")
+                .append(formatAlertNumber(event.get("actualValue")));
+        if (hasThreshold) {
+            builder.append("，阈值 ").append(formatAlertNumber(event.get("threshold")));
         }
-        builder.append("。");
-        if (!calculation.isEmpty()) {
-            builder.append("\n触发解读：").append(String.join("；", calculation.stream().limit(3).toList()));
+        builder.append("。\n\n");
+
+        builder.append("【关键指标】\n");
+        appendAlertPushLine(builder, "数据源", tableLabel);
+        appendAlertPushLine(builder, "指标", metricLabel);
+        appendAlertPushLine(builder, "时间字段", timeFieldLabel);
+        appendAlertPushLine(builder, "时间桶", event.get("bucketName"));
+        appendAlertPushLine(builder, "实际值", formatAlertNumber(event.get("actualValue")));
+        if (hasThreshold) {
+            appendAlertPushLine(builder, "阈值", formatAlertNumber(event.get("threshold")));
         }
-        if (!suggestions.isEmpty()) {
-            builder.append("\n建议动作：").append(String.join("；", suggestions.stream().limit(3).toList()));
+        if (hasAlertNumber(event.get("baselineValue"))) {
+            appendAlertPushLine(builder, "历史基线", formatAlertNumber(event.get("baselineValue")));
         }
-        builder.append("\n说明：以上文案由 AI/规则基于后端预警结果生成，异常判断仍以系统规则结果为准。");
+        if (hasAlertNumber(event.get("deviationRate"))) {
+            appendAlertPushLine(builder, "偏离率", formatAlertPercent(event.get("deviationRate")));
+        }
+        if (hasAlertNumber(event.get("zScore"))) {
+            appendAlertPushLine(builder, "Z-Score", formatAlertNumber(event.get("zScore")));
+        }
+        String filterExpression = firstText(rule.get("filterExpression"), rule.get("resolvedFilterExpression"));
+        if (!filterExpression.isBlank()) {
+            appendAlertPushLine(builder, "过滤条件", filterExpression);
+        }
+        builder.append("\n");
+
+        appendAlertPushList(builder, "触发原因", reasons);
+        appendAlertPushList(builder, "建议动作", suggestions);
+
+        builder.append("【说明】\n");
+        builder.append("- 异常判断以系统预警规则结果为准，请登录系统查看图表快照与处理详情。");
         return truncate(builder.toString(), 2000);
+    }
+
+    private String buildAlertPushFooter(Map<String, Object> event) {
+        StringBuilder builder = new StringBuilder();
+        builder.append("【追踪信息】\n");
+        appendAlertPushLine(builder, "事件 ID", event.get("id"));
+        appendAlertPushLine(builder, "规则 ID", event.get("ruleId"));
+        appendAlertPushLine(builder, "时间桶", event.get("bucketName"));
+        builder.append("- 查看方式：请登录系统查看预警图表快照与处理详情。");
+        return builder.toString();
+    }
+
+    private void appendAlertPushLine(StringBuilder builder, String label, Object value) {
+        builder.append("- ").append(label).append("：").append(alertValueOrDash(value)).append("\n");
+    }
+
+    private void appendAlertPushList(StringBuilder builder, String title, List<String> items) {
+        if (items == null || items.isEmpty()) {
+            return;
+        }
+        builder.append("【").append(title).append("】\n");
+        for (int i = 0; i < items.size(); i += 1) {
+            builder.append(i + 1).append(". ").append(items.get(i)).append("\n");
+        }
+        builder.append("\n");
+    }
+
+    private String alertOperatorLabel(String operator) {
+        return switch (normalizeAlertOperator(operator)) {
+            case "gt" -> "高于阈值";
+            case "zscore" -> "Z-Score 异常";
+            default -> "低于阈值";
+        };
+    }
+
+    private String alertRuleNameFromRequest(Map<String, Object> request,
+                                            String tableName,
+                                            String metricField,
+                                            String operator,
+                                            Double threshold,
+                                            String filterExpression) {
+        return alertRuleNameFromRequestWithFallback(request, null, tableName, metricField, operator, threshold, filterExpression);
+    }
+
+    private String alertRuleNameFromRequestWithFallback(Map<String, Object> request,
+                                                        Object existingRuleName,
+                                                        String tableName,
+                                                        String metricField,
+                                                        String operator,
+                                                        Double threshold,
+                                                        String filterExpression) {
+        String explicit = firstText(
+                request.get("ruleName"),
+                request.get("alertName"),
+                request.get("title"),
+                request.get("sourceQuestion")
+        );
+        if (!explicit.isBlank()) {
+            return truncate(explicit, 255);
+        }
+        String existing = text(existingRuleName);
+        if (!existing.isBlank()) {
+            return truncate(existing, 255);
+        }
+        return truncate(defaultAlertRuleDisplayName(tableName, metricField, operator, threshold, filterExpression), 255);
+    }
+
+    private String alertRuleDisplayName(Map<String, Object> rule, Map<String, Object> event) {
+        String tableName = firstText(rule == null ? null : rule.get("tableName"), event == null ? null : event.get("tableName"));
+        String metricField = firstText(rule == null ? null : rule.get("metricField"), event == null ? null : event.get("metricField"));
+        String operator = firstText(rule == null ? null : rule.get("operator"), event == null ? null : event.get("operator"));
+        Double threshold = hasAlertNumber(rule == null ? null : rule.get("threshold"))
+                ? parseDouble(rule.get("threshold"), Double.NaN)
+                : parseDouble(event == null ? null : event.get("threshold"), Double.NaN);
+        String filterExpression = firstText(
+                rule == null ? null : rule.get("filterExpression"),
+                rule == null ? null : rule.get("resolvedFilterExpression")
+        );
+        String ruleName = firstText(
+                rule == null ? null : rule.get("ruleName"),
+                event == null ? null : event.get("ruleName")
+        );
+        if (!ruleName.isBlank()) {
+            return ruleName;
+        }
+        return defaultAlertRuleDisplayName(tableName, metricField, operator, threshold, filterExpression);
+    }
+
+    private String defaultAlertRuleDisplayName(String tableName,
+                                               String metricField,
+                                               String operator,
+                                               Double threshold,
+                                               String filterExpression) {
+        String metricLabel = alertFieldLabel(tableName, metricField, false);
+        String condition = switch (normalizeAlertOperator(operator)) {
+            case "gt" -> "高于 " + formatAlertNumber(threshold);
+            case "zscore" -> "出现 Z-Score 异常";
+            default -> "低于 " + formatAlertNumber(threshold);
+        };
+        String filter = text(filterExpression);
+        return metricLabel + " " + condition + " 触发预警" + (filter.isBlank() ? "" : "（" + filter + "）");
+    }
+
+    private String alertTableLabel(String tableName) {
+        String raw = text(tableName);
+        if (raw.isBlank()) {
+            return "-";
+        }
+        try {
+            for (Map<String, Object> item : dataUploadService.listTables()) {
+                if (!raw.equals(text(item.get("tableName")))) {
+                    continue;
+                }
+                String label = firstText(item.get("displayName"), item.get("sourceName"), item.get("physicalTableName"), item.get("tableName"));
+                return labelWithRawName(label, raw);
+            }
+        } catch (RuntimeException ignored) {
+            // Table metadata is optional for push copy; raw table names are still usable.
+        }
+        return raw;
+    }
+
+    private String alertFieldLabel(String tableName, String field, boolean allowDisplayName) {
+        String raw = text(field);
+        if (raw.isBlank()) {
+            return "-";
+        }
+        try {
+            for (Map<String, Object> item : dataUploadService.listFields(tableName)) {
+                boolean matched = raw.equals(text(item.get("columnName")))
+                        || raw.equals(text(item.get("sourceFieldName")))
+                        || raw.equals(text(item.get("displayName")))
+                        || raw.equals(text(item.get("businessName")));
+                if (!matched) {
+                    continue;
+                }
+                String label = allowDisplayName
+                        ? firstText(item.get("businessName"), item.get("displayName"), item.get("sourceFieldName"), item.get("fieldComment"), item.get("columnName"))
+                        : firstText(item.get("businessName"), item.get("sourceFieldName"), item.get("displayName"), item.get("fieldComment"), item.get("columnName"));
+                if (label.isBlank()) {
+                    return raw;
+                }
+                return label;
+            }
+        } catch (RuntimeException ignored) {
+            // Field metadata is optional for push copy; raw field names are still usable.
+        }
+        return raw;
+    }
+
+    private String labelWithRawName(String label, String raw) {
+        String cleanLabel = text(label);
+        String cleanRaw = text(raw);
+        if (cleanLabel.isBlank()) {
+            return cleanRaw.isBlank() ? "-" : cleanRaw;
+        }
+        if (cleanRaw.isBlank()
+                || cleanLabel.equals(cleanRaw)
+                || cleanLabel.contains("（" + cleanRaw + "）")
+                || cleanLabel.contains("(" + cleanRaw + ")")) {
+            return cleanLabel;
+        }
+        return cleanLabel + "（" + cleanRaw + "）";
+    }
+
+    private List<String> compactAlertPushItems(List<String> items, int limit) {
+        if (items == null || items.isEmpty()) {
+            return List.of();
+        }
+        return items.stream()
+                .map(this::compactAlertPushText)
+                .filter(item -> !item.isBlank())
+                .limit(limit)
+                .toList();
+    }
+
+    private String compactAlertPushText(Object value) {
+        String compact = text(value)
+                .replaceAll("[\\r\\n\\t]+", " ")
+                .replaceAll("\\s{2,}", " ")
+                .trim();
+        if (compact.length() <= 140) {
+            return compact;
+        }
+        return compact.substring(0, 137) + "...";
+    }
+
+    private boolean hasAlertNumber(Object value) {
+        double parsed = parseDouble(value, Double.NaN);
+        return !Double.isNaN(parsed) && !Double.isInfinite(parsed);
+    }
+
+    private String formatAlertNumber(Object value) {
+        String raw = text(value);
+        if (raw.isBlank() || "nan".equalsIgnoreCase(raw) || "null".equalsIgnoreCase(raw)) {
+            return "-";
+        }
+        double parsed = parseDouble(value, Double.NaN);
+        if (Double.isNaN(parsed) || Double.isInfinite(parsed)) {
+            return raw;
+        }
+        double rounded = round(parsed);
+        String formatted = String.format(Locale.US, "%,.2f", rounded);
+        if (formatted.endsWith(".00")) {
+            return formatted.substring(0, formatted.length() - 3);
+        }
+        while (formatted.endsWith("0")) {
+            formatted = formatted.substring(0, formatted.length() - 1);
+        }
+        return formatted.endsWith(".") ? formatted.substring(0, formatted.length() - 1) : formatted;
+    }
+
+    private String formatAlertPercent(Object value) {
+        return formatAlertNumber(value) + "%";
+    }
+
+    private String alertValueOrDash(Object value) {
+        String raw = text(value);
+        return raw.isBlank() || "null".equalsIgnoreCase(raw) || "nan".equalsIgnoreCase(raw) ? "-" : raw;
     }
 
     private Map<String, Object> generateAlertPushExplanation(Map<String, Object> rule, Map<String, Object> event) {
@@ -2824,7 +3245,8 @@ public class AdvancedAnalysisService {
 
     private Map<String, Object> alertRuleDetail(long id) {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
-                SELECT id, user_id AS userId, org_scope AS orgScope, table_name AS tableName, metric_field AS metricField,
+                SELECT id, user_id AS userId, org_scope AS orgScope, rule_name AS ruleName,
+                       table_name AS tableName, metric_field AS metricField,
                        time_field AS timeField, granularity, filter_expression AS filterExpression,
                        resolved_filter_expression AS resolvedFilterExpression, operator,
                        threshold_value AS threshold, detection_cycle AS detectionCycle,
@@ -2844,6 +3266,14 @@ public class AdvancedAnalysisService {
         }
         Map<String, Object> row = new LinkedHashMap<>(rows.get(0));
         parseAlertRuleJsonFields(row);
+        row.put("ruleName", firstText(row.get("ruleName"), defaultAlertRuleDisplayName(
+                text(row.get("tableName")),
+                text(row.get("metricField")),
+                text(row.get("operator")),
+                parseDouble(row.get("threshold"), Double.NaN),
+                text(row.get("filterExpression"))
+        )));
+        attachAdvancedGraphContext(row, "预警 " + text(row.get("metricField")), text(row.get("tableName")));
         return row;
     }
 
@@ -2919,10 +3349,16 @@ public class AdvancedAnalysisService {
         Map<String, Object> fieldMapping = plan.get("fieldMapping") instanceof Map<?, ?> mapping
                 ? new LinkedHashMap<>((Map<String, Object>) mapping)
                 : Map.of();
-        Map<String, Object> algorithmParams = result.get("algorithmParams") instanceof Map<?, ?> params
-                ? new LinkedHashMap<>((Map<String, Object>) params)
-                : Map.of();
-        String algorithm = firstText(result.get("algorithm"), algorithmParams.get("algorithm"), "Holt-Winters");
+        Map<String, Object> request = asJsonObject(plan.get("request"));
+        Map<String, Object> resultParams = asJsonObject(result.get("params"));
+        Map<String, Object> algorithmParams = new LinkedHashMap<>();
+        algorithmParams.putAll(asJsonObject(result.get("algorithmParams")));
+        asJsonObject(resultParams.get("algorithmParams")).forEach(algorithmParams::putIfAbsent);
+        putIfPresent(algorithmParams, "alpha", firstText(algorithmParams.get("alpha"), resultParams.get("alpha"), request.get("alpha")));
+        putIfPresent(algorithmParams, "beta", firstText(algorithmParams.get("beta"), resultParams.get("beta"), request.get("beta")));
+        putIfPresent(algorithmParams, "gamma", firstText(algorithmParams.get("gamma"), resultParams.get("gamma"), request.get("gamma")));
+        putIfPresent(algorithmParams, "seasonLength", firstText(algorithmParams.get("seasonLength"), resultParams.get("seasonLength"), request.get("seasonLength")));
+        String algorithm = firstText(result.get("algorithm"), resultParams.get("algorithm"), request.get("algorithm"), algorithmParams.get("algorithm"), "Holt-Winters");
         int versionNo = parsePositiveInt(plan.get("versionNo"), 1);
         snapshot.put("tableName", text(plan.get("tableName")));
         snapshot.put("message", buildForecastDashboardTitle(plan, result, algorithm, versionNo));
@@ -2937,10 +3373,30 @@ public class AdvancedAnalysisService {
         snapshot.put("encode", Map.of("x", "name", "y", "forecast"));
         snapshot.put("optionTemplate", forecastDashboardOptionTemplate());
         snapshot.put("data", chartData);
+        snapshot.put("graphContext", result.getOrDefault("graphContext", List.of()));
+        snapshot.put("graphPath", result.getOrDefault("graphPath", Map.of()));
+        snapshot.put("graphSqlHints", result.getOrDefault("graphSqlHints", Map.of()));
+        snapshot.put("cacheHit", parseBoolean(result.get("cacheHit"), false));
+        snapshot.put("cacheKey", text(result.get("cacheKey")));
         snapshot.put("advancedAnalysisPlanId", plan.get("id"));
         snapshot.put("advancedAnalysisPlanName", text(plan.get("planName")));
         snapshot.put("advancedAnalysisPlanVersion", versionNo);
         snapshot.put("advancedAnalysisType", plan.get("planType"));
+        List<Map<String, Object>> reasoningReplaySteps = asJsonObjectList(result.get("reasoningReplaySteps"));
+        if (reasoningReplaySteps.isEmpty()) {
+            reasoningReplaySteps = asJsonObjectList(result.get("reasoningLogs"));
+        }
+        Map<String, Object> llm = asJsonObject(plan.get("llm"));
+        if (reasoningReplaySteps.isEmpty()) {
+            reasoningReplaySteps = asJsonObjectList(llm.get("reasoningReplaySteps"));
+        }
+        if (reasoningReplaySteps.isEmpty()) {
+            reasoningReplaySteps = asJsonObjectList(llm.get("thinkingLogs"));
+        }
+        if (!reasoningReplaySteps.isEmpty()) {
+            snapshot.put("reasoningReplaySteps", reasoningReplaySteps);
+            snapshot.put("reasoningLogs", reasoningReplaySteps);
+        }
         Map<String, Object> action = new LinkedHashMap<>();
         action.put("type", "advanced-analysis-plan-recalculate");
         action.put("label", "重新计算预测");
@@ -2949,21 +3405,23 @@ public class AdvancedAnalysisService {
         snapshot.put("advancedAnalysisAction", action);
         Map<String, Object> forecastMeta = new LinkedHashMap<>();
         forecastMeta.put("algorithm", algorithm);
-        forecastMeta.put("confidence", text(result.getOrDefault("confidence", "95%")));
+        forecastMeta.put("confidence", firstText(result.get("confidence"), resultParams.get("confidence"), "95%"));
         forecastMeta.put("algorithmParams", algorithmParams);
-        forecastMeta.put("granularity", firstText(result.get("granularity"), fieldMapping.get("granularity")));
-        forecastMeta.put("timeField", firstText(result.get("timeField"), fieldMapping.get("timeField")));
-        forecastMeta.put("metricField", firstText(result.get("metricField"), fieldMapping.get("metricField")));
-        forecastMeta.put("filterExpression", firstText(result.get("filterExpression"), fieldMapping.get("filterExpression")));
+        forecastMeta.put("granularity", firstText(result.get("granularity"), resultParams.get("granularity"), request.get("granularity"), fieldMapping.get("granularity")));
+        forecastMeta.put("timeField", firstText(result.get("timeField"), resultParams.get("timeField"), request.get("timeField"), fieldMapping.get("timeField")));
+        forecastMeta.put("metricField", firstText(result.get("metricField"), resultParams.get("metricField"), request.get("metricField"), fieldMapping.get("metricField")));
+        forecastMeta.put("filterExpression", firstText(result.get("filterExpression"), resultParams.get("filterExpression"), request.get("filterExpression"), fieldMapping.get("filterExpression")));
         forecastMeta.put("dataQuality", result.getOrDefault("dataQuality", Map.of()));
         snapshot.put("forecastMeta", forecastMeta);
+        Long executionTimeMs = Math.max(1L, parseLong(firstText(result.get("executionTimeMs"), resultParams.get("executionTimeMs")), 1L));
         Long historyId = chatQueryHistoryService.recordSuccess(
                 text(plan.get("planName")),
                 text(plan.get("tableName")),
                 snapshot,
-                null
+                executionTimeMs
         );
         if (historyId != null && historyId > 0) {
+            attachForecastHistoryConversationMetadata(historyId, plan, result);
             result.put("queryHistoryId", historyId);
             result.put("chartId", historyId);
             plan.put("result", result);
@@ -2973,6 +3431,111 @@ public class AdvancedAnalysisService {
             return historyId;
         }
         return null;
+    }
+
+    private void attachForecastHistoryConversationMetadata(Long historyId, Map<String, Object> plan, Map<String, Object> result) {
+        Map<String, Object> llm = asJsonObject(plan.get("llm"));
+        Map<String, Object> request = asJsonObject(plan.get("request"));
+        long conversationId = parseLong(firstText(result.get("conversationId"), llm.get("conversationId"), request.get("conversationId")), 0L);
+        long userTurnId = parseLong(firstText(result.get("userTurnId"), llm.get("userTurnId"), request.get("userTurnId")), 0L);
+        long assistantTurnId = parseLong(firstText(result.get("assistantTurnId"), result.get("turnId"), llm.get("assistantTurnId"), request.get("assistantTurnId")), 0L);
+        long artifactId = parseLong(firstText(result.get("artifactId"), llm.get("artifactId"), request.get("artifactId")), 0L);
+        if (conversationId <= 0 && assistantTurnId > 0) {
+            conversationId = conversationIdByTurnId(assistantTurnId);
+        }
+        if (conversationId <= 0 && artifactId > 0) {
+            conversationId = conversationIdByArtifactId(artifactId);
+        }
+        if (assistantTurnId <= 0 && artifactId > 0) {
+            assistantTurnId = turnIdByArtifactId(artifactId);
+        }
+        Integer turnNo = turnNoByTurnId(assistantTurnId);
+        if (conversationId > 0) {
+            Map<String, Object> context = new LinkedHashMap<>();
+            context.put("module", "advancedAnalysis");
+            context.put("analysisType", text(plan.get("planType")));
+            context.put("planId", plan.get("id"));
+            if (userTurnId > 0) context.put("userTurnId", userTurnId);
+            if (assistantTurnId > 0) context.put("assistantTurnId", assistantTurnId);
+            if (artifactId > 0) context.put("artifactId", artifactId);
+            context.put("engine", "advanced-analysis");
+            chatQueryHistoryService.attachConversationMetadata(
+                    historyId,
+                    conversationId,
+                    null,
+                    turnNo,
+                    "ASSISTANT",
+                    advancedHistoryIntentType(text(plan.get("planType"))),
+                    context,
+                    Map.of("tableName", text(plan.get("tableName"))),
+                    "ADVANCED_ANALYSIS",
+                    "高级分析预测历史已关联原始对话"
+            );
+        }
+        if (artifactId > 0) {
+            jdbcTemplate.update("""
+                    UPDATE is_chat_conversation_artifact
+                       SET history_id = ?
+                     WHERE id = ? AND (history_id IS NULL OR history_id = 0)
+                    """, historyId, artifactId);
+        }
+    }
+
+    private long conversationIdByTurnId(long turnId) {
+        if (turnId <= 0) return 0L;
+        try {
+            Long value = jdbcTemplate.queryForObject("""
+                    SELECT conversation_id FROM is_chat_conversation_turn WHERE id = ? LIMIT 1
+                    """, Long.class, turnId);
+            return value == null ? 0L : value;
+        } catch (Exception ignored) {
+            return 0L;
+        }
+    }
+
+    private long conversationIdByArtifactId(long artifactId) {
+        if (artifactId <= 0) return 0L;
+        try {
+            Long value = jdbcTemplate.queryForObject("""
+                    SELECT conversation_id FROM is_chat_conversation_artifact WHERE id = ? LIMIT 1
+                    """, Long.class, artifactId);
+            return value == null ? 0L : value;
+        } catch (Exception ignored) {
+            return 0L;
+        }
+    }
+
+    private long turnIdByArtifactId(long artifactId) {
+        if (artifactId <= 0) return 0L;
+        try {
+            Long value = jdbcTemplate.queryForObject("""
+                    SELECT turn_id FROM is_chat_conversation_artifact WHERE id = ? LIMIT 1
+                    """, Long.class, artifactId);
+            return value == null ? 0L : value;
+        } catch (Exception ignored) {
+            return 0L;
+        }
+    }
+
+    private Integer turnNoByTurnId(long turnId) {
+        if (turnId <= 0) return null;
+        try {
+            Integer value = jdbcTemplate.queryForObject("""
+                    SELECT turn_no FROM is_chat_conversation_turn WHERE id = ? LIMIT 1
+                    """, Integer.class, turnId);
+            return value == null || value <= 0 ? null : value;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private String advancedHistoryIntentType(String planType) {
+        String type = normalizePlanType(text(planType));
+        return switch (type) {
+            case "whatIf" -> "ADVANCED_WHAT_IF";
+            case "alert" -> "ADVANCED_ALERT";
+            default -> "ADVANCED_FORECAST";
+        };
     }
 
     private void persistPlanResultLink(Object planIdValue, Map<String, Object> result) {
@@ -3021,6 +3584,27 @@ public class AdvancedAnalysisService {
             data.add(point);
         }
         return data;
+    }
+
+    private int inferForecastHorizon(Map<String, Object> snapshot, int fallback) {
+        Object data = snapshot == null ? null : snapshot.get("data");
+        if (!(data instanceof List<?> list)) {
+            return fallback;
+        }
+        int count = 0;
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> map)) {
+                continue;
+            }
+            boolean forecast = map.get("forecast") != null
+                    || map.get("upper") != null
+                    || map.get("lower") != null
+                    || "forecast".equalsIgnoreCase(text(map.get("phase")));
+            if (forecast) {
+                count += 1;
+            }
+        }
+        return count > 0 ? Math.min(count, 60) : fallback;
     }
 
     private String buildForecastDashboardTitle(Map<String, Object> plan,
@@ -3080,6 +3664,182 @@ public class AdvancedAnalysisService {
                         )
                 )
         );
+    }
+
+    private long elapsedMs(long startedAt) {
+        return Math.max(1L, System.currentTimeMillis() - startedAt);
+    }
+
+    private String forecastCacheKey(String scope, Map<String, Object> payload) {
+        String normalizedPayload = toJson(normalizeCachePayload(payload));
+        return "insight:advanced-analysis:forecast:" + scope + ":" + sha256(normalizedPayload);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Object normalizeCachePayload(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            return map.entrySet().stream()
+                    .sorted(Comparator.comparing(entry -> text(entry.getKey())))
+                    .collect(Collectors.toMap(
+                            entry -> text(entry.getKey()),
+                            entry -> normalizeCachePayload(entry.getValue()),
+                            (left, right) -> left,
+                            LinkedHashMap::new
+                    ));
+        }
+        if (value instanceof List<?> list) {
+            return list.stream().map(this::normalizeCachePayload).toList();
+        }
+        return value;
+    }
+
+    private String sha256(String value) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(digest.digest(text(value).getBytes(StandardCharsets.UTF_8)));
+        } catch (Exception ignored) {
+            return Integer.toHexString(text(value).hashCode());
+        }
+    }
+
+    private Map<String, Object> readForecastCache(String cacheKey) {
+        String payload = redisGet(cacheKey);
+        if (payload == null || payload.isBlank()) {
+            return Map.of();
+        }
+        return new LinkedHashMap<>(parseJsonObject(payload));
+    }
+
+    private void writeForecastCache(String cacheKey, Map<String, Object> result) {
+        if (cacheKey == null || cacheKey.isBlank() || result == null || result.isEmpty()) {
+            return;
+        }
+        redisSet(cacheKey, toJson(result), Math.max(60, forecastCacheTtlSeconds));
+    }
+
+    private void markForecastCacheHit(Map<String, Object> result, String cacheKey, long startedAt) {
+        result.put("cacheHit", true);
+        result.put("cacheKey", cacheKey);
+        result.put("executionTimeMs", elapsedMs(startedAt));
+        result.put("cacheSource", "redis");
+    }
+
+    private void attachAdvancedGraphContext(Map<String, Object> target, String question, String tableName) {
+        if (target == null || target.isEmpty()) {
+            return;
+        }
+        String q = firstText(question, target.get("metricField"), target.get("targetMetric"), target.get("metric"));
+        String table = firstText(tableName, target.get("tableName"));
+        if (q.isBlank() && table.isBlank()) {
+            return;
+        }
+        try {
+            Map<String, Object> graphPath = knowledgeGraphService.retrieveMultiHopContextSafely(q, table);
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> graphContext = graphPath.get("ragContext") instanceof List<?> list
+                    ? (List<Map<String, Object>>) (List<?>) list
+                    : List.of();
+            target.put("graphContext", graphContext);
+            target.put("graphPath", graphPath);
+            target.put("graphSqlHints", knowledgeGraphService.buildSqlMappingHints(q, table, graphContext));
+        } catch (Exception ignored) {
+            target.putIfAbsent("graphContext", List.of());
+        }
+    }
+
+    private boolean redisSet(String key, String value, int ttlSeconds) {
+        if (!forecastCacheEnabled || !redisEnabled || key == null || key.isBlank() || value == null || value.isBlank()) {
+            return false;
+        }
+        try {
+            return redisCommand("SETEX", key, String.valueOf(Math.max(60, ttlSeconds)), value) != null;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private String redisGet(String key) {
+        if (!forecastCacheEnabled || !redisEnabled || key == null || key.isBlank()) {
+            return null;
+        }
+        try {
+            String response = redisCommand("GET", key);
+            return response == null || response.isBlank() ? null : response;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private String redisCommand(String... args) throws Exception {
+        try (Socket socket = new Socket(redisHost, redisPort)) {
+            socket.setSoTimeout(1500);
+            InputStream in = socket.getInputStream();
+            OutputStream out = socket.getOutputStream();
+            if (redisPassword != null && !redisPassword.isBlank()) {
+                writeRedisCommand(out, "AUTH", redisPassword);
+                readRedisReply(in);
+            }
+            if (redisDatabase > 0) {
+                writeRedisCommand(out, "SELECT", String.valueOf(redisDatabase));
+                readRedisReply(in);
+            }
+            writeRedisCommand(out, args);
+            return readRedisReply(in);
+        }
+    }
+
+    private void writeRedisCommand(OutputStream out, String... args) throws Exception {
+        StringBuilder command = new StringBuilder("*").append(args.length).append("\r\n");
+        for (String arg : args) {
+            byte[] bytes = Objects.toString(arg, "").getBytes(StandardCharsets.UTF_8);
+            command.append("$").append(bytes.length).append("\r\n")
+                    .append(Objects.toString(arg, "")).append("\r\n");
+        }
+        out.write(command.toString().getBytes(StandardCharsets.UTF_8));
+        out.flush();
+    }
+
+    private String readRedisReply(InputStream in) throws Exception {
+        int type = in.read();
+        if (type == -1) {
+            return null;
+        }
+        String line = readRedisLine(in);
+        if (type == '+') {
+            return line;
+        }
+        if (type == '-') {
+            throw new IllegalStateException(line);
+        }
+        if (type == ':') {
+            return line;
+        }
+        if (type == '$') {
+            int length = Integer.parseInt(line);
+            if (length < 0) {
+                return null;
+            }
+            byte[] body = in.readNBytes(length);
+            in.readNBytes(2);
+            return new String(body, StandardCharsets.UTF_8);
+        }
+        return line;
+    }
+
+    private String readRedisLine(InputStream in) throws Exception {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        int prev = -1;
+        int current;
+        while ((current = in.read()) != -1) {
+            if (prev == '\r' && current == '\n') {
+                byte[] bytes = out.toByteArray();
+                int length = Math.max(0, bytes.length - 1);
+                return new String(bytes, 0, length, StandardCharsets.UTF_8);
+            }
+            out.write(current);
+            prev = current;
+        }
+        return out.toString(StandardCharsets.UTF_8);
     }
 
     private void parseAlertRuleJsonFields(Map<String, Object> row) {
@@ -3188,7 +3948,8 @@ public class AdvancedAnalysisService {
             return;
         }
         List<Map<String, Object>> ruleRows = jdbcTemplate.queryForList("""
-                SELECT id, user_id AS userId, org_scope AS orgScope, table_name AS tableName, metric_field AS metricField,
+                SELECT id, user_id AS userId, org_scope AS orgScope, rule_name AS ruleName,
+                       table_name AS tableName, metric_field AS metricField,
                        time_field AS timeField, granularity, filter_expression AS filterExpression,
                        resolved_filter_expression AS resolvedFilterExpression, operator,
                        threshold_value AS threshold, detection_cycle AS detectionCycle,

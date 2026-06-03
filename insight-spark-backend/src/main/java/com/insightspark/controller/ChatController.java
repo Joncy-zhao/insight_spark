@@ -75,8 +75,9 @@ public class ChatController {
     public ApiResponse<Map<String, Object>> listSessions(@RequestParam(defaultValue = "1") int page,
                                                          @RequestParam(defaultValue = "20") int pageSize,
                                                          @RequestParam(required = false) String keyword,
-                                                         @RequestParam(required = false) String status) {
-        return ApiResponse.success(chatConversationService.listConversations(page, pageSize, keyword, status));
+                                                         @RequestParam(required = false) String status,
+                                                         @RequestParam(required = false) String advancedType) {
+        return ApiResponse.success(chatConversationService.listConversations(page, pageSize, keyword, status, advancedType));
     }
 
     @GetMapping("/sessions/{sessionId}")

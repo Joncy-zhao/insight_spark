@@ -174,7 +174,11 @@
               </template>
             </el-table-column>
             <el-table-column prop="queryTableName" label="DataSource" min-width="112" show-overflow-tooltip />
-            <el-table-column prop="modelCategory" label="模型" width="88" show-overflow-tooltip />
+            <el-table-column label="模型" width="88" show-overflow-tooltip>
+              <template #default="{ row }">
+                {{ displayModelCategory(row) }}
+              </template>
+            </el-table-column>
             <el-table-column label="SQL 状态" width="88">
               <template #default="{ row }">
                 <el-tag size="small" :type="sqlStatusTagType(row.sqlStatus)">{{ row.sqlStatusLabel }}</el-tag>
@@ -363,7 +367,7 @@
                       <el-tag :type="riskTagType(detail.riskLevel)">{{ detail.riskLevel }}</el-tag>
                       <el-tag type="info">{{ sourceTypeLabel(detail.sourceType) }}</el-tag>
                       <el-tag type="info">{{ chartTypeLabel(detail.chartType) }}</el-tag>
-                      <el-tag :type="sqlStatusTagType(detail.sqlStatus)">{{ detail.sqlStatusLabel || '无 SQL' }}</el-tag>
+                      <el-tag v-if="shouldShowDetailSql" :type="sqlStatusTagType(detail.sqlStatus)">{{ detail.sqlStatusLabel || '无 SQL' }}</el-tag>
                       <el-tag :type="aiParseTagType(detail.aiParseResult)">{{ detail.aiParseResultLabel || '解析信息缺失' }}</el-tag>
                       <el-tag :type="detail.isHitCache ? 'success' : 'info'">{{ detail.isHitCacheLabel || '缓存未知' }}</el-tag>
                       <el-tag :type="detail.slowQuery ? 'warning' : 'info'">{{ detail.slowQuery ? '慢查询' : '非慢查询' }}</el-tag>
@@ -386,7 +390,7 @@
                           <span>发生时间</span>
                           <div class="detail-overview-value">
                             <strong>{{ detail.createdAt || '-' }}</strong>
-                            <small>第 {{ detail.turnNo || '-' }} 轮</small>
+                            <small>{{ detailTurnNoText }}</small>
                           </div>
                         </div>
                         <div class="detail-overview-row">
@@ -405,14 +409,14 @@
                         <div class="detail-overview-row">
                           <span>模型类型</span>
                           <div class="detail-overview-value">
-                            <strong>{{ detail.modelCategory || '未识别模型' }}</strong>
+                            <strong>{{ detailModelTypeText }}</strong>
                             <small>{{ detail.artifactType || 'CHART' }}</small>
                           </div>
                         </div>
                         <div class="detail-overview-row">
                           <span>解析引擎</span>
                           <div class="detail-overview-value">
-                            <strong>{{ detail.engine || '未记录解析引擎' }}</strong>
+                            <strong>{{ detailParseEngineText }}</strong>
                             <small>{{ detail.aiParseResultLabel || '解析信息缺失' }}</small>
                           </div>
                         </div>
@@ -427,10 +431,10 @@
                           <span>执行耗时</span>
                           <div class="detail-overview-value">
                             <strong>{{ formatDuration(detail.executionTimeMs) }}</strong>
-                            <small>{{ detail.conversationId || '未记录会话ID' }}</small>
+                            <small>{{ detailConversationIdText }}</small>
                           </div>
                         </div>
-                        <div class="detail-overview-row">
+                        <div v-if="shouldShowDetailSql" class="detail-overview-row">
                           <span>SQL 状态</span>
                           <div class="detail-overview-value">
                             <strong>{{ detail.sqlStatusLabel || '无 SQL' }}</strong>
@@ -480,25 +484,25 @@
                       <div class="detail-section-head">
                         <div class="detail-section-title">
                           <h3>查询内容</h3>
-                          <p>原始问句与生成 SQL</p>
+                          <p>{{ detailQueryContentSubtitle }}</p>
                         </div>
                         <div class="detail-actions">
                           <el-button type="primary" :loading="rerunning" @click="rerun(detail)">重新执行</el-button>
-                          <el-button @click="copySql(detail.generatedSql || detail.sql)">复制 SQL</el-button>
+                          <el-button v-if="shouldShowDetailSql" :disabled="!detailRealSql" @click="copySql(detailRealSql)">复制 SQL</el-button>
                         </div>
                       </div>
-                      <div class="detail-query-grid">
+                      <div class="detail-query-grid" :class="{ 'detail-query-grid--single': !shouldShowDetailSql }">
                         <article class="detail-subpanel">
                           <div class="detail-subpanel-head">
                             <span>原始问题</span>
                           </div>
                           <p class="detail-text">{{ detail.question || '未记录原始问题' }}</p>
                         </article>
-                        <article class="detail-subpanel detail-subpanel--code">
+                        <article v-if="shouldShowDetailSql" class="detail-subpanel detail-subpanel--code">
                           <div class="detail-subpanel-head">
                             <span>生成 SQL</span>
                           </div>
-                          <pre class="detail-code">{{ detail.generatedSql || detail.sql || '无 SQL 记录' }}</pre>
+                          <pre class="detail-code">{{ detailSqlDisplayText }}</pre>
                         </article>
                       </div>
                     </section>
@@ -516,7 +520,7 @@
                             <span>摘要说明</span>
                             <el-tag effect="plain">{{ detail.intentType || '数据分析' }}</el-tag>
                           </div>
-                          <strong>{{ detail.summaryText || '当前记录未生成摘要，建议结合原始问题、SQL 和审计日志一起查看。' }}</strong>
+                          <strong>{{ detailQuerySummaryText }}</strong>
                           <p>{{ detail.riskReason || '未记录额外执行说明。' }}</p>
                         </article>
                         <article class="context-card">
@@ -524,16 +528,16 @@
                             <span>解析结果</span>
                             <el-tag :type="aiParseTagType(detail.aiParseResult)">{{ detail.aiParseResultLabel || '解析信息缺失' }}</el-tag>
                           </div>
-                          <strong>{{ detail.engine || detail.modelCategory || '未记录解析引擎' }}</strong>
-                          <p>{{ detail.generatedSql || detail.sql ? '本次请求已落库生成 SQL，可继续结合审计日志追溯。' : '当前记录未保存 SQL 文本，通常意味着解析未完成或流程被提前中断。' }}</p>
+                          <strong>{{ detailParseEngineText }}</strong>
+                          <p>{{ detailParseDescription }}</p>
                         </article>
-                        <article class="context-card">
+                        <article v-if="shouldShowDetailSql" class="context-card">
                           <div class="context-card-head">
                             <span>SQL 生成状态</span>
                             <el-tag :type="sqlStatusTagType(detail.sqlStatus)">{{ detail.sqlStatusLabel || '无 SQL' }}</el-tag>
                           </div>
                           <strong>{{ detail.executionStatusLabel || '-' }}</strong>
-                          <p>{{ detail.sqlStatus === 'BLOCKED' ? 'SQL 已生成，但在审计或权限校验阶段被拦截。' : detail.sqlStatus === 'READY' ? 'SQL 已成功生成并进入执行链路。' : '当前记录没有完整 SQL 结果。' }}</p>
+                          <p>{{ detailSqlStatusDescription }}</p>
                         </article>
                       </div>
                     </section>
@@ -674,7 +678,7 @@
                             </el-tag>
                           </div>
                         </article>
-                        <article v-if="detail.cacheContext?.cacheSql" class="context-card context-card--wide context-card--code">
+                        <article v-if="shouldShowDetailSql && detail.cacheContext?.cacheSql" class="context-card context-card--wide context-card--code">
                           <div class="context-card-head">
                             <span>缓存复用 SQL</span>
                             <el-tag effect="plain">缓存回放</el-tag>
@@ -684,7 +688,7 @@
                       </div>
                     </section>
 
-                    <section v-if="detail.auditLogs?.length" class="detail-section detail-panel">
+                    <section v-if="shouldShowDetailSql && detail.auditLogs?.length" class="detail-section detail-panel">
                       <div class="detail-section-head">
                         <div class="detail-section-title">
                           <h3>SQL 审计日志</h3>
@@ -823,7 +827,7 @@
                         <div class="detail-section-head">
                           <div class="detail-section-title">
                             <h3>模型推理过程</h3>
-                            <p>按阶段回放模型如何理解问题、定位数据、生成 SQL 并形成结果</p>
+                            <p>{{ reasoningIntroText }}</p>
                           </div>
                         </div>
                         <div class="reasoning-mini-summary">
@@ -946,9 +950,93 @@ const previewColumns = computed(() => {
   return first ? Object.keys(first) : []
 })
 
+const getDetailChartSnapshot = (entry = detail.value) => {
+  const snapshot = entry?.chartSnapshot
+  if (snapshot && typeof snapshot === 'object') return snapshot
+  if (typeof snapshot === 'string') {
+    try {
+      const parsed = JSON.parse(snapshot)
+      return parsed && typeof parsed === 'object' ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+  return {}
+}
+
+const isForecastDetailSnapshot = (entry = detail.value) => {
+  const snapshot = getDetailChartSnapshot(entry)
+  const type = String(snapshot.advancedAnalysisType || snapshot.fieldMapping?.mappingType || '').trim()
+  if (type === 'forecast' || snapshot.forecastMeta) return true
+  const rows = Array.isArray(snapshot.data) ? snapshot.data : []
+  return rows.some(row =>
+    row && typeof row === 'object' && (
+      Object.prototype.hasOwnProperty.call(row, 'history') ||
+      Object.prototype.hasOwnProperty.call(row, 'forecast') ||
+      Object.prototype.hasOwnProperty.call(row, 'upper') ||
+      Object.prototype.hasOwnProperty.call(row, 'lower') ||
+      Object.prototype.hasOwnProperty.call(row, 'phase')
+    )
+  )
+}
+
+const normalizeModelCategoryText = (value) => {
+  const text = String(value || '').trim()
+  const upper = text.toUpperCase()
+  if (!text || upper === 'UNKNOWN' || upper === 'UNKONWN') return ''
+  if (['预测算法', '情景推演', '智能预警'].includes(text)) return ''
+  return text
+}
+
+const advancedAnalysisKind = (entry = detail.value) => {
+  const snapshot = getDetailChartSnapshot(entry)
+  const rawType = String(
+    snapshot.advancedAnalysisType ||
+    snapshot.type ||
+    snapshot.fieldMapping?.mappingType ||
+    ''
+  ).trim()
+  const normalized = rawType.replace(/[-_\s]/g, '').toLowerCase()
+  if (normalized.includes('whatif')) return 'whatIf'
+  if (normalized.includes('alert') || normalized.includes('warning') || normalized.includes('prewarning')) return 'alert'
+  if (normalized.includes('forecast')) return 'forecast'
+  if (snapshot.forecastMeta || isForecastDetailSnapshot(entry)) return 'forecast'
+  if (snapshot.whatIfMeta || snapshot.scenarioMeta || Array.isArray(snapshot.scenarios) || Array.isArray(snapshot.variables)) return 'whatIf'
+  if (snapshot.alertMeta || snapshot.alertRule || snapshot.ruleId) return 'alert'
+  return ''
+}
+
+const advancedAnalysisModelLabel = (entry = detail.value) => {
+  const kind = advancedAnalysisKind(entry)
+  if (kind === 'forecast') return '预测算法'
+  if (kind === 'whatIf') return '情景推演'
+  if (kind === 'alert') return '智能预警'
+  return ''
+}
+
+const displayModelCategory = (entry) => {
+  const modelText = normalizeModelCategoryText(entry?.modelCategory) ||
+    normalizeModelCategoryText(entry?.llmModelUsed) ||
+    ''
+  if (modelText) return modelText
+  return advancedAnalysisKind(entry) ? 'LLM' : '未识别'
+}
+
+const detailIsAdvancedAnalysis = computed(() => Boolean(advancedAnalysisKind(detail.value)))
+const shouldShowDetailSql = computed(() => !detailIsAdvancedAnalysis.value)
+const detailModelTypeText = computed(() => displayModelCategory(detail.value))
+const detailTurnNoText = computed(() => {
+  const value = Number(detail.value?.turnNo)
+  return Number.isFinite(value) && value > 0 ? `第 ${value} 轮` : '轮次未记录'
+})
+const detailConversationIdText = computed(() => {
+  const value = String(detail.value?.conversationId || '').trim()
+  return value ? `会话 ${value}` : '会话未关联'
+})
+
 const detailChartPayload = computed(() => {
   const current = detail.value
-  const snapshot = current?.chartSnapshot
+  const snapshot = getDetailChartSnapshot(current)
   if (!current || !snapshot || typeof snapshot !== 'object') return null
   if (!Array.isArray(snapshot.data) || !snapshot.data.length) return null
   return {
@@ -960,12 +1048,122 @@ const detailChartPayload = computed(() => {
 const detailHasResultPreview = computed(() => Boolean(detailChartPayload.value || detail.value?.snapshotPreviewRows?.length))
 
 const detailFieldMappingSummary = computed(() => summarizeFieldMapping(
-  detail.value?.snapshotMetrics?.fieldMapping || detail.value?.chartSnapshot?.fieldMapping
+  detail.value?.snapshotMetrics?.fieldMapping || getDetailChartSnapshot(detail.value)?.fieldMapping
 ))
+
+const detailForecastMeta = computed(() => {
+  const snapshot = getDetailChartSnapshot(detail.value)
+  const meta = snapshot.forecastMeta
+  return meta && typeof meta === 'object' ? meta : {}
+})
+
+const detailParseEngineText = computed(() => {
+  const kind = advancedAnalysisKind(detail.value)
+  if (kind === 'forecast') return detailForecastMeta.value.algorithm || '时序预测算法'
+  if (kind === 'whatIf') return '拟合推演算法'
+  if (kind === 'alert') return 'Z-Score 异常检测'
+  return normalizeModelCategoryText(detail.value?.engine) ||
+    normalizeModelCategoryText(detail.value?.modelCategory) ||
+    '未记录解析引擎'
+})
+
+const detailQueryContentSubtitle = computed(() => (
+  shouldShowDetailSql.value ? '原始问句与生成 SQL' : '原始问句与算法结果'
+))
+
+const detailRealSql = computed(() => String(detail.value?.generatedSql || detail.value?.sql || '').trim())
+
+const detailSqlDisplayText = computed(() => {
+  if (detailRealSql.value) return detailRealSql.value
+  if (isForecastDetailSnapshot(detail.value)) {
+    return '预测记录由时序算法基于历史序列生成，无需生成 SQL。可通过下方结果预览查看历史值、预测值和置信区间。'
+  }
+  return '无 SQL 记录'
+})
+
+const detailQuerySummaryText = computed(() => {
+  const current = detail.value || {}
+  if (current.summaryText) return current.summaryText
+  if (isForecastDetailSnapshot(current)) {
+    const meta = detailForecastMeta.value
+    const algorithm = String(meta.algorithm || '').trim()
+    const confidence = String(meta.confidence || '').trim()
+    const parts = ['本次记录为预测类历史产物']
+    if (algorithm) parts.push(`算法：${algorithm}`)
+    if (confidence) parts.push(`置信区间：${confidence}`)
+    return `${parts.join('，')}。管理员可按普通查询详情查看原始问题、执行信息、结果快照与推理图谱。`
+  }
+  return '当前记录未生成摘要，建议结合原始问题、SQL 和审计日志一起查看。'
+})
+
+const detailParseDescription = computed(() => {
+  const kind = advancedAnalysisKind(detail.value)
+  if (kind === 'forecast') {
+    return '本次请求命中预测流程，由时序算法基于历史序列直接产出预测快照，因此详情中不展示 SQL。'
+  }
+  if (kind === 'whatIf') {
+    return '本次请求命中 What-if 推演流程，由拟合算法或业务公式直接计算情景结果，因此详情中不展示 SQL。'
+  }
+  if (kind === 'alert') {
+    return '本次请求命中智能预警流程，由阈值规则与异常检测生成预警配置或事件，因此详情中不展示 SQL。'
+  }
+  if (detailRealSql.value) {
+    return '本次请求已落库生成 SQL，可继续结合审计日志追溯。'
+  }
+  return '当前记录未保存 SQL 文本，通常意味着解析未完成或流程被提前中断。'
+})
+
+const detailSqlStatusDescription = computed(() => {
+  if (isForecastDetailSnapshot(detail.value) && !detailRealSql.value) {
+    return '预测记录无 SQL 生成环节，但仍保留执行状态、耗时、快照和推理信息。'
+  }
+  if (detail.value?.sqlStatus === 'BLOCKED') return 'SQL 已生成，但在审计或权限校验阶段被拦截。'
+  if (detail.value?.sqlStatus === 'READY') return 'SQL 已成功生成并进入执行链路。'
+  return '当前记录没有完整 SQL 结果。'
+})
 
 const resultPreviewMetrics = computed(() => {
   const current = detail.value || {}
   const metrics = current.snapshotMetrics || {}
+  if (isForecastDetailSnapshot(current)) {
+    const snapshot = getDetailChartSnapshot(current)
+    const meta = detailForecastMeta.value
+    const algorithmParams = meta.algorithmParams && typeof meta.algorithmParams === 'object'
+      ? meta.algorithmParams
+      : {}
+    const dataRows = Array.isArray(snapshot.data) ? snapshot.data : []
+    const forecastCount = dataRows.filter(row =>
+      row && typeof row === 'object' && (
+        row.forecast != null ||
+        row.upper != null ||
+        row.lower != null ||
+        String(row.phase || '').toLowerCase() === 'forecast'
+      )
+    ).length
+    const historyCount = Math.max(0, dataRows.length - forecastCount)
+    return [
+      {
+        label: '图表类型',
+        value: chartTypeLabel(metrics.chartType || current.chartType),
+        hint: '预测快照沿用普通查询的图表预览区域展示'
+      },
+      {
+        label: '预测算法',
+        value: meta.algorithm || algorithmParams.algorithm || '未记录',
+        hint: '来自预测快照或保存方案的算法元信息'
+      },
+      {
+        label: '样本/预测点',
+        value: `${historyCount} / ${forecastCount}`,
+        hint: '历史样本点数 / 预测点数'
+      },
+      {
+        label: '方案版本',
+        value: snapshot.advancedAnalysisPlanVersion ? `v${snapshot.advancedAnalysisPlanVersion}` : '未记录',
+        hint: meta.confidence ? `置信区间 ${meta.confidence}` : '预测方案版本与置信区间'
+      }
+    ]
+  }
   return [
     {
       label: '图表类型',
@@ -992,8 +1190,15 @@ const resultPreviewMetrics = computed(() => {
 
 const reasoningDisplaySteps = computed(() => buildReasoningDisplaySteps(detail.value))
 
+const reasoningIntroText = computed(() => (
+  shouldShowDetailSql.value
+    ? '按阶段回放模型如何理解问题、定位数据、生成 SQL 并形成结果'
+    : '按阶段回放模型如何理解需求、定位数据、执行算法并形成结果'
+))
+
 const reasoningOverviewCards = computed(() => {
   const current = detail.value || {}
+  const isAdvanced = detailIsAdvancedAnalysis.value
   return [
     {
       label: '分析目标',
@@ -1006,14 +1211,14 @@ const reasoningOverviewCards = computed(() => {
       hint: '本次生成过程中主要引用的数据表或数据源'
     },
     {
-      label: '生成策略',
-      value: current.engine || current.modelCategory || '未记录解析引擎',
+      label: isAdvanced ? '算法策略' : '生成策略',
+      value: detailParseEngineText.value,
       hint: current.aiParseResultLabel || '未记录解析结果'
     },
     {
       label: '结果产物',
       value: chartTypeLabel(current.chartType),
-      hint: current.sqlStatusLabel || '未记录 SQL 状态'
+      hint: isAdvanced ? (advancedAnalysisModelLabel(current) || '算法产物') : (current.sqlStatusLabel || '未记录 SQL 状态')
     }
   ]
 })
@@ -1720,7 +1925,8 @@ const rerun = async (row) => {
   rerunning.value = true
   try {
     const result = await rerunAdminChatHistory(row.id)
-    ElMessage.success(result.message || '复跑完成')
+    const newHistoryText = result.newHistoryId ? `，新历史 #${result.newHistoryId}` : ''
+    ElMessage.success(`${result.message || '复跑完成'}${newHistoryText}`)
     await loadList(page.value)
     if (detailVisible.value && detail.value?.id === row.id) {
       detail.value = normalizeDetail(await fetchAdminChatHistoryDetail(row.id))
@@ -2560,6 +2766,10 @@ onMounted(() => {
   display: grid;
   grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
   gap: 10px;
+}
+
+.detail-query-grid--single {
+  grid-template-columns: 1fr;
 }
 
 .detail-subpanel {

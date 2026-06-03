@@ -534,7 +534,9 @@ const renderScopeCharts = async (scope, cards) => {
     }
 
     const option =
-      card.payloadRow != null
+      card.option && typeof card.option === 'object'
+        ? card.option
+        : card.payloadRow != null
         ? buildOptionFromHistoryRow(card.payloadRow, card.chartUi || {})
         : buildChartOption(card)
     instance.setOption(option, true)
@@ -625,7 +627,7 @@ const openPreview = async (row) => {
           .map((c) => c.chartId ?? c.chart_id ?? c.CHART_ID)
           .filter((x) => x != null && String(x).trim() !== '')
           .map((x) => Number(x))
-          .filter((n) => Number.isFinite(n))
+          .filter((n) => Number.isFinite(n) && n > 0)
       )
     ]
     const payloadMap = {}

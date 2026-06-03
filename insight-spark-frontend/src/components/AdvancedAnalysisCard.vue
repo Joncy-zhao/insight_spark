@@ -255,7 +255,7 @@
     <footer class="advanced-card__actions">
       <el-button v-if="props.showSaveAction" size="small" type="primary" plain @click="$emit('save', analysis)">保存方案</el-button>
       <el-button
-        v-if="props.showPinAction && analysis.type === 'forecast'"
+        v-if="props.showPinAction"
         size="small"
         type="success"
         plain

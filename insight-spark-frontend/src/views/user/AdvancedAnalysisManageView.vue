@@ -1,46 +1,40 @@
 <template>
   <section class="advanced-manage-page">
     <header class="advanced-manage-header">
-      <div>
+      <div class="advanced-manage-header__copy">
+        <span class="module-kicker">用户端智能预测</span>
         <h1>预测与情景模拟</h1>
         <p>对话查询负责自然语言触发，这里集中管理预测方案、预警规则、预警事件和后续推送记录。</p>
       </div>
       <div class="advanced-manage-header__actions">
-        <el-button @click="goChat">进入对话触发</el-button>
-        <el-button type="primary" :loading="loading" @click="loadAll">刷新</el-button>
+        <el-button :icon="ChatLineRound" @click="goChat">进入对话触发</el-button>
+        <el-button type="primary" :icon="Refresh" :loading="loading" @click="loadAll">刷新</el-button>
       </div>
     </header>
 
     <div class="advanced-manage-metrics">
-      <article class="metric-card">
-        <span>预警规则</span>
-        <strong>{{ rules.length }}</strong>
-        <small>已保存规则总数</small>
-      </article>
-      <article class="metric-card is-green">
-        <span>启用规则</span>
-        <strong>{{ activeRuleCount }}</strong>
-        <small>离线 Agent 轮询范围</small>
-      </article>
-      <article class="metric-card is-orange">
-        <span>预警事件</span>
-        <strong>{{ events.length }}</strong>
-        <small>最近事件记录</small>
-      </article>
-      <article class="metric-card is-cyan">
-        <span>推送记录</span>
-        <strong>{{ pushLogs.length }}</strong>
-        <small>邮件/钉钉尝试记录</small>
-      </article>
-      <article class="metric-card is-purple">
-        <span>方案资产</span>
-        <strong>{{ plans.length }}</strong>
-        <small>预测/推演保存记录</small>
+      <article
+        v-for="card in summaryCards"
+        :key="card.label"
+        class="metric-card"
+        :class="`is-${card.tone}`"
+      >
+        <span class="metric-card__icon">
+          <el-icon><component :is="card.icon" /></el-icon>
+        </span>
+        <div class="metric-card__body">
+          <span>{{ card.label }}</span>
+          <strong>{{ card.value }}</strong>
+          <small>{{ card.description }}</small>
+        </div>
       </article>
     </div>
 
     <el-tabs v-model="activeTab" class="advanced-manage-tabs">
-      <el-tab-pane label="预警规则" name="rules">
+      <el-tab-pane name="rules">
+        <template #label>
+          <span class="tab-label"><span>预警规则</span><em>{{ rules.length }}</em></span>
+        </template>
         <section class="manage-panel">
           <div class="panel-head">
             <div>
@@ -48,7 +42,7 @@
               <p>支持编辑、启停、删除和手动检测；自动轮询由后端离线 Agent 执行。</p>
             </div>
           </div>
-          <el-table :data="rules" border v-loading="loading" empty-text="暂无预警规则">
+          <el-table class="manage-table" :data="paginatedRules" v-loading="loading" empty-text="暂无预警规则">
             <el-table-column prop="id" label="ID" width="80" />
             <el-table-column label="规则" min-width="220">
               <template #default="{ row }">
@@ -87,10 +81,25 @@
               </template>
             </el-table-column>
           </el-table>
+          <div class="table-pagination">
+            <span>共 {{ rules.length }} 条</span>
+            <el-pagination
+              v-model:current-page="tablePagination.rules.page"
+              v-model:page-size="tablePagination.rules.pageSize"
+              background
+              :page-sizes="pageSizeOptions"
+              :total="rules.length"
+              layout="sizes, prev, pager, next, jumper"
+              @size-change="handlePageSizeChange('rules')"
+            />
+          </div>
         </section>
       </el-tab-pane>
 
-      <el-tab-pane label="预警事件" name="events">
+      <el-tab-pane name="events">
+        <template #label>
+          <span class="tab-label"><span>预警事件</span><em>{{ events.length }}</em></span>
+        </template>
         <section class="manage-panel">
           <div class="panel-head">
             <div>
@@ -98,7 +107,7 @@
               <p>展示阈值和 Z-Score 检测生成的事件，支持确认、关闭、重开和处理备注。</p>
             </div>
           </div>
-          <el-table :data="events" border v-loading="loading" empty-text="暂无预警事件">
+          <el-table class="manage-table" :data="paginatedEvents" v-loading="loading" empty-text="暂无预警事件">
             <el-table-column prop="id" label="ID" width="80" />
             <el-table-column prop="ruleId" label="规则ID" width="90" />
             <el-table-column prop="bucketName" label="时间桶" width="130" />
@@ -154,27 +163,47 @@
               </template>
             </el-table-column>
           </el-table>
+          <div class="table-pagination">
+            <span>共 {{ events.length }} 条</span>
+            <el-pagination
+              v-model:current-page="tablePagination.events.page"
+              v-model:page-size="tablePagination.events.pageSize"
+              background
+              :page-sizes="pageSizeOptions"
+              :total="events.length"
+              layout="sizes, prev, pager, next, jumper"
+              @size-change="handlePageSizeChange('events')"
+            />
+          </div>
         </section>
       </el-tab-pane>
 
-      <el-tab-pane label="推送记录" name="push">
+      <el-tab-pane name="push">
+        <template #label>
+          <span class="tab-label"><span>推送记录</span><em>{{ pushLogs.length }}</em></span>
+        </template>
         <section class="manage-panel">
           <div class="panel-head">
             <div>
               <h2>预警推送记录</h2>
               <p>记录邮件/钉钉推送尝试、失败原因和重试结果；外部渠道未配置时不会影响预警事件生成。</p>
             </div>
-            <el-button type="primary" :loading="loading" @click="loadAll">刷新</el-button>
+            <el-button type="primary" :icon="Refresh" :loading="loading" @click="loadAll">刷新</el-button>
           </div>
           <div class="push-config-grid">
-            <article v-for="item in pushConfigList" :key="item.channel" class="push-config-card">
+            <article
+              v-for="item in pushConfigList"
+              :key="item.channel"
+              class="push-config-card"
+              :class="{ 'is-available': item.available }"
+            >
               <span>{{ pushChannelLabel(item.channel) }}</span>
               <strong>{{ item.available ? '可用' : '未配置' }}</strong>
               <small>{{ item.message }}</small>
               <em v-if="item.target">{{ item.target }}</em>
             </article>
           </div>
-          <el-table :data="pushLogs" border v-loading="loading" empty-text="暂无推送记录">
+          <el-table class="manage-table" :data="paginatedPushLogs" v-loading="loading" empty-text="暂无推送记录">
             <el-table-column prop="id" label="ID" width="80" />
             <el-table-column prop="eventId" label="事件ID" width="90" />
             <el-table-column prop="ruleId" label="规则ID" width="90" />
@@ -222,19 +251,34 @@
               </template>
             </el-table-column>
           </el-table>
+          <div class="table-pagination">
+            <span>共 {{ pushLogs.length }} 条</span>
+            <el-pagination
+              v-model:current-page="tablePagination.push.page"
+              v-model:page-size="tablePagination.push.pageSize"
+              background
+              :page-sizes="pageSizeOptions"
+              :total="pushLogs.length"
+              layout="sizes, prev, pager, next, jumper"
+              @size-change="handlePageSizeChange('push')"
+            />
+          </div>
         </section>
       </el-tab-pane>
 
-      <el-tab-pane label="预测/推演方案" name="plans">
+      <el-tab-pane name="plans">
+        <template #label>
+          <span class="tab-label"><span>预测/推演方案</span><em>{{ plans.length }}</em></span>
+        </template>
         <section class="manage-panel">
           <div class="panel-head">
             <div>
               <h2>方案资产管理</h2>
               <p>集中查看已保存的预测和 What-if 方案，支持详情查看、历史复算和删除。</p>
             </div>
-            <el-button type="primary" @click="goChat">去对话触发</el-button>
+            <el-button type="primary" :icon="ChatLineRound" @click="goChat">去对话触发</el-button>
           </div>
-          <el-table :data="plans" border v-loading="loading" empty-text="暂无预测/推演方案">
+          <el-table class="manage-table" :data="paginatedPlans" v-loading="loading" empty-text="暂无预测/推演方案">
             <el-table-column prop="id" label="ID" width="80" />
             <el-table-column label="类型" width="120">
               <template #default="{ row }">
@@ -273,6 +317,18 @@
               </template>
             </el-table-column>
           </el-table>
+          <div class="table-pagination">
+            <span>共 {{ plans.length }} 条</span>
+            <el-pagination
+              v-model:current-page="tablePagination.plans.page"
+              v-model:page-size="tablePagination.plans.pageSize"
+              background
+              :page-sizes="pageSizeOptions"
+              :total="plans.length"
+              layout="sizes, prev, pager, next, jumper"
+              @size-change="handlePageSizeChange('plans')"
+            />
+          </div>
         </section>
       </el-tab-pane>
     </el-tabs>
@@ -613,6 +669,15 @@
 <script setup>
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import {
+  Bell,
+  ChatLineRound,
+  DataAnalysis,
+  Refresh,
+  Timer,
+  TrendCharts,
+  WarningFilled
+} from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 import AdvancedAnalysisCard from '../../components/AdvancedAnalysisCard.vue'
 import {
@@ -655,6 +720,25 @@ const events = ref([])
 const pushLogs = ref([])
 const pushConfig = ref({})
 const plans = ref([])
+const pageSizeOptions = [10, 20, 50, 100]
+const tablePagination = reactive({
+  rules: {
+    page: 1,
+    pageSize: 10
+  },
+  events: {
+    page: 1,
+    pageSize: 10
+  },
+  push: {
+    page: 1,
+    pageSize: 10
+  },
+  plans: {
+    page: 1,
+    pageSize: 10
+  }
+})
 const selectedPlan = ref(null)
 const planDetailVisible = ref(false)
 const planVersionVisible = ref(false)
@@ -705,6 +789,77 @@ const editorForm = ref({
 })
 
 const activeRuleCount = computed(() => rules.value.filter(item => item.status === 'ACTIVE').length)
+
+const clampTablePage = (key, total) => {
+  const pager = tablePagination[key]
+  if (!pager) return
+  const safeTotal = Math.max(0, Number(total) || 0)
+  const safePageSize = Math.max(1, Number(pager.pageSize) || 10)
+  const maxPage = Math.max(1, Math.ceil(safeTotal / safePageSize))
+  if (pager.page > maxPage) {
+    pager.page = maxPage
+  } else if (pager.page < 1) {
+    pager.page = 1
+  }
+}
+
+const paginateRows = (rows, key) => {
+  const source = Array.isArray(rows) ? rows : []
+  const pager = tablePagination[key] || { page: 1, pageSize: 10 }
+  const page = Math.max(1, Number(pager.page) || 1)
+  const pageSize = Math.max(1, Number(pager.pageSize) || 10)
+  const start = (page - 1) * pageSize
+  return source.slice(start, start + pageSize)
+}
+
+const handlePageSizeChange = (key) => {
+  if (tablePagination[key]) {
+    tablePagination[key].page = 1
+  }
+}
+
+const paginatedRules = computed(() => paginateRows(rules.value, 'rules'))
+const paginatedEvents = computed(() => paginateRows(events.value, 'events'))
+const paginatedPushLogs = computed(() => paginateRows(pushLogs.value, 'push'))
+const paginatedPlans = computed(() => paginateRows(plans.value, 'plans'))
+
+const summaryCards = computed(() => [
+  {
+    label: '预警规则',
+    value: rules.value.length,
+    description: '已保存规则总数',
+    icon: DataAnalysis,
+    tone: 'blue'
+  },
+  {
+    label: '启用规则',
+    value: activeRuleCount.value,
+    description: '离线 Agent 轮询范围',
+    icon: Timer,
+    tone: 'green'
+  },
+  {
+    label: '预警事件',
+    value: events.value.length,
+    description: '最近事件记录',
+    icon: WarningFilled,
+    tone: 'orange'
+  },
+  {
+    label: '推送记录',
+    value: pushLogs.value.length,
+    description: '邮件/钉钉尝试记录',
+    icon: Bell,
+    tone: 'cyan'
+  },
+  {
+    label: '方案资产',
+    value: plans.value.length,
+    description: '预测/推演保存记录',
+    icon: TrendCharts,
+    tone: 'purple'
+  }
+])
 
 const alertExplanation = computed(() => {
   const value = eventSnapshotTarget.value?.llmExplanation
@@ -1737,6 +1892,11 @@ watch(eventSnapshotVisible, (visible) => {
   }
 })
 
+watch(() => rules.value.length, total => clampTablePage('rules', total))
+watch(() => events.value.length, total => clampTablePage('events', total))
+watch(() => pushLogs.value.length, total => clampTablePage('push', total))
+watch(() => plans.value.length, total => clampTablePage('plans', total))
+
 onMounted(loadAll)
 
 onBeforeUnmount(() => {
@@ -2084,6 +2244,554 @@ onBeforeUnmount(() => {
   .alert-explain-panel__content,
   .alert-snapshot__summary {
     grid-template-columns: 1fr;
+  }
+}
+
+.advanced-manage-page {
+  gap: 14px;
+  color: #172033;
+}
+
+.advanced-manage-header {
+  min-height: 104px;
+  padding: 18px 20px;
+  border: 1px solid #dce5f2;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 12px 28px rgba(15, 35, 71, 0.06);
+}
+
+.advanced-manage-header__copy {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.module-kicker {
+  width: fit-content;
+  padding: 3px 9px;
+  border: 1px solid #dbeafe;
+  border-radius: 999px;
+  background: #f8fbff;
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.advanced-manage-header h1 {
+  color: #0f2347;
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.advanced-manage-header p {
+  max-width: 780px;
+  margin-top: 0;
+  color: #62728a;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.advanced-manage-header__actions {
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.advanced-manage-header__actions :deep(.el-button),
+.panel-head :deep(.el-button) {
+  min-height: 34px;
+  border-radius: 6px;
+  font-weight: 700;
+}
+
+.advanced-manage-header__actions :deep(.el-button--primary),
+.panel-head :deep(.el-button--primary) {
+  background: #2563eb;
+  border-color: #2563eb;
+  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.18);
+}
+
+.advanced-manage-metrics {
+  grid-template-columns: repeat(5, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.metric-card {
+  min-width: 0;
+  min-height: 86px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid #dce5f2;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #ffffff 0%, #f7faff 100%);
+  box-shadow: 0 8px 20px rgba(15, 35, 71, 0.04);
+}
+
+.metric-card.is-green,
+.metric-card.is-orange,
+.metric-card.is-cyan,
+.metric-card.is-purple {
+  border-color: #dce5f2;
+  background: linear-gradient(180deg, #ffffff 0%, #f7faff 100%);
+}
+
+.metric-card .metric-card__icon {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  color: #2563eb;
+  font-size: 22px;
+  background: #edf4ff;
+}
+
+.metric-card.is-green .metric-card__icon {
+  color: #16a34a;
+  background: #ecfdf3;
+}
+
+.metric-card.is-orange .metric-card__icon {
+  color: #f97316;
+  background: #fff7ed;
+}
+
+.metric-card.is-cyan .metric-card__icon {
+  color: #0891b2;
+  background: #ecfeff;
+}
+
+.metric-card.is-purple .metric-card__icon {
+  color: #7c3aed;
+  background: #f5f3ff;
+}
+
+.metric-card__body {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.metric-card__body span {
+  color: #62728a;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.metric-card__body strong {
+  color: #0f2347;
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 1.05;
+}
+
+.metric-card__body small {
+  overflow: hidden;
+  color: #7a8799;
+  font-size: 12px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.advanced-manage-tabs {
+  padding: 0 16px 16px;
+  border: 1px solid #dce5f2;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 10px 24px rgba(15, 35, 71, 0.05);
+}
+
+.advanced-manage-tabs :deep(.el-tabs__header) {
+  margin: 0;
+}
+
+.advanced-manage-tabs :deep(.el-tabs__nav-wrap) {
+  padding: 0 2px;
+}
+
+.advanced-manage-tabs :deep(.el-tabs__nav-wrap::after) {
+  height: 1px;
+  background: #e8edf5;
+}
+
+.advanced-manage-tabs :deep(.el-tabs__item) {
+  height: 50px;
+  padding: 0 18px;
+  color: #5d6d84;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.advanced-manage-tabs :deep(.el-tabs__item.is-active) {
+  color: #2563eb;
+}
+
+.advanced-manage-tabs :deep(.el-tabs__active-bar) {
+  height: 2px;
+  border-radius: 999px;
+  background: #2563eb;
+}
+
+.advanced-manage-tabs :deep(.el-tabs__content) {
+  padding-top: 14px;
+}
+
+.tab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tab-label em {
+  min-width: 22px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: #eef2f7;
+  color: #64748b;
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1;
+}
+
+.advanced-manage-tabs :deep(.el-tabs__item.is-active) .tab-label em {
+  background: #dbeafe;
+  color: #2563eb;
+}
+
+.manage-panel {
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.panel-head {
+  min-height: 46px;
+  align-items: flex-start;
+  padding: 0 2px 2px;
+}
+
+.panel-head h2 {
+  color: #0f2347;
+  font-size: 17px;
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+.panel-head p {
+  max-width: 820px;
+  margin-top: 4px;
+  color: #62728a;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.manage-table {
+  overflow: hidden;
+  border: 1px solid #e1e8f2;
+  border-radius: 8px;
+  --el-table-border-color: #e8edf5;
+  --el-table-header-bg-color: #f8fafd;
+  --el-table-row-hover-bg-color: #f6faff;
+}
+
+.manage-table :deep(.el-table__inner-wrapper::before) {
+  display: none;
+}
+
+.manage-table :deep(th.el-table__cell) {
+  background: #f8fafd !important;
+  color: #51637d;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.manage-table :deep(.el-table__cell) {
+  padding: 10px 0;
+}
+
+.manage-table :deep(.el-table__row) {
+  min-height: 54px;
+}
+
+.manage-table :deep(.el-button.is-text) {
+  min-height: 26px;
+  padding: 4px 6px;
+  border-radius: 5px;
+  font-weight: 700;
+}
+
+.table-pagination {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 2px 0;
+}
+
+.table-pagination > span {
+  flex: 0 0 auto;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.table-pagination :deep(.el-pagination) {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.table-pagination :deep(.btn-prev),
+.table-pagination :deep(.btn-next),
+.table-pagination :deep(.el-pager li) {
+  border-radius: 6px;
+}
+
+.rule-title {
+  color: #102247;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.rule-meta {
+  color: #7a8799;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.schedule-meta {
+  gap: 4px;
+  color: #51637d;
+}
+
+.schedule-meta span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.event-note {
+  color: #51637d;
+}
+
+.push-config-grid {
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.push-config-card {
+  position: relative;
+  min-height: 88px;
+  padding: 14px 16px 14px 42px;
+  border: 1px solid #e1e8f2;
+  border-radius: 8px;
+  background: #fbfdff;
+}
+
+.push-config-card::before {
+  content: '';
+  position: absolute;
+  top: 18px;
+  left: 16px;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: #94a3b8;
+  box-shadow: 0 0 0 4px #f1f5f9;
+}
+
+.push-config-card.is-available::before {
+  background: #22c55e;
+  box-shadow: 0 0 0 4px #dcfce7;
+}
+
+.push-config-card span {
+  color: #62728a;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.push-config-card strong {
+  color: #102247;
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.push-config-card small,
+.push-config-card em {
+  color: #7a8799;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.alert-snapshot__summary {
+  gap: 10px;
+}
+
+.alert-snapshot__summary > div,
+.field-mapping-panel,
+.alert-explain-panel,
+.alert-explain-panel__content > div {
+  border-color: #e1e8f2;
+  border-radius: 8px;
+  background: #fbfdff;
+}
+
+.alert-snapshot__summary strong,
+.field-mapping-panel__item strong {
+  color: #102247;
+}
+
+.alert-snapshot__chart {
+  border-color: #e1e8f2;
+}
+
+.alert-snapshot__reason {
+  border-color: #fed7aa;
+  border-radius: 8px;
+}
+
+.plan-detail__meta span {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #51637d;
+  font-weight: 700;
+}
+
+.field-mapping-panel__head {
+  color: #2563eb;
+  font-weight: 800;
+}
+
+.plan-version-panel__toolbar {
+  padding: 12px;
+  border: 1px solid #e1e8f2;
+  border-radius: 8px;
+  background: #fbfdff;
+}
+
+.plan-version-compare__col {
+  padding: 12px;
+  border: 1px solid #e1e8f2;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.plan-version-compare__col h4 {
+  color: #0f2347;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.form-grid {
+  gap: 12px 14px;
+}
+
+:deep(.el-dialog) {
+  border-radius: 10px;
+}
+
+:deep(.el-dialog__header) {
+  margin: 0;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid #edf1f7;
+}
+
+:deep(.el-dialog__title) {
+  color: #0f2347;
+  font-size: 16px;
+  font-weight: 800;
+}
+
+:deep(.el-dialog__body) {
+  padding: 16px 20px;
+}
+
+:deep(.el-dialog__footer) {
+  padding: 12px 20px 16px;
+  border-top: 1px solid #edf1f7;
+}
+
+:deep(.el-form-item__label) {
+  color: #1e2f4d;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+:deep(.el-input__wrapper),
+:deep(.el-select__wrapper),
+:deep(.el-textarea__inner) {
+  border-radius: 6px;
+  box-shadow: 0 0 0 1px #d8e1ee inset;
+}
+
+@media (max-width: 1280px) {
+  .advanced-manage-metrics {
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .advanced-manage-header {
+    align-items: stretch;
+    padding: 16px;
+  }
+
+  .advanced-manage-header__actions {
+    justify-content: flex-start;
+  }
+
+  .panel-head {
+    gap: 10px;
+  }
+
+  .push-config-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .table-pagination {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .table-pagination :deep(.el-pagination) {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 640px) {
+  .advanced-manage-tabs {
+    padding-inline: 10px;
+  }
+
+  .advanced-manage-tabs :deep(.el-tabs__item) {
+    padding: 0 10px;
+    font-size: 13px;
+  }
+
+  .metric-card {
+    min-height: 78px;
+  }
+
+  .metric-card__body small {
+    white-space: normal;
   }
 }
 </style>
