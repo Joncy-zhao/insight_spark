@@ -16,10 +16,12 @@ import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 @Service
@@ -28,6 +30,13 @@ public class ChatConversationService {
     private static final int MAX_TITLE_LENGTH = 120;
     private static final int MAX_SUMMARY_LENGTH = 2000;
     private static final int MAX_MESSAGE_LENGTH = 8000;
+    private static final int MAX_ADVANCED_SERIES_POINTS = 240;
+    private static final int MAX_ADVANCED_PARAM_SERIES_POINTS = 120;
+    private static final int MAX_ADVANCED_INSIGHTS = 20;
+    private static final int MAX_ADVANCED_EXPLANATION_ITEMS = 12;
+    private static final int MAX_ADVANCED_THINKING_LOGS = 20;
+    private static final int MAX_ADVANCED_TEXT_LENGTH = 1200;
+    private static final int MAX_ADVANCED_NESTED_LIST_ITEMS = 40;
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -150,6 +159,10 @@ public class ChatConversationService {
     }
 
     public Map<String, Object> listConversations(int page, int pageSize, String keyword, String status) {
+        return listConversations(page, pageSize, keyword, status, null);
+    }
+
+    public Map<String, Object> listConversations(int page, int pageSize, String keyword, String status, String advancedType) {
         String userId = resolveUserId();
         int safePage = Math.max(1, page);
         int safePageSize = Math.max(1, Math.min(pageSize, 50));
@@ -158,6 +171,7 @@ public class ChatConversationService {
         }
         String text = Objects.toString(keyword, "").trim();
         String normalizedStatus = normalizeConversationStatus(status);
+        String normalizedAdvancedType = normalizeAdvancedSessionType(advancedType);
         List<Object> args = new ArrayList<>();
         StringBuilder where = new StringBuilder("""
                 FROM is_chat_conversation c
@@ -173,6 +187,17 @@ public class ChatConversationService {
             args.add("%" + text + "%");
             args.add("%" + text + "%");
         }
+        if (!normalizedAdvancedType.isBlank()) {
+            where.append("""
+                     AND EXISTS (
+                       SELECT 1
+                         FROM is_chat_conversation_artifact af
+                        WHERE af.conversation_id = c.id
+                          AND af.artifact_type = ?
+                     )
+                    """);
+            args.add(normalizedAdvancedType);
+        }
         Long total = jdbcTemplate.queryForObject("SELECT COUNT(*) " + where, Long.class, args.toArray());
         List<Object> queryArgs = new ArrayList<>(args);
         queryArgs.add(safePageSize);
@@ -183,7 +208,17 @@ public class ChatConversationService {
                        c.summary, c.last_turn_id AS lastTurnId, c.status,
                        c.created_at AS createdAt, c.updated_at AS updatedAt,
                        (SELECT COUNT(*) FROM is_chat_conversation_turn t
-                         WHERE t.conversation_id = c.id AND t.role = 'USER') AS turnCount
+                         WHERE t.conversation_id = c.id AND t.role = 'USER') AS turnCount,
+                       (SELECT GROUP_CONCAT(DISTINCT a.artifact_type ORDER BY a.artifact_type SEPARATOR ',')
+                          FROM is_chat_conversation_artifact a
+                         WHERE a.conversation_id = c.id
+                           AND a.artifact_type LIKE 'ADVANCED_%') AS advancedArtifactTypes,
+                       (SELECT a.artifact_type
+                          FROM is_chat_conversation_artifact a
+                         WHERE a.conversation_id = c.id
+                           AND a.artifact_type LIKE 'ADVANCED_%'
+                         ORDER BY a.id DESC
+                         LIMIT 1) AS latestAdvancedArtifactType
                 """ + where + """
                  ORDER BY c.updated_at DESC, c.id DESC
                  LIMIT ? OFFSET ?
@@ -387,6 +422,449 @@ public class ChatConversationService {
                 Objects.toString(message, "分析失败"), "ERROR", context, "REPLY");
         updateConversationAfterTurn(conversationId, turnId, question, message);
         return Map.of("id", turnId, "turnNo", turnNo);
+    }
+
+    public Map<String, Object> recordAdvancedAnalysisResult(Map<String, Object> request) {
+        String userId = resolveUserId();
+        if (userId == null) {
+            return Map.of();
+        }
+        Map<String, Object> analysis = asMap(request == null ? null : request.get("analysis"));
+        String question = Objects.toString(request == null ? null : request.get("question"),
+                Objects.toString(analysis.get("sourceQuestion"), "")).trim();
+        String tableName = Objects.toString(request == null ? null : request.get("tableName"),
+                Objects.toString(analysis.get("tableName"), "")).trim();
+        Long conversationId = ensureConversation(toLong(request == null ? null : request.get("conversationId")), question, tableName);
+        if (conversationId == null || !isConversationOwnedByUser(conversationId, userId)) {
+            return Map.of();
+        }
+
+        String analysisType = normalizeAdvancedAnalysisType(Objects.toString(analysis.get("type"),
+                Objects.toString(request == null ? null : request.get("type"), "")));
+        String intentType = advancedIntentType(analysisType);
+        String artifactType = advancedArtifactType(analysisType);
+        String clientMessageId = Objects.toString(request == null ? null : request.get("clientMessageId"), "").trim();
+        if (!clientMessageId.isBlank()) {
+            Map<String, Object> existing = findExistingAdvancedRecord(conversationId, clientMessageId);
+            if (!existing.isEmpty()) {
+                return existing;
+            }
+        }
+        Long parentTurnId = toLong(request == null ? null : request.get("parentTurnId"));
+        Map<String, Object> llmIntent = asMap(request == null ? null : request.get("llmIntent"));
+        List<Object> thinkingLogs = asList(request == null ? null : request.get("thinkingLogs"));
+        List<Object> compactThinkingLogs = compactAdvancedThinkingLogs(thinkingLogs);
+
+        Map<String, Object> userContext = new LinkedHashMap<>();
+        userContext.put("module", "advancedAnalysis");
+        userContext.put("analysisType", analysisType);
+        userContext.put("clientMessageId", clientMessageId);
+        userContext.put("tableName", tableName);
+        userContext.put("llmIntent", compactAdvancedValue(llmIntent, MAX_ADVANCED_NESTED_LIST_ITEMS, 4));
+        int userTurnNo = nextTurnNo(conversationId);
+        Long userTurnId = insertTurn(conversationId, parentTurnId, userTurnNo, "USER", question, intentType,
+                userContext, parentTurnId == null ? "NEW" : "FOLLOWUP");
+        updateConversationAfterTurn(conversationId, userTurnId, question, null);
+        maybeRenameConversation(conversationId, userTurnNo, question, tableName);
+
+        String message = Objects.toString(request == null ? null : request.get("message"),
+                defaultAdvancedAssistantMessage(analysisType, analysis)).trim();
+        Map<String, Object> assistantContext = new LinkedHashMap<>();
+        assistantContext.put("module", "advancedAnalysis");
+        assistantContext.put("analysisType", analysisType);
+        assistantContext.put("clientMessageId", clientMessageId);
+        assistantContext.put("question", question);
+        assistantContext.put("tableName", tableName);
+        assistantContext.put("thinkingLogs", compactThinkingLogs);
+        assistantContext.put("llmIntent", compactAdvancedValue(llmIntent, MAX_ADVANCED_NESTED_LIST_ITEMS, 4));
+        assistantContext.put("planId", nestedValue(analysis, "params", "planId"));
+        assistantContext.put("ruleId", nestedValue(analysis, "params", "ruleId"));
+        assistantContext.put("eventId", nestedValue(analysis, "params", "eventId"));
+
+        int assistantTurnNo = nextTurnNo(conversationId);
+        Long assistantTurnId = insertTurn(conversationId, userTurnId, assistantTurnNo, "ASSISTANT", message,
+                intentType, assistantContext, "REPLY");
+        Long artifactId = insertArtifact(conversationId, assistantTurnId, null, artifactType,
+                buildAdvancedAnalysisArtifact(analysis, request, conversationId, userTurnId, assistantTurnId, clientMessageId, thinkingLogs),
+                null,
+                advancedChartType(analysisType),
+                "alert".equals(analysisType) ? "WARNING" : "SAFE");
+        updateConversationAfterTurn(conversationId, assistantTurnId, question, message);
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("conversationId", conversationId);
+        payload.put("userTurnId", userTurnId);
+        payload.put("assistantTurnId", assistantTurnId);
+        payload.put("artifactId", artifactId);
+        payload.put("artifactType", artifactType);
+        payload.put("recorded", assistantTurnId != null && artifactId != null);
+        return payload;
+    }
+
+    private Map<String, Object> findExistingAdvancedRecord(Long conversationId, String clientMessageId) {
+        if (conversationId == null || clientMessageId == null || clientMessageId.isBlank()) {
+            return Map.of();
+        }
+        try {
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                    SELECT a.id AS artifactId,
+                           a.artifact_type AS artifactType,
+                           a.conversation_id AS conversationId,
+                           a.turn_id AS assistantTurnId,
+                           JSON_UNQUOTE(JSON_EXTRACT(a.artifact_json, '$.userTurnId')) AS userTurnId
+                      FROM is_chat_conversation_artifact a
+                     WHERE a.conversation_id = ?
+                       AND a.artifact_type LIKE 'ADVANCED_%'
+                       AND JSON_UNQUOTE(JSON_EXTRACT(a.artifact_json, '$.clientMessageId')) = ?
+                     ORDER BY a.id DESC
+                     LIMIT 1
+                    """, conversationId, clientMessageId);
+            if (rows.isEmpty()) {
+                return Map.of();
+            }
+            Map<String, Object> row = rows.get(0);
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("conversationId", toLong(row.get("conversationId")));
+            payload.put("userTurnId", toLong(row.get("userTurnId")));
+            payload.put("assistantTurnId", toLong(row.get("assistantTurnId")));
+            payload.put("artifactId", toLong(row.get("artifactId")));
+            payload.put("artifactType", Objects.toString(row.get("artifactType"), ""));
+            payload.put("recorded", true);
+            payload.put("duplicated", true);
+            return payload;
+        } catch (Exception ignored) {
+            return Map.of();
+        }
+    }
+
+    private Map<String, Object> buildAdvancedAnalysisArtifact(Map<String, Object> analysis,
+                                                              Map<String, Object> request,
+                                                              Long conversationId,
+                                                              Long userTurnId,
+                                                              Long assistantTurnId,
+                                                              String clientMessageId,
+                                                              List<Object> thinkingLogs) {
+        Map<String, Object> safeAnalysis = analysis == null ? Map.of() : analysis;
+        String analysisType = normalizeAdvancedAnalysisType(Objects.toString(safeAnalysis.get("type"),
+                Objects.toString(request == null ? null : request.get("type"), "")));
+        Map<String, Object> compactAnalysis = compactAdvancedAnalysis(safeAnalysis);
+        List<Object> compactThinkingLogs = compactAdvancedThinkingLogs(thinkingLogs);
+        Map<String, Object> storagePolicy = buildAdvancedStoragePolicy(safeAnalysis, compactAnalysis,
+                thinkingLogs, compactThinkingLogs);
+        boolean snapshotTruncated = Boolean.TRUE.equals(storagePolicy.get("truncated"));
+        if (snapshotTruncated) {
+            compactAnalysis.put("snapshotTruncated", true);
+            compactAnalysis.put("storagePolicy", storagePolicy);
+        }
+        Map<String, Object> artifact = new LinkedHashMap<>();
+        artifact.put("schemaVersion", 1);
+        artifact.put("module", "advancedAnalysis");
+        artifact.put("type", analysisType);
+        artifact.put("clientMessageId", clientMessageId);
+        artifact.put("conversationId", conversationId);
+        artifact.put("userTurnId", userTurnId);
+        artifact.put("assistantTurnId", assistantTurnId);
+        artifact.put("sourceQuestion", Objects.toString(request == null ? null : request.get("question"),
+                Objects.toString(safeAnalysis.get("sourceQuestion"), "")));
+        artifact.put("tableName", Objects.toString(request == null ? null : request.get("tableName"),
+                Objects.toString(safeAnalysis.get("tableName"), "")));
+        artifact.put("title", safeAnalysis.get("title"));
+        artifact.put("summary", safeAnalysis.get("summary"));
+        artifact.put("status", safeAnalysis.get("status"));
+        artifact.put("params", compactAnalysis.getOrDefault("params", Map.of()));
+        artifact.put("fieldMapping", compactAnalysis.getOrDefault("fieldMapping", Map.of()));
+        artifact.put("series", compactAnalysis.getOrDefault("series", List.of()));
+        artifact.put("insights", compactAnalysis.getOrDefault("insights", List.of()));
+        artifact.put("explanation", compactAnalysis.getOrDefault("explanation", Map.of()));
+        artifact.put("llmIntent", compactAdvancedValue(request == null ? Map.of() : asMap(request.get("llmIntent")),
+                MAX_ADVANCED_NESTED_LIST_ITEMS, 4));
+        artifact.put("thinkingLogs", compactThinkingLogs);
+        artifact.put("advancedAnalysis", compactAnalysis);
+        artifact.put("planId", nestedValue(safeAnalysis, "params", "planId"));
+        artifact.put("ruleId", nestedValue(safeAnalysis, "params", "ruleId"));
+        artifact.put("eventId", nestedValue(safeAnalysis, "params", "eventId"));
+        artifact.put("snapshotTruncated", snapshotTruncated);
+        artifact.put("storagePolicy", storagePolicy);
+        artifact.put("createdAtMillis", System.currentTimeMillis());
+        return artifact;
+    }
+
+    private Map<String, Object> compactAdvancedAnalysis(Map<String, Object> analysis) {
+        Map<String, Object> compact = new LinkedHashMap<>();
+        if (analysis != null) {
+            for (Map.Entry<String, Object> entry : analysis.entrySet()) {
+                String key = Objects.toString(entry.getKey(), "").trim();
+                if (key.isBlank()) {
+                    continue;
+                }
+                if ("series".equals(key)) {
+                    compact.put(key, compactAdvancedList(limitListEvenly(asList(entry.getValue()),
+                            MAX_ADVANCED_SERIES_POINTS), MAX_ADVANCED_SERIES_POINTS, false));
+                } else if ("insights".equals(key)) {
+                    compact.put(key, compactAdvancedList(asList(entry.getValue()), MAX_ADVANCED_INSIGHTS, false));
+                } else if ("explanation".equals(key)) {
+                    compact.put(key, compactAdvancedExplanation(entry.getValue()));
+                } else if ("params".equals(key)) {
+                    compact.put(key, compactAdvancedParams(entry.getValue()));
+                } else {
+                    compact.put(key, compactAdvancedValue(entry.getValue(), MAX_ADVANCED_NESTED_LIST_ITEMS, 4));
+                }
+            }
+        }
+        compact.putIfAbsent("series", List.of());
+        compact.putIfAbsent("insights", List.of());
+        compact.putIfAbsent("explanation", Map.of());
+        compact.putIfAbsent("params", Map.of());
+        return compact;
+    }
+
+    private Map<String, Object> compactAdvancedParams(Object value) {
+        Map<String, Object> params = asMap(value);
+        Map<String, Object> compact = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : params.entrySet()) {
+            String key = Objects.toString(entry.getKey(), "").trim();
+            if (key.isBlank()) {
+                continue;
+            }
+            Object rawValue = entry.getValue();
+            if (rawValue instanceof List<?> && isLargeAdvancedParamList(key)) {
+                List<Object> source = asList(rawValue);
+                List<Object> stored = compactAdvancedList(limitListEvenly(source, MAX_ADVANCED_PARAM_SERIES_POINTS),
+                        MAX_ADVANCED_PARAM_SERIES_POINTS, false);
+                compact.put(key, stored);
+                if (source.size() > stored.size()) {
+                    compact.put(key + "Truncated", true);
+                    compact.put(key + "OriginalCount", source.size());
+                    compact.put(key + "StoredCount", stored.size());
+                }
+            } else {
+                compact.put(key, compactAdvancedValue(rawValue, MAX_ADVANCED_NESTED_LIST_ITEMS, 4));
+            }
+        }
+        return compact;
+    }
+
+    private boolean isLargeAdvancedParamList(String key) {
+        String lower = Objects.toString(key, "").trim().toLowerCase(Locale.ROOT);
+        return lower.contains("series")
+                || lower.contains("rows")
+                || lower.contains("data")
+                || lower.contains("sample")
+                || lower.contains("snapshot");
+    }
+
+    private Map<String, Object> compactAdvancedExplanation(Object value) {
+        Map<String, Object> explanation = asMap(value);
+        Map<String, Object> compact = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : explanation.entrySet()) {
+            String key = Objects.toString(entry.getKey(), "").trim();
+            if (key.isBlank()) {
+                continue;
+            }
+            if (entry.getValue() instanceof List<?>) {
+                compact.put(key, compactAdvancedList(asList(entry.getValue()),
+                        MAX_ADVANCED_EXPLANATION_ITEMS, false));
+            } else {
+                compact.put(key, compactAdvancedValue(entry.getValue(), MAX_ADVANCED_NESTED_LIST_ITEMS, 3));
+            }
+        }
+        return compact;
+    }
+
+    private List<Object> compactAdvancedThinkingLogs(List<Object> thinkingLogs) {
+        return compactAdvancedList(thinkingLogs == null ? List.of() : thinkingLogs,
+                MAX_ADVANCED_THINKING_LOGS, false);
+    }
+
+    private List<Object> compactAdvancedList(List<Object> source, int maxItems, boolean evenly) {
+        List<Object> rows = source == null ? List.of() : source;
+        List<Object> limited = evenly ? limitListEvenly(rows, maxItems) : rows.stream().limit(maxItems).toList();
+        return limited.stream()
+                .map(item -> compactAdvancedValue(item, MAX_ADVANCED_NESTED_LIST_ITEMS, 4))
+                .collect(Collectors.toList());
+    }
+
+    private List<Object> limitListEvenly(List<Object> source, int maxItems) {
+        List<Object> rows = source == null ? List.of() : source;
+        if (maxItems <= 0 || rows.isEmpty()) {
+            return List.of();
+        }
+        if (rows.size() <= maxItems) {
+            return new ArrayList<>(rows);
+        }
+        if (maxItems == 1) {
+            return List.of(rows.get(rows.size() - 1));
+        }
+        Set<Integer> indices = new LinkedHashSet<>();
+        double step = (rows.size() - 1) / (double) (maxItems - 1);
+        for (int i = 0; i < maxItems; i++) {
+            int index = (int) Math.round(i * step);
+            indices.add(Math.max(0, Math.min(rows.size() - 1, index)));
+        }
+        for (int i = 0; indices.size() < maxItems && i < rows.size(); i++) {
+            indices.add(i);
+        }
+        List<Integer> sorted = new ArrayList<>(indices);
+        sorted.sort(Integer::compareTo);
+        List<Object> result = new ArrayList<>();
+        for (Integer index : sorted) {
+            result.add(rows.get(index));
+        }
+        return result;
+    }
+
+    private Object compactAdvancedValue(Object value, int listLimit, int depth) {
+        if (value == null) {
+            return null;
+        }
+        if (depth <= 0) {
+            return value instanceof Number || value instanceof Boolean
+                    ? value
+                    : safeText(Objects.toString(value, ""), MAX_ADVANCED_TEXT_LENGTH);
+        }
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> compact = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                String key = Objects.toString(entry.getKey(), "").trim();
+                if (!key.isBlank()) {
+                    compact.put(key, compactAdvancedValue(entry.getValue(), listLimit, depth - 1));
+                }
+            }
+            return compact;
+        }
+        if (value instanceof List<?> list) {
+            return list.stream()
+                    .limit(Math.max(0, listLimit))
+                    .map(item -> compactAdvancedValue(item, listLimit, depth - 1))
+                    .collect(Collectors.toList());
+        }
+        if (value instanceof String text) {
+            return safeText(text, MAX_ADVANCED_TEXT_LENGTH);
+        }
+        if (value instanceof Number || value instanceof Boolean) {
+            return value;
+        }
+        return safeText(Objects.toString(value, ""), MAX_ADVANCED_TEXT_LENGTH);
+    }
+
+    private Map<String, Object> buildAdvancedStoragePolicy(Map<String, Object> original,
+                                                           Map<String, Object> compact,
+                                                           List<Object> thinkingLogs,
+                                                           List<Object> compactThinkingLogs) {
+        int originalSeriesCount = asList(original == null ? null : original.get("series")).size();
+        int storedSeriesCount = asList(compact == null ? null : compact.get("series")).size();
+        int originalInsightCount = asList(original == null ? null : original.get("insights")).size();
+        int storedInsightCount = asList(compact == null ? null : compact.get("insights")).size();
+        int originalThinkingCount = thinkingLogs == null ? 0 : thinkingLogs.size();
+        int storedThinkingCount = compactThinkingLogs == null ? 0 : compactThinkingLogs.size();
+        boolean truncated = originalSeriesCount > storedSeriesCount
+                || originalInsightCount > storedInsightCount
+                || originalThinkingCount > storedThinkingCount
+                || hasTruncatedAdvancedParams(compact == null ? null : compact.get("params"));
+
+        Map<String, Object> policy = new LinkedHashMap<>();
+        policy.put("version", 1);
+        policy.put("maxSeriesPoints", MAX_ADVANCED_SERIES_POINTS);
+        policy.put("maxParamSeriesPoints", MAX_ADVANCED_PARAM_SERIES_POINTS);
+        policy.put("maxInsights", MAX_ADVANCED_INSIGHTS);
+        policy.put("maxExplanationItems", MAX_ADVANCED_EXPLANATION_ITEMS);
+        policy.put("maxThinkingLogs", MAX_ADVANCED_THINKING_LOGS);
+        policy.put("seriesOriginalCount", originalSeriesCount);
+        policy.put("seriesStoredCount", storedSeriesCount);
+        policy.put("insightsOriginalCount", originalInsightCount);
+        policy.put("insightsStoredCount", storedInsightCount);
+        policy.put("thinkingLogsOriginalCount", originalThinkingCount);
+        policy.put("thinkingLogsStoredCount", storedThinkingCount);
+        policy.put("truncated", truncated);
+        return policy;
+    }
+
+    private boolean hasTruncatedAdvancedParams(Object paramsValue) {
+        Map<String, Object> params = asMap(paramsValue);
+        return params.entrySet().stream()
+                .anyMatch(entry -> entry.getKey().endsWith("Truncated") && Boolean.TRUE.equals(entry.getValue()));
+    }
+
+    private String defaultAdvancedAssistantMessage(String analysisType, Map<String, Object> analysis) {
+        String title = Objects.toString(analysis == null ? null : analysis.get("title"), "").trim();
+        String label = switch (analysisType) {
+            case "whatIf" -> "What-if 推演";
+            case "alert" -> "智能预警";
+            default -> "时序预测";
+        };
+        return title.isBlank() ? label + "已生成，请在卡片中查看详情。" : label + "已生成：" + title;
+    }
+
+    private String normalizeAdvancedAnalysisType(String type) {
+        String value = Objects.toString(type, "").trim();
+        String lower = value.toLowerCase(Locale.ROOT);
+        if (lower.contains("what")) {
+            return "whatIf";
+        }
+        if (lower.contains("alert") || lower.contains("warning")) {
+            return "alert";
+        }
+        if (lower.contains("forecast") || lower.contains("predict")) {
+            return "forecast";
+        }
+        if ("whatIf".equals(value)) {
+            return "whatIf";
+        }
+        if ("alert".equals(value)) {
+            return "alert";
+        }
+        return "forecast";
+    }
+
+    private String advancedIntentType(String analysisType) {
+        return switch (analysisType) {
+            case "whatIf" -> "ADVANCED_WHAT_IF";
+            case "alert" -> "ADVANCED_ALERT";
+            default -> "ADVANCED_FORECAST";
+        };
+    }
+
+    private String advancedArtifactType(String analysisType) {
+        return switch (analysisType) {
+            case "whatIf" -> "ADVANCED_WHAT_IF";
+            case "alert" -> "ADVANCED_ALERT";
+            default -> "ADVANCED_FORECAST";
+        };
+    }
+
+    private String advancedChartType(String analysisType) {
+        return switch (analysisType) {
+            case "whatIf" -> "whatIf";
+            case "alert" -> "alert";
+            default -> "forecast";
+        };
+    }
+
+    private Object nestedValue(Map<String, Object> source, String parentKey, String childKey) {
+        if (source == null) {
+            return null;
+        }
+        Object parent = source.get(parentKey);
+        if (parent instanceof Map<?, ?> map) {
+            return map.get(childKey);
+        }
+        return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> asMap(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            return new LinkedHashMap<>((Map<String, Object>) map);
+        }
+        return new LinkedHashMap<>();
+    }
+
+    private List<Object> asList(Object value) {
+        if (value instanceof List<?> list) {
+            return new ArrayList<>(list);
+        }
+        String text = Objects.toString(value, "").trim();
+        return text.isBlank() ? List.of() : List.of(text);
     }
 
     public String buildExecutionQuestion(Long conversationId, Long currentUserTurnId, String question) {
@@ -706,7 +1184,47 @@ public class ChatConversationService {
         Map<String, Object> item = new LinkedHashMap<>(row);
         item.put("scope", parseJsonMap(row.get("scopeJson")));
         item.put("turnCount", toInt(row.get("turnCount")));
+        item.put("advancedTypes", advancedTypesFromArtifactCsv(row.get("advancedArtifactTypes")));
+        item.put("latestAdvancedType", advancedTypeFromArtifactType(row.get("latestAdvancedArtifactType")));
         return item;
+    }
+
+    private List<Map<String, Object>> advancedTypesFromArtifactCsv(Object value) {
+        String text = Objects.toString(value, "").trim();
+        if (text.isBlank()) {
+            return List.of();
+        }
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (String part : text.split(",")) {
+            String type = advancedTypeFromArtifactType(part);
+            if (type.isBlank()) {
+                continue;
+            }
+            boolean exists = result.stream().anyMatch(item -> Objects.equals(item.get("value"), type));
+            if (!exists) {
+                result.add(Map.of("value", type, "label", advancedTypeLabel(type)));
+            }
+        }
+        return result;
+    }
+
+    private String advancedTypeFromArtifactType(Object artifactType) {
+        String text = Objects.toString(artifactType, "").trim().toUpperCase(Locale.ROOT);
+        return switch (text) {
+            case "ADVANCED_WHAT_IF" -> "whatIf";
+            case "ADVANCED_ALERT" -> "alert";
+            case "ADVANCED_FORECAST" -> "forecast";
+            default -> "";
+        };
+    }
+
+    private String advancedTypeLabel(String type) {
+        return switch (type) {
+            case "whatIf" -> "What-if 推演";
+            case "alert" -> "智能预警";
+            case "forecast" -> "时序预测";
+            default -> "高级分析";
+        };
     }
 
     private Map<String, Object> buildPage(int page, int pageSize, String keyword, long total,
@@ -748,6 +1266,24 @@ public class ChatConversationService {
         String text = Objects.toString(status, "").trim().toUpperCase(Locale.ROOT);
         if ("ACTIVE".equals(text) || "ARCHIVED".equals(text) || "DELETED".equals(text) || "ALL".equals(text)) {
             return text;
+        }
+        return "";
+    }
+
+    private String normalizeAdvancedSessionType(String advancedType) {
+        String text = Objects.toString(advancedType, "").trim();
+        String lower = text.toLowerCase(Locale.ROOT);
+        if (lower.isBlank() || "all".equals(lower)) {
+            return "";
+        }
+        if ("forecast".equals(lower) || "advanced_forecast".equals(lower)) {
+            return "ADVANCED_FORECAST";
+        }
+        if ("whatif".equals(lower) || "what_if".equals(lower) || "advanced_what_if".equals(lower)) {
+            return "ADVANCED_WHAT_IF";
+        }
+        if ("alert".equals(lower) || "advanced_alert".equals(lower)) {
+            return "ADVANCED_ALERT";
         }
         return "";
     }

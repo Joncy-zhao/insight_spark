@@ -199,7 +199,7 @@
                       <span v-if="artifactIdForItem(item)" class="dge-chart-id">Artifact {{ artifactIdForItem(item) }}</span>
                       <span v-if="turnIdForItem(item)" class="dge-chart-id">Turn {{ turnIdForItem(item) }}</span>
                       <el-button
-                        v-if="chartIdForItem(item)"
+                        v-if="payloadForItem(item)"
                         type="primary"
                         link
                         size="small"
@@ -226,7 +226,7 @@
                       hide-title
                     />
                     <div v-else class="dge-chart-fallback">
-                      {{ chartIdForItem(item) ? '图表数据暂不可用' : '未关联 chart_id' }}
+                      {{ artifactIdForItem(item) ? '高级分析图表数据暂不可用' : (chartIdForItem(item) ? '图表数据暂不可用' : '未关联 chart_id') }}
                     </div>
                   </div>
                 </div>
@@ -427,7 +427,8 @@ import {
   mergeGridItemsWithComponents,
   serializeLayoutForApi,
   extractLegacyChartCards,
-  normalizeCanvasStyle
+  normalizeCanvasStyle,
+  buildAdvancedAnalysisPreviewCard
 } from '../../utils/dashboardGrid.js'
 import DashboardChart from '../../components/dashboard/DashboardChart.vue'
 import LegacyInlineChart from '../../components/dashboard/LegacyInlineChart.vue'
@@ -877,7 +878,10 @@ function chartIdForItem(item) {
   const c = componentByItemId.value.get(String(item.i))
   if (!c) return ''
   const raw = c.chartId ?? c.chart_id ?? c.CHART_ID
-  return raw != null ? String(raw) : ''
+  if (raw == null) return ''
+  const n = Number(raw)
+  if (Number.isFinite(n) && n <= 0) return ''
+  return String(raw)
 }
 
 function artifactIdForItem(item) {
@@ -895,9 +899,39 @@ function turnIdForItem(item) {
 }
 
 function payloadForItem(item) {
+  const advancedPayload = advancedPayloadForItem(item)
+  if (advancedPayload) return advancedPayload
   const cid = chartIdForItem(item)
   if (!cid) return null
   return chartPayloadById.value[cid] || null
+}
+
+function advancedPayloadForItem(item) {
+  const c = componentByItemId.value.get(String(item?.i))
+  if (!c) return null
+  const card = buildAdvancedAnalysisPreviewCard(c, item, 0, `dge-${board.value?.id || 'board'}`)
+  if (!card) return null
+  const analysis = card.advancedAnalysis || {}
+  return {
+    id: Number(c.chartId ?? c.chart_id ?? c.CHART_ID ?? 0) || 0,
+    artifactId: c.artifactId ?? c.artifact_id ?? c.ARTIFACT_ID ?? null,
+    turnId: c.turnId ?? c.turn_id ?? c.TURN_ID ?? null,
+    chartType: card.chartType,
+    queryText: card.title,
+    queryTableName: card.tableName,
+    generatedSql: '',
+    option: card.option,
+    chartSnapshot: {
+      module: 'advancedAnalysis',
+      type: analysis.type || '',
+      message: card.title,
+      chartType: card.chartType,
+      tableName: card.tableName,
+      fieldMapping: analysis.fieldMapping || {},
+      data: card.data,
+      advancedAnalysis: analysis
+    }
+  }
 }
 
 function compactReadableTitle(value, max = 80) {
@@ -1120,6 +1154,8 @@ async function loadPinnedSummariesByScanningDashboards() {
             if (cid == null) continue
             const key = String(cid).trim()
             if (!key) continue
+            const numericId = Number(key)
+            if (Number.isFinite(numericId) && numericId <= 0) continue
             if (!byChart.has(key)) byChart.set(key, new Set())
             byChart.get(key).add(bname)
           }
@@ -1148,13 +1184,13 @@ async function loadChartPayloads() {
     const raw = c.chartId ?? c.chart_id ?? c.CHART_ID
     if (raw == null) continue
     const n = Number(raw)
-    if (Number.isFinite(n)) idSet.add(n)
+    if (Number.isFinite(n) && n > 0) idSet.add(n)
   }
   for (const s of allPinnedSummaries.value || []) {
     const raw = s.chart_id ?? s.chartId ?? s.CHART_ID ?? s.chartid
     if (raw == null) continue
     const n = Number(raw)
-    if (Number.isFinite(n)) idSet.add(n)
+    if (Number.isFinite(n) && n > 0) idSet.add(n)
   }
   const unique = [...idSet]
   if (!unique.length) {

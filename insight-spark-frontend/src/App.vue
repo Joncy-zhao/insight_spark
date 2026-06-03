@@ -68,9 +68,10 @@
         <AdminWorkbenchView v-if="activeModule === 'adminWorkbench'" />
         <AdminDashboardView v-if="activeModule === 'adminDashboard'" />
         <StackCSystemConfigView v-if="activeModule === 'stackCConfig'" />
+        <AiChartRuleConfigView v-if="activeModule === 'aiChartRules'" />
         <PerformanceGovernanceView v-if="activeModule === 'performanceGovernance'" />
         <PlaceholderView
-            v-if="!['upload', 'chat', 'audit', 'adminChatHistory', 'adminChatQueryLab', 'permission', 'permissionAdmin', 'datasource', 'diagnosis', 'advancedAnalysis', 'knowledgeGraph', 'workbench', 'dashboard', 'collaboration', 'adminWorkbench', 'adminDashboard', 'stackCConfig', 'performanceGovernance'].includes(activeModule)"
+            v-if="!['upload', 'chat', 'audit', 'adminChatHistory', 'adminChatQueryLab', 'permission', 'permissionAdmin', 'datasource', 'diagnosis', 'advancedAnalysis', 'knowledgeGraph', 'workbench', 'dashboard', 'collaboration', 'adminWorkbench', 'adminDashboard', 'stackCConfig', 'aiChartRules', 'performanceGovernance'].includes(activeModule)"
         />
       </el-main>
     </el-container>
@@ -156,6 +157,7 @@ import SqlAuditView from './views/admin/SqlAuditView.vue'
 import AdminChatHistoryView from './views/admin/AdminChatHistoryView.vue'
 import AdminChatQueryLabView from './views/admin/AdminChatQueryLabView.vue'
 import StackCSystemConfigView from './views/admin/StackCSystemConfigView.vue'
+import AiChartRuleConfigView from './views/admin/AiChartRuleConfigView.vue'
 import PerformanceGovernanceView from './views/admin/PerformanceGovernanceView.vue'
 import AdminWorkbenchView from './views/admin/AdminWorkbenchView.vue'
 import AdminDashboardView from './views/admin/AdminDashboardView.vue'
@@ -190,6 +192,7 @@ const moduleIconMap = {
   adminChatHistory: Monitor,
   adminChatQueryLab: SetUp,
   stackCConfig: Setting,
+  aiChartRules: DataAnalysis,
   performanceGovernance: Cpu,
   default: Grid
 }
@@ -375,6 +378,7 @@ const activeChatSessionId = ref(null)
 const chatSessionLoading = ref(false)
 const chatSessionKeyword = ref('')
 const chatSessionStatus = ref('ACTIVE')
+const chatSessionAdvancedType = ref('ALL')
 const activeBranchParentTurnId = ref(null)
 const activeBranchParentTurnMeta = ref(null)
 const diagnosisProgress = ref({ percentage: 0, step: '待开始', logs: [] })
@@ -451,7 +455,7 @@ const visibleMenuGroups = computed(() => {
       .filter(group => group.modules.length)
 })
 const isPermissionModule = computed(() => activeModule.value === 'permission' || activeModule.value === 'permissionAdmin')
-const isAdminModule = computed(() => ['datasource', 'permissionAdmin', 'knowledgeGraph', 'audit', 'adminChatHistory', 'adminChatQueryLab', 'stackCConfig', 'adminWorkbench', 'adminDashboard', 'performanceGovernance'].includes(activeModule.value))
+const isAdminModule = computed(() => ['datasource', 'permissionAdmin', 'knowledgeGraph', 'audit', 'adminChatHistory', 'adminChatQueryLab', 'stackCConfig', 'aiChartRules', 'adminWorkbench', 'adminDashboard', 'performanceGovernance'].includes(activeModule.value))
 const isAdminUser = computed(() => currentUser.value?.role === 'ADMIN')
 const portalLabel = computed(() => isAdminUser.value ? '管理员门户' : '用户门户')
 const homeModuleKey = computed(() => isAdminUser.value ? 'adminWorkbench' : 'workbench')
@@ -1113,6 +1117,47 @@ const buildAnalysisFromTurn = (turn, chartArtifact, sqlArtifact, fallbackMessage
   }
 }
 
+const isAdvancedAnalysisArtifact = (artifact) =>
+  String(artifact?.artifactType || '').toUpperCase().startsWith('ADVANCED_')
+
+const normalizeAdvancedAnalysisHistoryType = (type) => {
+  const value = String(type || '').trim()
+  const lower = value.toLowerCase()
+  if (lower.includes('what')) return 'whatIf'
+  if (lower.includes('alert')) return 'alert'
+  return 'forecast'
+}
+
+const buildAdvancedAnalysisFromTurn = (turn, advancedArtifact) => {
+  const snapshot = normalizeChartArtifactSnapshot(advancedArtifact)
+  if (!snapshot || typeof snapshot !== 'object') return null
+  const rawAnalysis = snapshot.advancedAnalysis && typeof snapshot.advancedAnalysis === 'object'
+    ? snapshot.advancedAnalysis
+    : snapshot
+  const type = normalizeAdvancedAnalysisHistoryType(rawAnalysis.type || snapshot.type || advancedArtifact?.artifactType)
+  return {
+    ...rawAnalysis,
+    id: rawAnalysis.id || `advanced-history-${advancedArtifact?.id || turn?.id || Date.now()}`,
+    type,
+    title: rawAnalysis.title || snapshot.title || String(turn?.messageText || '高级分析记录'),
+    summary: rawAnalysis.summary || snapshot.summary || String(turn?.messageText || ''),
+    tableName: rawAnalysis.tableName || snapshot.tableName || '',
+    sourceQuestion: rawAnalysis.sourceQuestion || snapshot.sourceQuestion || '',
+    snapshotTruncated: Boolean(rawAnalysis.snapshotTruncated || snapshot.snapshotTruncated),
+    storagePolicy: rawAnalysis.storagePolicy || snapshot.storagePolicy || {},
+    conversationId: advancedArtifact?.conversationId == null ? null : String(advancedArtifact.conversationId),
+    assistantTurnId: turn?.id == null ? null : String(turn.id),
+    artifactId: advancedArtifact?.id == null ? null : String(advancedArtifact.id),
+    chatRecord: {
+      conversationId: advancedArtifact?.conversationId,
+      assistantTurnId: turn?.id,
+      artifactId: advancedArtifact?.id,
+      artifactType: advancedArtifact?.artifactType,
+      recorded: true
+    }
+  }
+}
+
 const restoreAnalysisFromMessage = (message, options = {}) => {
   const analysis = message?.analysisSnapshot
   if (!analysis || !Array.isArray(analysis.data) || !analysis.data.length) return false
@@ -1300,12 +1345,27 @@ const clearActiveBranchParent = () => {
   activeBranchParentTurnMeta.value = null
 }
 
+const normalizeChatSessionSummary = (summary) =>
+  String(summary || '')
+    .replace(/\r?\n+/g, ' · ')
+    .replace(/\s+/g, ' ')
+    .replace(/最近问题[:：]\s*/g, '问：')
+    .replace(/最近回答[:：]\s*/g, '答：')
+    .trim()
+
 const normalizeChatSessionItem = (item) => ({
   id: String(item?.id || ''),
   title: String(item?.title || '新对话').trim(),
-  summary: String(item?.summary || '').trim(),
+  summary: normalizeChatSessionSummary(item?.summary),
   tableName: String(item?.scope?.tableName || item?.tableName || '').trim(),
   status: String(item?.status || 'ACTIVE').trim().toUpperCase(),
+  advancedTypes: Array.isArray(item?.advancedTypes)
+    ? item.advancedTypes.map(type => ({
+      value: String(type?.value || type || '').trim(),
+      label: String(type?.label || '').trim()
+    })).filter(type => type.value)
+    : [],
+  latestAdvancedType: String(item?.latestAdvancedType || '').trim(),
   turnCount: Number(item?.turnCount || 0),
   updatedAt: item?.updatedAt || item?.createdAt || new Date().toISOString()
 })
@@ -1314,6 +1374,12 @@ const normalizeChatSessionStatus = (status) => {
   const text = String(status || '').trim().toUpperCase()
   if (['ALL', 'ACTIVE', 'ARCHIVED'].includes(text)) return text
   return 'ACTIVE'
+}
+
+const normalizeChatSessionAdvancedType = (type) => {
+  const text = String(type || '').trim()
+  if (['forecast', 'whatIf', 'alert', 'ALL'].includes(text)) return text
+  return 'ALL'
 }
 
 const syncChatSessionListItem = (session) => {
@@ -1330,8 +1396,10 @@ const loadChatSessions = async (options = {}) => {
   }
   const nextKeyword = String(options.keyword ?? chatSessionKeyword.value ?? '').trim()
   const nextStatus = normalizeChatSessionStatus(options.status ?? chatSessionStatus.value)
+  const nextAdvancedType = normalizeChatSessionAdvancedType(options.advancedType ?? chatSessionAdvancedType.value)
   chatSessionKeyword.value = nextKeyword
   chatSessionStatus.value = nextStatus
+  chatSessionAdvancedType.value = nextAdvancedType
   chatSessionLoading.value = true
   try {
     const data = unwrap(await axios.get(`${API_BASE}/api/chat/sessions`, {
@@ -1339,7 +1407,8 @@ const loadChatSessions = async (options = {}) => {
         page: 1,
         pageSize: 20,
         keyword: nextKeyword || undefined,
-        status: nextStatus === 'ALL' ? undefined : nextStatus
+        status: nextStatus === 'ALL' ? undefined : nextStatus,
+        advancedType: nextAdvancedType === 'ALL' ? undefined : nextAdvancedType
       }
     }))
     chatSessions.value = Array.isArray(data?.items)
@@ -1394,6 +1463,10 @@ const selectChatSession = async (sessionId) => {
       const artifacts = Array.isArray(turn?.artifacts) ? turn.artifacts : []
       const chartArtifact = artifacts.find(item => String(item?.artifactType || '').toUpperCase() === 'CHART')
       const sqlArtifact = artifacts.find(item => String(item?.artifactType || '').toUpperCase() === 'SQL')
+      const advancedArtifact = artifacts.find(isAdvancedAnalysisArtifact)
+      const advancedAnalysis = role === 'system'
+        ? buildAdvancedAnalysisFromTurn(turn, advancedArtifact)
+        : null
       const analysisSnapshot = role === 'system'
         ? buildAnalysisFromTurn(turn, chartArtifact, sqlArtifact, String(turn?.messageText || ''))
         : null
@@ -1407,11 +1480,19 @@ const selectChatSession = async (sessionId) => {
         turnId: turn?.id == null ? null : String(turn.id),
         parentTurnId: turn?.parentTurnId == null ? null : String(turn.parentTurnId),
         turnNo: Number(turn?.turnNo || 0) || null,
-        artifactId: chartArtifact?.id == null ? null : String(chartArtifact.id),
+        artifactId: (chartArtifact || advancedArtifact)?.id == null ? null : String((chartArtifact || advancedArtifact).id),
         artifactIds: artifacts.map(item => String(item?.id || '')).filter(Boolean),
         analysisSnapshot,
+        advancedAnalysis,
         clickableChart: Boolean(analysisSnapshot),
-        sourceQuestion: analysisSnapshot?.sourceQuestion || ''
+        sourceQuestion: analysisSnapshot?.sourceQuestion || advancedAnalysis?.sourceQuestion || '',
+        thinkingLogs: advancedAnalysis
+          ? (Array.isArray(advancedArtifact?.artifact?.thinkingLogs)
+            ? advancedArtifact.artifact.thinkingLogs
+            : (Array.isArray(turn?.context?.thinkingLogs) ? turn.context.thinkingLogs : []))
+          : undefined,
+        thinkingCollapsed: true,
+        chatRecordStatus: advancedAnalysis ? 'saved' : undefined
       })
     }
     messages.value = nextMessages.length
@@ -1432,16 +1513,19 @@ const selectChatSession = async (sessionId) => {
 const searchChatSessions = async () => {
   await loadChatSessions({
     keyword: chatSessionKeyword.value,
-    status: chatSessionStatus.value
+    status: chatSessionStatus.value,
+    advancedType: chatSessionAdvancedType.value
   })
 }
 
 const resetChatSessionSearch = async () => {
   chatSessionKeyword.value = ''
   chatSessionStatus.value = 'ACTIVE'
+  chatSessionAdvancedType.value = 'ALL'
   await loadChatSessions({
     keyword: '',
-    status: 'ACTIVE'
+    status: 'ACTIVE',
+    advancedType: 'ALL'
   })
 }
 
@@ -5166,6 +5250,7 @@ provide('workbench', {
   chatSessionLoading,
   chatSessionKeyword,
   chatSessionStatus,
+  chatSessionAdvancedType,
   searchChatSessions,
   resetChatSessionSearch,
   refreshActiveChatSessionSummary,

@@ -98,6 +98,9 @@ public class ChatBiService {
     @Autowired
     private RuleBasedNl2SqlStrategy ruleBasedNl2SqlStrategy;
 
+    @Autowired
+    private AiChartRuleConfigService aiChartRuleConfigService;
+
     public Map<String, Object> executeChat(ChatQueryRequest request) {
         ChatQueryRequest safeRequest = request == null ? new ChatQueryRequest() : request;
         String question = Objects.toString(safeRequest.getQuestion(), "").trim();
@@ -364,6 +367,8 @@ public class ChatBiService {
         response.put("sourceType", officialSource ? "OFFICIAL" : "UPLOAD");
         response.put("sql", generatedSql);
         response.put("data", queryResult);
+        Map<String, Object> chartRecommendation = recommendConfiguredChart(question, fields, queryResult, chartType);
+        chartType = Objects.toString(chartRecommendation.getOrDefault("chartType", chartType), chartType);
         response.put("chartType", chartType);
         response.put("fieldMapping", fieldMapping);
         response.put("engine", engine);
@@ -387,8 +392,48 @@ public class ChatBiService {
                 + "」生成" + chartName(chartType) + "。");
 
         attachChartEncodingSpec(response, chartType, aiResult.orElse(null));
+        applyConfiguredChartRecommendation(response, chartRecommendation);
 
         return response;
+    }
+
+    private Map<String, Object> recommendConfiguredChart(String question, List<Map<String, Object>> fields,
+                                                         List<Map<String, Object>> rows, String fallbackChartType) {
+        try {
+            Map<String, Object> recommendation = new LinkedHashMap<>(
+                    aiChartRuleConfigService.recommendForChatResult(question, fields, rows));
+            recommendation.putIfAbsent("status", "CONFIGURED");
+            return recommendation;
+        } catch (Exception e) {
+            log.warn("AI chart recommendation config failed, fallback to generated chartType {}: {}",
+                    fallbackChartType, e.getMessage());
+            return Map.of(
+                    "chartType", fallbackChartType,
+                    "status", "FALLBACK",
+                    "explain", "AI chart recommendation config unavailable, using generated chart type."
+            );
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void applyConfiguredChartRecommendation(Map<String, Object> response, Map<String, Object> recommendation) {
+        if (recommendation == null || recommendation.isEmpty()) {
+            return;
+        }
+        response.put("chartRecommendation", recommendation);
+        response.put("chartRuleCode", recommendation.getOrDefault("ruleCode", ""));
+        response.put("chartRuleName", recommendation.getOrDefault("ruleName", ""));
+        response.put("chartScenarioType", recommendation.getOrDefault("scenarioType", ""));
+        response.put("chartRecommendationStatus", recommendation.getOrDefault("status", ""));
+        response.put("chartRecommendationExplain", recommendation.getOrDefault("explain", ""));
+        response.put("voiceSummary", recommendation.getOrDefault("voiceSummary", Map.of()));
+        Object template = recommendation.get("optionTemplate");
+        if (template instanceof Map<?, ?> templateMap) {
+            Map<String, Object> current = response.get("optionTemplate") instanceof Map<?, ?> currentMap
+                    ? castToObjectMap(currentMap)
+                    : Map.of();
+            response.put("optionTemplate", deepMergeMaps(current, castToObjectMap(templateMap)));
+        }
     }
 
     /**

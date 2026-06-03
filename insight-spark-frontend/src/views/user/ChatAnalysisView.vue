@@ -400,6 +400,21 @@
                 </el-tag>
               </el-descriptions-item>
               <el-descriptions-item label="审计说明">{{ lastAnalysis.riskReason }}</el-descriptions-item>
+              <el-descriptions-item v-if="lastAnalysis.chartRuleName || lastAnalysis.chartRuleCode" label="命中规则">
+                <el-tag type="primary" size="small">{{ lastAnalysis.chartRuleName || lastAnalysis.chartRuleCode }}</el-tag>
+              </el-descriptions-item>
+              <el-descriptions-item v-if="lastAnalysis.chartRuleCode" label="规则编码">
+                {{ lastAnalysis.chartRuleCode }}
+              </el-descriptions-item>
+              <el-descriptions-item v-if="lastAnalysis.chartScenarioType" label="推荐场景">
+                {{ lastAnalysis.chartScenarioType }}
+              </el-descriptions-item>
+              <el-descriptions-item v-if="lastAnalysis.chartRecommendationStatus" label="推荐状态">
+                {{ lastAnalysis.chartRecommendationStatus }}
+              </el-descriptions-item>
+              <el-descriptions-item v-if="lastAnalysis.chartRecommendationExplain" label="推荐说明" :span="2">
+                {{ lastAnalysis.chartRecommendationExplain }}
+              </el-descriptions-item>
             </el-descriptions>
 
             <el-card v-if="currentDiagnosis" class="diagnosis-preview-card" shadow="hover" style="margin: 18px 0 0 0;">

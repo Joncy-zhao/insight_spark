@@ -42,10 +42,11 @@ const title = computed(() => {
   if (custom) return custom.slice(0, 120)
   const snap = props.payload?.chartSnapshot
   const obj = typeof snap === 'object' && snap ? snap : {}
-  return String(obj.message || '').slice(0, 120) || ''
+  return String(obj.message || props.payload?.queryText || '').slice(0, 120) || ''
 })
 
 const hasData = computed(() => {
+  if (props.payload?.option && typeof props.payload.option === 'object') return true
   const snap = props.payload?.chartSnapshot
   if (typeof snap === 'object' && snap && Array.isArray(snap.data)) return snap.data.length > 0
   try {
@@ -65,7 +66,10 @@ const render = () => {
   if (!chart) {
     chart = echarts.getInstanceByDom(host.value) || echarts.init(host.value)
   }
-  chart.setOption(buildOptionFromHistoryRow(props.payload, props.chartUi || {}), true)
+  const option = props.payload?.option && typeof props.payload.option === 'object'
+    ? props.payload.option
+    : buildOptionFromHistoryRow(props.payload, props.chartUi || {})
+  chart.setOption(option, true)
   chart.resize()
 }
 

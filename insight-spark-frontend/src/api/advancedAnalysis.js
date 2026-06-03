@@ -1,10 +1,123 @@
-import { http, unwrap } from './http'
+import { API_BASE, http, unwrap } from './http'
 
 export const parseAdvancedAnalysisIntent = (payload) =>
   http.post('/api/advanced-analysis/parse', payload).then(unwrap)
 
+const readToken = () => {
+  const directToken = localStorage.getItem('token')
+  if (directToken) return directToken
+  try {
+    return JSON.parse(localStorage.getItem('insight_auth') || 'null')?.token || ''
+  } catch (error) {
+    return ''
+  }
+}
+
+const parseSseEvent = (chunk) => {
+  const lines = chunk.split('\n')
+  let eventName = 'message'
+  const dataLines = []
+  for (const line of lines) {
+    if (line.startsWith('event:')) eventName = line.slice(6).trim()
+    else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
+  }
+  const dataText = dataLines.join('\n').trim()
+  if (!dataText) return null
+  let payload
+  try {
+    payload = JSON.parse(dataText)
+  } catch (error) {
+    payload = { message: dataText }
+  }
+  return { eventName, payload }
+}
+
+const waitForThinkingPaint = () =>
+  new Promise(resolve => {
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => resolve())
+      return
+    }
+    setTimeout(resolve, 0)
+  })
+
+export const streamAdvancedAnalysisIntent = async (payload = {}, { onThinking } = {}) => {
+  const token = readToken()
+  const headers = {
+    Accept: 'text/event-stream',
+    'Content-Type': 'application/json'
+  }
+  if (token) {
+    headers.Authorization = `Bearer ${token}`
+  }
+  const response = await fetch(`${API_BASE}/api/advanced-analysis/parse-stream`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(payload),
+    cache: 'no-store'
+  })
+  if (!response.ok || !response.body) {
+    throw new Error(response.status === 401 ? '登录已失效，请重新登录' : `高级分析流式解析失败(${response.status})`)
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  let result = null
+
+  const consumeEvent = async (rawEvent) => {
+    const parsed = parseSseEvent(rawEvent)
+    if (!parsed) return
+    if (parsed.eventName === 'thinking') {
+      onThinking?.(parsed.payload)
+      await waitForThinkingPaint()
+      return
+    }
+    if (parsed.eventName === 'result') {
+      result = parsed.payload
+      return
+    }
+    if (parsed.eventName === 'error') {
+      throw new Error(parsed.payload?.message || '高级分析流式解析失败')
+    }
+  }
+
+  const parseBufferedEvents = () => {
+    const normalized = buffer.replace(/\r\n/g, '\n')
+    const chunks = normalized.split('\n\n')
+    if (chunks.length <= 1) {
+      buffer = normalized
+      return []
+    }
+    buffer = chunks.pop() || ''
+    return chunks
+  }
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const rawEvents = parseBufferedEvents()
+    for (const rawEvent of rawEvents) {
+      await consumeEvent(rawEvent)
+    }
+    if (result) return result
+  }
+
+  if (buffer.trim()) {
+    await consumeEvent(buffer.trim())
+  }
+  if (!result) {
+    throw new Error('高级分析流式解析结束，但未收到结果')
+  }
+  return result
+}
+
 export const fetchAdvancedAnalysisFieldMeta = (payload) =>
   http.post('/api/advanced-analysis/field-meta', payload).then(unwrap)
+
+export const saveAdvancedAnalysisChatRecord = (payload) =>
+  http.post('/api/advanced-analysis/chat-records', payload).then(unwrap)
 
 export const runAdvancedForecast = (payload) =>
   http.post('/api/advanced-analysis/forecast', payload).then(unwrap)

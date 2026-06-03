@@ -2,14 +2,22 @@ package com.insightspark.controller;
 
 import com.insightspark.common.ApiResponse;
 import com.insightspark.service.AdvancedAnalysisService;
+import com.insightspark.service.ChatConversationService;
 import com.insightspark.service.PythonAiService;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -24,6 +32,11 @@ public class AdvancedAnalysisController {
     @Autowired
     private AdvancedAnalysisService advancedAnalysisService;
 
+    @Autowired
+    private ChatConversationService chatConversationService;
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
     @PostMapping("/parse")
     public ApiResponse<Map<String, Object>> parseIntent(@RequestBody Map<String, Object> request) {
         String question = text(request.get("question"));
@@ -37,9 +50,116 @@ public class AdvancedAnalysisController {
         return ApiResponse.success(result);
     }
 
+    @PostMapping(value = "/parse-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public void parseIntentStream(@RequestBody Map<String, Object> request, HttpServletResponse response) throws IOException {
+        response.setContentType(MediaType.TEXT_EVENT_STREAM_VALUE);
+        response.setCharacterEncoding(StandardCharsets.UTF_8.name());
+        response.setHeader("Cache-Control", "no-cache");
+        response.setHeader("X-Accel-Buffering", "no");
+
+        PrintWriter writer = response.getWriter();
+        try {
+            String question = text(request.get("question"));
+            if (question.isBlank()) {
+                writeAdvancedSse(writer, "error", Map.of("message", "分析问题不能为空"));
+                return;
+            }
+
+            String tableName = text(request.get("tableName"));
+            Map<String, Object> context = asMap(request.get("context"));
+            writeAdvancedThinkingStep(writer, "收到指令", trimTo(question, 80));
+            writeAdvancedThinkingStep(writer, "准备上下文", tableName.isBlank()
+                    ? "未指定数据源，将结合最近一次对话上下文识别"
+                    : "数据源：" + tableName);
+
+            int fieldCount = collectionSize(context.get("fields"));
+            int timeFieldCount = collectionSize(context.get("timeFields"));
+            int numericFieldCount = collectionSize(context.get("numericFields"));
+            writeAdvancedThinkingStep(writer, "读取字段元数据",
+                    "字段 " + fieldCount + " 个，时间字段 " + timeFieldCount + " 个，数值字段 " + numericFieldCount + " 个");
+            writeAdvancedThinkingStep(writer, "调用 LLM 识别意图", "正在判断预测、What-if 推演或预警规则，并抽取指标、公式与参数");
+
+            Map<String, Object> result = pythonAiService.parseAdvancedAnalysisIntent(question, tableName, context)
+                    .orElseGet(() -> fallbackParse(question));
+            writeAdvancedThinkingStep(writer, "意图解析完成", summarizeIntentResult(result));
+            writeAdvancedSse(writer, "result", result);
+        } catch (Exception e) {
+            try {
+                writeAdvancedSse(writer, "error", Map.of("message", e.getMessage() == null ? "高级分析意图解析失败" : e.getMessage()));
+            } catch (IOException ignored) {
+                // Client has disconnected.
+            }
+        } finally {
+            writer.close();
+        }
+    }
+
     @PostMapping("/field-meta")
     public ApiResponse<Map<String, Object>> fieldMeta(@RequestBody Map<String, Object> request) {
         return ApiResponse.success(advancedAnalysisService.fieldMeta(request));
+    }
+
+    @PostMapping("/chat-records")
+    public ApiResponse<Map<String, Object>> saveChatRecord(@RequestBody Map<String, Object> request) {
+        String question = text(request == null ? null : request.get("question"));
+        if (question.isBlank()) {
+            return ApiResponse.badRequest("分析问题不能为空");
+        }
+        return ApiResponse.success(chatConversationService.recordAdvancedAnalysisResult(request == null ? Map.of() : request));
+    }
+
+    private void writeAdvancedThinkingStep(PrintWriter writer, String title, String detail) throws IOException {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("title", title);
+        payload.put("detail", detail);
+        payload.put("ts", System.currentTimeMillis());
+        writeAdvancedSse(writer, "thinking", payload);
+        pauseForAdvancedSseProgress();
+    }
+
+    private void pauseForAdvancedSseProgress() throws IOException {
+        try {
+            Thread.sleep(180);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Advanced analysis SSE progress interrupted", e);
+        }
+    }
+
+    private void writeAdvancedSse(PrintWriter writer, String eventName, Object payload) throws IOException {
+        writer.write("event: " + eventName + "\n");
+        writer.write("data: " + objectMapper.writeValueAsString(payload) + "\n\n");
+        writer.flush();
+        if (writer.checkError()) {
+            throw new IOException("SSE client disconnected");
+        }
+    }
+
+    private String summarizeIntentResult(Map<String, Object> result) {
+        String intent = text(result.get("intent"));
+        String metric = text(result.get("metric"));
+        String intentLabel = switch (intent) {
+            case "forecast" -> "时序预测";
+            case "whatIf" -> "What-if 推演";
+            case "alert" -> "智能预警";
+            default -> "未识别";
+        };
+        return metric.isBlank() ? "识别结果：" + intentLabel : "识别结果：" + intentLabel + "，指标：" + metric;
+    }
+
+    private int collectionSize(Object value) {
+        if (value instanceof Collection<?> collection) {
+            return collection.size();
+        }
+        return 0;
+    }
+
+    private String trimTo(String value, int maxLength) {
+        String text = value == null ? "" : value.trim();
+        if (text.length() <= maxLength) {
+            return text;
+        }
+        return text.substring(0, Math.max(0, maxLength - 1)) + "…";
     }
 
     @PostMapping("/forecast")

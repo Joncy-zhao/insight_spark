@@ -10,6 +10,7 @@ import org.apache.poi.ss.usermodel.Workbook;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
@@ -43,6 +44,10 @@ public class ChatQueryHistoryService {
 
     @Autowired
     private ChatBiService chatBiService;
+
+    @Autowired
+    @Lazy
+    private AdvancedAnalysisService advancedAnalysisService;
 
     @Value("${insight.chat-history.cleanup-enabled:true}")
     private boolean historyCleanupEnabled;
@@ -517,6 +522,9 @@ public class ChatQueryHistoryService {
 
     public Map<String, Object> rerunHistoryAsAdmin(Long historyId) {
         Map<String, Object> detail = getAdminHistoryDetail(historyId);
+        if (isAdvancedAnalysisSnapshot(toObjectMap(detail.get("chartSnapshot")))) {
+            return rerunAdvancedAnalysisHistoryAsAdmin(historyId, detail);
+        }
         String question = Objects.toString(detail.get("question"), "").trim();
         String tableName = Objects.toString(detail.get("queryTableName"), "").trim();
         if (question.isBlank()) {
@@ -571,6 +579,78 @@ public class ChatQueryHistoryService {
         auditPayload.put("cacheHit", result.get("cacheHit"));
         recordHistoryAdminAudit("ADMIN_RERUN", historyId, newHistoryId,
                 Objects.toString(detail.get("userId"), ""), "管理员复跑历史查询", auditPayload);
+        return response;
+    }
+
+    private Map<String, Object> rerunAdvancedAnalysisHistoryAsAdmin(Long historyId, Map<String, Object> detail) {
+        Map<String, Object> snapshot = toObjectMap(detail.get("chartSnapshot"));
+        long planId = toLong(snapshot.get("advancedAnalysisPlanId"));
+        if (planId <= 0) {
+            Map<String, Object> action = toObjectMap(snapshot.get("advancedAnalysisAction"));
+            planId = toLong(action.get("planId"));
+        }
+        if (planId <= 0) {
+            if (isForecastSnapshot(snapshot)) {
+                return rerunUnsavedForecastHistoryAsAdmin(historyId, detail);
+            }
+            throw new IllegalArgumentException("该推演/预警记录缺少高级分析方案 ID，无法按同类流程复跑");
+        }
+        Map<String, Object> rerunResult = advancedAnalysisService.recalculatePlanForAdminHistory(planId, detail);
+        Long newHistoryId = toLong(rerunResult.get("newHistoryId"));
+        if (newHistoryId != null && newHistoryId > 0) {
+            attachAdminRerunLink(newHistoryId, historyId, detail, toObjectMap(rerunResult.get("result")));
+        }
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("originHistoryId", historyId);
+        response.put("newHistoryId", newHistoryId);
+        response.put("question", detail.get("question"));
+        response.put("tableName", detail.get("queryTableName"));
+        response.put("engine", rerunResult.get("engine"));
+        response.put("chartType", rerunResult.get("chartType"));
+        response.put("riskLevel", rerunResult.getOrDefault("riskLevel", "SAFE"));
+        response.put("cacheHit", rerunResult.get("cacheHit"));
+        response.put("message", Objects.toString(rerunResult.getOrDefault("message", "高级分析复跑完成"), "高级分析复跑完成"));
+        response.put("analysisType", rerunResult.get("analysisType"));
+        response.put("planId", planId);
+        response.put("result", rerunResult.getOrDefault("result", Map.of()));
+        Map<String, Object> auditPayload = new LinkedHashMap<>();
+        auditPayload.put("originHistoryId", historyId);
+        auditPayload.put("newHistoryId", newHistoryId);
+        auditPayload.put("planId", planId);
+        auditPayload.put("analysisType", rerunResult.get("analysisType"));
+        auditPayload.put("question", detail.get("question"));
+        auditPayload.put("tableName", detail.get("queryTableName"));
+        recordHistoryAdminAudit("ADMIN_RERUN", historyId, newHistoryId,
+                Objects.toString(detail.get("userId"), ""), "管理员复跑预测与情景模拟历史", auditPayload);
+        return response;
+    }
+
+    private Map<String, Object> rerunUnsavedForecastHistoryAsAdmin(Long historyId, Map<String, Object> detail) {
+        Map<String, Object> rerunResult = advancedAnalysisService.recalculateForecastSnapshotForAdminHistory(detail);
+        Long newHistoryId = toLong(rerunResult.get("newHistoryId"));
+        if (newHistoryId != null && newHistoryId > 0) {
+            attachAdminRerunLink(newHistoryId, historyId, detail, toObjectMap(rerunResult.get("result")));
+        }
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("originHistoryId", historyId);
+        response.put("newHistoryId", newHistoryId);
+        response.put("question", detail.get("question"));
+        response.put("tableName", detail.get("queryTableName"));
+        response.put("engine", rerunResult.get("engine"));
+        response.put("chartType", rerunResult.get("chartType"));
+        response.put("riskLevel", rerunResult.getOrDefault("riskLevel", "SAFE"));
+        response.put("cacheHit", rerunResult.get("cacheHit"));
+        response.put("message", Objects.toString(rerunResult.getOrDefault("message", "预测记录复跑完成"), "预测记录复跑完成"));
+        response.put("analysisType", "forecast");
+        response.put("result", rerunResult.getOrDefault("result", Map.of()));
+        Map<String, Object> auditPayload = new LinkedHashMap<>();
+        auditPayload.put("originHistoryId", historyId);
+        auditPayload.put("newHistoryId", newHistoryId);
+        auditPayload.put("analysisType", "forecast");
+        auditPayload.put("question", detail.get("question"));
+        auditPayload.put("tableName", detail.get("queryTableName"));
+        recordHistoryAdminAudit("ADMIN_RERUN", historyId, newHistoryId,
+                Objects.toString(detail.get("userId"), ""), "管理员复跑未保存预测历史", auditPayload);
         return response;
     }
 
@@ -704,6 +784,7 @@ public class ChatQueryHistoryService {
     private Map<String, Object> mapHistoryRow(Map<String, Object> row) {
         Map<String, Object> item = new LinkedHashMap<>(row);
         Map<String, Object> snapshot = parseJsonMap(row.get("chartSnapshot"));
+        hydrateForecastSnapshotFromSavedPlan(row, snapshot);
         List<Map<String, Object>> reasoningReplaySteps = parseJsonStepList(row.get("reasoningProcess"));
         List<String> reasoningProcess = reasoningReplaySteps.isEmpty()
                 ? parseJsonStringList(row.get("reasoningProcess"))
@@ -727,16 +808,17 @@ public class ChatQueryHistoryService {
         item.put("executionTimeMs", toNullableInt(row.get("executionTimeMs")));
         item.put("isHitCache", toBooleanFlag(row.get("isHitCache")));
         item.put("sourceType", toLong(row.get("dataSourceId")) > 0 ? "OFFICIAL" : "UPLOAD");
-        item.put("conversationId", row.get("conversationId"));
-        item.put("turnNo", row.get("turnNo"));
         item.put("intentType", row.get("intentType"));
         item.put("artifactType", row.get("artifactType"));
         Map<String, Object> context = parseJsonMap(row.get("contextJson"));
         Map<String, Object> scope = parseJsonMap(row.get("scopeJson"));
+        Map<String, Object> conversationMeta = resolveHistoryConversationMeta(row, context, snapshot);
+        item.put("conversationId", conversationMeta.get("conversationId"));
+        item.put("turnNo", conversationMeta.get("turnNo"));
         item.put("context", context);
         item.put("scope", scope);
-        item.put("userTurnId", context.get("userTurnId"));
-        item.put("assistantTurnId", context.get("assistantTurnId"));
+        item.put("userTurnId", firstNonBlankValue(context.get("userTurnId"), conversationMeta.get("userTurnId")));
+        item.put("assistantTurnId", firstNonBlankValue(context.get("assistantTurnId"), conversationMeta.get("assistantTurnId")));
         item.put("summaryText", row.get("summaryText"));
         item.put("engine", Objects.toString(context.getOrDefault("engine", ""), ""));
         item.put("sqlStatus", resolveSqlStatus(item));
@@ -769,7 +851,196 @@ public class ChatQueryHistoryService {
         if (result.get("optionTemplate") != null) {
             snapshot.put("optionTemplate", result.get("optionTemplate"));
         }
+        copyAdvancedAnalysisSnapshotFields(snapshot, result);
+        attachForecastSnapshotMeta(snapshot, result);
         return snapshot;
+    }
+
+    private void copyAdvancedAnalysisSnapshotFields(Map<String, Object> snapshot, Map<String, Object> result) {
+        List<String> keys = List.of(
+                "advancedAnalysisPlanId",
+                "advancedAnalysisPlanName",
+                "advancedAnalysisPlanVersion",
+                "advancedAnalysisType",
+                "advancedAnalysisAction",
+                "forecastMeta"
+        );
+        for (String key : keys) {
+            Object value = result.get(key);
+            if (value != null) {
+                snapshot.put(key, value);
+            }
+        }
+    }
+
+    private void attachForecastSnapshotMeta(Map<String, Object> snapshot, Map<String, Object> result) {
+        if (!isForecastResultShape(result)) {
+            return;
+        }
+        snapshot.putIfAbsent("advancedAnalysisType", "forecast");
+        Map<String, Object> fieldMapping = toObjectMap(result.get("fieldMapping"));
+        Map<String, Object> params = toObjectMap(result.get("params"));
+        Map<String, Object> forecastMeta = new LinkedHashMap<>(toObjectMap(result.get("forecastMeta")));
+        Map<String, Object> algorithmParams = new LinkedHashMap<>(toObjectMap(forecastMeta.get("algorithmParams")));
+        toObjectMap(result.get("algorithmParams")).forEach(algorithmParams::putIfAbsent);
+        toObjectMap(params.get("algorithmParams")).forEach(algorithmParams::putIfAbsent);
+        putIfNotBlank(algorithmParams, "alpha", firstNonBlank(algorithmParams.get("alpha"), params.get("alpha")));
+        putIfNotBlank(algorithmParams, "beta", firstNonBlank(algorithmParams.get("beta"), params.get("beta")));
+        putIfNotBlank(algorithmParams, "gamma", firstNonBlank(algorithmParams.get("gamma"), params.get("gamma")));
+        putIfNotBlank(algorithmParams, "seasonLength", firstNonBlank(algorithmParams.get("seasonLength"), params.get("seasonLength")));
+        putIfNotBlank(forecastMeta, "algorithm",
+                firstNonBlank(forecastMeta.get("algorithm"), result.get("algorithm"), params.get("algorithm"), algorithmParams.get("algorithm"), fieldMapping.get("algorithm")));
+        putIfNotBlank(forecastMeta, "confidence",
+                firstNonBlank(forecastMeta.get("confidence"), result.get("confidence"), params.get("confidence"), result.get("confidenceLevel"), "95%"));
+        putIfNotBlank(forecastMeta, "granularity",
+                firstNonBlank(forecastMeta.get("granularity"), result.get("granularity"), params.get("granularity"), fieldMapping.get("granularity"), result.get("timeRange")));
+        putIfNotBlank(forecastMeta, "timeField",
+                firstNonBlank(forecastMeta.get("timeField"), result.get("timeField"), params.get("timeField"), fieldMapping.get("timeField")));
+        putIfNotBlank(forecastMeta, "metricField",
+                firstNonBlank(forecastMeta.get("metricField"), result.get("metricField"), params.get("metricField"), fieldMapping.get("metricField"), fieldMapping.get("metric")));
+        putIfNotBlank(forecastMeta, "filterExpression",
+                firstNonBlank(forecastMeta.get("filterExpression"), result.get("filterExpression"), params.get("filterExpression"), fieldMapping.get("filterExpression")));
+        if (!algorithmParams.isEmpty()) {
+            forecastMeta.put("algorithmParams", algorithmParams);
+        }
+        if (!forecastMeta.isEmpty()) {
+            snapshot.put("forecastMeta", forecastMeta);
+        }
+    }
+
+    private void hydrateForecastSnapshotFromSavedPlan(Map<String, Object> historyRow, Map<String, Object> snapshot) {
+        if (snapshot == null || snapshot.isEmpty()) {
+            return;
+        }
+        if (!containsForecastRows(snapshot.get("data")) && !toObjectMap(snapshot.get("forecastMeta")).isEmpty()) {
+            return;
+        }
+        if (!containsForecastRows(snapshot.get("data"))) {
+            return;
+        }
+        boolean needsHydrate = snapshot.get("advancedAnalysisPlanVersion") == null
+                || toObjectMap(toObjectMap(snapshot.get("forecastMeta")).get("algorithmParams")).isEmpty();
+        if (!needsHydrate) {
+            return;
+        }
+        String historyId = Objects.toString(historyRow.get("id"), "").trim();
+        if (historyId.isBlank()) {
+            return;
+        }
+        try {
+            List<Map<String, Object>> plans = jdbcTemplate.queryForList("""
+                    SELECT id AS planId, plan_name AS planName, plan_type AS planType, version_no AS versionNo,
+                           request_json AS requestJson, result_json AS resultJson, field_mapping_json AS fieldMappingJson
+                    FROM is_advanced_analysis_plan
+                    WHERE status <> 'DELETED'
+                      AND (user_id = ? OR ? = 'ADMIN')
+                      AND (
+                        JSON_UNQUOTE(JSON_EXTRACT(result_json, '$.queryHistoryId')) = ?
+                        OR JSON_UNQUOTE(JSON_EXTRACT(result_json, '$.chartId')) = ?
+                      )
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT 1
+                    """, resolveUserId(), AuthContext.role(), historyId, historyId);
+            if (plans.isEmpty()) {
+                return;
+            }
+            Map<String, Object> plan = plans.get(0);
+            snapshot.putIfAbsent("advancedAnalysisPlanId", plan.get("planId"));
+            snapshot.putIfAbsent("advancedAnalysisPlanName", plan.get("planName"));
+            snapshot.putIfAbsent("advancedAnalysisPlanVersion", plan.get("versionNo"));
+            snapshot.putIfAbsent("advancedAnalysisType", firstNonBlank(plan.get("planType"), "forecast"));
+            Map<String, Object> action = toObjectMap(snapshot.get("advancedAnalysisAction"));
+            if (action.isEmpty()) {
+                action = new LinkedHashMap<>();
+                action.put("type", "advanced-analysis-plan-recalculate");
+                action.put("label", "重新计算预测");
+                action.put("planId", plan.get("planId"));
+                action.put("planVersion", plan.get("versionNo"));
+                snapshot.put("advancedAnalysisAction", action);
+            }
+            Map<String, Object> result = parseJsonMap(plan.get("resultJson"));
+            Map<String, Object> request = parseJsonMap(plan.get("requestJson"));
+            Map<String, Object> fieldMapping = parseJsonMap(plan.get("fieldMappingJson"));
+            Map<String, Object> merged = new LinkedHashMap<>(result);
+            merged.put("fieldMapping", fieldMapping);
+            merged.putIfAbsent("params", toObjectMap(result.get("params")));
+            Map<String, Object> params = toObjectMap(merged.get("params"));
+            request.forEach(params::putIfAbsent);
+            merged.put("params", params);
+            attachForecastSnapshotMeta(snapshot, merged);
+        } catch (Exception ignored) {
+            // 历史详情增强失败不应影响历史记录正常展示。
+        }
+    }
+
+    private boolean isForecastResultShape(Map<String, Object> result) {
+        Map<String, Object> fieldMapping = toObjectMap(result.get("fieldMapping"));
+        String type = firstNonBlank(result.get("type"), result.get("planType"), fieldMapping.get("mappingType"));
+        if ("forecast".equalsIgnoreCase(type)) {
+            return true;
+        }
+        if (!firstNonBlank(result.get("algorithm"), result.get("algorithmParams"), result.get("confidence")).isBlank()) {
+            return true;
+        }
+        String textSignal = (Objects.toString(result.get("message"), "") + " "
+                + Objects.toString(fieldMapping.get("dimension"), "") + " "
+                + Objects.toString(fieldMapping.get("metric"), "")).toLowerCase(Locale.ROOT);
+        return containsForecastRows(result.get("data")) && textSignal.matches(".*(预测|预估|forecast|holt|prophet).*");
+    }
+
+    private boolean containsForecastRows(Object data) {
+        if (!(data instanceof List<?> rows)) {
+            return false;
+        }
+        for (Object item : rows) {
+            if (!(item instanceof Map<?, ?> raw)) {
+                continue;
+            }
+            Map<String, Object> row = toObjectMap(raw);
+            boolean hasForecastColumns = row.containsKey("history")
+                    || row.containsKey("forecast")
+                    || row.containsKey("upper")
+                    || row.containsKey("lower")
+                    || row.containsKey("phase");
+            boolean hasForecastValues = row.get("forecast") != null
+                    || row.get("upper") != null
+                    || row.get("lower") != null
+                    || "forecast".equalsIgnoreCase(Objects.toString(row.get("phase"), ""));
+            if (hasForecastColumns && hasForecastValues) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Map<String, Object> toObjectMap(Object value) {
+        if (!(value instanceof Map<?, ?> raw)) {
+            return Map.of();
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : raw.entrySet()) {
+            String key = Objects.toString(entry.getKey(), "").trim();
+            if (!key.isBlank()) {
+                result.put(key, entry.getValue());
+            }
+        }
+        return result;
+    }
+
+    private String firstNonBlank(Object... values) {
+        for (Object value : values) {
+            String text = Objects.toString(value, "").trim();
+            if (!text.isBlank()) {
+                return text;
+            }
+        }
+        return "";
+    }
+
+    private void putIfNotBlank(Map<String, Object> target, String key, String value) {
+        if (value != null && !value.isBlank()) {
+            target.put(key, value);
+        }
     }
 
     private Map<String, Object> mapAdminHistoryRow(Map<String, Object> row) {
@@ -781,8 +1052,8 @@ public class ChatQueryHistoryService {
         item.put("executionStatusLabel", historyExecutionLabel(toNullableInt(row.get("executionStatus"))));
         item.put("isHitCacheLabel", toBooleanFlag(row.get("isHitCache")) ? "命中" : "未命中");
         item.put("operatorLabel", buildUserDisplayName(row));
-        item.put("modelCategory", resolveModelCategory(Objects.toString(row.get("llmModelUsed"), "")));
-        Map<String, Object> snapshot = parseJsonMap(row.get("chartSnapshot"));
+        Map<String, Object> snapshot = toObjectMap(item.get("chartSnapshot"));
+        item.put("modelCategory", resolveAdminModelCategory(row, snapshot));
         item.put("snapshotPreviewRows", extractSnapshotPreviewRows(snapshot));
         item.put("snapshotMetrics", summarizeSnapshot(snapshot));
         return item;
@@ -1359,6 +1630,246 @@ public class ChatQueryHistoryService {
         return text;
     }
 
+    private Map<String, Object> resolveHistoryConversationMeta(Map<String, Object> row,
+                                                               Map<String, Object> context,
+                                                               Map<String, Object> snapshot) {
+        Map<String, Object> meta = new LinkedHashMap<>();
+        long historyId = toLong(row.get("id"));
+        long conversationId = toLong(row.get("conversationId"));
+        long assistantTurnId = toLong(context.get("assistantTurnId"));
+        long userTurnId = toLong(context.get("userTurnId"));
+        Integer turnNo = toNullableInt(row.get("turnNo"));
+
+        Map<String, Object> artifactMeta = resolveConversationMetaByHistoryId(historyId);
+        conversationId = firstPositive(conversationId, toLong(artifactMeta.get("conversationId")));
+        assistantTurnId = firstPositive(assistantTurnId, toLong(artifactMeta.get("assistantTurnId")));
+        userTurnId = firstPositive(userTurnId, toLong(artifactMeta.get("userTurnId")));
+        if (turnNo == null || turnNo <= 0) {
+            turnNo = toNullableInt(artifactMeta.get("turnNo"));
+        }
+
+        if (conversationId <= 0 || assistantTurnId <= 0 || turnNo == null || turnNo <= 0) {
+            Map<String, Object> planMeta = resolveConversationMetaByAdvancedPlan(historyId, snapshot);
+            conversationId = firstPositive(conversationId, toLong(planMeta.get("conversationId")));
+            assistantTurnId = firstPositive(assistantTurnId, toLong(planMeta.get("assistantTurnId")));
+            userTurnId = firstPositive(userTurnId, toLong(planMeta.get("userTurnId")));
+            if (turnNo == null || turnNo <= 0) {
+                turnNo = toNullableInt(planMeta.get("turnNo"));
+            }
+        }
+
+        if ((turnNo == null || turnNo <= 0) && conversationId > 0) {
+            Integer contextTurnNo = resolveTurnNoByContext(conversationId, Map.of(
+                    "assistantTurnId", assistantTurnId,
+                    "userTurnId", userTurnId
+            ));
+            if (contextTurnNo != null && contextTurnNo > 0) {
+                turnNo = contextTurnNo;
+            }
+        }
+
+        meta.put("conversationId", conversationId > 0 ? conversationId : null);
+        meta.put("assistantTurnId", assistantTurnId > 0 ? assistantTurnId : null);
+        meta.put("userTurnId", userTurnId > 0 ? userTurnId : null);
+        meta.put("turnNo", turnNo != null && turnNo > 0 ? turnNo : null);
+        return meta;
+    }
+
+    private Map<String, Object> resolveConversationMetaByHistoryId(long historyId) {
+        if (historyId <= 0) {
+            return Map.of();
+        }
+        try {
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                    SELECT a.conversation_id AS conversationId,
+                           a.turn_id AS assistantTurnId,
+                           JSON_UNQUOTE(JSON_EXTRACT(a.artifact_json, '$.userTurnId')) AS userTurnId,
+                           t.turn_no AS turnNo
+                      FROM is_chat_conversation_artifact a
+                      INNER JOIN is_chat_conversation_turn t ON t.id = a.turn_id
+                     WHERE a.history_id = ?
+                     ORDER BY t.turn_no DESC, t.id DESC
+                     LIMIT 1
+                    """, historyId);
+            return rows.isEmpty() ? Map.of() : rows.get(0);
+        } catch (Exception ignored) {
+            return Map.of();
+        }
+    }
+
+    private Map<String, Object> resolveConversationMetaByAdvancedPlan(long historyId, Map<String, Object> snapshot) {
+        if (historyId <= 0 && (snapshot == null || snapshot.isEmpty())) {
+            return Map.of();
+        }
+        long planId = toLong(snapshot == null ? null : snapshot.get("advancedAnalysisPlanId"));
+        if (planId <= 0 && snapshot != null) {
+            planId = toLong(toObjectMap(snapshot.get("advancedAnalysisAction")).get("planId"));
+        }
+        long artifactId = 0L;
+        try {
+            if (planId > 0) {
+                List<Map<String, Object>> planRows = jdbcTemplate.queryForList("""
+                        SELECT result_json AS resultJson, llm_json AS llmJson
+                          FROM is_advanced_analysis_plan
+                         WHERE id = ? AND status <> 'DELETED'
+                         LIMIT 1
+                        """, planId);
+                if (!planRows.isEmpty()) {
+                    Map<String, Object> result = parseJsonMap(planRows.get(0).get("resultJson"));
+                    Map<String, Object> llm = parseJsonMap(planRows.get(0).get("llmJson"));
+                    artifactId = firstPositive(
+                            toLong(firstNonBlank(result.get("artifactId"), llm.get("artifactId"))),
+                            0L
+                    );
+                }
+            }
+            if (artifactId > 0) {
+                List<Map<String, Object>> artifactRows = jdbcTemplate.queryForList("""
+                        SELECT a.conversation_id AS conversationId,
+                               a.turn_id AS assistantTurnId,
+                               JSON_UNQUOTE(JSON_EXTRACT(a.artifact_json, '$.userTurnId')) AS userTurnId,
+                               t.turn_no AS turnNo
+                          FROM is_chat_conversation_artifact a
+                          INNER JOIN is_chat_conversation_turn t ON t.id = a.turn_id
+                         WHERE a.id = ?
+                         LIMIT 1
+                        """, artifactId);
+                if (!artifactRows.isEmpty()) {
+                    return artifactRows.get(0);
+                }
+            }
+            List<Object> args = new ArrayList<>();
+            StringBuilder where = new StringBuilder(" WHERE p.status <> 'DELETED' ");
+            if (planId > 0) {
+                where.append(" AND p.id = ? ");
+                args.add(planId);
+            } else {
+                where.append("""
+                         AND (
+                           JSON_UNQUOTE(JSON_EXTRACT(p.result_json, '$.queryHistoryId')) = ?
+                           OR JSON_UNQUOTE(JSON_EXTRACT(p.result_json, '$.chartId')) = ?
+                         )
+                        """);
+                args.add(String.valueOf(historyId));
+                args.add(String.valueOf(historyId));
+            }
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                    SELECT a.conversation_id AS conversationId,
+                           a.turn_id AS assistantTurnId,
+                           JSON_UNQUOTE(JSON_EXTRACT(a.artifact_json, '$.userTurnId')) AS userTurnId,
+                           t.turn_no AS turnNo
+                      FROM is_advanced_analysis_plan p
+                      INNER JOIN is_chat_conversation_artifact a
+                        ON JSON_UNQUOTE(JSON_EXTRACT(a.artifact_json, '$.planId')) = CAST(p.id AS CHAR)
+                        OR JSON_UNQUOTE(JSON_EXTRACT(a.artifact_json, '$.advancedAnalysis.params.planId')) = CAST(p.id AS CHAR)
+                      INNER JOIN is_chat_conversation_turn t ON t.id = a.turn_id
+                    """ + where + """
+                     ORDER BY a.created_at DESC, a.id DESC
+                     LIMIT 1
+                    """, args.toArray());
+            return rows.isEmpty() ? Map.of() : rows.get(0);
+        } catch (Exception ignored) {
+            return Map.of();
+        }
+    }
+
+    private long firstPositive(long first, long second) {
+        return first > 0 ? first : Math.max(second, 0);
+    }
+
+    private Object firstNonBlankValue(Object first, Object second) {
+        String text = Objects.toString(first, "").trim();
+        return text.isBlank() ? second : first;
+    }
+
+    private Integer resolveTurnNoByHistoryId(long historyId) {
+        if (historyId <= 0) {
+            return null;
+        }
+        try {
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                    SELECT t.turn_no AS turnNo
+                      FROM is_chat_conversation_artifact a
+                      INNER JOIN is_chat_conversation_turn t ON t.id = a.turn_id
+                     WHERE a.history_id = ?
+                     ORDER BY t.turn_no DESC, t.id DESC
+                     LIMIT 1
+                    """, historyId);
+            return rows.isEmpty() ? null : toNullableInt(rows.get(0).get("turnNo"));
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private Integer resolveTurnNoByContext(long conversationId, Map<String, Object> context) {
+        if (conversationId <= 0 || context == null || context.isEmpty()) {
+            return null;
+        }
+        long assistantTurnId = toLong(context.get("assistantTurnId"));
+        long userTurnId = toLong(context.get("userTurnId"));
+        long turnId = assistantTurnId > 0 ? assistantTurnId : userTurnId;
+        if (turnId <= 0) {
+            return null;
+        }
+        try {
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                    SELECT turn_no AS turnNo
+                      FROM is_chat_conversation_turn
+                     WHERE id = ? AND conversation_id = ?
+                     LIMIT 1
+                    """, turnId, conversationId);
+            return rows.isEmpty() ? null : toNullableInt(rows.get(0).get("turnNo"));
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private String resolveAdminModelCategory(Map<String, Object> row, Map<String, Object> snapshot) {
+        if (isAdvancedAnalysisSnapshot(snapshot)) {
+            String modelCategory = resolveModelCategory(Objects.toString(row.get("llmModelUsed"), ""));
+            return "UNKNOWN".equals(modelCategory) ? "LLM" : modelCategory;
+        }
+        return resolveModelCategory(Objects.toString(row.get("llmModelUsed"), ""));
+    }
+
+    private boolean isAdvancedAnalysisSnapshot(Map<String, Object> snapshot) {
+        if (snapshot == null || snapshot.isEmpty()) {
+            return false;
+        }
+        Map<String, Object> fieldMapping = toObjectMap(snapshot.get("fieldMapping"));
+        String type = firstNonBlank(
+                snapshot.get("advancedAnalysisType"),
+                snapshot.get("type"),
+                fieldMapping.get("mappingType")
+        );
+        String normalized = type.replaceAll("[-_\\s]", "").toLowerCase(Locale.ROOT);
+        return normalized.contains("forecast")
+                || normalized.contains("whatif")
+                || normalized.contains("alert")
+                || normalized.contains("warning")
+                || normalized.contains("prewarning")
+                || !toObjectMap(snapshot.get("forecastMeta")).isEmpty()
+                || containsForecastRows(snapshot.get("data"))
+                || !toObjectMap(snapshot.get("whatIfMeta")).isEmpty()
+                || snapshot.get("scenarios") instanceof List<?>
+                || snapshot.get("variables") instanceof List<?>
+                || !toObjectMap(snapshot.get("alertMeta")).isEmpty()
+                || snapshot.containsKey("alertRule")
+                || snapshot.containsKey("ruleId");
+    }
+
+    private boolean isForecastSnapshot(Map<String, Object> snapshot) {
+        if (snapshot == null || snapshot.isEmpty()) {
+            return false;
+        }
+        Map<String, Object> fieldMapping = toObjectMap(snapshot.get("fieldMapping"));
+        String type = firstNonBlank(snapshot.get("advancedAnalysisType"), snapshot.get("type"), fieldMapping.get("mappingType"));
+        String normalized = type.replaceAll("[-_\\s]", "").toLowerCase(Locale.ROOT);
+        return normalized.contains("forecast")
+                || !toObjectMap(snapshot.get("forecastMeta")).isEmpty()
+                || containsForecastRows(snapshot.get("data"));
+    }
+
     private String resolveSqlStatus(Map<String, Object> item) {
         String sql = Objects.toString(item.get("generatedSql"), Objects.toString(item.get("sql"), "")).trim();
         Integer executionStatus = toNullableInt(item.get("executionStatus"));
@@ -1527,6 +2038,9 @@ public class ChatQueryHistoryService {
         if (!(raw instanceof List<?> list)) {
             return List.of();
         }
+        if (containsForecastRows(raw)) {
+            return extractForecastSnapshotPreviewRows(list);
+        }
         List<Map<String, Object>> rows = new ArrayList<>();
         for (Object item : list.stream().limit(6).toList()) {
             if (item instanceof Map<?, ?> map) {
@@ -1538,6 +2052,71 @@ public class ChatQueryHistoryService {
         return rows;
     }
 
+    private List<Map<String, Object>> extractForecastSnapshotPreviewRows(List<?> list) {
+        List<Map<String, Object>> historyRows = new ArrayList<>();
+        List<Map<String, Object>> forecastRows = new ArrayList<>();
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> map)) {
+                continue;
+            }
+            Map<String, Object> source = castToStringObjectMap(map);
+            boolean hasForecast = source.get("forecast") != null
+                    || source.get("upper") != null
+                    || source.get("lower") != null
+                    || "forecast".equalsIgnoreCase(Objects.toString(source.get("phase"), ""));
+            if (hasForecast) {
+                forecastRows.add(normalizeForecastSnapshotPreviewRow(source));
+            } else {
+                historyRows.add(normalizeForecastSnapshotPreviewRow(source));
+            }
+        }
+        int maxRows = 12;
+        List<Map<String, Object>> rows = new ArrayList<>();
+        int historyLimit = Math.min(historyRows.size(), Math.max(0, maxRows - Math.min(forecastRows.size(), 8)));
+        if (historyLimit > 0) {
+            rows.addAll(historyRows.subList(historyRows.size() - historyLimit, historyRows.size()));
+        }
+        if (forecastRows.size() <= maxRows - rows.size()) {
+            rows.addAll(forecastRows);
+        } else {
+            int remaining = maxRows - rows.size();
+            int head = Math.max(1, remaining / 2);
+            int tail = Math.max(0, remaining - head);
+            rows.addAll(forecastRows.subList(0, Math.min(head, forecastRows.size())));
+            if (tail > 0 && forecastRows.size() > head) {
+                rows.addAll(forecastRows.subList(Math.max(head, forecastRows.size() - tail), forecastRows.size()));
+            }
+        }
+        return rows;
+    }
+
+    private Map<String, Object> normalizeForecastSnapshotPreviewRow(Map<String, Object> row) {
+        Map<String, Object> normalized = new LinkedHashMap<>();
+        normalized.put("周期", firstNonBlank(row.get("name"), row.get("period"), row.get("dimension"), "-"));
+        normalized.put("历史值", firstNonBlank(row.get("history"),
+                "history".equalsIgnoreCase(Objects.toString(row.get("phase"), "")) ? row.get("value") : null));
+        normalized.put("预测值", firstNonBlank(row.get("forecast"),
+                "forecast".equalsIgnoreCase(Objects.toString(row.get("phase"), "")) ? row.get("value") : null));
+        normalized.put("置信下界", firstNonBlank(row.get("lower"), row.get("lowerBound")));
+        normalized.put("置信上界", firstNonBlank(row.get("upper"), row.get("upperBound")));
+        normalized.put("阶段", forecastPhaseLabel(row));
+        return normalized;
+    }
+
+    private String forecastPhaseLabel(Map<String, Object> row) {
+        String phase = Objects.toString(row.get("phase"), "").trim().toLowerCase(Locale.ROOT);
+        if ("history".equals(phase)) {
+            return "历史";
+        }
+        if ("forecast".equals(phase)) {
+            return "预测";
+        }
+        if (row.get("forecast") != null || row.get("upper") != null || row.get("lower") != null) {
+            return "预测";
+        }
+        return "历史";
+    }
+
     private Map<String, Object> summarizeSnapshot(Map<String, Object> snapshot) {
         Map<String, Object> summary = new LinkedHashMap<>();
         List<Map<String, Object>> previewRows = extractSnapshotPreviewRows(snapshot);
@@ -1546,6 +2125,9 @@ public class ChatQueryHistoryService {
         summary.put("tableName", snapshot.get("tableName"));
         summary.put("hasGraphContext", snapshot.get("graphContext") instanceof List<?> list && !list.isEmpty());
         summary.put("fieldMapping", snapshot.get("fieldMapping"));
+        summary.put("advancedAnalysisType", snapshot.get("advancedAnalysisType"));
+        summary.put("forecastMeta", snapshot.get("forecastMeta"));
+        summary.put("advancedAnalysisPlanVersion", snapshot.get("advancedAnalysisPlanVersion"));
         return summary;
     }
 

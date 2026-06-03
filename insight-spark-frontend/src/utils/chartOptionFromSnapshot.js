@@ -111,6 +111,145 @@ function snapHasEncode(snap) {
   return snap.encode && typeof snap.encode === 'object' && Object.keys(snap.encode).length > 0
 }
 
+function isForecastSnapshot(snap) {
+  const type = String(snap?.advancedAnalysisType || snap?.fieldMapping?.mappingType || '').trim()
+  if (type === 'forecast' || snap?.forecastMeta) return true
+  const rows = Array.isArray(snap?.data) ? snap.data : []
+  return rows.some(row =>
+    row && typeof row === 'object' && (
+      Object.prototype.hasOwnProperty.call(row, 'history') ||
+      Object.prototype.hasOwnProperty.call(row, 'forecast') ||
+      Object.prototype.hasOwnProperty.call(row, 'upper') ||
+      Object.prototype.hasOwnProperty.call(row, 'lower') ||
+      Object.prototype.hasOwnProperty.call(row, 'phase')
+    )
+  )
+}
+
+function forecastPointHistoryValue(row) {
+  if (!row || typeof row !== 'object') return null
+  if (row.history != null) return row.history
+  if (String(row.phase || '').toLowerCase() === 'history') return row.value ?? null
+  return null
+}
+
+function forecastPointForecastValue(row) {
+  if (!row || typeof row !== 'object') return null
+  if (row.forecast != null) return row.forecast
+  if (String(row.phase || '').toLowerCase() === 'forecast') return row.value ?? null
+  return null
+}
+
+function buildForecastOptionFromSnapshot(snap) {
+  const rows = Array.isArray(snap.data) ? snap.data : []
+  const source = rows
+    .filter(row => row && typeof row === 'object' && row.name != null)
+    .map(row => ({
+      name: String(row.name ?? ''),
+      history: forecastPointHistoryValue(row),
+      forecast: forecastPointForecastValue(row),
+      upper: row.upper ?? null,
+      lower: row.lower ?? null
+    }))
+  const values = source.flatMap(row => [row.history, row.forecast, row.upper, row.lower])
+    .map(value => Number(value))
+    .filter(value => Number.isFinite(value))
+  const valueAxisRange = buildValueAxisRange(values)
+  const useZoom = source.length > 18
+  const metricLabel = String(snap?.fieldMapping?.metric || snap?.forecastMeta?.metricField || '预测值')
+  return {
+    animation: false,
+    tooltip: { trigger: 'axis', confine: true },
+    legend: {
+      top: 2,
+      data: ['历史值', '预测值', '置信上界', '置信下界']
+    },
+    grid: {
+      left: 48,
+      right: 18,
+      top: 46,
+      bottom: useZoom ? 70 : 48,
+      containLabel: true
+    },
+    dataset: [{
+      dimensions: ['name', 'history', 'forecast', 'upper', 'lower'],
+      source
+    }],
+    xAxis: {
+      type: 'category',
+      axisLabel: {
+        interval: 0,
+        rotate: source.length > 8 ? 38 : 20,
+        hideOverlap: true,
+        fontSize: 11,
+        formatter: (value) => {
+          const text = String(value ?? '')
+          return text.length > 14 ? `${text.slice(0, 14)}…` : text
+        }
+      }
+    },
+    yAxis: {
+      type: 'value',
+      name: metricLabel,
+      min: valueAxisRange.min,
+      max: valueAxisRange.max,
+      splitLine: { lineStyle: { color: '#eef2f7' } },
+      axisLabel: {
+        fontSize: 11,
+        formatter: (value) => {
+          const n = Number(value)
+          if (!Number.isFinite(n)) return value
+          if (Math.abs(n) >= 10000) return `${(n / 10000).toFixed(1)}w`
+          return `${n}`
+        }
+      }
+    },
+    series: [
+      {
+        name: '历史值',
+        type: 'line',
+        encode: { x: 'name', y: 'history' },
+        showSymbol: false,
+        connectNulls: false,
+        lineStyle: { color: '#2563eb', width: 2 },
+        itemStyle: { color: '#2563eb' }
+      },
+      {
+        name: '预测值',
+        type: 'line',
+        encode: { x: 'name', y: 'forecast' },
+        showSymbol: true,
+        symbolSize: 6,
+        connectNulls: false,
+        lineStyle: { color: '#16a34a', width: 2, type: 'dashed' },
+        itemStyle: { color: '#16a34a' }
+      },
+      {
+        name: '置信上界',
+        type: 'line',
+        encode: { x: 'name', y: 'upper' },
+        showSymbol: false,
+        connectNulls: false,
+        lineStyle: { color: '#5b7cda', width: 1 }
+      },
+      {
+        name: '置信下界',
+        type: 'line',
+        encode: { x: 'name', y: 'lower' },
+        showSymbol: false,
+        connectNulls: false,
+        lineStyle: { color: '#b5d334', width: 1 }
+      }
+    ],
+    dataZoom: useZoom
+      ? [
+          { type: 'slider', show: true, xAxisIndex: 0, bottom: 8, height: 22, start: 0, end: 100 },
+          { type: 'inside', xAxisIndex: 0, start: 0, end: 100 }
+        ]
+      : undefined
+  }
+}
+
 function buildDatasetFromSnapshot(snap) {
   const dims =
     Array.isArray(snap.dimensions) && snap.dimensions.length > 0
@@ -491,6 +630,10 @@ export function buildOptionFromHistoryRow(row, ui = {}) {
   const hasItemOverrides = Object.keys(itemOv).length > 0
   const template =
     snap.optionTemplate && typeof snap.optionTemplate === 'object' ? snap.optionTemplate : null
+
+  if (isForecastSnapshot(snap)) {
+    return buildForecastOptionFromSnapshot(snap)
+  }
 
   let built
   if (snapHasEncode(snap) && !hasItemOverrides) {

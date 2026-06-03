@@ -40,6 +40,9 @@ insight:
     host: localhost
     port: 6379
     database: 6
+  advanced-analysis:
+    forecast-cache-enabled: true
+    forecast-cache-ttl-seconds: 1800
   advanced-alert:
     agent-cron: "0 */15 * * * *"
 
