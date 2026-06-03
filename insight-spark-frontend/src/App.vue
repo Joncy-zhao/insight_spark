@@ -38,24 +38,10 @@
           </button>
           <div class="topbar-divider" aria-hidden="true"></div>
           <button class="home-crumb" type="button" @click="goHome">
-            <el-icon><House /></el-icon>
             <span>首页</span>
           </button>
-          <div
-              v-for="tab in orderedNavigationTabs"
-              :key="tab.key"
-              class="page-tab"
-              :class="{ 'is-active': tab.key === activeModule }"
-              role="button"
-              tabindex="0"
-              @click="activeModule = tab.key"
-              @keydown.enter="activeModule = tab.key"
-          >
-            <span>{{ tab.order }}. {{ tab.title }}</span>
-            <button class="tab-close" type="button" aria-label="关闭页面" @click.stop="closeTab(tab.key)">
-              <el-icon><Close /></el-icon>
-            </button>
-          </div>
+          <span v-if="!isHomeModule(activeModule)" class="breadcrumb-separator">/</span>
+          <span v-if="!isHomeModule(activeModule)" class="current-crumb">{{ moduleTitle }}</span>
         </div>
         <div class="topbar-actions">
           <el-tag :type="currentUser?.role === 'ADMIN' ? 'warning' : 'success'">
@@ -5509,10 +5495,13 @@ provide('workbench', {
 }
 
 .sidebar-toggle:hover,
-.home-crumb:hover,
 .tab-close:hover {
   color: #2f7cf6;
   background: #f5f8ff;
+}
+
+.home-crumb:hover {
+  color: #2f7cf6;
 }
 
 .hamburger-icon,
@@ -5570,13 +5559,30 @@ provide('workbench', {
 }
 
 .home-crumb {
-  height: 32px;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 10px;
-  border-radius: 4px;
+  padding: 0;
+  color: #53627a;
   font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.8);
+  white-space: nowrap;
+}
+
+.breadcrumb-separator {
+  margin: 0 14px;
+  color: #c8d0dc;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.current-crumb {
+  color: #344258;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.75);
   white-space: nowrap;
 }
 
