@@ -247,6 +247,54 @@ function parseMaybeJson(raw) {
   }
 }
 
+function compactText(value, max = 160) {
+  const text = String(value || '').trim()
+  if (!text) return ''
+  return text.length > max ? `${text.slice(0, max)}...` : text
+}
+
+function buildChartSourceMeta(payload = {}, snapshot = {}, item = {}) {
+  const ruleName = compactText(snapshot.chartRuleName || payload.chartRuleName)
+  const ruleCode = compactText(snapshot.chartRuleCode || payload.chartRuleCode)
+  const scenarioType = compactText(snapshot.chartScenarioType || payload.chartScenarioType)
+  const explain = compactText(snapshot.chartRecommendationExplain || payload.chartRecommendationExplain, 220)
+  const hasRule = Boolean(ruleName || ruleCode || scenarioType)
+  if (hasRule) {
+    return {
+      sourceType: 'AI_RULE_SNAPSHOT',
+      sourceLabel: 'AI 推荐规则',
+      snapshotLabel: '历史快照',
+      ruleName,
+      ruleCode,
+      scenarioType,
+      explain,
+      detail: [ruleName || ruleCode, scenarioType].filter(Boolean).join(' · ')
+    }
+  }
+  if (snapshot && Object.keys(snapshot).length) {
+    return {
+      sourceType: 'HISTORY_SNAPSHOT',
+      sourceLabel: '历史快照',
+      snapshotLabel: '历史快照',
+      ruleName: '',
+      ruleCode: '',
+      scenarioType: '',
+      explain: '',
+      detail: compactText(snapshot.message || payload.queryText || item.title || '')
+    }
+  }
+  return {
+    sourceType: 'MANUAL',
+    sourceLabel: '手动配置',
+    snapshotLabel: '',
+    ruleName: '',
+    ruleCode: '',
+    scenarioType: '',
+    explain: '',
+    detail: compactText(item.title || '')
+  }
+}
+
 function toNumber(value) {
   const n = Number(value)
   return Number.isFinite(n) ? n : 0
@@ -398,21 +446,27 @@ export function buildAdvancedAnalysisPreviewCard(comp, item, index, scope) {
     String(item?.title || '').trim() ||
     String(rawAnalysis?.title || artifact?.title || '').trim() ||
     (type === 'whatIf' ? 'What-if 推演' : type === 'alert' ? '智能预警' : '时序预测')
-  return {
-    _previewKind: 'advancedAnalysis',
+    return {
+      _previewKind: 'advancedAnalysis',
     _renderKey: `${scope}-advanced-${String(comp?.id || comp?.componentId || index)}-${index}`,
     cardId: String(comp?.id || comp?.componentId || ''),
     title,
     chartType: type === 'whatIf' ? 'bar' : 'line',
     tableName: String(rawAnalysis?.tableName || artifact?.tableName || ''),
     sql: '',
-    data: rows.map(row => ({
-      name: String(row?.name || row?.label || ''),
-      value: toNumber(row?.forecast ?? row?.value ?? row?.history)
-    })),
-    advancedAnalysis: rawAnalysis,
-    option: buildAdvancedAnalysisOption(rawAnalysis),
-    chartUi: chartUiFromGridItem(item)
+      data: rows.map(row => ({
+        name: String(row?.name || row?.label || ''),
+        value: toNumber(row?.forecast ?? row?.value ?? row?.history)
+      })),
+      sourceMeta: {
+        sourceType: 'ADVANCED_ANALYSIS',
+        sourceLabel: '高级分析快照',
+        snapshotLabel: '历史快照',
+        detail: type === 'whatIf' ? 'What-if 推演' : type === 'alert' ? '智能预警' : '时序预测'
+      },
+      advancedAnalysis: rawAnalysis,
+      option: buildAdvancedAnalysisOption(rawAnalysis),
+      chartUi: chartUiFromGridItem(item)
   }
 }
 
@@ -472,6 +526,7 @@ export function buildUnifiedPreviewCards(layoutJson, components, chartPayloadByI
       tableName: String(snap.tableName || payload.queryTableName || ''),
       sql: String(snap.sql || payload.generatedSql || ''),
       payloadRow: payload,
+      sourceMeta: buildChartSourceMeta(payload, snap, item),
       chartUi: chartUiFromGridItem(item)
     })
   })

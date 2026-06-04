@@ -31,6 +31,10 @@ public class ApiResponse<T> {
         return new ApiResponse<>(400, message, null);
     }
 
+    public static <T> ApiResponse<T> forbidden(String message) {
+        return new ApiResponse<>(403, message, null);
+    }
+
     public int getCode() {
         return code;
     }

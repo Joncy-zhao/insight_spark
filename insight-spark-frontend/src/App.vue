@@ -170,6 +170,12 @@ import AuthView from './views/AuthView.vue'
 import { authToken, currentUser, isAuthenticated, clearSession, restoreSessionHeader } from './store/session'
 import { logout } from './api/auth'
 import { useVoiceInteraction } from './composables/useVoiceInteraction'
+import {
+  applyDynamicInteractionDefaults,
+  applyOptionTemplateDefaults,
+  buildForecastChartOption,
+  hasForecastSeriesRows
+} from './utils/chartOptionFromSnapshot'
 
 const API_BASE = 'http://localhost:8080'
 const LAST_SELECTED_TABLE_KEY = 'insight:lastSelectedTableName'
@@ -467,7 +473,9 @@ const officialQueryTables = computed(() => tables.value.filter(item => String(it
 const chartTypeLabel = computed(() => {
   if (currentChartType.value === 'bar') return '柱状图'
   if (currentChartType.value === 'pie') return '饼图'
+  if (currentChartType.value === 'doughnut') return '环形图'
   if (currentChartType.value === 'line') return '折线图'
+  if (currentChartType.value === 'table') return '表格'
   return currentChartType.value
 })
 const numericFields = computed(() => fields.value.filter(field => field.fieldType === 'NUMBER'))
@@ -477,6 +485,32 @@ const canDiagnoseLastAnalysis = computed(() => Boolean(lastAnalysis.value && num
 const canRegenerateLastAnalysis = computed(() => Boolean(String(lastAnalysis.value?.sourceQuestion || '').trim()))
 const canPinLastAnalysis = computed(() => Boolean(lastAnalysis.value?.data?.length))
 const hasVoiceConclusion = computed(() => Boolean(lastAnalysis.value?.data?.length || lastAnalysis.value?.message))
+const isLastAnalysisTable = computed(() => String(lastAnalysis.value?.chartType || currentChartType.value || '').toLowerCase() === 'table')
+const lastAnalysisTableRows = computed(() => {
+  if (!isLastAnalysisTable.value) return []
+  return Array.isArray(lastAnalysis.value?.tableRows)
+    ? lastAnalysis.value.tableRows
+    : (Array.isArray(lastAnalysis.value?.data) ? lastAnalysis.value.data : [])
+})
+const lastAnalysisTableColumns = computed(() => {
+  if (!isLastAnalysisTable.value) return []
+  const configured = Array.isArray(lastAnalysis.value?.tableColumns) ? lastAnalysis.value.tableColumns : []
+  if (configured.length) {
+    return configured.map(item => {
+      if (item && typeof item === 'object') {
+        const prop = String(item.prop || item.column || item.key || '').trim()
+        return {
+          prop,
+          label: String(item.label || item.name || prop).trim() || prop
+        }
+      }
+      const prop = String(item || '').trim()
+      return { prop, label: prop }
+    }).filter(item => item.prop)
+  }
+  const first = lastAnalysisTableRows.value.find(row => row && typeof row === 'object') || {}
+  return Object.keys(first).map(key => ({ prop: key, label: key }))
+})
 const isVoicePhysicalColumnCode = (value) => /^col_\d+$/i.test(String(value || '').trim())
 
 const escapeVoiceRegExp = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -4064,39 +4098,132 @@ const formatSpeechNumber = (value) => {
   return `${num.toFixed(2)}`
 }
 
+const chartTypeVoiceName = (chartType) => {
+  const type = String(chartType || '').toLowerCase()
+  if (type === 'pie') return '饼图'
+  if (type === 'doughnut') return '环形图'
+  if (type === 'line') return '折线图'
+  if (type === 'table') return '表格'
+  return '柱状图'
+}
+
+const voiceFriendlyLabel = (...values) => {
+  for (const value of values) {
+    const text = String(value ?? '').trim()
+    if (!text || isVoicePhysicalColumnCode(text)) continue
+    return fieldLabel(text) || text
+  }
+  const fallback = values.map(value => String(value ?? '').trim()).find(Boolean)
+  return fallback || ''
+}
+
+const extractVoiceNumericRows = (analysis) => {
+  const rows = Array.isArray(analysis?.data) ? analysis.data : []
+  if (String(analysis?.chartType || '').toLowerCase() === 'table') {
+    return []
+  }
+  if (analysis?.autoForecast || analysis?.advancedAnalysisType === 'forecast') {
+    return rows
+      .map(row => ({
+        name: String(row?.name ?? '').trim() || '未命名',
+        value: row?.forecast ?? row?.history ?? row?.value
+      }))
+      .filter(row => !Number.isNaN(toNumber(row.value)))
+  }
+  return getSortedChartData(rows)
+}
+
+const resolveVoiceSummaryConfig = (analysis) => {
+  const raw = analysis?.voiceSummary && typeof analysis.voiceSummary === 'object' ? analysis.voiceSummary : {}
+  const enabled = raw.enabled == null ? true : Boolean(raw.enabled)
+  const order = Array.isArray(raw.order) && raw.order.length
+    ? raw.order.map(item => String(item || '').trim()).filter(Boolean)
+    : ['title', 'metric', 'max', 'min', 'trend', 'anomaly']
+  const templates = raw.templates && typeof raw.templates === 'object' ? raw.templates : {}
+  const chartTemplates = raw.chartTemplates && typeof raw.chartTemplates === 'object' ? raw.chartTemplates : {}
+  return {
+    ...raw,
+    enabled,
+    order,
+    templates,
+    chartTemplates
+  }
+}
+
+const detectVoiceTrend = (rows) => {
+  const numericRows = Array.isArray(rows) ? rows.filter(row => !Number.isNaN(toNumber(row.value))) : []
+  if (numericRows.length < 2) return '暂无明显趋势'
+  const first = toNumber(numericRows[0].value)
+  const last = toNumber(numericRows[numericRows.length - 1].value)
+  if (Number.isNaN(first) || Number.isNaN(last)) return '暂无明显趋势'
+  const delta = last - first
+  const base = Math.max(Math.abs(first), 1)
+  if (Math.abs(delta) / base < 0.03) return '整体平稳'
+  return delta > 0 ? '整体上升' : '整体下降'
+}
+
+const countVoiceAnomalies = (analysis) => {
+  const rows = Array.isArray(analysis?.data) ? analysis.data : []
+  return rows.filter(row => row && (row.anomaly != null || row.outlier != null || String(row.phase || '').toLowerCase() === 'anomaly')).length
+}
+
+const replaceVoiceTemplate = (template, context) => String(template || '').replace(/\{(\w+)\}/g, (_, key) => {
+  const value = context[key]
+  return value == null || value === '' ? '' : String(value)
+})
+
 const buildVoiceConclusion = (analysis) => {
   if (!analysis) return ''
+  const voiceSummary = resolveVoiceSummaryConfig(analysis)
+  if (!voiceSummary.enabled) return ''
   if (!Array.isArray(analysis.data) || !analysis.data.length) {
     return normalizeVoiceSentence(analysis.message || '本次查询已完成，但暂无可播报的数据结果。')
   }
 
-  const dimension = String(analysis.fieldMapping?.dimension || '维度').trim()
-  const metric = String(analysis.fieldMapping?.metric || '指标').trim()
-  const chartTypeName = analysis.chartType === 'pie'
-    ? '饼图'
-    : analysis.chartType === 'line'
-      ? '折线图'
-      : '柱状图'
-  const sorted = getSortedChartData(analysis.data)
-  const topItems = sorted.slice(0, 3).map(item => ({
-    name: String(item.name ?? '未命名').trim() || '未命名',
-    value: formatSpeechNumber(item.value)
-  }))
-  const intro = `查询完成，已生成${chartTypeName}。当前按${dimension}分析${metric}，共${sorted.length}项结果。`
-  if (!topItems.length) {
-    return normalizeVoiceSentence(`${intro}${analysis.message || ''}`)
+  const chartType = String(analysis.chartType || '').toLowerCase()
+  const chartTypeName = chartTypeVoiceName(chartType)
+  const dimension = voiceFriendlyLabel(analysis.fieldMapping?.dimension, analysis.fieldMapping?.dimensionKey, '维度')
+  const metric = voiceFriendlyLabel(analysis.fieldMapping?.metric, analysis.fieldMapping?.metricKey, analysis.forecastMeta?.metricField, '指标')
+  const rows = extractVoiceNumericRows(analysis)
+  const sortedByValue = [...rows]
+    .filter(item => !Number.isNaN(toNumber(item.value)))
+    .sort((left, right) => toNumber(right.value) - toNumber(left.value))
+  const maxItem = sortedByValue[0] || {}
+  const minItem = sortedByValue[sortedByValue.length - 1] || {}
+  const context = {
+    ruleName: voiceSummary.ruleName || analysis.chartRuleName || 'AI 推荐规则',
+    chartTypeName,
+    dimension,
+    metric,
+    count: chartType === 'table'
+      ? (Array.isArray(analysis.tableRows) ? analysis.tableRows.length : analysis.data.length)
+      : analysis.data.length,
+    maxName: String(maxItem.name || '暂无').trim(),
+    maxValue: formatSpeechNumber(maxItem.value),
+    minName: String(minItem.name || '暂无').trim(),
+    minValue: formatSpeechNumber(minItem.value),
+    trend: detectVoiceTrend(rows),
+    anomalyCount: countVoiceAnomalies(analysis)
   }
-
-  if (analysis.chartType === 'pie') {
-    const summary = topItems.map(item => `${item.name}占比对应数值为${item.value}`).join('，')
-    return normalizeVoiceSentence(`${intro}主要结论如下，${summary}。`)
+  const chartTemplate = Object.prototype.hasOwnProperty.call(voiceSummary.chartTemplates || {}, chartType)
+    ? voiceSummary.chartTemplates[chartType]
+    : voiceSummary.summaryTemplate
+  if (chartTemplate) {
+    return normalizeVoiceSentence(replaceVoiceTemplate(chartTemplate, context))
   }
-
-  const [first, second, third] = topItems
-  const lines = [`最高的是${first.name}，数值为${first.value}`]
-  if (second) lines.push(`第二是${second.name}，数值为${second.value}`)
-  if (third) lines.push(`第三是${third.name}，数值为${third.value}`)
-  return normalizeVoiceSentence(`${intro}${lines.join('，')}。`)
+  const defaultTemplates = {
+    title: '查询完成，已生成{chartTypeName}。',
+    metric: '当前按{dimension}分析{metric}，共{count}项结果。',
+    max: '最大值为{maxName}，数值{maxValue}。',
+    min: '最小值为{minName}，数值{minValue}。',
+    trend: '整体趋势为{trend}。',
+    anomaly: '检测到{anomalyCount}个异常点。'
+  }
+  const parts = voiceSummary.order
+    .map(key => voiceSummary.templates?.[key] || defaultTemplates[key])
+    .filter(Boolean)
+    .map(template => replaceVoiceTemplate(template, context))
+  return normalizeVoiceSentence(parts.join(''))
 }
 
 const stopVoicePlayback = () => {
@@ -4116,7 +4243,11 @@ const toggleVoicePlayback = async () => {
 const speakLatestAnalysisConclusion = async (analysis = lastAnalysis.value) => {
   const content = buildVoiceConclusion(analysis)
   if (!content) {
-    ElMessage.warning('暂无可播报的分析结果')
+    if (analysis?.voiceSummary?.enabled === false) {
+      ElMessage.warning('当前规则已关闭语音摘要')
+    } else {
+      ElMessage.warning('暂无可播报的分析结果')
+    }
     return
   }
   try {
@@ -5011,6 +5142,10 @@ const dataUrlToBlob = (dataUrl) => {
 }
 
 const exportChartAsImage = () => {
+  if (isLastAnalysisTable.value) {
+    ElMessage.warning('当前结果是表格，请使用表格数据查看')
+    return
+  }
   const instance = ensureChatChartInstance()
   if (!instance || !lastAnalysis.value?.data?.length) {
     ElMessage.warning('暂无可导出的图表')
@@ -5057,14 +5192,29 @@ watch(activeModule, (nextModule) => {
 })
 
 const renderChart = (data, type) => {
+  if (String(type || '').toLowerCase() === 'table') {
+    if (chartInstance) {
+      chartInstance.clear()
+    }
+    return
+  }
   const instance = ensureChatChartInstance()
   if (!instance) return
+  const rawRows = Array.isArray(data) ? data : []
   const normalizedData = getSortedChartData(data)
   const xAxisData = normalizedData.map(item => item.name)
   const seriesData = normalizedData.map(item => Number(item.value ?? 0))
   let option = {}
 
-  if (type === 'bar' || type === 'line') {
+  if (type === 'line' && hasForecastSeriesRows(rawRows)) {
+    const template = lastAnalysis.value?.optionTemplate || {}
+    const prediction = template?.prediction || {}
+    option = buildForecastChartOption(rawRows, {
+      metricLabel: lastAnalysis.value?.fieldMapping?.metric || lastAnalysis.value?.forecastMeta?.metricField || '预测值',
+      confidenceLabel: prediction.confidenceLabel || lastAnalysis.value?.forecastMeta?.confidence || '95%',
+      legendConfig: prediction.legendConfig
+    })
+  } else if (type === 'bar' || type === 'line') {
     const shouldUseZoom = normalizedData.length > 12
     option = {
       tooltip: {
@@ -5120,7 +5270,44 @@ const renderChart = (data, type) => {
     }
   }
 
+  option = applyLiveChartOptionTemplate(option, lastAnalysis.value?.optionTemplate)
   instance.setOption(option, true)
+}
+
+const applyLiveChartOptionTemplate = (baseOption, template) => {
+  if (!template || typeof template !== 'object') {
+    return applyDynamicInteractionDefaults(baseOption, null, { chartType: lastAnalysis.value?.chartType })
+  }
+  const withTemplate = mergeChartOptions(applyOptionTemplateDefaults(baseOption, template), template)
+  return applyDynamicInteractionDefaults(withTemplate, template, { chartType: lastAnalysis.value?.chartType })
+}
+
+const mergeChartOptions = (base, override) => {
+  if (Array.isArray(base) || Array.isArray(override)) {
+    const baseArray = Array.isArray(base) ? base : []
+    const overrideArray = Array.isArray(override) ? override : []
+    const max = Math.max(baseArray.length, overrideArray.length)
+    const merged = []
+    for (let i = 0; i < max; i++) {
+      const left = baseArray[i]
+      const right = overrideArray[i]
+      if (left && typeof left === 'object' && !Array.isArray(left) && right && typeof right === 'object' && !Array.isArray(right)) {
+        merged[i] = mergeChartOptions(left, right)
+      } else {
+        merged[i] = right === undefined ? left : right
+      }
+    }
+    return merged
+  }
+  if (!base || typeof base !== 'object' || !override || typeof override !== 'object') {
+    return override === undefined ? base : override
+  }
+  const merged = { ...base }
+  for (const [key, value] of Object.entries(override)) {
+    if (value === undefined || value === null) continue
+    merged[key] = mergeChartOptions(base[key], value)
+  }
+  return merged
 }
 
 provide('workbench', {
@@ -5207,6 +5394,9 @@ provide('workbench', {
   question,
   loading,
   isStreaming,
+  streamAbortController,
+  activeChatRequestId,
+  stopRequested,
   businessDictionaryPanelVisible,
   businessDictionaryFocusModelId,
   selectedChatBusinessModelId,
@@ -5214,6 +5404,9 @@ provide('workbench', {
   recentChatQueries,
   messages,
   currentChartType,
+  isLastAnalysisTable,
+  lastAnalysisTableColumns,
+  lastAnalysisTableRows,
   chartSortMode,
   lastAnalysis,
   moduleTitle,

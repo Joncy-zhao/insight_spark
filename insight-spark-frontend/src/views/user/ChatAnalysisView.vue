@@ -209,13 +209,33 @@
                         <div class="advanced-dialog-entry__type">{{ advancedAnalysisTypeLabel(msg.advancedAnalysis.type) }}</div>
                         <div class="advanced-dialog-entry__title">{{ msg.advancedAnalysis.title }}</div>
                         <div class="advanced-dialog-entry__summary">{{ msg.advancedAnalysis.summary }}</div>
+                        <div v-if="advancedRuleInfo(msg.advancedAnalysis).has" class="advanced-dialog-entry__rule">
+                          <div>
+                            <span>命中规则</span>
+                            <strong>{{ advancedRuleInfo(msg.advancedAnalysis).ruleName || advancedRuleInfo(msg.advancedAnalysis).ruleCode }}</strong>
+                          </div>
+                          <div v-if="advancedRuleInfo(msg.advancedAnalysis).ruleCode">
+                            <span>规则编码</span>
+                            <strong>{{ advancedRuleInfo(msg.advancedAnalysis).ruleCode }}</strong>
+                          </div>
+                          <div v-if="advancedRuleInfo(msg.advancedAnalysis).scenarioType">
+                            <span>推荐场景</span>
+                            <strong>{{ advancedRuleInfo(msg.advancedAnalysis).scenarioLabel }}</strong>
+                          </div>
+                          <div v-if="advancedRuleInfo(msg.advancedAnalysis).explain" class="advanced-dialog-entry__rule-explain">
+                            <span>推荐说明</span>
+                            <strong>{{ advancedRuleInfo(msg.advancedAnalysis).explain }}</strong>
+                          </div>
+                        </div>
                       </div>
-                      <el-tag size="small" effect="light" :type="msg.advancedAnalysis.status === '模拟生成' ? 'warning' : 'success'">
-                        {{ msg.advancedAnalysis.status || '已生成' }}
-                      </el-tag>
-                      <el-button size="small" type="primary" plain @click="openAdvancedAnalysisDialog(msg.advancedAnalysis)">
-                        查看详情
-                      </el-button>
+                      <div class="advanced-dialog-entry__actions">
+                        <el-tag size="small" effect="light" :type="msg.advancedAnalysis.status === '模拟生成' ? 'warning' : 'success'">
+                          {{ msg.advancedAnalysis.status || '已生成' }}
+                        </el-tag>
+                        <el-button size="small" type="primary" plain @click="openAdvancedAnalysisDialog(msg.advancedAnalysis)">
+                          查看详情
+                        </el-button>
+                      </div>
                     </div>
                     <div v-if="msg.fieldBindingResults?.length" class="field-binding-card">
                       <div class="field-binding-card__header">{{ msg.fieldBindingTitle || '字段变更结果' }}</div>
@@ -347,6 +367,7 @@
                 <p>AI 将理解您的意图并推荐最合适的 ECharts 图表类型</p>
               </div>
               <div class="chart-actions">
+                <el-tag v-if="lastAnalysis" type="info" effect="plain" round>AI 推荐图表</el-tag>
                 <el-tag v-if="currentChartType" type="success" effect="dark" round>
                   {{ chartTypeLabel }}效果
                 </el-tag>
@@ -360,12 +381,12 @@
                 >
                   重新生成
                 </el-button>
-                <el-select v-model="chartSortMode" size="small" style="width: 150px;" @change="() => lastAnalysis?.data?.length && renderChart(lastAnalysis.data, currentChartType)">
+                <el-select v-if="!isLastAnalysisTable" v-model="chartSortMode" size="small" style="width: 150px;" @change="() => lastAnalysis?.data?.length && renderChart(lastAnalysis.data, currentChartType)">
                   <el-option label="按数值降序" value="desc" />
                   <el-option label="按数值升序" value="asc" />
                   <el-option label="按名称排序" value="name" />
                 </el-select>
-                <el-button v-if="lastAnalysis?.data?.length" size="small" @click="exportChartAsImage">导出图片</el-button>
+                <el-button v-if="lastAnalysis?.data?.length && !isLastAnalysisTable" size="small" @click="exportChartAsImage">导出图片</el-button>
                 <el-button
                     v-if="canPinLastAnalysis"
                     size="small"
@@ -387,7 +408,26 @@
               </div>
             </div>
 
-            <div id="echarts-container" class="chart-canvas"></div>
+            <div v-show="!isLastAnalysisTable" id="echarts-container" class="chart-canvas"></div>
+            <div v-if="isLastAnalysisTable" class="analysis-table-wrap">
+              <el-table
+                  :data="lastAnalysisTableRows"
+                  border
+                  stripe
+                  height="360"
+                  table-layout="fixed"
+                  empty-text="暂无明细数据"
+              >
+                <el-table-column
+                    v-for="column in lastAnalysisTableColumns"
+                    :key="column.prop"
+                    :prop="column.prop"
+                    :label="column.label"
+                    min-width="130"
+                    show-overflow-tooltip
+                />
+              </el-table>
+            </div>
 
             <el-descriptions v-if="lastAnalysis" :column="2" border class="analysis-meta">
               <el-descriptions-item label="数据表">{{ lastAnalysis.tableName }}</el-descriptions-item>
@@ -410,7 +450,9 @@
                 {{ lastAnalysis.chartScenarioType }}
               </el-descriptions-item>
               <el-descriptions-item v-if="lastAnalysis.chartRecommendationStatus" label="推荐状态">
-                {{ lastAnalysis.chartRecommendationStatus }}
+                <el-tag :type="String(lastAnalysis.chartRecommendationStatus).toUpperCase() === 'FALLBACK' ? 'warning' : 'success'" size="small">
+                  {{ lastAnalysis.chartRecommendationStatus }}
+                </el-tag>
               </el-descriptions-item>
               <el-descriptions-item v-if="lastAnalysis.chartRecommendationExplain" label="推荐说明" :span="2">
                 {{ lastAnalysis.chartRecommendationExplain }}
@@ -796,6 +838,21 @@
                     </div>
 
                     <div class="history-detail__section">
+                      <div class="history-detail__section-title">AI 推荐规则</div>
+                      <div v-if="summarizeHistoryRule(selectedHistoryEntry).length" class="history-detail__kv-grid">
+                        <div
+                            v-for="item in summarizeHistoryRule(selectedHistoryEntry)"
+                            :key="item.label"
+                            class="history-detail__kv-item"
+                        >
+                          <span class="history-detail__kv-label">{{ item.label }}</span>
+                          <span class="history-detail__kv-value">{{ item.value }}</span>
+                        </div>
+                      </div>
+                      <div v-else class="history-detail__placeholder">暂无规则命中信息</div>
+                    </div>
+
+                    <div class="history-detail__section">
                       <div class="history-detail__section-title">字段映射</div>
                       <div v-if="summarizeFieldMapping(selectedHistoryEntry.fieldMapping).length" class="history-detail__kv-grid">
                         <div
@@ -910,11 +967,11 @@
                           </article>
                         </div>
                         <div class="history-detail__snapshot-table">
-                          <table>
+                          <table :style="{ minWidth: historySnapshotTableMinWidth(selectedHistoryEntry) }">
                             <thead>
                             <tr>
-                              <th v-for="column in historySnapshotPreviewColumns(selectedHistoryEntry)" :key="column">
-                                {{ column }}
+                              <th v-for="column in historySnapshotPreviewColumns(selectedHistoryEntry)" :key="column.key">
+                                {{ column.label }}
                               </th>
                             </tr>
                             </thead>
@@ -925,15 +982,15 @@
                             >
                               <td
                                   v-for="column in historySnapshotPreviewColumns(selectedHistoryEntry)"
-                                  :key="`${selectedHistoryEntry.id}-${rowIndex}-${column}`"
+                                  :key="`${selectedHistoryEntry.id}-${rowIndex}-${column.key}`"
                               >
-                                {{ formatHistoryValue(row[column]) }}
+                                {{ formatHistoryValue(row[column.key]) }}
                               </td>
                             </tr>
                             </tbody>
                           </table>
                         </div>
-                        <div class="history-detail__thumbnail-card">
+                        <div v-if="!isHistoryTableEntry(selectedHistoryEntry)" class="history-detail__thumbnail-card">
                           <div class="history-detail__thumbnail-head">
                             <div class="history-detail__thumbnail-title">图表缩略图</div>
                             <div class="history-detail__thumbnail-meta">
@@ -942,6 +999,7 @@
                           </div>
                           <div ref="historyPreviewChartRef" class="history-detail__thumbnail-chart"></div>
                         </div>
+                        <div v-else class="history-detail__hint">当前历史产物为表格结果，已使用上方表格快照展示，不生成图表缩略图。</div>
                       </div>
                       <div v-else class="history-detail__placeholder">
                         暂无可预览的图表快照
@@ -1543,6 +1601,7 @@ import {
   saveAdvancedAnalysisPlan,
   saveAdvancedAlertRule,
   parseAdvancedAnalysisIntent,
+  streamAdvancedAnalysisIntent,
   runAdvancedForecast,
   runAdvancedForecastFromSeries,
   runAdvancedAlertDetection,
@@ -1573,6 +1632,9 @@ const {
   createDatasource,
   currentChartType,
   currentDiagnosis,
+  isLastAnalysisTable,
+  lastAnalysisTableColumns,
+  lastAnalysisTableRows,
   data,
   datasourceForm,
   dateFields,
@@ -1609,6 +1671,9 @@ const {
   loadSchemaTables,
   loadTables,
   loading,
+  streamAbortController,
+  activeChatRequestId,
+  stopRequested,
   messages,
   moduleSubtitle,
   moduleTitle,
@@ -1855,6 +1920,101 @@ const advancedAnalysisTypeLabel = (type) => {
   if (type === 'whatIf') return 'What-if 推演'
   if (type === 'alert') return '离线智能预警'
   return '高级分析'
+}
+
+const advancedScenarioLabel = (scenarioType) => {
+  const value = String(scenarioType || '').trim().toUpperCase()
+  if (value === 'TIME_SERIES') return '时序趋势'
+  if (value === 'GROUP_COMPARE') return '分组对比'
+  if (value === 'RATIO') return '占比分析'
+  if (value === 'DETAIL') return '明细数据'
+  if (value === 'SCENARIO_SIMULATION') return '情景推演'
+  if (value === 'ADVANCED_ALERT') return '智能预警'
+  if (value === 'CUSTOM') return '自定义规则'
+  return value || '自动推荐'
+}
+
+const defaultAdvancedChartRecommendation = (type) => {
+  if (type === 'forecast') {
+    return {
+      ruleCode: 'time_series_default',
+      ruleName: '时序趋势默认规则',
+      scenarioType: 'TIME_SERIES',
+      status: 'CONFIGURED',
+      explain: '识别到预测类时序分析，推荐折线图展示历史值、预测值和 95% 置信区间。'
+    }
+  }
+  if (type === 'whatIf') {
+    return {
+      ruleCode: 'advanced_whatif_compare',
+      ruleName: '情景推演对比规则',
+      scenarioType: 'GROUP_COMPARE',
+      status: 'EXTENDED',
+      explain: '识别到情景推演分析，推荐柱状图对比基准、保守、中性、乐观和推荐方案。'
+    }
+  }
+  if (type === 'alert') {
+    return {
+      ruleCode: 'advanced_alert_line',
+      ruleName: '智能预警趋势规则',
+      scenarioType: 'TIME_SERIES',
+      status: 'EXTENDED',
+      explain: '识别到预警检测场景，推荐折线图展示检测值、阈值线和异常波动。'
+    }
+  }
+  return {
+    ruleCode: 'advanced_analysis_default',
+    ruleName: '高级分析默认规则',
+    scenarioType: 'CUSTOM',
+    status: 'EXTENDED',
+    explain: '高级分析结果已按业务场景自动匹配展示方式。'
+  }
+}
+
+const advancedRuleInfo = (analysis = {}) => {
+  const recommendation = analysis?.chartRecommendation && typeof analysis.chartRecommendation === 'object'
+    ? analysis.chartRecommendation
+    : {}
+  const ruleCode = String(analysis?.chartRuleCode || recommendation.ruleCode || '').trim()
+  const ruleName = String(analysis?.chartRuleName || recommendation.ruleName || '').trim()
+  const scenarioType = String(analysis?.chartScenarioType || recommendation.scenarioType || '').trim()
+  const status = String(analysis?.chartRecommendationStatus || recommendation.status || '').trim()
+  const explain = String(analysis?.chartRecommendationExplain || recommendation.explain || '').trim()
+  return {
+    has: Boolean(ruleCode || ruleName || scenarioType || explain),
+    ruleCode,
+    ruleName,
+    scenarioType,
+    scenarioLabel: advancedScenarioLabel(scenarioType),
+    status,
+    explain
+  }
+}
+
+const withAdvancedChartRecommendation = (analysis = {}) => {
+  if (!analysis || typeof analysis !== 'object') return analysis
+  const fallback = defaultAdvancedChartRecommendation(analysis.type)
+  const current = analysis.chartRecommendation && typeof analysis.chartRecommendation === 'object'
+    ? analysis.chartRecommendation
+    : {}
+  const recommendation = {
+    ...fallback,
+    ...current,
+    ruleCode: String(analysis.chartRuleCode || current.ruleCode || fallback.ruleCode || '').trim(),
+    ruleName: String(analysis.chartRuleName || current.ruleName || fallback.ruleName || '').trim(),
+    scenarioType: String(analysis.chartScenarioType || current.scenarioType || fallback.scenarioType || '').trim(),
+    status: String(analysis.chartRecommendationStatus || current.status || fallback.status || '').trim(),
+    explain: String(analysis.chartRecommendationExplain || current.explain || fallback.explain || '').trim()
+  }
+  return {
+    ...analysis,
+    chartRecommendation: recommendation,
+    chartRuleCode: recommendation.ruleCode,
+    chartRuleName: recommendation.ruleName,
+    chartScenarioType: recommendation.scenarioType,
+    chartRecommendationStatus: recommendation.status,
+    chartRecommendationExplain: recommendation.explain
+  }
 }
 
 const formatAdvancedNumber = (value) => {
@@ -2489,7 +2649,36 @@ const completeWhatIfVariablesFromFormula = (variables = [], formula = '', fields
   return rows
 }
 
-const confirmForecastParams = (fieldMeta, defaults = {}) => new Promise((resolve) => {
+const makeAbortableConfirmResolver = (resolve, signal, onAbort) => {
+  if (signal?.aborted) {
+    onAbort?.()
+    resolve(null)
+    return null
+  }
+  let settled = false
+  let abortHandler = null
+  const finish = (value) => {
+    if (settled) return
+    settled = true
+    if (signal && abortHandler) {
+      signal.removeEventListener('abort', abortHandler)
+    }
+    resolve(value)
+  }
+  abortHandler = () => {
+    onAbort?.()
+    finish(null)
+  }
+  signal?.addEventListener('abort', abortHandler, { once: true })
+  return finish
+}
+
+const confirmForecastParams = (fieldMeta, defaults = {}, signal) => new Promise((resolve) => {
+  const finish = makeAbortableConfirmResolver(resolve, signal, () => {
+    forecastConfirmVisible.value = false
+    forecastConfirmResolver = null
+  })
+  if (!finish) return
   forecastConfirmMeta.value = {
     timeFields: Array.isArray(fieldMeta?.timeFields) ? fieldMeta.timeFields : [],
     numericFields: Array.isArray(fieldMeta?.numericFields) ? fieldMeta.numericFields : []
@@ -2507,7 +2696,7 @@ const confirmForecastParams = (fieldMeta, defaults = {}) => new Promise((resolve
     gamma: defaults.gamma ?? 0.20,
     seasonLength: defaults.seasonLength ?? 0
   }
-  forecastConfirmResolver = resolve
+  forecastConfirmResolver = finish
   forecastConfirmVisible.value = true
 })
 
@@ -2531,7 +2720,12 @@ const cancelForecastConfirm = () => {
   }
 }
 
-const confirmWhatIfParams = (fieldMeta, defaults = {}) => new Promise((resolve) => {
+const confirmWhatIfParams = (fieldMeta, defaults = {}, signal) => new Promise((resolve) => {
+  const finish = makeAbortableConfirmResolver(resolve, signal, () => {
+    whatIfConfirmVisible.value = false
+    whatIfConfirmResolver = null
+  })
+  if (!finish) return
   const numericFields = Array.isArray(fieldMeta?.numericFields) ? fieldMeta.numericFields : []
   whatIfConfirmMeta.value = { numericFields }
   whatIfConfirmForm.value = {
@@ -2548,7 +2742,7 @@ const confirmWhatIfParams = (fieldMeta, defaults = {}) => new Promise((resolve) 
         max: item.max ?? null
       }))
   }
-  whatIfConfirmResolver = resolve
+  whatIfConfirmResolver = finish
   whatIfConfirmVisible.value = true
 })
 
@@ -2613,7 +2807,12 @@ const cancelWhatIfConfirm = () => {
   }
 }
 
-const confirmAlertParams = (fieldMeta, defaults = {}) => new Promise((resolve) => {
+const confirmAlertParams = (fieldMeta, defaults = {}, signal) => new Promise((resolve) => {
+  const finish = makeAbortableConfirmResolver(resolve, signal, () => {
+    alertConfirmVisible.value = false
+    alertConfirmResolver = null
+  })
+  if (!finish) return
   alertConfirmMeta.value = {
     timeFields: Array.isArray(fieldMeta?.timeFields) ? fieldMeta.timeFields : [],
     numericFields: Array.isArray(fieldMeta?.numericFields) ? fieldMeta.numericFields : []
@@ -2636,7 +2835,7 @@ const confirmAlertParams = (fieldMeta, defaults = {}) => new Promise((resolve) =
           ? ['dingtalk']
           : ['email', 'dingtalk']
   }
-  alertConfirmResolver = resolve
+  alertConfirmResolver = finish
   alertConfirmVisible.value = true
 })
 
@@ -2681,6 +2880,12 @@ const buildAnalysisFromRealForecast = (result, text, params, llmIntent, fieldMet
     metric: formatAnalysisMetricLabel(result?.metricField || llmIntent?.metricField || metric, metric, fieldMeta?.numericFields),
     timeRange: result?.granularity || params.horizon || '自定义周期',
     status: '真实计算',
+    chartRecommendation: result?.chartRecommendation,
+    chartRuleCode: result?.chartRuleCode,
+    chartRuleName: result?.chartRuleName,
+    chartScenarioType: result?.chartScenarioType,
+    chartRecommendationStatus: result?.chartRecommendationStatus,
+    chartRecommendationExplain: result?.chartRecommendationExplain,
     params: {
       horizon: params.horizon,
       algorithm: result?.algorithm || params.algorithm || 'Holt-Winters',
@@ -2797,7 +3002,7 @@ const buildAnalysisFromSavedAlertRule = (rule, text, params, llmIntent, fieldMet
   }
 }
 
-const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = {}) => {
+const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = {}, signal) => {
   const tableName = selectedTableName?.value || lastAnalysis?.value?.tableName || ''
   if (type === 'whatIf') {
     assertWhatIfInstructionAllowed(text, params, llmIntent)
@@ -2806,7 +3011,7 @@ const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = 
     return createAdvancedAnalysis(type, text, params, llmIntent)
   }
   try {
-    const fieldMeta = await fetchAdvancedAnalysisFieldMeta({ tableName })
+      const fieldMeta = await fetchAdvancedAnalysisFieldMeta({ tableName }, signal ? { signal } : undefined)
     if (type === 'forecast') {
       const mergedParams = {
         horizon: params.horizon || llmIntent.horizon || inferForecastHorizon(text),
@@ -2833,7 +3038,7 @@ const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = 
         gamma: mergedParams.gamma,
         seasonLength: mergedParams.seasonLength
       }
-      const confirmedPayload = await confirmForecastParams(fieldMeta, inferredPayload)
+      const confirmedPayload = await confirmForecastParams(fieldMeta, inferredPayload, signal)
       if (!confirmedPayload) {
         throw new Error('已取消预测参数确认')
       }
@@ -2850,7 +3055,7 @@ const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = 
           beta: mergedParams.beta,
           gamma: mergedParams.gamma,
           seasonLength: mergedParams.seasonLength
-        })
+        }, signal ? { signal } : undefined)
         return buildAnalysisFromRealForecast(result, text, { ...mergedParams, sourceSeries: chartSeries }, llmIntent, fieldMeta)
       }
       const payload = {
@@ -2860,7 +3065,7 @@ const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = 
       if (!payload.timeField || !payload.metricField) {
         throw new Error('缺少可用于真实预测的时间字段或数值指标，且上一轮查询结果不足以预测')
       }
-      const result = await runAdvancedForecast(payload)
+      const result = await runAdvancedForecast(payload, signal ? { signal } : undefined)
       return buildAnalysisFromRealForecast(result, text, {
         ...mergedParams,
         tableName: payload.tableName,
@@ -2894,7 +3099,7 @@ const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = 
         formula,
         formulaScope: params.formulaScope || 'aggregate',
         variables: completeWhatIfVariablesFromFormula(defaultVariables, formula, numericFields)
-      })
+      }, signal)
       if (!confirmedWhatIf) {
         throw new Error('已取消推演参数确认')
       }
@@ -2909,7 +3114,7 @@ const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = 
         formulaScope: confirmedWhatIf.formula ? confirmedWhatIf.formulaScope || 'aggregate' : 'aggregate',
         sourceQuestion: text,
         variables: normalizedVariables
-      })
+      }, signal ? { signal } : undefined)
       return buildAnalysisFromRealWhatIf(result, text, {
         tableName,
         targetMetric: confirmedWhatIf.targetMetric,
@@ -2933,11 +3138,11 @@ const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = 
         threshold: params.threshold ?? llmIntent.threshold ?? inferAlertThreshold(text),
         detectionCycle: params.detectionCycle || llmIntent.detectionCycle || 'daily',
         channel: params.channel || llmIntent.channel || 'both'
-      })
+      }, signal)
       if (!confirmedAlert) {
         throw new Error('已取消预警规则确认')
       }
-      const savedRule = await saveAdvancedAlertRule(confirmedAlert)
+      const savedRule = await saveAdvancedAlertRule(confirmedAlert, signal ? { signal } : undefined)
       return buildAnalysisFromSavedAlertRule(savedRule, text, confirmedAlert, llmIntent, fieldMeta)
     }
   } catch (error) {
@@ -3063,53 +3268,79 @@ const createAdvancedAnalysis = (type, text, params = {}, llmIntent = {}) => {
   }
 }
 
+const scrollChatToBottom = () => {
+  nextTick(() => {
+    const dom = document.getElementById('chatHistory')
+    if (dom) dom.scrollTop = dom.scrollHeight
+  })
+}
+
+const buildAdvancedIntentPayload = async (text, signal) => {
+  const tableName = selectedTableName?.value || lastAnalysis?.value?.tableName || ''
+  let fieldMeta = null
+  if (tableName) {
+    try {
+      fieldMeta = await fetchAdvancedAnalysisFieldMeta({ tableName }, signal ? { signal } : undefined)
+    } catch (error) {
+      console.warn('advanced analysis field meta unavailable:', error)
+    }
+  }
+  return {
+    question: text,
+    tableName,
+    context: {
+      lastMetric: lastAnalysis?.value?.fieldMapping?.metric || '',
+      lastMetricKey: lastAnalysis?.value?.fieldMapping?.metricKey || '',
+      lastDimension: lastAnalysis?.value?.fieldMapping?.dimension || '',
+      lastDimensionKey: lastAnalysis?.value?.fieldMapping?.dimensionKey || '',
+      chartType: lastAnalysis?.value?.chartType || '',
+      sourceQuestion: lastAnalysis?.value?.sourceQuestion || '',
+      fields: fieldMeta?.fields || [],
+      timeFields: fieldMeta?.timeFields || [],
+      numericFields: fieldMeta?.numericFields || []
+    }
+  }
+}
+
+const normalizeAdvancedParsedIntent = (parsed) => {
+  const intent = normalizeAdvancedIntentType(parsed?.intent || parsed?.type)
+  return intent ? { ...parsed, intent } : null
+}
+
 const parseAdvancedIntentWithLlm = async (text) => {
   try {
-    const tableName = selectedTableName?.value || lastAnalysis?.value?.tableName || ''
-    let fieldMeta = null
-    if (tableName) {
-      try {
-        fieldMeta = await fetchAdvancedAnalysisFieldMeta({ tableName })
-      } catch (error) {
-        console.warn('advanced analysis field meta unavailable:', error)
-      }
-    }
-    const parsed = await parseAdvancedAnalysisIntent({
-      question: text,
-      tableName,
-      context: {
-        lastMetric: lastAnalysis?.value?.fieldMapping?.metric || '',
-        lastMetricKey: lastAnalysis?.value?.fieldMapping?.metricKey || '',
-        lastDimension: lastAnalysis?.value?.fieldMapping?.dimension || '',
-        lastDimensionKey: lastAnalysis?.value?.fieldMapping?.dimensionKey || '',
-        chartType: lastAnalysis?.value?.chartType || '',
-        sourceQuestion: lastAnalysis?.value?.sourceQuestion || '',
-        fields: fieldMeta?.fields || [],
-        timeFields: fieldMeta?.timeFields || [],
-        numericFields: fieldMeta?.numericFields || []
-      }
-    })
-    const intent = normalizeAdvancedIntentType(parsed?.intent || parsed?.type)
-    if (!intent) return null
-    return { ...parsed, intent }
+    const parsed = await parseAdvancedAnalysisIntent(await buildAdvancedIntentPayload(text))
+    return normalizeAdvancedParsedIntent(parsed)
   } catch (error) {
     console.warn('advanced analysis llm parse fallback:', error)
     return null
   }
 }
 
-const pushAdvancedAnalysisMessage = (analysis, userText = '') => {
-  messages.value.push({
+const parseAdvancedIntentWithStream = async (text, onThinking, signal) => {
+  const parsed = await streamAdvancedAnalysisIntent(await buildAdvancedIntentPayload(text, signal), {
+    onThinking,
+    signal
+  })
+  return normalizeAdvancedParsedIntent(parsed)
+}
+
+const buildAdvancedAnalysisMessage = (analysis, userText = '', thinkingLogs = []) => {
+  const normalized = withAdvancedChartRecommendation(analysis)
+  return {
     role: 'system',
-    content: `${advancedAnalysisTypeLabel(analysis.type)}已生成，请在卡片中调整参数、重新计算或保存方案。`,
-    advancedAnalysis: analysis,
+    content: `${advancedAnalysisTypeLabel(normalized.type)}已生成，请在卡片中调整参数、重新计算或保存方案。`,
+    advancedAnalysis: normalized,
     sourceQuestion: userText,
-    sourceTableName: analysis.tableName || selectedTableName?.value || ''
-  })
-  nextTick(() => {
-    const dom = document.getElementById('chatHistory')
-    if (dom) dom.scrollTop = dom.scrollHeight
-  })
+    sourceTableName: normalized.tableName || selectedTableName?.value || '',
+    thinkingLogs: Array.isArray(thinkingLogs) ? thinkingLogs.slice(0, 12) : [],
+    thinkingCollapsed: true
+  }
+}
+
+const pushAdvancedAnalysisMessage = (analysis, userText = '') => {
+  messages.value.push(buildAdvancedAnalysisMessage(analysis, userText))
+  scrollChatToBottom()
 }
 
 const alertEventStatusLabel = (status) => {
@@ -3280,7 +3511,7 @@ if (advancedAlertContext) {
 }
 
 const openAdvancedAnalysisDialog = (analysis) => {
-  activeAdvancedAnalysis.value = analysis
+  activeAdvancedAnalysis.value = withAdvancedChartRecommendation(analysis)
   advancedAnalysisDialogVisible.value = true
 }
 
@@ -3303,25 +3534,112 @@ const sendChatQuestion = async () => {
       return
     }
   }
-  const llmIntent = await parseAdvancedIntentWithLlm(text)
-  const intent = llmIntent?.intent || localIntent
+  const requestId = activeChatRequestId?.value != null ? activeChatRequestId.value + 1 : Date.now()
+  if (activeChatRequestId?.value != null) {
+    activeChatRequestId.value = requestId
+  }
+  const isCurrentAdvancedRequest = () => activeChatRequestId?.value == null || activeChatRequestId.value === requestId
+  stopRequested.value = false
   messages.value.push({
     role: 'user',
     content: text,
     parentTurnId: String(activeBranchParentTurnMeta?.value?.turnId || '').trim() || null
   })
   question.value = ''
-  try {
-    const analysis = await createAdvancedAnalysisAsync(intent, text, {}, llmIntent || {})
-    pushAdvancedAnalysisMessage(analysis, text)
-  } catch (error) {
-    const message = error.message || '高级分析生成失败'
-    ElMessage.error(message)
-    messages.value.push({
-      role: 'system',
-      content: `生成预测与情景模拟卡片失败：${message}`,
+  loading.value = true
+  isStreaming.value = true
+  const placeholderIndex = messages.value.length
+  const thinkingLogs = []
+  const seenThinkingSet = new Set()
+  const pushThinkingLine = (title, detail = '') => {
+    const line = [String(title || '').trim(), String(detail || '').trim()].filter(Boolean).join('：')
+    if (!line || seenThinkingSet.has(line)) return
+    seenThinkingSet.add(line)
+    thinkingLogs.push(line)
+    const current = messages.value[placeholderIndex] || { role: 'system' }
+    messages.value.splice(placeholderIndex, 1, {
+      ...current,
+      content: `高级分析处理中（${thinkingLogs.length}步）· 当前：${line}`,
+      thinkingLogs: thinkingLogs.slice(0, 12),
+      thinkingCollapsed: false,
       sourceTableName: selectedTableName?.value || lastAnalysis?.value?.tableName || ''
     })
+    scrollChatToBottom()
+  }
+  messages.value.push({
+    role: 'system',
+    content: '正在识别高级分析意图...',
+    thinkingLogs: [],
+    thinkingCollapsed: false,
+    sourceTableName: selectedTableName?.value || lastAnalysis?.value?.tableName || ''
+  })
+  scrollChatToBottom()
+  const controller = new AbortController()
+  streamAbortController.value = controller
+  try {
+    pushThinkingLine('收到指令', text)
+    let llmIntent = null
+    try {
+      llmIntent = await parseAdvancedIntentWithStream(
+        text,
+        (step) => pushThinkingLine(step?.title || step?.stage || '处理中', step?.detail || ''),
+        controller.signal
+      )
+    } catch (streamError) {
+      if (stopRequested.value || streamError?.name === 'AbortError') {
+        const stopError = new Error('已手动停止本次生成')
+        stopError.name = 'AbortError'
+        throw stopError
+      }
+      pushThinkingLine('流式解析降级', streamError.message || 'SSE 通道暂不可用，切换普通解析')
+      llmIntent = await parseAdvancedIntentWithLlm(text)
+    }
+    const intent = llmIntent?.intent || localIntent
+    pushThinkingLine('确认分析场景', advancedAnalysisTypeLabel(intent))
+    pushThinkingLine('准备执行分析', intent === 'forecast' ? '确认预测参数并生成预测曲线' : intent === 'whatIf' ? '确认推演参数并计算多场景结果' : '确认预警规则并保存检测配置')
+    const analysis = await createAdvancedAnalysisAsync(intent, text, {}, llmIntent || {}, controller.signal)
+    pushThinkingLine('生成分析卡片', '已完成图表推荐规则匹配和结果卡片渲染')
+    if (!isCurrentAdvancedRequest() || stopRequested.value) {
+      messages.value.splice(placeholderIndex, 1, {
+        role: 'system',
+        content: '已手动停止本次生成。',
+        thinkingLogs: thinkingLogs.slice(0, 12),
+        thinkingCollapsed: true,
+        sourceTableName: selectedTableName?.value || lastAnalysis?.value?.tableName || ''
+      })
+      return
+    }
+    messages.value.splice(placeholderIndex, 1, buildAdvancedAnalysisMessage(analysis, text, thinkingLogs))
+    clearActiveBranchParent()
+    scrollChatToBottom()
+  } catch (error) {
+    if (error?.name === 'AbortError' || stopRequested.value) {
+      messages.value.splice(placeholderIndex, 1, {
+        role: 'system',
+        content: '已手动停止本次生成。',
+        thinkingLogs: thinkingLogs.slice(0, 12),
+        thinkingCollapsed: true,
+        sourceTableName: selectedTableName?.value || lastAnalysis?.value?.tableName || ''
+      })
+      return
+    }
+    const message = error.message || '高级分析生成失败'
+    ElMessage.error(message)
+    messages.value.splice(placeholderIndex, 1, {
+      role: 'system',
+      content: `生成预测与情景模拟卡片失败：${message}`,
+      thinkingLogs: thinkingLogs.slice(0, 12),
+      thinkingCollapsed: true,
+      sourceTableName: selectedTableName?.value || lastAnalysis?.value?.tableName || ''
+    })
+  } finally {
+    if (streamAbortController.value === controller) {
+      streamAbortController.value = null
+    }
+    loading.value = false
+    isStreaming.value = false
+    stopRequested.value = false
+    scrollChatToBottom()
   }
 }
 
@@ -3338,10 +3656,10 @@ const recalculateAdvancedAnalysis = async ({ analysis, params }) => {
   nextAnalysis.title = analysis.title
   const target = (messages.value || []).find(item => item?.advancedAnalysis?.id === analysis.id)
   if (target) {
-    target.advancedAnalysis = nextAnalysis
+    target.advancedAnalysis = withAdvancedChartRecommendation(nextAnalysis)
   }
   if (activeAdvancedAnalysis.value?.id === analysis.id) {
-    activeAdvancedAnalysis.value = nextAnalysis
+    activeAdvancedAnalysis.value = withAdvancedChartRecommendation(nextAnalysis)
   }
   ElMessage.success('已根据最新参数重新计算')
 }
@@ -3406,8 +3724,8 @@ const explainAdvancedAnalysis = async (analysis) => {
         source: 'chat-analysis-card'
       }
     })
-    const nextAnalysis = {
-      ...analysis,
+  const nextAnalysis = {
+      ...withAdvancedChartRecommendation(analysis),
       explanation
     }
     applyAdvancedAnalysisUpdate(analysis.id, nextAnalysis)
@@ -3536,7 +3854,7 @@ const saveAdvancedAnalysis = async (analysis) => {
     return
   }
   const savedAnalysis = {
-    ...analysis,
+    ...withAdvancedChartRecommendation(analysis),
     status: '已保存',
     planId: persistedPlan?.id || analysis.planId
   }
@@ -3899,6 +4217,7 @@ const historyExecutionStatusType = (entry) => {
 const historyCacheLabel = (entry) => entry?.isHitCache ? '命中缓存' : '未命中缓存'
 const historyCacheTagType = (entry) => entry?.isHitCache ? 'primary' : 'info'
 const isHistoryEntryRestorable = (entry) => Boolean(entry?.hasChartSnapshot)
+const isHistoryTableEntry = (entry) => String(entry?.chartType || entry?.chartSnapshot?.chartType || '').toLowerCase() === 'table'
 
 const formatHistoryValue = (value) => {
   if (value == null || value === '') return '--'
@@ -3936,12 +4255,66 @@ const buildHistoryPreviewSeriesData = (entry) => {
 }
 
 const historySnapshotPreviewRows = (entry) => {
-  const rows = Array.isArray(entry?.chartSnapshot?.data) ? entry.chartSnapshot.data : []
+  const rows = Array.isArray(entry?.chartSnapshot?.tableRows)
+    ? entry.chartSnapshot.tableRows
+    : (Array.isArray(entry?.chartSnapshot?.data) ? entry.chartSnapshot.data : [])
   return rows.slice(0, 3).map(row => (row && typeof row === 'object' ? row : { value: row }))
 }
 
-const historySnapshotPreviewColumns = (entry) =>
-  Object.keys(historySnapshotPreviewRows(entry)[0] || {})
+const historySnapshotColumnLabels = (entry) => {
+  const labels = {}
+  const columns = Array.isArray(entry?.chartSnapshot?.tableColumns) ? entry.chartSnapshot.tableColumns : []
+  for (const column of columns) {
+    if (column && typeof column === 'object') {
+      const key = String(column.prop || column.key || column.column || '').trim()
+      if (key) labels[key] = String(column.label || column.name || key).trim() || key
+    } else {
+      const key = String(column || '').trim()
+      if (key) labels[key] = key
+    }
+  }
+  const fieldLabels = entry?.fieldMapping?.fieldResolution?.tableColumnLabels
+  if (fieldLabels && typeof fieldLabels === 'object') {
+    for (const [key, value] of Object.entries(fieldLabels)) {
+      if (!labels[key]) labels[key] = String(value || key).trim() || key
+    }
+  }
+  return labels
+}
+
+const historyReadableColumnLabel = (entry, key) => {
+  const raw = String(key || '').trim()
+  if (!raw) return '字段'
+  const labels = historySnapshotColumnLabels(entry)
+  const label = String(labels[raw] || '').trim()
+  if (label && !/^col[_-]?\d+$/i.test(label)) return label
+  return label || raw
+}
+
+const historySnapshotPreviewColumns = (entry) => {
+  const rows = historySnapshotPreviewRows(entry)
+  const keys = Array.isArray(entry?.chartSnapshot?.tableColumns) && entry.chartSnapshot.tableColumns.length
+    ? entry.chartSnapshot.tableColumns.map(column => String(column?.prop || column?.key || column?.column || column || '').trim()).filter(Boolean)
+    : Object.keys(rows[0] || {})
+  return [...new Set(keys)].filter(key => !rows.length || Object.prototype.hasOwnProperty.call(rows[0], key))
+    .map(key => ({ key, label: historyReadableColumnLabel(entry, key) }))
+}
+
+const historySnapshotTableMinWidth = (entry) => {
+  const count = historySnapshotPreviewColumns(entry).length
+  return `${Math.max(520, count * 132)}px`
+}
+
+const summarizeHistoryRule = (entry) => {
+  const snap = entry?.chartSnapshot || {}
+  return [
+    { label: '命中规则', value: String(entry?.chartRuleName || snap.chartRuleName || entry?.chartRuleCode || snap.chartRuleCode || '').trim() },
+    { label: '规则编码', value: String(entry?.chartRuleCode || snap.chartRuleCode || '').trim() },
+    { label: '推荐场景', value: String(entry?.chartScenarioType || snap.chartScenarioType || '').trim() },
+    { label: '推荐状态', value: String(entry?.chartRecommendationStatus || snap.chartRecommendationStatus || '').trim() },
+    { label: '推荐说明', value: String(entry?.chartRecommendationExplain || snap.chartRecommendationExplain || '').trim() }
+  ].filter(item => item.value)
+}
 
 const historySnapshotPreviewCards = (entry) => {
   const rows = historySnapshotPreviewRows(entry)
@@ -3954,12 +4327,12 @@ const historySnapshotPreviewCards = (entry) => {
     const extraFieldKeys = keys.filter(key => key !== titleKey && key !== metricFieldKey).slice(0, 3)
     return {
       id: `${entry?.id || 'history'}-preview-${index}`,
-      titleLabel: titleKey || '维度',
+      titleLabel: titleKey ? historyReadableColumnLabel(entry, titleKey) : '维度',
       titleValue: titleKey ? formatHistoryValue(row?.[titleKey]) : `第${index + 1}条`,
-      metricLabel: metricFieldKey || '指标',
+      metricLabel: metricFieldKey ? historyReadableColumnLabel(entry, metricFieldKey) : '指标',
       metricValue: metricFieldKey ? formatHistoryValue(row?.[metricFieldKey]) : '--',
       extraFields: extraFieldKeys.map(key => ({
-        label: key,
+        label: historyReadableColumnLabel(entry, key),
         value: formatHistoryValue(row?.[key])
       }))
     }
@@ -4065,7 +4438,7 @@ const disposeHistoryPreviewChart = () => {
 }
 
 const renderHistoryPreviewChart = (entry) => {
-  if (!historyPreviewChartRef.value || !entry || !isHistoryEntryRestorable(entry)) {
+  if (isHistoryTableEntry(entry) || !historyPreviewChartRef.value || !entry || !isHistoryEntryRestorable(entry)) {
     disposeHistoryPreviewChart()
     return
   }
@@ -4334,10 +4707,17 @@ onBeforeUnmount(() => {
   flex: 0 0 auto;
 }
 .chat-layout {
+  display: grid;
+  grid-template-columns: minmax(420px, 0.95fr) minmax(480px, 1.35fr);
+  gap: 16px;
   min-height: 0;
 }
 .chat-panel {
+  min-width: 420px;
   min-height: 0;
+}
+.chart-panel {
+  min-width: 0;
 }
 .chat-datasource-bar {
   display: flex;
@@ -5335,15 +5715,18 @@ onBeforeUnmount(() => {
   word-break: break-word;
 }
 .history-detail__snapshot-table {
-  overflow: auto;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
+  scrollbar-gutter: stable;
 }
 .history-detail__snapshot-table table {
-  width: 100%;
-  min-width: 320px;
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
-  table-layout: fixed;
+  table-layout: auto;
 }
 .history-detail__snapshot-table th,
 .history-detail__snapshot-table td {
@@ -5353,11 +5736,32 @@ onBeforeUnmount(() => {
   color: #334155;
   font-size: 12px;
   line-height: 1.5;
-  word-break: break-word;
+  min-width: 112px;
+  max-width: 220px;
+  white-space: normal;
+  word-break: normal;
+  overflow-wrap: anywhere;
   vertical-align: top;
 }
 .history-detail__snapshot-table th {
   background: #f8fafc;
+  color: #0f172a;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: keep-all;
+}
+.analysis-table-wrap {
+  min-height: 360px;
+  overflow: hidden;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #ffffff;
+}
+.analysis-table-wrap :deep(.el-table) {
+  --el-table-header-bg-color: #f8fafc;
+}
+.analysis-table-wrap :deep(.el-table th) {
   color: #0f172a;
   font-weight: 700;
 }
@@ -5486,9 +5890,9 @@ onBeforeUnmount(() => {
   word-break: break-word;
 }
 .advanced-dialog-entry {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
   gap: 12px;
   width: min(620px, 100%);
   margin-top: 10px;
@@ -5520,6 +5924,44 @@ onBeforeUnmount(() => {
   font-size: 12px;
   line-height: 1.5;
   word-break: break-word;
+}
+.advanced-dialog-entry__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-top: 2px;
+}
+.advanced-dialog-entry__rule {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 6px;
+  margin-top: 6px;
+}
+.advanced-dialog-entry__rule div {
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+.advanced-dialog-entry__rule span {
+  display: block;
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.advanced-dialog-entry__rule strong {
+  display: block;
+  margin-top: 2px;
+  color: #0f172a;
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+.advanced-dialog-entry__rule-explain {
+  grid-column: 1 / -1;
 }
 .advanced-analysis-dialog :deep(.el-dialog__body) {
   padding-top: 8px;
@@ -5715,6 +6157,15 @@ onBeforeUnmount(() => {
   border: 0;
 }
 
+@media (max-width: 1100px) {
+  .chat-layout {
+    grid-template-columns: 1fr;
+  }
+  .chat-panel {
+    min-width: 0;
+  }
+}
+
 @media (max-width: 900px) {
   .history-toolbar__primary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -5787,6 +6238,9 @@ onBeforeUnmount(() => {
 @media (max-width: 720px) {
   .advanced-dialog-entry {
     align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+  .advanced-dialog-entry__rule {
     grid-template-columns: 1fr;
   }
   .forecast-confirm-grid {

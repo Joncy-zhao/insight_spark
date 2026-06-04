@@ -43,7 +43,8 @@ public class SqlMigrationRunner {
             "db/migration/advanced_analysis_plan_migration_20260529.sql",
             "db/migration/advanced_analysis_plan_version_migration_20260601.sql",
             "db/migration/advanced_analysis_field_mapping_migration_20260602.sql",
-            "db/migration/ai_chart_rule_config_migration_20260603.sql"
+            "db/migration/ai_chart_rule_config_migration_20260603.sql",
+            "db/migration/ai_chart_rule_version_migration_20260604.sql"
     );
 
     private final DataSource dataSource;

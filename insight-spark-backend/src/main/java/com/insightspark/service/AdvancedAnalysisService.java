@@ -130,6 +130,9 @@ public class AdvancedAnalysisService {
     @Autowired
     private KnowledgeGraphService knowledgeGraphService;
 
+    @Autowired
+    private AiChartRuleConfigService aiChartRuleConfigService;
+
     public AdvancedAnalysisService() {
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
         requestFactory.setConnectTimeout(5000);
@@ -169,6 +172,52 @@ public class AdvancedAnalysisService {
         );
     }
 
+    private void attachChartRecommendation(Map<String, Object> result, String question,
+                                           List<Map<String, Object>> fields,
+                                           List<Map<String, Object>> rows,
+                                           String fallbackChartType) {
+        try {
+            Map<String, Object> recommendation = new LinkedHashMap<>(
+                    aiChartRuleConfigService.recommendForChatResult(question, fields, rows));
+            recommendation.putIfAbsent("status", "CONFIGURED");
+            applyChartRecommendation(result, recommendation);
+        } catch (Exception ignored) {
+            Map<String, Object> recommendation = new LinkedHashMap<>();
+            recommendation.put("chartType", fallbackChartType);
+            recommendation.put("ruleCode", "fallback_time_series");
+            recommendation.put("ruleName", "时序趋势兜底规则");
+            recommendation.put("scenarioType", "TIME_SERIES");
+            recommendation.put("status", "FALLBACK");
+            recommendation.put("explain", "AI 图表推荐规则暂不可用，已使用时序预测兜底规则渲染历史值、预测值和置信区间。");
+            applyChartRecommendation(result, recommendation);
+        }
+    }
+
+    private void applyChartRecommendation(Map<String, Object> result, Map<String, Object> recommendation) {
+        if (recommendation == null || recommendation.isEmpty()) {
+            return;
+        }
+        result.put("chartRecommendation", recommendation);
+        result.put("chartRuleCode", recommendation.getOrDefault("ruleCode", ""));
+        result.put("chartRuleName", recommendation.getOrDefault("ruleName", ""));
+        result.put("chartScenarioType", recommendation.getOrDefault("scenarioType", ""));
+        result.put("chartRecommendationStatus", recommendation.getOrDefault("status", ""));
+        result.put("chartRecommendationExplain", recommendation.getOrDefault("explain", ""));
+        result.put("voiceSummary", recommendation.getOrDefault("voiceSummary", Map.of()));
+        Object template = recommendation.get("optionTemplate");
+        if (template instanceof Map<?, ?>) {
+            result.put("optionTemplate", template);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> castRows(Object rows) {
+        if (rows instanceof List<?> list) {
+            return (List<Map<String, Object>>) (List<?>) list;
+        }
+        return List.of();
+    }
+
     public Map<String, Object> forecast(Map<String, Object> request) {
         long startedAt = System.currentTimeMillis();
         String tableName = required(request, "tableName");
@@ -197,6 +246,8 @@ public class AdvancedAnalysisService {
         Map<String, Object> cached = readForecastCache(cacheKey);
         if (!cached.isEmpty()) {
             markForecastCacheHit(cached, cacheKey, startedAt);
+            attachChartRecommendation(cached, "预测 " + metricField, dataUploadService.listFields(tableName),
+                    castRows(cached.get("series")), "line");
             attachAdvancedGraphContext(cached, firstText(request.get("sourceQuestion"), "预测 " + metricField), tableName);
             return cached;
         }
@@ -230,7 +281,7 @@ public class AdvancedAnalysisService {
         result.put("algorithm", algorithm);
         result.put("algorithmParams", params.toMap());
         result.put("confidence", "95%");
-        result.put("series", series);
+        result.put("series", attachAnomalyPoints(series, rawAnomalyValues(preprocess)));
         result.put("cacheHit", false);
         result.put("cacheKey", cacheKey);
         result.put("dataQuality", dataQuality(history, preprocess));
@@ -241,6 +292,7 @@ public class AdvancedAnalysisService {
         ));
         result.put("explanation", forecastExplanation(algorithm, granularity, history, forecast, params, "真实数据源", preprocess));
         result.put("executionTimeMs", elapsedMs(startedAt));
+        attachChartRecommendation(result, "预测 " + metricField, dataUploadService.listFields(tableName), series, "line");
         attachAdvancedGraphContext(result, firstText(request.get("sourceQuestion"), "预测 " + metricField), tableName);
         writeForecastCache(cacheKey, result);
         return result;
@@ -278,6 +330,10 @@ public class AdvancedAnalysisService {
         Map<String, Object> cached = readForecastCache(cacheKey);
         if (!cached.isEmpty()) {
             markForecastCacheHit(cached, cacheKey, startedAt);
+            attachChartRecommendation(cached, "预测 " + metric, List.of(
+                    Map.of("name", "query_result_dimension", "columnName", "query_result_dimension", "type", "date", "sourceFieldName", "查询结果维度"),
+                    Map.of("name", metric, "columnName", metric, "type", "number", "sourceFieldName", metric)
+            ), castRows(cached.get("series")), "line");
             attachAdvancedGraphContext(cached, firstText(request.get("sourceQuestion"), "预测 " + metric), tableName);
             return cached;
         }
@@ -299,7 +355,7 @@ public class AdvancedAnalysisService {
         result.put("algorithm", algorithm);
         result.put("algorithmParams", params.toMap());
         result.put("confidence", "95%");
-        result.put("series", series);
+        result.put("series", attachAnomalyPoints(series, rawAnomalyValues(preprocess)));
         result.put("cacheHit", false);
         result.put("cacheKey", cacheKey);
         result.put("dataQuality", dataQuality(history, preprocess));
@@ -310,6 +366,10 @@ public class AdvancedAnalysisService {
         ));
         result.put("explanation", forecastExplanation(algorithm, inferredGranularity, history, forecast, params, "上一轮查询结果", preprocess));
         result.put("executionTimeMs", elapsedMs(startedAt));
+        attachChartRecommendation(result, "预测 " + metric, List.of(
+                Map.of("name", "query_result_dimension", "columnName", "query_result_dimension", "type", "date", "sourceFieldName", "查询结果维度"),
+                Map.of("name", metric, "columnName", metric, "type", "number", "sourceFieldName", metric)
+        ), series, "line");
         attachAdvancedGraphContext(result, firstText(request.get("sourceQuestion"), "预测 " + metric), tableName);
         writeForecastCache(cacheKey, result);
         return result;
@@ -1169,7 +1229,7 @@ public class AdvancedAnalysisService {
 
     private SeriesPreprocessResult preprocessSeries(List<Point> rawHistory, String granularity) {
         if (rawHistory == null || rawHistory.isEmpty()) {
-            return new SeriesPreprocessResult(List.of(), 0, 0, 0);
+            return new SeriesPreprocessResult(List.of(), 0, 0, 0, List.of());
         }
         Map<String, Double> merged = new LinkedHashMap<>();
         int duplicateCount = 0;
@@ -1189,7 +1249,8 @@ public class AdvancedAnalysisService {
         List<Point> filled = fillMissingBuckets(deduplicated, granularity);
         int filledCount = Math.max(0, filled.size() - deduplicated.size());
         OutlierAdjustResult adjusted = adjustOutliers(filled);
-        return new SeriesPreprocessResult(adjusted.points(), duplicateCount, filledCount, adjusted.adjustedCount());
+        return new SeriesPreprocessResult(adjusted.points(), duplicateCount, filledCount,
+                adjusted.adjustedCount(), adjusted.rawAnomalies());
     }
 
     private List<Point> fillMissingBuckets(List<Point> history, String granularity) {
@@ -1266,25 +1327,27 @@ public class AdvancedAnalysisService {
 
     private OutlierAdjustResult adjustOutliers(List<Point> history) {
         if (history.size() < 6) {
-            return new OutlierAdjustResult(history, 0);
+            return new OutlierAdjustResult(history, 0, List.of());
         }
         double avg = history.stream().mapToDouble(Point::value).average().orElse(0D);
         double std = standardDeviation(history);
         if (std <= 0D) {
-            return new OutlierAdjustResult(history, 0);
+            return new OutlierAdjustResult(history, 0, List.of());
         }
         double lower = avg - std * 3D;
         double upper = avg + std * 3D;
         int adjustedCount = 0;
         List<Point> result = new ArrayList<>();
+        List<Point> anomalies = new ArrayList<>();
         for (Point point : history) {
             double adjusted = clamp(point.value(), lower, upper);
             if (Math.abs(adjusted - point.value()) > 0.000001D) {
                 adjustedCount += 1;
+                anomalies.add(point);
             }
             result.add(new Point(point.name(), adjusted));
         }
-        return new OutlierAdjustResult(result, adjustedCount);
+        return new OutlierAdjustResult(result, adjustedCount, anomalies);
     }
 
     private double loadMetricAverage(String tableName, String metricField) {
@@ -3569,6 +3632,7 @@ public class AdvancedAnalysisService {
             double forecast = parseDouble(map.get("forecast"), Double.NaN);
             double upper = parseDouble(map.get("upper"), Double.NaN);
             double lower = parseDouble(map.get("lower"), Double.NaN);
+            double anomaly = parseDouble(map.get("anomaly"), Double.NaN);
             double value = Double.isNaN(forecast) ? history : forecast;
             if (name.isBlank() || Double.isNaN(value)) {
                 continue;
@@ -3580,6 +3644,7 @@ public class AdvancedAnalysisService {
             point.put("forecast", Double.isNaN(forecast) ? null : round(forecast));
             point.put("upper", Double.isNaN(upper) ? null : round(upper));
             point.put("lower", Double.isNaN(lower) ? null : round(lower));
+            point.put("anomaly", Double.isNaN(anomaly) ? null : round(anomaly));
             point.put("phase", Double.isNaN(forecast) ? "history" : "forecast");
             data.add(point);
         }
@@ -4261,6 +4326,35 @@ public class AdvancedAnalysisService {
         return quality;
     }
 
+    private Map<String, Double> rawAnomalyValues(SeriesPreprocessResult preprocess) {
+        if (preprocess == null || preprocess.rawAnomalies() == null || preprocess.rawAnomalies().isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Double> result = new LinkedHashMap<>();
+        for (Point point : preprocess.rawAnomalies()) {
+            if (point != null && !point.name().isBlank()) {
+                result.put(point.name(), round(point.value()));
+            }
+        }
+        return result;
+    }
+
+    private List<Map<String, Object>> attachAnomalyPoints(List<Map<String, Object>> series, Map<String, Double> anomalies) {
+        if (series == null || series.isEmpty() || anomalies == null || anomalies.isEmpty()) {
+            return series == null ? List.of() : series;
+        }
+        List<Map<String, Object>> result = new ArrayList<>(series.size());
+        for (Map<String, Object> row : series) {
+            Map<String, Object> copy = new LinkedHashMap<>(row);
+            String name = text(copy.get("name"));
+            if (anomalies.containsKey(name)) {
+                copy.put("anomaly", anomalies.get(name));
+            }
+            result.add(copy);
+        }
+        return result;
+    }
+
     private String buildPreprocessMessage(int filledCount, int duplicateCount, int outlierCount) {
         List<String> parts = new ArrayList<>();
         if (filledCount > 0) {
@@ -4712,10 +4806,11 @@ public class AdvancedAnalysisService {
     private record Point(String name, double value) {
     }
 
-    private record SeriesPreprocessResult(List<Point> points, int duplicateCount, int filledCount, int outlierAdjustedCount) {
+    private record SeriesPreprocessResult(List<Point> points, int duplicateCount, int filledCount,
+                                          int outlierAdjustedCount, List<Point> rawAnomalies) {
     }
 
-    private record OutlierAdjustResult(List<Point> points, int adjustedCount) {
+    private record OutlierAdjustResult(List<Point> points, int adjustedCount, List<Point> rawAnomalies) {
     }
 
     private record FormulaToken(String type, String value) {

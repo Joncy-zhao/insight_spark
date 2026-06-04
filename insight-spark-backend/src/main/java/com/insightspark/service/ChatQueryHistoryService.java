@@ -49,6 +49,10 @@ public class ChatQueryHistoryService {
     @Lazy
     private AdvancedAnalysisService advancedAnalysisService;
 
+    @Autowired
+    @Lazy
+    private AiChartRuleConfigService aiChartRuleConfigService;
+
     @Value("${insight.chat-history.cleanup-enabled:true}")
     private boolean historyCleanupEnabled;
 
@@ -205,7 +209,41 @@ public class ChatQueryHistoryService {
             sql += " AND user_id = ?";
             args.add(userId);
         }
-        return jdbcTemplate.queryForList(sql, args.toArray());
+        return jdbcTemplate.queryForList(sql, args.toArray()).stream()
+                .map(this::hydrateLatestInteractiveOptionTemplate)
+                .toList();
+    }
+
+    private Map<String, Object> hydrateLatestInteractiveOptionTemplate(Map<String, Object> row) {
+        Map<String, Object> item = new LinkedHashMap<>(row);
+        Map<String, Object> snapshot = parseJsonMap(row.get("chartSnapshot"));
+        if (snapshot.isEmpty()) {
+            return item;
+        }
+        String ruleCode = Objects.toString(snapshot.get("chartRuleCode"), "").trim();
+        if (ruleCode.isBlank()) {
+            return item;
+        }
+        Map<String, Object> latestInteractive = aiChartRuleConfigService.latestInteractiveOptionTemplate(
+                ruleCode,
+                Objects.toString(row.getOrDefault("chartType", snapshot.getOrDefault("chartType", "bar")), "bar"));
+        if (latestInteractive.isEmpty()) {
+            return item;
+        }
+        Map<String, Object> optionTemplate = new LinkedHashMap<>(parseJsonMap(snapshot.get("optionTemplate")));
+        for (String key : List.of("animation", "tooltip", "dynamic")) {
+            if (latestInteractive.containsKey(key)) {
+                optionTemplate.put(key, latestInteractive.get(key));
+            }
+        }
+        if (latestInteractive.containsKey("dataZoom")) {
+            optionTemplate.put("dataZoom", latestInteractive.get("dataZoom"));
+        } else {
+            optionTemplate.remove("dataZoom");
+        }
+        snapshot.put("optionTemplate", optionTemplate);
+        item.put("chartSnapshot", snapshot);
+        return item;
     }
 
     public void assertHistoryChartOwnedByCurrentUser(long historyId) {
@@ -790,6 +828,11 @@ public class ChatQueryHistoryService {
                 ? parseJsonStringList(row.get("reasoningProcess"))
                 : compactReasoningSteps(reasoningReplaySteps);
         item.put("chartSnapshot", snapshot);
+        item.put("chartRuleCode", firstNonBlankValue(snapshot.get("chartRuleCode"), row.get("chartRuleCode")));
+        item.put("chartRuleName", firstNonBlankValue(snapshot.get("chartRuleName"), row.get("chartRuleName")));
+        item.put("chartScenarioType", firstNonBlankValue(snapshot.get("chartScenarioType"), row.get("chartScenarioType")));
+        item.put("chartRecommendationStatus", firstNonBlankValue(snapshot.get("chartRecommendationStatus"), row.get("chartRecommendationStatus")));
+        item.put("chartRecommendationExplain", firstNonBlankValue(snapshot.get("chartRecommendationExplain"), row.get("chartRecommendationExplain")));
         item.put("graphContext", snapshot.get("graphContext"));
         item.put("graphPath", snapshot.get("graphPath"));
         item.put("graphSqlHints", snapshot.get("graphSqlHints"));
@@ -832,6 +875,11 @@ public class ChatQueryHistoryService {
         Map<String, Object> snapshot = new LinkedHashMap<>();
         snapshot.put("tableName", tableName);
         snapshot.put("chartType", result.get("chartType"));
+        putIfNotBlank(snapshot, "chartRuleCode", Objects.toString(result.get("chartRuleCode"), ""));
+        putIfNotBlank(snapshot, "chartRuleName", Objects.toString(result.get("chartRuleName"), ""));
+        putIfNotBlank(snapshot, "chartScenarioType", Objects.toString(result.get("chartScenarioType"), ""));
+        putIfNotBlank(snapshot, "chartRecommendationStatus", Objects.toString(result.get("chartRecommendationStatus"), ""));
+        putIfNotBlank(snapshot, "chartRecommendationExplain", Objects.toString(result.get("chartRecommendationExplain"), ""));
         snapshot.put("fieldMapping", result.get("fieldMapping"));
         snapshot.put("graphContext", result.get("graphContext"));
         snapshot.put("graphPath", result.get("graphPath"));
@@ -839,6 +887,12 @@ public class ChatQueryHistoryService {
         snapshot.put("message", result.get("message"));
         snapshot.put("sql", result.get("sql"));
         snapshot.put("data", result.get("data"));
+        if (result.get("tableColumns") != null) {
+            snapshot.put("tableColumns", result.get("tableColumns"));
+        }
+        if (result.get("tableRows") != null) {
+            snapshot.put("tableRows", result.get("tableRows"));
+        }
         if (result.get("chartEngine") != null) {
             snapshot.put("chartEngine", result.get("chartEngine"));
         }

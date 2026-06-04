@@ -224,6 +224,7 @@
                       :payload="payloadForItem(item)"
                       :chart-ui="chartUiForItem(item)"
                       hide-title
+                      @refresh="refreshChartPayloadsFromDynamicConfig"
                     />
                     <div v-else class="dge-chart-fallback">
                       {{ artifactIdForItem(item) ? '高级分析图表数据暂不可用' : (chartIdForItem(item) ? '图表数据暂不可用' : '未关联 chart_id') }}
@@ -455,6 +456,7 @@ const gridLayout = ref([])
 const legacyCards = ref([])
 const components = ref([])
 const chartPayloadById = ref({})
+let dynamicRefreshInFlight = false
 /** 当前用户所有可访问看板中已钉入的 chart 汇总（来自 GET /pinned-charts） */
 const allPinnedSummaries = ref([])
 const saving = ref(false)
@@ -1209,6 +1211,20 @@ async function loadChartPayloads() {
   chartPayloadById.value = map
 }
 
+async function refreshChartPayloadsFromDynamicConfig() {
+  if (!innerVisible.value || dynamicRefreshInFlight) return
+  dynamicRefreshInFlight = true
+  try {
+    await loadChartPayloads()
+  } catch {
+    // 看板动态刷新失败时保留当前快照，避免打断用户查看。
+  } finally {
+    window.setTimeout(() => {
+      dynamicRefreshInFlight = false
+    }, 600)
+  }
+}
+
 async function loadBoard() {
   const id = props.initialRow?.id
   if (!id) return
@@ -1271,6 +1287,7 @@ function onClosed() {
   legacyCards.value = []
   components.value = []
   chartPayloadById.value = {}
+  dynamicRefreshInFlight = false
   allPinnedSummaries.value = []
   historyKeyword.value = ''
   editingItemId.value = null

@@ -63,6 +63,11 @@
             <el-tag size="small">{{ chartTypeLabel(card.chartType) }}</el-tag>
           </div>
           <div class="chart-sub">{{ card.tableName || '未指定数据表' }}</div>
+          <div v-if="card.sourceMeta" class="chart-source">
+            <el-tag size="small" effect="plain">{{ card.sourceMeta.sourceLabel }}</el-tag>
+            <el-tag v-if="card.sourceMeta.snapshotLabel" size="small" type="info" effect="plain">{{ card.sourceMeta.snapshotLabel }}</el-tag>
+            <span v-if="card.sourceMeta.detail">{{ card.sourceMeta.detail }}</span>
+          </div>
           <div :ref="setChartRef(card._renderKey)" class="chart-box" />
           <details v-if="card.sql" class="sql-wrap">
             <summary>查看 SQL</summary>
@@ -636,6 +641,25 @@ onBeforeUnmount(() => {
   color: #6b7280;
   font-size: 12px;
   margin-bottom: 8px;
+}
+
+.chart-source {
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: -2px 0 8px;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.4;
+  overflow: hidden;
+}
+
+.chart-source span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chart-box {

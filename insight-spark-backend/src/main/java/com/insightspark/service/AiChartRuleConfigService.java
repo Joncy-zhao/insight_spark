@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 @Service
 @DependsOn("sqlMigrationRunner")
@@ -23,6 +24,37 @@ public class AiChartRuleConfigService {
 
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {
     };
+    private static final int MAX_TEST_FIELD_COUNT = 60;
+    private static final int MAX_TEST_ROW_COUNT = 500;
+    private static final int MAX_TEST_JSON_LENGTH = 120_000;
+    private static final int MAX_CONFIG_TEXT_LENGTH = 60_000;
+    private static final int MAX_SAFE_STRING_LENGTH = 4_000;
+    private static final Set<String> RENDER_ROOT_KEYS = Set.of(
+            "animation", "smooth", "showSymbol", "barMaxWidth", "tooltip", "dataZoom", "label",
+            "prediction", "voiceSummary", "dynamic", "refreshIntervalSeconds", "dynamicRefreshInterval",
+            "compare", "sort", "pagination", "sortable", "table"
+    );
+    private static final Set<String> RENDER_TOOLTIP_KEYS = Set.of("show", "trigger", "confine", "axisPointerType", "axisPointer");
+    private static final Set<String> RENDER_AXIS_POINTER_KEYS = Set.of("type");
+    private static final Set<String> RENDER_DATA_ZOOM_KEYS = Set.of("enabled", "threshold", "start", "end", "height", "bottom");
+    private static final Set<String> RENDER_DYNAMIC_KEYS = Set.of(
+            "refreshIntervalSeconds", "incrementalRendering", "progressive", "progressiveThreshold",
+            "largeThreshold", "autoDataZoomThreshold", "autoLegendScrollThreshold", "dataZoomStart", "dataZoomEnd"
+    );
+    private static final Set<String> RENDER_LABEL_KEYS = Set.of("show", "showPercent", "digits", "minPercent", "formatter", "position", "fontSize");
+    private static final Set<String> RENDER_PREDICTION_KEYS = Set.of(
+            "enabled", "confidence", "confidenceLabel", "horizon", "algorithm", "showExplanation",
+            "legendConfig", "legend", "showHistory", "historyLabel", "showForecast", "forecastLabel",
+            "showUpper", "upperLabel", "showLower", "lowerLabel", "showAnomaly", "anomalyLabel"
+    );
+    private static final Set<String> RENDER_PREDICTION_SERIES_KEYS = Set.of("history", "forecast", "upper", "lower", "anomaly");
+    private static final Set<String> RENDER_PREDICTION_LEGEND_ITEM_KEYS = Set.of("show", "label");
+    private static final Set<String> RENDER_VOICE_SUMMARY_KEYS = Set.of("enabled", "order", "templates", "chartTemplates", "summaryTemplate", "maxItems");
+    private static final Set<String> RENDER_VOICE_FIELD_KEYS = Set.of("title", "metric", "max", "min", "trend", "anomaly");
+    private static final Set<String> RENDER_CHART_TYPE_KEYS = Set.of("line", "bar", "pie", "doughnut", "table");
+    private static final Set<String> RENDER_COMPARE_KEYS = Set.of("mom", "yoy");
+    private static final Set<String> RENDER_PAGINATION_KEYS = Set.of("pageSize");
+    private static final Set<String> RENDER_TABLE_KEYS = Set.of("showHeader", "stripe", "border", "pageSize", "sortable");
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -80,8 +112,25 @@ public class AiChartRuleConfigService {
                   INDEX `idx_ai_chart_audit_created` (`created_at`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI chart rule audit log';
                 """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS `ai_chart_rule_version` (
+                  `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+                  `rule_id` BIGINT NOT NULL,
+                  `rule_code` VARCHAR(80) NOT NULL,
+                  `version_no` INT NOT NULL,
+                  `snapshot` TEXT NOT NULL,
+                  `change_action` VARCHAR(32) NOT NULL,
+                  `operator` VARCHAR(64) NULL,
+                  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  UNIQUE KEY `uk_ai_chart_rule_version_no` (`rule_id`, `version_no`),
+                  INDEX `idx_ai_chart_rule_version_rule` (`rule_id`),
+                  INDEX `idx_ai_chart_rule_version_code` (`rule_code`),
+                  INDEX `idx_ai_chart_rule_version_created` (`created_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI chart rule version snapshots';
+                """);
         seedRules();
         seedPreference();
+        seedInitialRuleVersions();
     }
 
     public List<Map<String, Object>> listRules(String scenarioType, Boolean enabled, String keyword) {
@@ -126,6 +175,7 @@ public class AiChartRuleConfigService {
     }
 
     public Map<String, Object> createRule(Map<String, Object> body) {
+        requireAdminForWrite();
         String ruleCode = requireText(body, "ruleCode");
         String ruleName = requireText(body, "ruleName");
         String scenarioType = requireText(body, "scenarioType");
@@ -136,7 +186,7 @@ public class AiChartRuleConfigService {
         String renderConfig = jsonValue(body.get("renderConfig"));
         String explainTemplate = textValue(body.get("explainTemplate"));
         String uid = operatorUser();
-        validateConfig(matchConfig, renderConfig);
+        validateRuleConfig(matchConfig, renderConfig);
 
         jdbcTemplate.update("""
                 INSERT INTO ai_chart_rule(rule_code, rule_name, scenario_type, chart_type, enabled, priority,
@@ -147,10 +197,12 @@ public class AiChartRuleConfigService {
         Long id = jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
         Map<String, Object> saved = getRule(id);
         writeAudit(id, "CREATE", null, saved);
+        recordRuleVersion(id, "CREATE", saved);
         return saved;
     }
 
     public Map<String, Object> updateRule(Long id, Map<String, Object> body) {
+        requireAdminForWrite();
         Map<String, Object> before = getRule(id);
         String ruleCode = requireText(body, "ruleCode");
         String ruleName = requireText(body, "ruleName");
@@ -161,7 +213,7 @@ public class AiChartRuleConfigService {
         String matchConfig = jsonValue(body.get("matchConfig"));
         String renderConfig = jsonValue(body.get("renderConfig"));
         String explainTemplate = textValue(body.get("explainTemplate"));
-        validateConfig(matchConfig, renderConfig);
+        validateRuleConfig(matchConfig, renderConfig);
 
         jdbcTemplate.update("""
                 UPDATE ai_chart_rule
@@ -172,23 +224,79 @@ public class AiChartRuleConfigService {
                 matchConfig, renderConfig, explainTemplate, operatorUser(), id);
         Map<String, Object> saved = getRule(id);
         writeAudit(id, "UPDATE", before, saved);
+        recordRuleVersion(id, "UPDATE", saved);
         return saved;
     }
 
     public void updateEnabled(Long id, boolean enabled) {
+        requireAdminForWrite();
         Map<String, Object> before = getRule(id);
         jdbcTemplate.update("""
                 UPDATE ai_chart_rule
                 SET enabled = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """, enabled ? 1 : 0, operatorUser(), id);
-        writeAudit(id, enabled ? "ENABLE" : "DISABLE", before, getRule(id));
+        Map<String, Object> saved = getRule(id);
+        String action = enabled ? "ENABLE" : "DISABLE";
+        writeAudit(id, action, before, saved);
+        recordRuleVersion(id, action, saved);
     }
 
     public void deleteRule(Long id) {
+        requireAdminForWrite();
         Map<String, Object> before = getRule(id);
+        recordRuleVersion(id, "DELETE", before);
         jdbcTemplate.update("DELETE FROM ai_chart_rule WHERE id = ?", id);
         writeAudit(id, "DELETE", before, null);
+    }
+
+    public List<Map<String, Object>> listRuleVersions(Long ruleId) {
+        return jdbcTemplate.queryForList("""
+                        SELECT id, rule_id AS ruleId, rule_code AS ruleCode, version_no AS versionNo,
+                               snapshot, change_action AS changeAction, operator, created_at AS createdAt
+                        FROM ai_chart_rule_version
+                        WHERE rule_id = ?
+                        ORDER BY version_no DESC, id DESC
+                        """, ruleId).stream()
+                .map(this::decodeVersion)
+                .toList();
+    }
+
+    public Map<String, Object> rollbackRuleVersion(Long ruleId, Long versionId) {
+        requireAdminForWrite();
+        Map<String, Object> before = getRule(ruleId);
+        Map<String, Object> version = decodeVersion(jdbcTemplate.queryForMap("""
+                SELECT id, rule_id AS ruleId, rule_code AS ruleCode, version_no AS versionNo,
+                       snapshot, change_action AS changeAction, operator, created_at AS createdAt
+                FROM ai_chart_rule_version
+                WHERE id = ? AND rule_id = ?
+                """, versionId, ruleId));
+        Map<String, Object> snapshot = mapValue(version.get("snapshot"));
+        if (snapshot.isEmpty()) {
+            throw new IllegalArgumentException("版本快照为空，无法回滚");
+        }
+        validateRuleConfig(jsonValue(snapshot.get("matchConfig")), jsonValue(snapshot.get("renderConfig")));
+        jdbcTemplate.update("""
+                UPDATE ai_chart_rule
+                SET rule_code = ?, rule_name = ?, scenario_type = ?, chart_type = ?, enabled = ?, priority = ?,
+                    match_config = ?, render_config = ?, explain_template = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                requireText(snapshot, "ruleCode"),
+                requireText(snapshot, "ruleName"),
+                requireText(snapshot, "scenarioType"),
+                requireText(snapshot, "chartType"),
+                boolValue(snapshot.get("enabled"), true) ? 1 : 0,
+                intValue(snapshot.get("priority"), 100),
+                jsonValue(snapshot.get("matchConfig")),
+                jsonValue(snapshot.get("renderConfig")),
+                textValue(snapshot.get("explainTemplate")),
+                operatorUser(),
+                ruleId);
+        Map<String, Object> saved = getRule(ruleId);
+        writeAudit(ruleId, "ROLLBACK", before, Map.of("version", version, "rule", saved));
+        recordRuleVersion(ruleId, "ROLLBACK", saved);
+        return saved;
     }
 
     public Map<String, Object> getPreferences() {
@@ -207,6 +315,7 @@ public class AiChartRuleConfigService {
     }
 
     public Map<String, Object> savePreferences(Map<String, Object> body) {
+        requireAdminForWrite();
         String themeName = Objects.toString(body.getOrDefault("themeName", "Enterprise Default")).trim();
         String colorPalette = jsonValue(body.getOrDefault("colorPalette", List.of("#2563eb", "#16a34a", "#f59e0b", "#dc2626")));
         String fontConfig = jsonValue(body.getOrDefault("fontConfig", Map.of("fontFamily", "Microsoft YaHei", "fontSize", 12)));
@@ -234,6 +343,9 @@ public class AiChartRuleConfigService {
                 "animation", List.of(true, false),
                 "legendPositions", List.of("top", "bottom", "left", "right"),
                 "dynamicRefreshIntervals", List.of(0, 5, 10, 30, 60),
+                "tooltipTriggers", List.of("axis", "item", "none"),
+                "dynamicOptions", List.of("dataZoom", "incrementalRendering", "progressive", "largeThreshold",
+                        "autoDataZoomThreshold", "autoLegendScrollThreshold"),
                 "voiceSummaryFields", List.of("title", "metric", "trend", "max", "min", "anomaly"),
                 "chartTypes", List.of("line", "bar", "pie", "doughnut", "table")
         );
@@ -255,21 +367,183 @@ public class AiChartRuleConfigService {
         return jdbcTemplate.queryForList(sql.toString(), args.toArray());
     }
 
+    public Map<String, Object> exportConfig() {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("format", "insight-spark-ai-chart-rules");
+        payload.put("version", 1);
+        payload.put("exportedAt", java.time.LocalDateTime.now().toString());
+        payload.put("rules", listRules(null, null, null).stream()
+                .map(this::stripRuleRuntimeFields)
+                .toList());
+        payload.put("preferences", getPreferences());
+        return payload;
+    }
+
+    public Map<String, Object> previewImport(Map<String, Object> body) {
+        List<Map<String, Object>> incomingRules = objectList(body.get("rules"));
+        if (incomingRules.size() > 200) {
+            throw new IllegalArgumentException("导入规则数量不能超过 200 条");
+        }
+        Map<String, Map<String, Object>> existing = new LinkedHashMap<>();
+        for (Map<String, Object> rule : listRules(null, null, null)) {
+            existing.put(Objects.toString(rule.get("ruleCode"), ""), rule);
+        }
+        List<Map<String, Object>> changes = new ArrayList<>();
+        int create = 0;
+        int overwrite = 0;
+        int unchanged = 0;
+        for (Map<String, Object> raw : incomingRules) {
+            Map<String, Object> rule = normalizeImportRule(raw);
+            String code = Objects.toString(rule.get("ruleCode"), "");
+            Map<String, Object> old = existing.get(code);
+            String action = old == null ? "CREATE" : sameRule(old, rule) ? "UNCHANGED" : "OVERWRITE";
+            if ("CREATE".equals(action)) create++;
+            if ("OVERWRITE".equals(action)) overwrite++;
+            if ("UNCHANGED".equals(action)) unchanged++;
+            changes.add(Map.of(
+                    "ruleCode", code,
+                    "ruleName", rule.get("ruleName"),
+                    "action", action
+            ));
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("createCount", create);
+        result.put("overwriteCount", overwrite);
+        result.put("unchangedCount", unchanged);
+        result.put("preferenceIncluded", body.get("preferences") instanceof Map<?, ?>);
+        result.put("changes", changes);
+        return result;
+    }
+
+    public Map<String, Object> importConfig(Map<String, Object> body) {
+        requireAdminForWrite();
+        Map<String, Object> preview = previewImport(body);
+        List<Map<String, Object>> incomingRules = objectList(body.get("rules"));
+        int applied = 0;
+        for (Map<String, Object> raw : incomingRules) {
+            Map<String, Object> rule = normalizeImportRule(raw);
+            upsertImportedRule(rule);
+            applied++;
+        }
+        if (body.get("preferences") instanceof Map<?, ?> preferenceMap) {
+            savePreferences(mapValue(preferenceMap));
+        }
+        Map<String, Object> result = new LinkedHashMap<>(preview);
+        result.put("appliedRuleCount", applied);
+        writeAudit(null, "IMPORT", null, result);
+        return result;
+    }
+
     public Map<String, Object> testRecommendation(Map<String, Object> body) {
+        validateTestPayload(body);
         List<Map<String, Object>> fields = objectList(body.get("fields"));
         List<Map<String, Object>> rows = objectList(body.get("rows"));
         String intent = Objects.toString(body.getOrDefault("intent", ""), "");
         Map<String, Object> profile = profile(fields, rows, intent);
         Map<String, Object> rule = chooseRule(profile, intent);
         Map<String, Object> option = buildOption(rule, fields, rows);
+        Map<String, Object> optionTemplate = buildOptionTemplate(Objects.toString(rule.get("chartType"), "bar"),
+                mapValue(rule.get("renderConfig")), getPreferences());
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("profile", profile);
         result.put("matchedRule", rule);
         result.put("chartType", rule.get("chartType"));
         result.put("option", option);
+        result.put("optionTemplate", optionTemplate);
         result.put("explain", explain(rule, profile));
         writeAudit(longOrNull(rule.get("id")), "TEST", null, result);
         return result;
+    }
+
+    public Map<String, Object> latestInteractiveOptionTemplate(String ruleCode, String fallbackChartType) {
+        String code = Objects.toString(ruleCode, "").trim();
+        if (code.isBlank()) {
+            return Map.of();
+        }
+        Map<String, Object> rule = findRuleByCode(code);
+        if (rule == null || !boolValue(rule.get("enabled"), true)) {
+            return Map.of(
+                    "dynamic", Map.of("refreshIntervalSeconds", 0),
+                    "dataZoom", Map.of("enabled", false)
+            );
+        }
+        Map<String, Object> fullTemplate = buildOptionTemplate(
+                Objects.toString(rule.getOrDefault("chartType", fallbackChartType), fallbackChartType),
+                mapValue(rule.get("renderConfig")),
+                getPreferences());
+        Map<String, Object> interactive = new LinkedHashMap<>();
+        for (String key : List.of("animation", "tooltip", "dataZoom", "dynamic")) {
+            if (fullTemplate.containsKey(key)) {
+                interactive.put(key, fullTemplate.get(key));
+            }
+        }
+        if (!interactive.containsKey("dataZoom")) {
+            interactive.put("dataZoom", Map.of("enabled", false));
+        }
+        return interactive;
+    }
+
+    private Map<String, Object> stripRuleRuntimeFields(Map<String, Object> rule) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (String key : List.of("ruleCode", "ruleName", "scenarioType", "chartType", "enabled",
+                "priority", "matchConfig", "renderConfig", "explainTemplate")) {
+            out.put(key, rule.get(key));
+        }
+        return out;
+    }
+
+    private Map<String, Object> normalizeImportRule(Map<String, Object> raw) {
+        Map<String, Object> rule = new LinkedHashMap<>();
+        rule.put("ruleCode", requireText(raw, "ruleCode"));
+        rule.put("ruleName", requireText(raw, "ruleName"));
+        rule.put("scenarioType", requireText(raw, "scenarioType"));
+        rule.put("chartType", requireText(raw, "chartType"));
+        rule.put("enabled", boolValue(raw.get("enabled"), true));
+        rule.put("priority", intValue(raw.get("priority"), 100));
+        rule.put("matchConfig", mapValue(raw.get("matchConfig")));
+        rule.put("renderConfig", mapValue(raw.get("renderConfig")));
+        rule.put("explainTemplate", textValue(raw.get("explainTemplate")));
+        validateRuleConfig(jsonValue(rule.get("matchConfig")), jsonValue(rule.get("renderConfig")));
+        return rule;
+    }
+
+    private boolean sameRule(Map<String, Object> oldRule, Map<String, Object> newRule) {
+        return Objects.equals(stripRuleRuntimeFields(oldRule), stripRuleRuntimeFields(newRule));
+    }
+
+    private void upsertImportedRule(Map<String, Object> rule) {
+        Map<String, Object> before = findRuleByCode(Objects.toString(rule.get("ruleCode"), ""));
+        String uid = operatorUser();
+        jdbcTemplate.update("""
+                INSERT INTO ai_chart_rule(rule_code, rule_name, scenario_type, chart_type, enabled, priority,
+                                          match_config, render_config, explain_template, created_by, updated_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE rule_name = VALUES(rule_name),
+                                        scenario_type = VALUES(scenario_type),
+                                        chart_type = VALUES(chart_type),
+                                        enabled = VALUES(enabled),
+                                        priority = VALUES(priority),
+                                        match_config = VALUES(match_config),
+                                        render_config = VALUES(render_config),
+                                        explain_template = VALUES(explain_template),
+                                        updated_by = VALUES(updated_by),
+                                        updated_at = CURRENT_TIMESTAMP
+                """,
+                rule.get("ruleCode"),
+                rule.get("ruleName"),
+                rule.get("scenarioType"),
+                rule.get("chartType"),
+                boolValue(rule.get("enabled"), true) ? 1 : 0,
+                intValue(rule.get("priority"), 100),
+                jsonValue(rule.get("matchConfig")),
+                jsonValue(rule.get("renderConfig")),
+                textValue(rule.get("explainTemplate")),
+                uid,
+                uid);
+        Map<String, Object> saved = findRuleByCode(Objects.toString(rule.get("ruleCode"), ""));
+        if (before == null || !sameRule(before, saved)) {
+            recordRuleVersion(longOrNull(saved.get("id")), before == null ? "IMPORT_CREATE" : "IMPORT_OVERWRITE", saved);
+        }
     }
 
     public Map<String, Object> recommendForChatResult(String intent, List<Map<String, Object>> fields,
@@ -332,13 +606,15 @@ public class AiChartRuleConfigService {
         int dimensionFields = 0;
         for (Map<String, Object> field : fields) {
             String name = Objects.toString(field.getOrDefault("name", field.getOrDefault("columnName", "")), "");
+            String sourceName = Objects.toString(field.getOrDefault("sourceFieldName", ""), "");
             String type = Objects.toString(field.getOrDefault("type", ""), "").toLowerCase(Locale.ROOT);
-            String lower = name.toLowerCase(Locale.ROOT);
-            boolean isTime = type.contains("date") || type.contains("time") || lower.contains("date")
-                    || lower.contains("time") || name.contains("日期") || name.contains("时间") || name.contains("月份");
-            boolean isNumber = type.contains("int") || type.contains("decimal") || type.contains("double")
-                    || type.contains("number") || type.contains("numeric") || type.contains("float")
-                    || name.contains("金额") || name.contains("销售额") || name.contains("数量") || name.contains("占比");
+            String combinedName = name + " " + sourceName;
+            String lower = buildFieldSearchText(field, combinedName);
+            boolean isTime = isTimeLikeField(type, lower);
+            boolean isNumber = isNumericLikeField(type, lower)
+                    || combinedName.contains("金额") || combinedName.contains("销售额") || combinedName.contains("数量")
+                    || combinedName.contains("占比") || lower.contains("amt") || lower.contains("qty")
+                    || lower.contains("profit") || lower.contains("discount");
             if (isTime) {
                 timeFields++;
             } else if (isNumber) {
@@ -359,10 +635,13 @@ public class AiChartRuleConfigService {
     }
 
     private String detectScenario(String intent, int timeFields, int numericFields, int dimensionFields, int fieldCount, int rowCount) {
-        String lower = Objects.toString(intent, "").toLowerCase(Locale.ROOT);
-        if (lower.contains("trend") || lower.contains("forecast") || intent.contains("趋势") || intent.contains("预测")) {
-            return "TIME_SERIES";
+        if (isExplicitDetailIntent(intent)) {
+            return "DETAIL";
         }
+        if (isTimeSeriesIntent(intent)) {
+            return timeFields > 0 ? "TIME_SERIES" : (dimensionFields > 0 && numericFields > 0 ? "GROUP_COMPARE" : "DETAIL");
+        }
+        String lower = Objects.toString(intent, "").toLowerCase(Locale.ROOT);
         if (lower.contains("ratio") || lower.contains("share") || intent.contains("占比") || intent.contains("比例")) {
             return "RATIO";
         }
@@ -379,6 +658,73 @@ public class AiChartRuleConfigService {
             return "DETAIL";
         }
         return numericFields > 0 ? "GROUP_COMPARE" : "DETAIL";
+    }
+
+    private boolean isExplicitDetailIntent(String intent) {
+        String text = Objects.toString(intent, "");
+        String lower = text.toLowerCase(Locale.ROOT);
+        boolean asksMultipleFields = text.contains("显示") && (text.contains("、") || text.contains("，")
+                || text.contains(",") || text.contains("和"));
+        return text.contains("明细") || text.contains("详情") || text.contains("列表")
+                || text.contains("表格") || text.contains("列出") || asksMultipleFields
+                || lower.contains("detail");
+    }
+
+    private boolean isTimeSeriesIntent(String intent) {
+        String text = Objects.toString(intent, "");
+        String lower = text.toLowerCase(Locale.ROOT);
+        return lower.contains("trend") || lower.contains("forecast")
+                || text.contains("趋势") || text.contains("预测")
+                || text.contains("每日") || text.contains("按日") || text.contains("每天")
+                || text.contains("每月") || text.contains("按月") || text.contains("月度") || text.contains("月份")
+                || text.contains("每周") || text.contains("按周") || text.contains("周度")
+                || text.contains("每季度") || text.contains("按季度") || text.contains("季度")
+                || text.contains("每年") || text.contains("按年") || text.contains("年度")
+                || text.contains("日期") || text.contains("时间");
+    }
+
+    private boolean isTimeLikeField(String type, String fieldText) {
+        String normalizedType = Objects.toString(type, "").toLowerCase(Locale.ROOT);
+        String text = Objects.toString(fieldText, "").toLowerCase(Locale.ROOT);
+        if (normalizedType.contains("date") || normalizedType.contains("time")) {
+            return true;
+        }
+        boolean hasTimeSignal = containsAny(text, "date", "time", "day", "month", "year", "week", "quarter",
+                "日期", "时间", "月份", "年月", "年份", "年度", "月度", "季度");
+        return hasTimeSignal && !hasStrongMetricSignal(text);
+    }
+
+    private boolean isNumericLikeField(String type, String fieldText) {
+        String normalizedType = Objects.toString(type, "").toLowerCase(Locale.ROOT);
+        String text = Objects.toString(fieldText, "").toLowerCase(Locale.ROOT);
+        return normalizedType.contains("int") || normalizedType.contains("decimal") || normalizedType.contains("double")
+                || normalizedType.contains("number") || normalizedType.contains("numeric") || normalizedType.contains("float")
+                || containsAny(text, "amount", "sales", "sale", "revenue", "gmv", "profit", "margin", "qty",
+                "quantity", "discount", "金额", "销售额", "销售", "收入", "营收", "利润", "数量", "销量", "折扣", "占比");
+    }
+
+    private String buildFieldSearchText(Map<String, Object> field, String fallback) {
+        return (Objects.toString(fallback, "") + " "
+                + Objects.toString(field.get("columnName"), "") + " "
+                + Objects.toString(field.get("displayName"), "") + " "
+                + Objects.toString(field.get("sourceFieldName"), "") + " "
+                + Objects.toString(field.get("fieldComment"), "")).toLowerCase(Locale.ROOT);
+    }
+
+    private boolean containsAny(String text, String... candidates) {
+        String source = Objects.toString(text, "").toLowerCase(Locale.ROOT);
+        for (String candidate : candidates) {
+            if (source.contains(candidate.toLowerCase(Locale.ROOT))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasStrongMetricSignal(String text) {
+        return containsAny(Objects.toString(text, "").toLowerCase(Locale.ROOT),
+                "sales_amt", "amount", "amt", "revenue", "gmv", "profit", "margin", "qty", "quantity", "discount",
+                "销售额", "金额", "收入", "营收", "利润", "数量", "销量", "折扣", "占比");
     }
 
     private Map<String, Object> buildOption(Map<String, Object> rule, List<Map<String, Object>> fields, List<Map<String, Object>> rows) {
@@ -421,52 +767,272 @@ public class AiChartRuleConfigService {
     private Map<String, Object> buildOptionTemplate(String chartType, Map<String, Object> renderConfig,
                                                     Map<String, Object> preference) {
         Map<String, Object> option = new LinkedHashMap<>();
-        option.put("animation", renderConfig.getOrDefault("animation",
-                mapValue(preference.get("defaultOptions")).getOrDefault("animation", true)));
+        Map<String, Object> defaultOptions = mapValue(preference.get("defaultOptions"));
+        Map<String, Object> dynamic = buildDynamicRenderConfig(renderConfig);
+        option.put("animation", renderConfig.containsKey("animation")
+                ? boolValue(renderConfig.get("animation"), true)
+                : boolValue(defaultOptions.get("animation"), true));
         option.put("color", preference.getOrDefault("colorPalette", List.of()));
+        option.put("dynamic", dynamic);
+        if ("table".equalsIgnoreCase(chartType)) {
+            option.put("type", "table");
+            option.put("table", Map.of(
+                    "showHeader", true,
+                    "stripe", true,
+                    "border", true
+            ));
+            return option;
+        }
         Map<String, Object> layout = mapValue(preference.get("layoutConfig"));
         String legendPosition = Objects.toString(layout.getOrDefault("legend", "top"), "top");
-        option.put("legend", Map.of("top".equals(legendPosition) || "bottom".equals(legendPosition) ? legendPosition : "top", 2));
+        option.put("legend", buildLegendOption(legendPosition, dynamic));
         if ("line".equalsIgnoreCase(chartType) || "bar".equalsIgnoreCase(chartType)) {
-            option.put("tooltip", Map.of("trigger", "axis", "confine", true));
+            option.put("tooltip", buildTooltipOption(chartType, renderConfig));
             option.put("grid", Map.of("left", 48, "right", 16, "top", 36, "bottom", 56, "containLabel", true));
             Map<String, Object> series0 = new LinkedHashMap<>();
+            applyDynamicSeriesConfig(series0, dynamic);
             if ("line".equalsIgnoreCase(chartType)) {
                 series0.put("smooth", boolValue(renderConfig.get("smooth"), true));
                 series0.put("showSymbol", boolValue(renderConfig.get("showSymbol"), false));
+                Map<String, Object> prediction = mapValue(renderConfig.get("prediction"));
+                if (boolValue(prediction.get("enabled"), false)) {
+                    Map<String, Object> predictionOption = new LinkedHashMap<>();
+                    predictionOption.put("enabled", true);
+                    predictionOption.put("confidence", prediction.getOrDefault("confidence", 0.95));
+                    predictionOption.put("confidenceLabel", confidenceLabel(prediction.getOrDefault("confidence", 0.95)));
+                    Map<String, Object> legend = buildPredictionLegendConfig(prediction);
+                    predictionOption.put("legendConfig", legend);
+                    predictionOption.put("legend", predictionLegendNames(legend));
+                    predictionOption.put("showExplanation", boolValue(prediction.get("showExplanation"), true));
+                    option.put("prediction", predictionOption);
+                }
             } else {
                 series0.put("barMaxWidth", intValue(renderConfig.get("barMaxWidth"), 32));
                 series0.put("itemStyle", Map.of("borderRadius", List.of(4, 4, 0, 0)));
             }
             option.put("series", List.of(series0));
         } else if ("pie".equalsIgnoreCase(chartType) || "doughnut".equalsIgnoreCase(chartType)) {
-            option.put("tooltip", Map.of("trigger", "item", "confine", true));
+            option.put("tooltip", buildTooltipOption(chartType, renderConfig));
             Map<String, Object> label = mapValue(renderConfig.get("label"));
             Map<String, Object> series0 = new LinkedHashMap<>();
             series0.put("type", "pie");
+            applyDynamicSeriesConfig(series0, dynamic);
             series0.put("radius", "doughnut".equalsIgnoreCase(chartType) ? List.of("42%", "68%") : "65%");
             series0.put("minShowLabelAngle", intValue(label.get("minPercent"), 3));
             series0.put("label", Map.of("show", true, "formatter", "{b}: {d}%"));
             option.put("series", List.of(series0));
         }
-        if (boolValue(renderConfig.get("dataZoom"), false)) {
-            option.put("dataZoom", List.of(
-                    Map.of("type", "slider", "show", true, "xAxisIndex", 0, "bottom", 8, "height", 22),
-                    Map.of("type", "inside", "xAxisIndex", 0)
-            ));
+        if (shouldEnableDataZoom(renderConfig.get("dataZoom"), defaultOptions)) {
+            option.put("dataZoom", buildDataZoomOption(renderConfig.get("dataZoom"), dynamic));
         }
         return option;
     }
 
+    private Map<String, Object> buildDynamicRenderConfig(Map<String, Object> renderConfig) {
+        Map<String, Object> raw = new LinkedHashMap<>(mapValue(renderConfig.get("dynamic")));
+        if (renderConfig.containsKey("dynamicRefreshInterval")) {
+            raw.put("refreshIntervalSeconds", renderConfig.get("dynamicRefreshInterval"));
+        }
+        if (renderConfig.containsKey("refreshIntervalSeconds")) {
+            raw.put("refreshIntervalSeconds", renderConfig.get("refreshIntervalSeconds"));
+        }
+        Map<String, Object> dataZoom = mapValue(renderConfig.get("dataZoom"));
+        if (!dataZoom.isEmpty()) {
+            raw.putIfAbsent("autoDataZoomThreshold", dataZoom.get("threshold"));
+            raw.putIfAbsent("dataZoomStart", dataZoom.get("start"));
+            raw.putIfAbsent("dataZoomEnd", dataZoom.get("end"));
+        }
+        Map<String, Object> dynamic = new LinkedHashMap<>();
+        dynamic.put("refreshIntervalSeconds", boundedInt(raw.get("refreshIntervalSeconds"), 0, 0, 3600));
+        dynamic.put("incrementalRendering", boolValue(raw.get("incrementalRendering"), false));
+        dynamic.put("progressive", boundedInt(raw.get("progressive"), 0, 0, 20000));
+        dynamic.put("progressiveThreshold", boundedInt(raw.get("progressiveThreshold"), 3000, 0, 100000));
+        dynamic.put("largeThreshold", boundedInt(raw.get("largeThreshold"), 2000, 0, 100000));
+        dynamic.put("autoDataZoomThreshold", boundedInt(raw.get("autoDataZoomThreshold"), 14, 4, 500));
+        dynamic.put("autoLegendScrollThreshold", boundedInt(raw.get("autoLegendScrollThreshold"), 10, 4, 500));
+        dynamic.put("dataZoomStart", boundedInt(raw.get("dataZoomStart"), 0, 0, 100));
+        dynamic.put("dataZoomEnd", boundedInt(raw.get("dataZoomEnd"), 60, 1, 100));
+        return dynamic;
+    }
+
+    private Map<String, Object> buildLegendOption(String legendPosition, Map<String, Object> dynamic) {
+        String position = Set.of("top", "bottom", "left", "right").contains(legendPosition) ? legendPosition : "top";
+        Map<String, Object> legend = new LinkedHashMap<>();
+        legend.put("type", "scroll");
+        legend.put(position, 2);
+        legend.put("pageButtonGap", 6);
+        legend.put("pageIconSize", 10);
+        legend.put("selector", false);
+        legend.put("autoScrollThreshold", dynamic.getOrDefault("autoLegendScrollThreshold", 10));
+        return legend;
+    }
+
+    private Map<String, Object> buildTooltipOption(String chartType, Map<String, Object> renderConfig) {
+        Map<String, Object> raw = mapValue(renderConfig.get("tooltip"));
+        boolean show = raw.isEmpty() && !(renderConfig.get("tooltip") instanceof Map<?, ?>)
+                ? boolValue(renderConfig.get("tooltip"), true)
+                : boolValue(raw.get("show"), true);
+        String defaultTrigger = "pie".equalsIgnoreCase(chartType) || "doughnut".equalsIgnoreCase(chartType) ? "item" : "axis";
+        String trigger = Objects.toString(raw.getOrDefault("trigger", defaultTrigger), defaultTrigger).toLowerCase(Locale.ROOT);
+        if (!Set.of("axis", "item", "none").contains(trigger)) {
+            trigger = defaultTrigger;
+        }
+        Map<String, Object> tooltip = new LinkedHashMap<>();
+        tooltip.put("show", show && !"none".equals(trigger));
+        tooltip.put("trigger", "none".equals(trigger) ? defaultTrigger : trigger);
+        tooltip.put("confine", boolValue(raw.get("confine"), true));
+        String axisPointerType = Objects.toString(raw.getOrDefault("axisPointerType", "shadow"), "shadow").toLowerCase(Locale.ROOT);
+        if (Set.of("line", "shadow", "cross", "none").contains(axisPointerType) && !"none".equals(axisPointerType)) {
+            tooltip.put("axisPointer", Map.of("type", axisPointerType));
+        }
+        return tooltip;
+    }
+
+    private boolean shouldEnableDataZoom(Object rawDataZoom, Map<String, Object> defaultOptions) {
+        if (rawDataZoom instanceof Map<?, ?> map) {
+            Map<String, Object> normalized = mapValue(map);
+            return boolValue(normalized.get("enabled"), true);
+        }
+        if (rawDataZoom != null) {
+            return boolValue(rawDataZoom, false);
+        }
+        return boolValue(defaultOptions.get("dataZoom"), false);
+    }
+
+    private List<Map<String, Object>> buildDataZoomOption(Object rawDataZoom, Map<String, Object> dynamic) {
+        Map<String, Object> raw = mapValue(rawDataZoom);
+        int start = boundedInt(raw.get("start"), intValue(dynamic.get("dataZoomStart"), 0), 0, 100);
+        int end = boundedInt(raw.get("end"), intValue(dynamic.get("dataZoomEnd"), 60), 1, 100);
+        if (end <= start) {
+            end = Math.min(100, start + 1);
+        }
+        int height = boundedInt(raw.get("height"), 22, 12, 60);
+        int bottom = boundedInt(raw.get("bottom"), 8, 0, 120);
+        return List.of(
+                Map.of("type", "slider", "show", true, "xAxisIndex", 0, "bottom", bottom,
+                        "height", height, "start", start, "end", end),
+                Map.of("type", "inside", "xAxisIndex", 0, "start", start, "end", end)
+        );
+    }
+
+    private void applyDynamicSeriesConfig(Map<String, Object> series, Map<String, Object> dynamic) {
+        if (boolValue(dynamic.get("incrementalRendering"), false)) {
+            int progressive = intValue(dynamic.get("progressive"), 400);
+            series.put("progressive", progressive > 0 ? progressive : 400);
+            series.put("progressiveThreshold", intValue(dynamic.get("progressiveThreshold"), 3000));
+        }
+        int largeThreshold = intValue(dynamic.get("largeThreshold"), 2000);
+        if (largeThreshold > 0) {
+            series.put("largeThreshold", largeThreshold);
+        }
+    }
+
+    private Map<String, Object> buildPredictionLegendConfig(Map<String, Object> prediction) {
+        Map<String, Object> legend = new LinkedHashMap<>(mapValue(prediction.get("legendConfig")));
+        mergePredictionLegendItem(legend, prediction, "history", "showHistory", "historyLabel", "历史值", true);
+        mergePredictionLegendItem(legend, prediction, "forecast", "showForecast", "forecastLabel", "预测值", true);
+        mergePredictionLegendItem(legend, prediction, "upper", "showUpper", "upperLabel", "置信上界", true);
+        mergePredictionLegendItem(legend, prediction, "lower", "showLower", "lowerLabel", "置信下界", true);
+        mergePredictionLegendItem(legend, prediction, "anomaly", "showAnomaly", "anomalyLabel", "异常点", false);
+        return legend;
+    }
+
+    private void mergePredictionLegendItem(Map<String, Object> legend, Map<String, Object> prediction,
+                                           String key, String showKey, String labelKey,
+                                           String defaultLabel, boolean defaultVisible) {
+        Map<String, Object> current = new LinkedHashMap<>(mapValue(legend.get(key)));
+        current.put("show", boolValue(prediction.getOrDefault(showKey, current.get("show")), defaultVisible));
+        String label = Objects.toString(prediction.getOrDefault(labelKey, current.getOrDefault("label", defaultLabel)), "").trim();
+        current.put("label", label.isBlank() ? defaultLabel : label);
+        legend.put(key, current);
+    }
+
+    private List<String> predictionLegendNames(Map<String, Object> legend) {
+        List<String> names = new ArrayList<>();
+        for (String key : List.of("history", "forecast", "upper", "lower", "anomaly")) {
+            Map<String, Object> item = mapValue(legend.get(key));
+            if (boolValue(item.get("show"), true)) {
+                String label = Objects.toString(item.getOrDefault("label", ""), "").trim();
+                if (!label.isBlank()) {
+                    names.add(label);
+                }
+            }
+        }
+        return names;
+    }
+
+    private String confidenceLabel(Object value) {
+        if (value instanceof Number number) {
+            double confidence = number.doubleValue();
+            if (confidence > 0 && confidence <= 1) {
+                return Math.round(confidence * 100) + "%";
+            }
+            return Math.round(confidence) + "%";
+        }
+        String text = Objects.toString(value, "95%").trim();
+        if (text.endsWith("%")) {
+            return text;
+        }
+        try {
+            double confidence = Double.parseDouble(text);
+            if (confidence > 0 && confidence <= 1) {
+                return Math.round(confidence * 100) + "%";
+            }
+            return Math.round(confidence) + "%";
+        } catch (Exception ignored) {
+            return "95%";
+        }
+    }
+
     private Map<String, Object> buildVoiceSummary(Map<String, Object> rule, Map<String, Object> profile,
                                                   Map<String, Object> renderConfig) {
-        return Map.of(
-                "enabled", boolValue(renderConfig.get("voiceSummary"), true),
-                "scenarioType", rule.get("scenarioType"),
-                "chartType", rule.get("chartType"),
-                "summaryTemplate", "已按 " + rule.get("ruleName") + " 推荐 " + rule.get("chartType")
-                        + "，数据包含 " + profile.get("rowCount") + " 行。"
-        );
+        Object raw = renderConfig.get("voiceSummary");
+        Map<String, Object> config = raw instanceof Map<?, ?> rawMap ? mapValue(rawMap) : Map.of();
+        boolean enabled = raw instanceof Map<?, ?>
+                ? boolValue(config.get("enabled"), true)
+                : boolValue(raw, true);
+        String chartType = Objects.toString(rule.get("chartType"), "bar");
+        List<String> order = stringList(config.get("order"),
+                List.of("title", "metric", "max", "min", "trend", "anomaly"));
+        Map<String, Object> templates = defaultVoiceTemplates(config);
+        Map<String, Object> chartTemplates = defaultChartVoiceTemplates(config);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("enabled", enabled);
+        result.put("scenarioType", rule.get("scenarioType"));
+        result.put("chartType", chartType);
+        result.put("ruleCode", rule.get("ruleCode"));
+        result.put("ruleName", rule.get("ruleName"));
+        result.put("order", order);
+        result.put("templates", templates);
+        result.put("chartTemplates", chartTemplates);
+        result.put("summaryTemplate", Objects.toString(config.getOrDefault("summaryTemplate",
+                chartTemplates.getOrDefault(chartType, chartTemplates.getOrDefault("bar", ""))), ""));
+        result.put("maxItems", intValue(config.get("maxItems"), 3));
+        result.put("rowCount", profile.get("rowCount"));
+        return result;
+    }
+
+    private Map<String, Object> defaultVoiceTemplates(Map<String, Object> config) {
+        Map<String, Object> templates = new LinkedHashMap<>();
+        templates.put("title", "查询完成，已按「{ruleName}」生成{chartTypeName}。");
+        templates.put("metric", "当前按{dimension}分析{metric}，共{count}项结果。");
+        templates.put("max", "最大值为{maxName}，数值{maxValue}。");
+        templates.put("min", "最小值为{minName}，数值{minValue}。");
+        templates.put("trend", "整体趋势为{trend}。");
+        templates.put("anomaly", "检测到{anomalyCount}个异常点。");
+        templates.putAll(mapValue(config.get("templates")));
+        return templates;
+    }
+
+    private Map<String, Object> defaultChartVoiceTemplates(Map<String, Object> config) {
+        Map<String, Object> chartTemplates = new LinkedHashMap<>();
+        chartTemplates.put("line", "查询完成，已生成折线图。当前按{dimension}分析{metric}，整体趋势为{trend}，最大值为{maxName}{maxValue}。");
+        chartTemplates.put("bar", "查询完成，已生成柱状图。当前按{dimension}对比{metric}，最大值为{maxName}{maxValue}，最小值为{minName}{minValue}。");
+        chartTemplates.put("pie", "查询完成，已生成饼图。当前展示{metric}的占比结构，最高项为{maxName}{maxValue}。");
+        chartTemplates.put("doughnut", "查询完成，已生成环形图。当前展示{metric}的占比结构，最高项为{maxName}{maxValue}。");
+        chartTemplates.put("table", "查询完成，已生成表格。当前展示{count}行明细数据，包含{dimension}和{metric}等字段。");
+        chartTemplates.putAll(mapValue(config.get("chartTemplates")));
+        return chartTemplates;
     }
 
     private List<Map<String, Object>> normalizeFieldsForProfile(List<Map<String, Object>> fields, List<Map<String, Object>> rows) {
@@ -474,7 +1040,8 @@ public class AiChartRuleConfigService {
             return fields.stream().map(field -> {
                 Map<String, Object> item = new LinkedHashMap<>(field);
                 if (!item.containsKey("name")) {
-                    item.put("name", item.getOrDefault("displayName", item.getOrDefault("columnName", "")));
+                    item.put("name", item.getOrDefault("displayName",
+                            item.getOrDefault("sourceFieldName", item.getOrDefault("columnName", ""))));
                 }
                 if (!item.containsKey("type")) {
                     item.put("type", item.getOrDefault("fieldType", ""));
@@ -578,12 +1145,60 @@ public class AiChartRuleConfigService {
         return rule;
     }
 
+    private Map<String, Object> findRuleByCode(String ruleCode) {
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT id, rule_code AS ruleCode, rule_name AS ruleName, scenario_type AS scenarioType,
+                       chart_type AS chartType, enabled, priority, match_config AS matchConfig,
+                       render_config AS renderConfig, explain_template AS explainTemplate,
+                       created_by AS createdBy, updated_by AS updatedBy, created_at AS createdAt, updated_at AS updatedAt
+                FROM ai_chart_rule WHERE rule_code = ?
+                """, ruleCode);
+        return rows.isEmpty() ? null : decodeRule(rows.get(0));
+    }
+
     private Map<String, Object> decodeRule(Map<String, Object> row) {
         Map<String, Object> result = new LinkedHashMap<>(row);
         result.put("enabled", boolValue(row.get("enabled"), true));
         result.put("matchConfig", readJson(Objects.toString(row.get("matchConfig"), "{}"), Map.of()));
         result.put("renderConfig", readJson(Objects.toString(row.get("renderConfig"), "{}"), Map.of()));
         return result;
+    }
+
+    private Map<String, Object> decodeVersion(Map<String, Object> row) {
+        Map<String, Object> result = new LinkedHashMap<>(row);
+        result.put("snapshot", readJson(Objects.toString(row.get("snapshot"), "{}"), Map.of()));
+        return result;
+    }
+
+    private void seedInitialRuleVersions() {
+        Integer count = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM ai_chart_rule_version", Integer.class);
+        if (count != null && count > 0) {
+            return;
+        }
+        for (Map<String, Object> rule : listRules(null, null, null)) {
+            recordRuleVersion(longOrNull(rule.get("id")), "INIT", rule);
+        }
+    }
+
+    private void recordRuleVersion(Long ruleId, String action, Map<String, Object> snapshot) {
+        if (ruleId == null || snapshot == null || snapshot.isEmpty()) {
+            return;
+        }
+        Integer nextVersion = jdbcTemplate.queryForObject("""
+                SELECT COALESCE(MAX(version_no), 0) + 1
+                FROM ai_chart_rule_version
+                WHERE rule_id = ?
+                """, Integer.class, ruleId);
+        jdbcTemplate.update("""
+                INSERT INTO ai_chart_rule_version(rule_id, rule_code, version_no, snapshot, change_action, operator)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ruleId,
+                Objects.toString(snapshot.get("ruleCode"), ""),
+                nextVersion == null ? 1 : nextVersion,
+                jsonValue(stripRuleRuntimeFields(snapshot)),
+                action,
+                operatorUser());
     }
 
     private void writeAudit(Long ruleId, String action, Object before, Object after) {
@@ -593,20 +1208,214 @@ public class AiChartRuleConfigService {
                 """, ruleId, action, jsonValue(before), jsonValue(after), operatorUser());
     }
 
+    private void requireAdminForWrite() {
+        try {
+            if (!AuthContext.isAdmin()) {
+                throw new SecurityException("仅管理员可修改 AI 图表推荐规则配置");
+            }
+        } catch (IllegalStateException ignored) {
+            // Startup seed and isolated unit tests run without a request-scoped AuthContext.
+        }
+    }
+
+    private void validateTestPayload(Map<String, Object> body) {
+        if (body == null) {
+            throw new IllegalArgumentException("测试样例不能为空");
+        }
+        int jsonLength = jsonLength(body);
+        if (jsonLength > MAX_TEST_JSON_LENGTH) {
+            throw new IllegalArgumentException("规则测试样例 JSON 过大，最大支持 " + MAX_TEST_JSON_LENGTH + " 字符");
+        }
+        List<?> fields = rawList(body.get("fields"));
+        if (fields.size() > MAX_TEST_FIELD_COUNT) {
+            throw new IllegalArgumentException("规则测试样例字段数不能超过 " + MAX_TEST_FIELD_COUNT + " 个");
+        }
+        List<?> rows = rawList(body.get("rows"));
+        if (rows.size() > MAX_TEST_ROW_COUNT) {
+            throw new IllegalArgumentException("规则测试样例行数不能超过 " + MAX_TEST_ROW_COUNT + " 行");
+        }
+        for (Object row : rows) {
+            if (row instanceof Map<?, ?> map && map.size() > MAX_TEST_FIELD_COUNT * 2) {
+                throw new IllegalArgumentException("规则测试样例单行字段过多");
+            }
+        }
+    }
+
+    private void validateRuleConfig(String matchConfig, String renderConfig) {
+        validateConfig(matchConfig, renderConfig);
+        validateRenderConfig(renderConfig);
+    }
+
     private void validateConfig(String... jsonValues) {
         for (String value : jsonValues) {
             if (value == null || value.isBlank()) {
                 continue;
             }
-            if (value.length() > 60000) {
-                throw new IllegalArgumentException("JSON config is too large");
+            if (value.length() > MAX_CONFIG_TEXT_LENGTH) {
+                throw new IllegalArgumentException("配置 JSON 过大，单项最多支持 " + MAX_CONFIG_TEXT_LENGTH + " 字符");
             }
-            String lower = value.toLowerCase(Locale.ROOT);
-            if (lower.contains("<script") || lower.contains("javascript:") || lower.contains("function(")) {
-                throw new IllegalArgumentException("JSON config contains unsafe content");
-            }
-            readJson(value, Map.of());
+            Object parsed = parseJsonConfig(value);
+            validateSafeJsonValue(parsed, "$");
         }
+    }
+
+    private void validateRenderConfig(String renderConfig) {
+        if (renderConfig == null || renderConfig.isBlank()) {
+            return;
+        }
+        Object parsed = parseJsonConfig(renderConfig);
+        if (!(parsed instanceof Map<?, ?> raw)) {
+            throw new IllegalArgumentException("ECharts 渲染配置必须是 JSON 对象");
+        }
+        validateRenderConfigMap(mapValue(raw), "");
+    }
+
+    private Object parseJsonConfig(String value) {
+        try {
+            return objectMapper.readValue(value, Object.class);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("JSON 格式不正确，请检查逗号、引号和括号是否完整");
+        }
+    }
+
+    private void validateSafeJsonValue(Object value, String path) {
+        if (value instanceof Map<?, ?> map) {
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                String key = Objects.toString(entry.getKey(), "");
+                validateSafeJsonKey(key, path);
+                validateSafeJsonValue(entry.getValue(), path + "." + key);
+            }
+            return;
+        }
+        if (value instanceof List<?> list) {
+            if (list.size() > 1_000) {
+                throw new IllegalArgumentException("配置数组过长，单个数组最多支持 1000 项");
+            }
+            for (Object item : list) {
+                validateSafeJsonValue(item, path + "[]");
+            }
+            return;
+        }
+        if (value instanceof String text) {
+            validateSafeText(text, path);
+        }
+    }
+
+    private void validateSafeJsonKey(String key, String path) {
+        String normalized = key.toLowerCase(Locale.ROOT).replace("_", "").replace("-", "");
+        if (normalized.contains("script")
+                || normalized.contains("function")
+                || normalized.equals("url")
+                || normalized.endsWith("url")
+                || normalized.equals("href")
+                || normalized.equals("src")
+                || normalized.equals("link")
+                || normalized.equals("onclick")
+                || normalized.equals("onload")
+                || normalized.equals("onerror")) {
+            throw new IllegalArgumentException("检测到不安全配置字段：" + friendlyPath(path + "." + key)
+                    + "，禁止配置脚本、函数入口或外链地址字段");
+        }
+    }
+
+    private void validateSafeText(String text, String path) {
+        if (text.length() > MAX_SAFE_STRING_LENGTH) {
+            throw new IllegalArgumentException("配置文本过长：" + friendlyPath(path)
+                    + "，单个文本最多支持 " + MAX_SAFE_STRING_LENGTH + " 字符");
+        }
+        String lower = text.toLowerCase(Locale.ROOT);
+        String compact = lower.replaceAll("\\s+", "");
+        if (lower.contains("<script")
+                || lower.contains("</script")
+                || lower.contains("javascript:")
+                || lower.contains("vbscript:")
+                || lower.contains("data:text/html")
+                || lower.contains("data:application/javascript")
+                || lower.contains("http://")
+                || lower.contains("https://")
+                || lower.contains("://")
+                || compact.contains("function(")
+                || compact.contains("newfunction(")
+                || compact.contains("eval(")
+                || compact.contains("settimeout(")
+                || compact.contains("setinterval(")
+                || compact.contains("document.")
+                || compact.contains("window.")
+                || compact.contains("fetch(")
+                || compact.contains("xmlhttprequest")
+                || compact.contains("=>")) {
+            throw new IllegalArgumentException("检测到不安全配置内容：" + friendlyPath(path)
+                    + "，禁止在图表配置中写入脚本、函数体或外链 URL");
+        }
+    }
+
+    private void validateRenderConfigMap(Map<String, Object> map, String path) {
+        Set<String> allowed = allowedRenderKeys(path);
+        if (allowed.isEmpty()) {
+            throw new IllegalArgumentException("暂不支持该图表渲染配置节点：" + friendlyPath(path)
+                    + "。请使用页面中的结构化配置项，或改用允许的动态渲染、预测、语音播报配置");
+        }
+        for (Map.Entry<String, Object> entry : map.entrySet()) {
+            String key = entry.getKey();
+            if (!allowed.contains(key)) {
+                throw new IllegalArgumentException("暂不支持该图表渲染配置字段：" + friendlyPath(renderPath(path, key))
+                        + "。为避免影响前端渲染安全，当前只允许规则引擎已支持的配置项");
+            }
+            Object value = entry.getValue();
+            if (value instanceof Map<?, ?> nested) {
+                validateRenderConfigMap(mapValue(nested), renderPath(path, key));
+            } else if (value instanceof List<?> list) {
+                validateRenderConfigList(list, renderPath(path, key));
+            }
+        }
+    }
+
+    private Set<String> allowedRenderKeys(String path) {
+        return switch (path) {
+            case "" -> RENDER_ROOT_KEYS;
+            case "tooltip" -> RENDER_TOOLTIP_KEYS;
+            case "tooltip.axisPointer" -> RENDER_AXIS_POINTER_KEYS;
+            case "dataZoom" -> RENDER_DATA_ZOOM_KEYS;
+            case "dynamic" -> RENDER_DYNAMIC_KEYS;
+            case "label" -> RENDER_LABEL_KEYS;
+            case "prediction" -> RENDER_PREDICTION_KEYS;
+            case "prediction.legendConfig" -> RENDER_PREDICTION_SERIES_KEYS;
+            case "prediction.legendConfig.history", "prediction.legendConfig.forecast",
+                    "prediction.legendConfig.upper", "prediction.legendConfig.lower",
+                    "prediction.legendConfig.anomaly" -> RENDER_PREDICTION_LEGEND_ITEM_KEYS;
+            case "voiceSummary" -> RENDER_VOICE_SUMMARY_KEYS;
+            case "voiceSummary.templates" -> RENDER_VOICE_FIELD_KEYS;
+            case "voiceSummary.chartTemplates" -> RENDER_CHART_TYPE_KEYS;
+            case "compare" -> RENDER_COMPARE_KEYS;
+            case "pagination" -> RENDER_PAGINATION_KEYS;
+            case "table" -> RENDER_TABLE_KEYS;
+            default -> Set.of();
+        };
+    }
+
+    private void validateRenderConfigList(List<?> list, String path) {
+        if (list.size() > 100) {
+            throw new IllegalArgumentException("图表渲染配置数组过长：" + friendlyPath(path) + "，最多支持 100 项");
+        }
+        for (Object item : list) {
+            if (item instanceof Map<?, ?> nested) {
+                validateRenderConfigMap(mapValue(nested), path + "[]");
+            } else if (item instanceof List<?> nestedList) {
+                validateRenderConfigList(nestedList, path + "[]");
+            }
+        }
+    }
+
+    private String renderPath(String path, String key) {
+        return path == null || path.isBlank() ? key : path + "." + key;
+    }
+
+    private String friendlyPath(String path) {
+        String value = Objects.toString(path, "").trim();
+        if (value.isBlank() || "$".equals(value)) {
+            return "根配置";
+        }
+        return value.startsWith("$.") ? value.substring(2) : value;
     }
 
     private Map<String, Object> mapValue(Object value) {
@@ -636,6 +1445,21 @@ public class AiChartRuleConfigService {
         return result;
     }
 
+    private List<?> rawList(Object value) {
+        return value instanceof List<?> list ? list : List.of();
+    }
+
+    private List<String> stringList(Object value, List<String> fallback) {
+        if (!(value instanceof List<?> list)) {
+            return fallback;
+        }
+        List<String> result = list.stream()
+                .map(item -> Objects.toString(item, "").trim())
+                .filter(item -> !item.isBlank())
+                .toList();
+        return result.isEmpty() ? fallback : result;
+    }
+
     private <T> T readJson(String value, T fallback) {
         try {
             if (fallback instanceof List<?>) {
@@ -657,7 +1481,15 @@ public class AiChartRuleConfigService {
         try {
             return objectMapper.writeValueAsString(value);
         } catch (Exception e) {
-            throw new IllegalArgumentException("Invalid JSON config");
+            throw new IllegalArgumentException("JSON 配置序列化失败，请检查配置内容");
+        }
+    }
+
+    private int jsonLength(Object value) {
+        try {
+            return objectMapper.writeValueAsString(value).length();
+        } catch (Exception ignored) {
+            return Objects.toString(value, "").length();
         }
     }
 
@@ -695,6 +1527,11 @@ public class AiChartRuleConfigService {
         } catch (Exception ignored) {
             return fallback;
         }
+    }
+
+    private static int boundedInt(Object value, int fallback, int min, int max) {
+        int parsed = intValue(value, fallback);
+        return Math.min(max, Math.max(min, parsed));
     }
 
     private static Long longOrNull(Object value) {

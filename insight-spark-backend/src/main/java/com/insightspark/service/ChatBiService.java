@@ -3,6 +3,7 @@ package com.insightspark.service;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -14,6 +15,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CancellationException;
+import java.util.Locale;
 
 @Service
 public class ChatBiService {
@@ -100,6 +102,9 @@ public class ChatBiService {
 
     @Autowired
     private AiChartRuleConfigService aiChartRuleConfigService;
+
+    @Autowired
+    private ObjectProvider<AdvancedAnalysisService> advancedAnalysisServiceProvider;
 
     public Map<String, Object> executeChat(ChatQueryRequest request) {
         ChatQueryRequest safeRequest = request == null ? new ChatQueryRequest() : request;
@@ -291,6 +296,7 @@ public class ChatBiService {
         long startedAt = System.currentTimeMillis();
         List<Map<String, Object>> queryResult;
         boolean fallbackExecuted = false;
+        Map<String, Object> chartRecommendation = Map.of();
         Integer previousTimeout = jdbcTemplate.getQueryTimeout();
         try (SqlAuditService.QueryPermit ignored = sqlAuditService.acquireQueryPermit("chat-bi")) {
             jdbcTemplate.setQueryTimeout(guard.timeoutSeconds());
@@ -341,6 +347,26 @@ public class ChatBiService {
                     queryResult = (List<Map<String, Object>>) recovery.getOrDefault("data", queryResult);
                 }
             }
+            chartRecommendation = recommendConfiguredChart(question, fields, queryResult, chartType);
+            chartType = Objects.toString(chartRecommendation.getOrDefault("chartType", chartType), chartType);
+            if ("table".equalsIgnoreCase(chartType) && shouldRequeryDetailTable(queryResult)) {
+                RuleBasedNl2SqlStrategy.FieldChoice detailChoice = ruleBasedNl2SqlStrategy.chooseFields(question, fields);
+                String detailSql = sqlAuditService.ensureLimit(
+                        ruleBasedNl2SqlStrategy.buildSql(queryTableName, detailChoice, "table"), 200);
+                SqlAuditService.AuditResult detailAudit = sqlAuditService.inspect(detailSql, activeTable);
+                if (!detailAudit.blocked()) {
+                    ensureNotCancelled("明细表格重查前");
+                    generatedSql = detailSql;
+                    fieldMapping = fallbackFieldMapping(detailChoice);
+                    queryResult = officialSource
+                            ? datasourceService.executeQueryWithoutAudit(activeTable, generatedSql)
+                            : queryUploadTable(activeTable, generatedSql, guard.maxRows());
+                    queryResult = sqlAuditService.maskRowsWithReport(activeTable, queryResult).rows();
+                    generationTrace.add("detailTableRequery=APPLIED");
+                } else {
+                    generationTrace.add("detailTableRequery=SKIPPED;reason=" + detailAudit.riskReason());
+                }
+            }
             queryResult = normalizeChartRows(queryResult, chartType, fieldMapping);
             ensureNotCancelled("结果归一化后");
             long durationMs = System.currentTimeMillis() - startedAt;
@@ -367,10 +393,12 @@ public class ChatBiService {
         response.put("sourceType", officialSource ? "OFFICIAL" : "UPLOAD");
         response.put("sql", generatedSql);
         response.put("data", queryResult);
-        Map<String, Object> chartRecommendation = recommendConfiguredChart(question, fields, queryResult, chartType);
-        chartType = Objects.toString(chartRecommendation.getOrDefault("chartType", chartType), chartType);
         response.put("chartType", chartType);
         response.put("fieldMapping", fieldMapping);
+        if ("table".equalsIgnoreCase(chartType)) {
+            response.put("tableColumns", buildTableColumns(queryResult, fieldMapping));
+            response.put("tableRows", queryResult);
+        }
         response.put("engine", engine);
         response.put("modelId", selectedModelId);
         response.put("modelName", selectedModelName);
@@ -393,6 +421,7 @@ public class ChatBiService {
 
         attachChartEncodingSpec(response, chartType, aiResult.orElse(null));
         applyConfiguredChartRecommendation(response, chartRecommendation);
+        applyAutoForecastIfNeeded(response, chartRecommendation, fieldMapping, activeTable, question, generationTrace);
 
         return response;
     }
@@ -453,6 +482,221 @@ public class ChatBiService {
             template = deepMergeMaps(template, castToObjectMap(tm));
         }
         response.put("optionTemplate", template);
+    }
+
+    private void applyAutoForecastIfNeeded(Map<String, Object> response,
+                                           Map<String, Object> recommendation,
+                                           Map<String, Object> fieldMapping,
+                                           String tableName,
+                                           String question,
+                                           List<String> generationTrace) {
+        List<Map<String, Object>> rows = asMapList(response.get("data"));
+        if (isExplicitDetailIntent(question)) {
+            generationTrace.add("autoForecast=SKIPPED;reason=DETAIL_INTENT");
+            return;
+        }
+        if (!shouldAutoRunForecast(response, recommendation, rows)) {
+            return;
+        }
+        List<Map<String, Object>> sourceSeries = buildForecastSourceSeries(rows);
+        if (sourceSeries.size() < 3) {
+            generationTrace.add("autoForecast=SKIPPED;reason=INSUFFICIENT_POINTS;points=" + sourceSeries.size());
+            return;
+        }
+        try {
+            Map<String, Object> prediction = predictionConfig(response, recommendation);
+            Map<String, Object> forecastRequest = new LinkedHashMap<>();
+            forecastRequest.put("tableName", tableName);
+            forecastRequest.put("metric", firstNonBlank(
+                    fieldMapping.get("metric"),
+                    fieldMapping.get("metricKey"),
+                    response.get("metricField"),
+                    "核心指标"));
+            forecastRequest.put("series", sourceSeries);
+            forecastRequest.put("horizon", prediction.getOrDefault("horizon", 3));
+            forecastRequest.put("algorithm", prediction.getOrDefault("algorithm", "Holt-Winters"));
+            forecastRequest.put("sourceQuestion", question);
+            AdvancedAnalysisService advancedAnalysisService = advancedAnalysisServiceProvider.getIfAvailable();
+            if (advancedAnalysisService == null) {
+                generationTrace.add("autoForecast=SKIPPED;reason=ADVANCED_SERVICE_UNAVAILABLE");
+                return;
+            }
+            Map<String, Object> forecastResult = advancedAnalysisService.forecastFromSeries(forecastRequest);
+            mergeForecastResult(response, forecastResult, fieldMapping, generationTrace);
+        } catch (CancellationException e) {
+            throw e;
+        } catch (Exception e) {
+            generationTrace.add("autoForecast=SKIPPED;reason=" + safeTraceValue(e.getMessage()));
+            log.warn("Auto forecast enrichment skipped: {}", e.getMessage());
+        }
+    }
+
+    private boolean shouldAutoRunForecast(Map<String, Object> response,
+                                          Map<String, Object> recommendation,
+                                          List<Map<String, Object>> rows) {
+        if (!"line".equalsIgnoreCase(Objects.toString(response.get("chartType"), ""))) {
+            return false;
+        }
+        if (rows == null || rows.isEmpty() || containsForecastRows(rows)) {
+            return false;
+        }
+        if (!isPredictionEnabled(response, recommendation)) {
+            return false;
+        }
+        String scenario = Objects.toString(response.getOrDefault("chartScenarioType",
+                recommendation == null ? "" : recommendation.getOrDefault("scenarioType", "")), "");
+        return "TIME_SERIES".equalsIgnoreCase(scenario) || "line".equalsIgnoreCase(Objects.toString(
+                recommendation == null ? "" : recommendation.getOrDefault("chartType", ""), ""));
+    }
+
+    private boolean isExplicitDetailIntent(String question) {
+        String text = Objects.toString(question, "");
+        String lower = text.toLowerCase(Locale.ROOT);
+        boolean asksMultipleFields = text.contains("显示") && (text.contains("、") || text.contains("，")
+                || text.contains(",") || text.contains("和"));
+        return text.contains("明细") || text.contains("详情") || text.contains("列表")
+                || text.contains("表格") || text.contains("列出") || asksMultipleFields
+                || lower.contains("detail");
+    }
+
+    private boolean isPredictionEnabled(Map<String, Object> response, Map<String, Object> recommendation) {
+        Map<String, Object> prediction = predictionConfig(response, recommendation);
+        return boolValue(prediction.get("enabled"), false);
+    }
+
+    private Map<String, Object> predictionConfig(Map<String, Object> response, Map<String, Object> recommendation) {
+        Map<String, Object> prediction = new LinkedHashMap<>();
+        Object responseTemplate = response == null ? null : response.get("optionTemplate");
+        if (responseTemplate instanceof Map<?, ?> templateMap) {
+            Object raw = templateMap.get("prediction");
+            if (raw instanceof Map<?, ?> predictionMap) {
+                prediction.putAll(castToObjectMap(predictionMap));
+            }
+        }
+        Object recommendationTemplate = recommendation == null ? null : recommendation.get("optionTemplate");
+        if (recommendationTemplate instanceof Map<?, ?> templateMap) {
+            Object raw = templateMap.get("prediction");
+            if (raw instanceof Map<?, ?> predictionMap) {
+                prediction.putAll(castToObjectMap(predictionMap));
+            }
+        }
+        return prediction;
+    }
+
+    private boolean containsForecastRows(List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            if (row == null) {
+                continue;
+            }
+            boolean hasForecastColumns = row.containsKey("history")
+                    || row.containsKey("forecast")
+                    || row.containsKey("upper")
+                    || row.containsKey("lower")
+                    || row.containsKey("phase");
+            boolean hasForecastValues = row.get("forecast") != null
+                    || row.get("upper") != null
+                    || row.get("lower") != null
+                    || "forecast".equalsIgnoreCase(Objects.toString(row.get("phase"), ""));
+            if (hasForecastColumns && hasForecastValues) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private List<Map<String, Object>> buildForecastSourceSeries(List<Map<String, Object>> rows) {
+        List<Map<String, Object>> series = new ArrayList<>();
+        for (Map<String, Object> row : rows) {
+            if (row == null) {
+                continue;
+            }
+            String name = Objects.toString(firstNonBlankValue(row, "name", "dim_name", "dimension"), "").trim();
+            Double value = toDouble(firstNonBlankValue(row, "value", "metric_value", "metric"));
+            if (name.isBlank() || value == null) {
+                continue;
+            }
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("name", name);
+            item.put("value", value);
+            series.add(item);
+        }
+        return series;
+    }
+
+    private void mergeForecastResult(Map<String, Object> response,
+                                     Map<String, Object> forecastResult,
+                                     Map<String, Object> fieldMapping,
+                                     List<String> generationTrace) {
+        Object rawSeries = forecastResult.get("series");
+        if (!(rawSeries instanceof List<?> list) || list.isEmpty()) {
+            generationTrace.add("autoForecast=SKIPPED;reason=EMPTY_FORECAST_SERIES");
+            return;
+        }
+        List<Map<String, Object>> forecastRows = new ArrayList<>();
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> raw)) {
+                continue;
+            }
+            Map<String, Object> row = new LinkedHashMap<>(castToObjectMap(raw));
+            Object history = row.get("history");
+            Object forecast = row.get("forecast");
+            if (forecast != null || row.get("upper") != null || row.get("lower") != null) {
+                row.put("phase", "forecast");
+                row.put("value", forecast);
+            } else {
+                row.put("phase", "history");
+                row.put("value", history);
+            }
+            forecastRows.add(row);
+        }
+        if (forecastRows.isEmpty() || !containsForecastRows(forecastRows)) {
+            generationTrace.add("autoForecast=SKIPPED;reason=NO_FORECAST_VALUES");
+            return;
+        }
+        response.put("data", forecastRows);
+        response.put("chartType", "line");
+        response.put("dimensions", List.of("name", "history", "forecast", "upper", "lower", "anomaly"));
+        response.put("encode", Map.of("x", "name", "y", "value"));
+        response.put("advancedAnalysisType", "forecast");
+        response.put("autoForecast", true);
+        response.put("forecastMeta", forecastMeta(forecastResult));
+        Map<String, Object> mergedFieldMapping = new LinkedHashMap<>(fieldMapping == null ? Map.of() : fieldMapping);
+        mergedFieldMapping.putIfAbsent("mappingType", "forecast");
+        mergedFieldMapping.putIfAbsent("timeField", forecastResult.getOrDefault("timeField", "query_result_dimension"));
+        mergedFieldMapping.putIfAbsent("metricField", forecastResult.getOrDefault("metricField", mergedFieldMapping.get("metric")));
+        response.put("fieldMapping", mergedFieldMapping);
+        mergeForecastOptionTemplate(response, forecastResult);
+        Object explanation = forecastResult.get("explanation");
+        if (explanation != null) {
+            response.put("forecastExplanation", explanation);
+        }
+        response.put("message", Objects.toString(response.getOrDefault("message", "分析完成。"), "分析完成。")
+                + " 已根据时序预测规则生成预测曲线和置信区间。");
+        generationTrace.add("autoForecast=APPLIED;points=" + forecastRows.size()
+                + ";algorithm=" + forecastResult.getOrDefault("algorithm", ""));
+    }
+
+    private Map<String, Object> forecastMeta(Map<String, Object> forecastResult) {
+        Map<String, Object> meta = new LinkedHashMap<>();
+        putIfPresent(meta, "algorithm", forecastResult.get("algorithm"));
+        putIfPresent(meta, "confidence", forecastResult.get("confidence"));
+        putIfPresent(meta, "granularity", forecastResult.get("granularity"));
+        putIfPresent(meta, "timeField", forecastResult.get("timeField"));
+        putIfPresent(meta, "metricField", forecastResult.get("metricField"));
+        putIfPresent(meta, "dataQuality", forecastResult.get("dataQuality"));
+        putIfPresent(meta, "algorithmParams", forecastResult.get("algorithmParams"));
+        putIfPresent(meta, "cacheHit", forecastResult.get("cacheHit"));
+        return meta;
+    }
+
+    private void mergeForecastOptionTemplate(Map<String, Object> response, Map<String, Object> forecastResult) {
+        if (!(forecastResult.get("optionTemplate") instanceof Map<?, ?> forecastTemplateMap)) {
+            return;
+        }
+        Map<String, Object> current = response.get("optionTemplate") instanceof Map<?, ?> currentMap
+                ? castToObjectMap(currentMap)
+                : Map.of();
+        response.put("optionTemplate", deepMergeMaps(current, castToObjectMap(forecastTemplateMap)));
     }
 
     @SuppressWarnings("unchecked")
@@ -830,6 +1074,9 @@ public class ChatBiService {
         if (rows == null || rows.isEmpty()) {
             return rows;
         }
+        if ("table".equalsIgnoreCase(chartType)) {
+            return rows;
+        }
         if (rows.stream().allMatch(row -> row.containsKey("name") && row.containsKey("value"))) {
             return rows;
         }
@@ -860,8 +1107,23 @@ public class ChatBiService {
         }).toList();
     }
 
+    private boolean shouldRequeryDetailTable(List<Map<String, Object>> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return true;
+        }
+        Map<String, Object> first = rows.get(0);
+        if (first == null || first.isEmpty()) {
+            return true;
+        }
+        List<String> keys = first.keySet().stream().map(key -> Objects.toString(key, "").toLowerCase()).toList();
+        return keys.contains("dim_name") || keys.contains("metric_value")
+                || (keys.contains("name") && keys.contains("value") && keys.size() <= 3);
+    }
+
     private String chartName(String chartType) {
-        return chartType.equals("bar") ? "柱状图" : chartType.equals("pie") ? "饼图" : "折线图";
+        return chartType.equals("bar") ? "柱状图"
+                : chartType.equals("pie") || chartType.equals("doughnut") ? "饼图"
+                : chartType.equals("table") ? "表格" : "折线图";
     }
 
     private List<Map<String, Object>> queryUploadTable(String sql) {
@@ -902,11 +1164,46 @@ public class ChatBiService {
     }
 
     private Map<String, Object> fallbackFieldMapping(RuleBasedNl2SqlStrategy.FieldChoice fieldChoice) {
-        return Map.of(
-                "dimension", fieldChoice.dimensionDisplayName(),
-                "metric", fieldChoice.metricDisplayName() == null ? "记录数" : fieldChoice.metricDisplayName(),
-                "dimensionKey", fieldChoice.dimensionColumn(),
-                "metricKey", fieldChoice.metricColumn() == null ? "value" : fieldChoice.metricColumn());
+        Map<String, Object> mapping = new LinkedHashMap<>();
+        mapping.put("dimension", fieldChoice.dimensionDisplayName());
+        mapping.put("metric", fieldChoice.metricDisplayName() == null ? "记录数" : fieldChoice.metricDisplayName());
+        mapping.put("dimensionKey", fieldChoice.dimensionColumn());
+        mapping.put("metricKey", fieldChoice.metricColumn() == null ? "value" : fieldChoice.metricColumn());
+        mapping.put("tableColumns", fieldChoice.tableColumns());
+        mapping.put("fieldResolution", fieldChoice.resolutionLog());
+        return mapping;
+    }
+
+    private List<Map<String, Object>> buildTableColumns(List<Map<String, Object>> rows, Map<String, Object> fieldMapping) {
+        List<String> configured = fieldMapping.get("tableColumns") instanceof List<?> list
+                ? list.stream().map(item -> Objects.toString(item, "").trim()).filter(item -> !item.isBlank()).toList()
+                : List.of();
+        List<String> keys = new ArrayList<>();
+        if (!configured.isEmpty()) {
+            keys.addAll(configured);
+        }
+        if (rows != null && !rows.isEmpty()) {
+            for (String key : rows.get(0).keySet()) {
+                if (!keys.contains(key)) {
+                    keys.add(key);
+                }
+            }
+        }
+        return keys.stream()
+                .filter(key -> rows == null || rows.isEmpty() || rows.get(0).containsKey(key))
+                .map(key -> Map.<String, Object>of("prop", key, "label", resolveTableColumnLabel(key, fieldMapping)))
+                .toList();
+    }
+
+    private String resolveTableColumnLabel(String key, Map<String, Object> fieldMapping) {
+        if (fieldMapping.get("fieldResolution") instanceof Map<?, ?> resolution
+                && resolution.get("tableColumnLabels") instanceof Map<?, ?> labels) {
+            String label = Objects.toString(labels.get(key), "").trim();
+            if (!label.isBlank()) {
+                return label;
+            }
+        }
+        return key;
     }
 
     private List<Map<String, Object>> attachDimensionKey(List<Map<String, Object>> rows, Map<String, Object> fieldMapping) {
@@ -945,6 +1242,65 @@ public class ChatBiService {
             }
         }
         return null;
+    }
+
+    private Object firstNonBlank(Object... values) {
+        if (values == null) {
+            return "";
+        }
+        for (Object value : values) {
+            if (value == null) {
+                continue;
+            }
+            if (value instanceof String text && text.trim().isEmpty()) {
+                continue;
+            }
+            return value;
+        }
+        return "";
+    }
+
+    private void putIfPresent(Map<String, Object> target, String key, Object value) {
+        if (value != null && !(value instanceof String text && text.trim().isEmpty())) {
+            target.put(key, value);
+        }
+    }
+
+    private boolean boolValue(Object value, boolean fallback) {
+        if (value instanceof Boolean flag) {
+            return flag;
+        }
+        if (value instanceof Number number) {
+            return number.intValue() != 0;
+        }
+        String text = Objects.toString(value, "").trim().toLowerCase(Locale.ROOT);
+        if (List.of("true", "1", "yes", "y", "on", "是", "启用").contains(text)) {
+            return true;
+        }
+        if (List.of("false", "0", "no", "n", "off", "否", "停用").contains(text)) {
+            return false;
+        }
+        return fallback;
+    }
+
+    private Double toDouble(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Number number) {
+            return number.doubleValue();
+        }
+        try {
+            double parsed = Double.parseDouble(Objects.toString(value, "").replace(",", "").trim());
+            return Double.isFinite(parsed) ? parsed : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private String safeTraceValue(Object value) {
+        String text = Objects.toString(value, "").replaceAll("[\\r\\n;]+", " ").trim();
+        return text.isBlank() ? "UNKNOWN" : text.substring(0, Math.min(text.length(), 120));
     }
 
     private void ensureNotCancelled(String stage) {
