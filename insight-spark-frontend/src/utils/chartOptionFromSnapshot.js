@@ -63,10 +63,13 @@ function normalizeChartItem(item) {
 
 export function normalizeChartType(value) {
   const type = String(value || '').toLowerCase()
-  if (type === 'line' || type === 'pie') return type
+  if (type === 'line' || type === 'pie' || type === 'bar' || type === 'table') return type
+  if (type === 'doughnut' || type === 'donut') return 'pie'
   if (type.includes('饼')) return 'pie'
+  if (type.includes('环')) return 'pie'
   if (type.includes('折')) return 'line'
   if (type.includes('柱')) return 'bar'
+  if (type.includes('表')) return 'table'
   return 'bar'
 }
 
@@ -140,29 +143,122 @@ function forecastPointForecastValue(row) {
   return null
 }
 
-function buildForecastOptionFromSnapshot(snap) {
-  const rows = Array.isArray(snap.data) ? snap.data : []
-  const source = rows
+export function hasForecastSeriesRows(rows) {
+  return Array.isArray(rows) && rows.some(row =>
+    row && typeof row === 'object' && (
+      Object.prototype.hasOwnProperty.call(row, 'history') ||
+      Object.prototype.hasOwnProperty.call(row, 'forecast') ||
+      Object.prototype.hasOwnProperty.call(row, 'upper') ||
+      Object.prototype.hasOwnProperty.call(row, 'lower') ||
+      String(row.phase || '').toLowerCase() === 'forecast'
+    )
+  )
+}
+
+function forecastLegendItem(options, key, defaultLabel, defaultShow = true) {
+  const config = options?.legendConfig && typeof options.legendConfig === 'object'
+    ? options.legendConfig
+    : {}
+  const raw = config[key] && typeof config[key] === 'object' ? config[key] : {}
+  const show = raw.show == null ? defaultShow : Boolean(raw.show)
+  const label = String(raw.label || defaultLabel).trim() || defaultLabel
+  return { show, label }
+}
+
+export function buildForecastChartOption(rows, options = {}) {
+  const rawRows = Array.isArray(rows) ? rows : []
+  const source = rawRows
     .filter(row => row && typeof row === 'object' && row.name != null)
     .map(row => ({
       name: String(row.name ?? ''),
       history: forecastPointHistoryValue(row),
       forecast: forecastPointForecastValue(row),
       upper: row.upper ?? null,
-      lower: row.lower ?? null
+      lower: row.lower ?? null,
+      anomaly: row.anomaly ?? row.outlier ?? null
     }))
   const values = source.flatMap(row => [row.history, row.forecast, row.upper, row.lower])
     .map(value => Number(value))
     .filter(value => Number.isFinite(value))
   const valueAxisRange = buildValueAxisRange(values)
   const useZoom = source.length > 18
-  const metricLabel = String(snap?.fieldMapping?.metric || snap?.forecastMeta?.metricField || '预测值')
+  const metricLabel = String(options.metricLabel || '预测值')
+  const confidenceLabel = String(options.confidenceLabel || '95%')
+  const historyLegend = forecastLegendItem(options, 'history', '历史值')
+  const forecastLegend = forecastLegendItem(options, 'forecast', '预测值')
+  const upperLegend = forecastLegendItem(options, 'upper', '置信上界')
+  const lowerLegend = forecastLegendItem(options, 'lower', '置信下界')
+  const anomalyLegend = forecastLegendItem(options, 'anomaly', '异常点', false)
+  const legendData = [historyLegend, forecastLegend, upperLegend, lowerLegend, anomalyLegend]
+    .filter(item => item.show)
+    .map(item => item.label)
+  const series = []
+  if (historyLegend.show) {
+    series.push({
+      name: historyLegend.label,
+      type: 'line',
+      encode: { x: 'name', y: 'history' },
+      showSymbol: false,
+      connectNulls: false,
+      lineStyle: { color: '#2563eb', width: 2 },
+      itemStyle: { color: '#2563eb' }
+    })
+  }
+  if (forecastLegend.show) {
+    series.push({
+      name: forecastLegend.label,
+      type: 'line',
+      encode: { x: 'name', y: 'forecast' },
+      showSymbol: true,
+      symbolSize: 6,
+      connectNulls: false,
+      lineStyle: { color: '#16a34a', width: 2, type: 'dashed' },
+      itemStyle: { color: '#16a34a' }
+    })
+  }
+  if (upperLegend.show) {
+    series.push({
+      name: upperLegend.label,
+      type: 'line',
+      encode: { x: 'name', y: 'upper' },
+      showSymbol: false,
+      connectNulls: false,
+      lineStyle: { color: '#93c5fd', width: 1 },
+      areaStyle: lowerLegend.show ? { color: 'rgba(147, 197, 253, 0.18)' } : undefined,
+      tooltip: { valueFormatter: value => `${value}（${confidenceLabel} 上界）` }
+    })
+  }
+  if (lowerLegend.show) {
+    series.push({
+      name: lowerLegend.label,
+      type: 'line',
+      encode: { x: 'name', y: 'lower' },
+      showSymbol: false,
+      connectNulls: false,
+      lineStyle: { color: '#93c5fd', width: 1 },
+      tooltip: { valueFormatter: value => `${value}（${confidenceLabel} 下界）` }
+    })
+  }
+  if (anomalyLegend.show) {
+    const anomalyData = source
+      .filter(row => row.anomaly != null)
+      .map(row => ({ name: row.name, value: [row.name, row.anomaly] }))
+    series.push({
+      name: anomalyLegend.label,
+      type: 'scatter',
+      encode: { x: 'name', y: 'anomaly' },
+      data: anomalyData,
+      symbolSize: 9,
+      itemStyle: { color: '#ef4444' },
+      tooltip: { valueFormatter: value => `${value}（异常点）` }
+    })
+  }
   return {
     animation: false,
     tooltip: { trigger: 'axis', confine: true },
     legend: {
       top: 2,
-      data: ['历史值', '预测值', '置信上界', '置信下界']
+      data: legendData
     },
     grid: {
       left: 48,
@@ -172,7 +268,7 @@ function buildForecastOptionFromSnapshot(snap) {
       containLabel: true
     },
     dataset: [{
-      dimensions: ['name', 'history', 'forecast', 'upper', 'lower'],
+      dimensions: ['name', 'history', 'forecast', 'upper', 'lower', 'anomaly'],
       source
     }],
     xAxis: {
@@ -204,43 +300,7 @@ function buildForecastOptionFromSnapshot(snap) {
         }
       }
     },
-    series: [
-      {
-        name: '历史值',
-        type: 'line',
-        encode: { x: 'name', y: 'history' },
-        showSymbol: false,
-        connectNulls: false,
-        lineStyle: { color: '#2563eb', width: 2 },
-        itemStyle: { color: '#2563eb' }
-      },
-      {
-        name: '预测值',
-        type: 'line',
-        encode: { x: 'name', y: 'forecast' },
-        showSymbol: true,
-        symbolSize: 6,
-        connectNulls: false,
-        lineStyle: { color: '#16a34a', width: 2, type: 'dashed' },
-        itemStyle: { color: '#16a34a' }
-      },
-      {
-        name: '置信上界',
-        type: 'line',
-        encode: { x: 'name', y: 'upper' },
-        showSymbol: false,
-        connectNulls: false,
-        lineStyle: { color: '#5b7cda', width: 1 }
-      },
-      {
-        name: '置信下界',
-        type: 'line',
-        encode: { x: 'name', y: 'lower' },
-        showSymbol: false,
-        connectNulls: false,
-        lineStyle: { color: '#b5d334', width: 1 }
-      }
-    ],
+    series,
     dataZoom: useZoom
       ? [
           { type: 'slider', show: true, xAxisIndex: 0, bottom: 8, height: 22, start: 0, end: 100 },
@@ -248,6 +308,16 @@ function buildForecastOptionFromSnapshot(snap) {
         ]
       : undefined
   }
+}
+
+function buildForecastOptionFromSnapshot(snap) {
+  const rows = Array.isArray(snap.data) ? snap.data : []
+  const prediction = snap?.optionTemplate?.prediction || {}
+  return buildForecastChartOption(rows, {
+    metricLabel: snap?.fieldMapping?.metric || snap?.forecastMeta?.metricField || '预测值',
+    confidenceLabel: snap?.forecastMeta?.confidence || prediction?.confidenceLabel || '95%',
+    legendConfig: prediction?.legendConfig
+  })
 }
 
 function buildDatasetFromSnapshot(snap) {
@@ -306,6 +376,194 @@ export function applyOptionTemplateDefaults(built, template) {
   } else {
     out.series = bs
   }
+  if (Array.isArray(template.color) && template.color.length) {
+    out.color = template.color
+  }
+  return out
+}
+
+function clampNumber(value, min, max, fallback) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return fallback
+  return Math.min(max, Math.max(min, Math.round(n)))
+}
+
+function boolValue(value, fallback = false) {
+  if (value == null) return fallback
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value !== 0
+  return String(value).toLowerCase() === 'true'
+}
+
+function mergeObjects(base, override) {
+  if (!override || typeof override !== 'object' || Array.isArray(override)) return base
+  const out = { ...(base && typeof base === 'object' && !Array.isArray(base) ? base : {}) }
+  for (const [key, value] of Object.entries(override)) {
+    if (value === undefined || value === null) continue
+    if (
+      value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      out[key] &&
+      typeof out[key] === 'object' &&
+      !Array.isArray(out[key])
+    ) {
+      out[key] = mergeObjects(out[key], value)
+    } else {
+      out[key] = value
+    }
+  }
+  return out
+}
+
+function normalizeDynamicConfig(template = {}) {
+  const dynamic = template?.dynamic && typeof template.dynamic === 'object' ? template.dynamic : {}
+  const dataZoom = template?.dataZoom && typeof template.dataZoom === 'object' && !Array.isArray(template.dataZoom)
+    ? template.dataZoom
+    : {}
+  return {
+    refreshIntervalSeconds: clampNumber(
+      dynamic.refreshIntervalSeconds ?? template.refreshIntervalSeconds ?? template.dynamicRefreshInterval,
+      0,
+      3600,
+      0
+    ),
+    incrementalRendering: boolValue(dynamic.incrementalRendering, false),
+    progressive: clampNumber(dynamic.progressive, 0, 20000, 0),
+    progressiveThreshold: clampNumber(dynamic.progressiveThreshold, 0, 100000, 3000),
+    largeThreshold: clampNumber(dynamic.largeThreshold, 0, 100000, 2000),
+    autoDataZoomThreshold: clampNumber(dynamic.autoDataZoomThreshold ?? dataZoom.threshold, 4, 500, 14),
+    autoLegendScrollThreshold: clampNumber(dynamic.autoLegendScrollThreshold, 4, 500, 10),
+    dataZoomStart: clampNumber(dynamic.dataZoomStart ?? dataZoom.start, 0, 100, 0),
+    dataZoomEnd: clampNumber(dynamic.dataZoomEnd ?? dataZoom.end, 1, 100, 60)
+  }
+}
+
+function normalizeTooltip(template, fallbackTrigger) {
+  const raw = template?.tooltip
+  if (raw === false) return { show: false, trigger: fallbackTrigger, confine: true }
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const trigger = ['axis', 'item'].includes(String(raw.trigger || '').toLowerCase())
+      ? String(raw.trigger).toLowerCase()
+      : fallbackTrigger
+    return mergeObjects({ show: true, trigger, confine: true }, raw)
+  }
+  return null
+}
+
+function optionCategoryCount(option, fallback = 0) {
+  const xAxis = Array.isArray(option?.xAxis) ? option.xAxis[0] : option?.xAxis
+  if (Array.isArray(xAxis?.data)) return xAxis.data.length
+  const dataset = Array.isArray(option?.dataset) ? option.dataset[0] : option?.dataset
+  if (Array.isArray(dataset?.source)) return dataset.source.length
+  const series = Array.isArray(option?.series) ? option.series : []
+  const firstSeries = series.find(item => Array.isArray(item?.data))
+  if (firstSeries?.data) return firstSeries.data.length
+  return fallback
+}
+
+function optionHasCartesianAxis(option) {
+  return Boolean(option?.xAxis && option?.yAxis)
+}
+
+function shouldEnableTemplateDataZoom(template, categoryCount, threshold) {
+  const raw = template?.dataZoom
+  if (Array.isArray(raw)) return true
+  if (raw && typeof raw === 'object') {
+    return raw.enabled == null ? true : boolValue(raw.enabled, true)
+  }
+  if (raw != null) return boolValue(raw, false)
+  return categoryCount > threshold
+}
+
+function isTemplateDataZoomDisabled(template) {
+  const raw = template?.dataZoom
+  if (raw === false) return true
+  return Boolean(raw && typeof raw === 'object' && !Array.isArray(raw) && raw.enabled === false)
+}
+
+function buildAutoDataZoom(dynamic, categoryCount) {
+  const start = Math.min(dynamic.dataZoomStart, dynamic.dataZoomEnd - 1)
+  const autoEnd = categoryCount > dynamic.autoDataZoomThreshold
+    ? Math.min(100, Math.max(8, Math.ceil((dynamic.autoDataZoomThreshold / categoryCount) * 100)))
+    : dynamic.dataZoomEnd
+  const end = Math.max(start + 1, Math.min(dynamic.dataZoomEnd, autoEnd))
+  return [
+    { type: 'slider', show: true, xAxisIndex: 0, bottom: 8, height: 22, start, end },
+    { type: 'inside', xAxisIndex: 0, start, end }
+  ]
+}
+
+function normalizeLegendForOverflow(legend, template, categoryCount, dynamic, chartType) {
+  const templateLegend = template?.legend && typeof template.legend === 'object' && !Array.isArray(template.legend)
+    ? template.legend
+    : {}
+  const baseLegend = legend && typeof legend === 'object' && !Array.isArray(legend) ? legend : {}
+  const merged = mergeObjects(baseLegend, templateLegend)
+  const shouldScroll = categoryCount > dynamic.autoLegendScrollThreshold || String(chartType).toLowerCase() === 'pie'
+  if (!shouldScroll) return Object.keys(merged).length ? merged : legend
+  return {
+    type: 'scroll',
+    pageButtonGap: 6,
+    pageIconSize: 10,
+    ...merged
+  }
+}
+
+function applyDynamicSeries(series, dynamic, categoryCount) {
+  if (!Array.isArray(series)) return series
+  return series.map(item => {
+    if (!item || typeof item !== 'object') return item
+    const next = { ...item }
+    if (dynamic.incrementalRendering) {
+      next.progressive = dynamic.progressive > 0 ? dynamic.progressive : 400
+      next.progressiveThreshold = dynamic.progressiveThreshold
+    }
+    if (dynamic.largeThreshold > 0) {
+      next.largeThreshold = dynamic.largeThreshold
+      if (['bar', 'line', 'scatter'].includes(String(next.type || '').toLowerCase()) && categoryCount >= dynamic.largeThreshold) {
+        next.large = true
+      }
+    }
+    return next
+  })
+}
+
+export function resolveDynamicRefreshInterval(optionOrTemplate) {
+  const dynamic = normalizeDynamicConfig(optionOrTemplate || {})
+  return dynamic.refreshIntervalSeconds >= 5 ? dynamic.refreshIntervalSeconds : 0
+}
+
+export function applyDynamicInteractionDefaults(option, template, context = {}) {
+  if (!option || typeof option !== 'object') return option
+  const sourceTemplate = template && typeof template === 'object' ? template : {}
+  const dynamic = normalizeDynamicConfig(sourceTemplate)
+  const chartType = normalizeChartType(context.chartType || sourceTemplate.type || option?.series?.[0]?.type)
+  const categoryCount = optionCategoryCount(option, Number(context.categoryCount) || 0)
+  const out = { ...option, dynamic: { ...(option.dynamic || {}), ...dynamic } }
+  if (sourceTemplate.animation != null) {
+    out.animation = boolValue(sourceTemplate.animation, true)
+  }
+  const tooltip = normalizeTooltip(sourceTemplate, chartType === 'pie' ? 'item' : 'axis')
+  if (tooltip) {
+    out.tooltip = mergeObjects(out.tooltip, tooltip)
+  } else if (out.tooltip && typeof out.tooltip === 'object') {
+    out.tooltip = mergeObjects(out.tooltip, { confine: true })
+  }
+  out.legend = normalizeLegendForOverflow(out.legend, sourceTemplate, categoryCount, dynamic, chartType)
+  if (optionHasCartesianAxis(out)) {
+    if (shouldEnableTemplateDataZoom(sourceTemplate, categoryCount, dynamic.autoDataZoomThreshold)) {
+      out.dataZoom = Array.isArray(sourceTemplate.dataZoom)
+        ? sourceTemplate.dataZoom
+        : buildAutoDataZoom(dynamic, categoryCount)
+      if (out.grid && typeof out.grid === 'object' && !Array.isArray(out.grid)) {
+        out.grid = { ...out.grid, bottom: Math.max(Number(out.grid.bottom) || 0, 72) }
+      }
+    } else if (isTemplateDataZoomDisabled(sourceTemplate)) {
+      delete out.dataZoom
+    }
+  }
+  out.series = applyDynamicSeries(out.series, dynamic, categoryCount)
   return out
 }
 
@@ -632,7 +890,10 @@ export function buildOptionFromHistoryRow(row, ui = {}) {
     snap.optionTemplate && typeof snap.optionTemplate === 'object' ? snap.optionTemplate : null
 
   if (isForecastSnapshot(snap)) {
-    return buildForecastOptionFromSnapshot(snap)
+    const built = buildForecastOptionFromSnapshot(snap)
+    return template
+      ? applyDynamicInteractionDefaults(applyOptionTemplateDefaults(built, template), template, { chartType })
+      : applyDynamicInteractionDefaults(built, null, { chartType })
   }
 
   let built
@@ -642,5 +903,6 @@ export function buildOptionFromHistoryRow(row, ui = {}) {
     built = buildOptionLegacyFromPoints(snap, chartType, ui, itemOv)
   }
 
-  return template ? applyOptionTemplateDefaults(built, template) : built
+  const withTemplate = template ? applyOptionTemplateDefaults(built, template) : built
+  return applyDynamicInteractionDefaults(withTemplate, template, { chartType })
 }

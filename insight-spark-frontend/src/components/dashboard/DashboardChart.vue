@@ -9,7 +9,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as echarts from 'echarts'
-import { buildOptionFromHistoryRow } from '../../utils/chartOptionFromSnapshot.js'
+import { buildOptionFromHistoryRow, resolveDynamicRefreshInterval } from '../../utils/chartOptionFromSnapshot.js'
 
 const props = defineProps({
   /** charts-batch 返回的单行 */
@@ -22,9 +22,12 @@ const props = defineProps({
   hideTitle: { type: Boolean, default: false }
 })
 
+const emit = defineEmits(['refresh'])
+
 const host = ref(null)
 let chart = null
 let resizeObserver = null
+let refreshTimer = null
 
 function bindResizeObserver() {
   if (typeof ResizeObserver === 'undefined') return
@@ -71,6 +74,17 @@ const render = () => {
     : buildOptionFromHistoryRow(props.payload, props.chartUi || {})
   chart.setOption(option, true)
   chart.resize()
+  scheduleDynamicRefresh(resolveDynamicRefreshInterval(option))
+}
+
+function scheduleDynamicRefresh(seconds) {
+  if (refreshTimer) {
+    window.clearInterval(refreshTimer)
+    refreshTimer = null
+  }
+  const intervalSeconds = Number(seconds) || 0
+  if (intervalSeconds < 5) return
+  refreshTimer = window.setInterval(() => emit('refresh'), intervalSeconds * 1000)
 }
 
 watch(() => [props.payload, props.chartUi], render, { deep: true })
@@ -88,6 +102,10 @@ onMounted(() => {
 onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   resizeObserver = null
+  if (refreshTimer) {
+    window.clearInterval(refreshTimer)
+    refreshTimer = null
+  }
   window.removeEventListener('resize', render)
   if (chart) {
     try {

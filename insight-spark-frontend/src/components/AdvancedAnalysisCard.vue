@@ -24,6 +24,25 @@
       </div>
     </section>
 
+    <section v-if="ruleMeta.has" class="advanced-card__rule-meta">
+      <div>
+        <span>命中规则</span>
+        <strong>{{ ruleMeta.ruleName || ruleMeta.ruleCode }}</strong>
+      </div>
+      <div v-if="ruleMeta.ruleCode">
+        <span>规则编码</span>
+        <strong>{{ ruleMeta.ruleCode }}</strong>
+      </div>
+      <div v-if="ruleMeta.scenarioType">
+        <span>推荐场景</span>
+        <strong>{{ ruleMeta.scenarioLabel }}</strong>
+      </div>
+      <div v-if="ruleMeta.explain" class="advanced-card__rule-meta-explain">
+        <span>推荐说明</span>
+        <strong>{{ ruleMeta.explain }}</strong>
+      </div>
+    </section>
+
     <section v-if="analysis.type === 'forecast'" class="advanced-card__controls">
       <el-form label-position="top">
         <div class="advanced-card__form-grid">
@@ -275,6 +294,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { ElMessage } from 'element-plus'
 import { QuestionFilled } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
+import { applyDynamicInteractionDefaults, applyOptionTemplateDefaults, buildForecastChartOption } from '../utils/chartOptionFromSnapshot'
 
 const props = defineProps({
   analysis: {
@@ -364,6 +384,38 @@ const tagType = computed(() => {
   if (props.analysis.type === 'alert') return 'warning'
   if (props.analysis.type === 'whatIf') return 'success'
   return 'primary'
+})
+
+const scenarioLabel = (scenarioType) => {
+  const value = String(scenarioType || '').trim().toUpperCase()
+  if (value === 'TIME_SERIES') return '时序趋势'
+  if (value === 'GROUP_COMPARE') return '分组对比'
+  if (value === 'RATIO') return '占比分析'
+  if (value === 'DETAIL') return '明细数据'
+  if (value === 'SCENARIO_SIMULATION') return '情景推演'
+  if (value === 'ADVANCED_ALERT') return '智能预警'
+  if (value === 'CUSTOM') return '自定义规则'
+  return value || '自动推荐'
+}
+
+const ruleMeta = computed(() => {
+  const recommendation = props.analysis?.chartRecommendation && typeof props.analysis.chartRecommendation === 'object'
+    ? props.analysis.chartRecommendation
+    : {}
+  const ruleCode = String(props.analysis?.chartRuleCode || recommendation.ruleCode || '').trim()
+  const ruleName = String(props.analysis?.chartRuleName || recommendation.ruleName || '').trim()
+  const scenarioType = String(props.analysis?.chartScenarioType || recommendation.scenarioType || '').trim()
+  const status = String(props.analysis?.chartRecommendationStatus || recommendation.status || '').trim()
+  const explain = String(props.analysis?.chartRecommendationExplain || recommendation.explain || '').trim()
+  return {
+    has: Boolean(ruleCode || ruleName || scenarioType || explain),
+    ruleCode,
+    ruleName,
+    scenarioType,
+    scenarioLabel: scenarioLabel(scenarioType),
+    status,
+    explain
+  }
 })
 
 const whatIfSensitivityRows = computed(() => {
@@ -609,66 +661,17 @@ const getForecastZoomRange = (rows) => {
 const buildForecastOption = () => {
   const rows = props.analysis.series || []
   const zoomRange = getForecastZoomRange(rows)
-  return {
-    tooltip: { trigger: 'axis' },
-    legend: { top: 4, data: ['历史值', '预测值', '置信上界', '置信下界'] },
-    grid: { left: 54, right: 24, top: 48, bottom: 42, containLabel: true },
-    xAxis: {
-      type: 'category',
-      data: rows.map(item => item.name),
-      axisLabel: {
-        hideOverlap: true,
-        interval: 'auto',
-        rotate: rows.length > 48 ? 35 : 0
-      }
-    },
-    yAxis: { type: 'value', axisLabel: { formatter: formatAxisValue } },
-    dataZoom: [
-      { type: 'inside', startValue: zoomRange.startValue, endValue: zoomRange.endValue },
-      { type: 'slider', height: 16, bottom: 8, startValue: zoomRange.startValue, endValue: zoomRange.endValue }
-    ],
-    series: [
-      {
-        name: '历史值',
-        type: 'line',
-        smooth: true,
-        data: rows.map(item => item.history),
-        connectNulls: false,
-        showSymbol: false,
-        lineStyle: { color: '#2563eb', width: 2 },
-        itemStyle: { color: '#2563eb' }
-      },
-      {
-        name: '预测值',
-        type: 'line',
-        smooth: true,
-        data: rows.map(item => item.forecast),
-        connectNulls: false,
-        showSymbol: true,
-        symbolSize: 8,
-        sampling: 'lttb',
-        lineStyle: { color: '#16a34a', width: 2, type: 'dashed' },
-        itemStyle: { color: '#16a34a' }
-      },
-      {
-        name: '置信上界',
-        type: 'line',
-        data: rows.map(item => item.upper),
-        symbol: 'none',
-        showSymbol: false,
-        lineStyle: { color: '#93c5fd', width: 1 },
-        areaStyle: { color: 'rgba(147, 197, 253, 0.18)' }
-      },
-      {
-        name: '置信下界',
-        type: 'line',
-        data: rows.map(item => item.lower),
-        symbol: 'none',
-        showSymbol: false,
-        lineStyle: { color: '#93c5fd', width: 1 }
-      }
-    ]
-  }
+  const prediction = props.analysis?.optionTemplate?.prediction || {}
+  const option = buildForecastChartOption(rows, {
+    metricLabel: props.analysis?.metricField || props.analysis?.params?.metricField || '预测值',
+    confidenceLabel: prediction.confidenceLabel || props.analysis?.confidence || draft.confidence || '95%',
+    legendConfig: prediction.legendConfig
+  })
+  option.dataZoom = [
+    { type: 'inside', startValue: zoomRange.startValue, endValue: zoomRange.endValue },
+    { type: 'slider', height: 16, bottom: 8, startValue: zoomRange.startValue, endValue: zoomRange.endValue }
+  ]
+  return option
 }
 
 const buildWhatIfOption = () => {
@@ -734,7 +737,13 @@ const renderChart = async () => {
     : props.analysis.type === 'whatIf'
       ? buildWhatIfOption()
       : buildAlertOption()
-  chartInstance.setOption(option, true)
+  const withTemplate = applyOptionTemplateDefaults(option, props.analysis?.optionTemplate)
+  chartInstance.setOption(
+    applyDynamicInteractionDefaults(withTemplate, props.analysis?.optionTemplate, {
+      chartType: props.analysis.type === 'whatIf' ? 'bar' : 'line'
+    }),
+    true
+  )
   chartInstance.resize()
 }
 
@@ -833,7 +842,13 @@ onBeforeUnmount(() => {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
+.advanced-card__rule-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
 .advanced-card__meta div,
+.advanced-card__rule-meta div,
 .advanced-card__insight {
   min-width: 0;
   display: grid;
@@ -844,15 +859,20 @@ onBeforeUnmount(() => {
   background: #f8fafc;
 }
 .advanced-card__meta span,
+.advanced-card__rule-meta span,
 .advanced-card__insight span {
   color: #64748b;
   font-size: 12px;
 }
 .advanced-card__meta strong,
+.advanced-card__rule-meta strong,
 .advanced-card__insight strong {
   color: #0f172a;
   font-size: 13px;
   word-break: break-word;
+}
+.advanced-card__rule-meta-explain {
+  grid-column: 1 / -1;
 }
 .advanced-card__controls {
   padding: 12px;
@@ -1168,6 +1188,7 @@ onBeforeUnmount(() => {
 
 @media (max-width: 720px) {
   .advanced-card__meta,
+  .advanced-card__rule-meta,
   .advanced-card__insights,
   .advanced-card__form-grid {
     grid-template-columns: 1fr;

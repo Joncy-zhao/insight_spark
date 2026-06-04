@@ -3,15 +3,18 @@ package com.insightspark;
 import com.insightspark.common.ApiResponse;
 import com.insightspark.controller.DataUploadController;
 import com.insightspark.controller.DiagnosisController;
+import com.insightspark.service.AiChartRuleConfigService;
 import com.insightspark.service.DataUploadService;
 import com.insightspark.service.DatasourceService;
 import com.insightspark.service.DiagnosisService;
 import com.insightspark.service.SqlAuditService;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.util.AbstractList;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
@@ -19,6 +22,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class P2AcceptanceTests {
@@ -120,6 +124,53 @@ class P2AcceptanceTests {
         assertEquals(200, response.getCode());
         assertEquals("task-async", response.getData().get("taskId"));
         assertEquals("WAITING", response.getData().get("status"));
+    }
+
+    @Test
+    void aiChartRuleUnsafeRenderConfigIsBlocked() {
+        AiChartRuleConfigService service = new AiChartRuleConfigService();
+        ReflectionTestUtils.setField(service, "objectMapper", new ObjectMapper());
+
+        assertThrows(IllegalArgumentException.class, () -> ReflectionTestUtils.invokeMethod(
+                service,
+                "validateRuleConfig",
+                "{}",
+                "{\"tooltip\":{\"formatter\":\"function(){return 1}\"}}"
+        ));
+    }
+
+    @Test
+    void aiChartRuleTestPayloadRejectsTooManyRows() {
+        AiChartRuleConfigService service = new AiChartRuleConfigService();
+        ReflectionTestUtils.setField(service, "objectMapper", new ObjectMapper());
+        List<Map<String, Object>> rows = new AbstractList<>() {
+            @Override
+            public Map<String, Object> get(int index) {
+                return Map.of("部门", "华东", "销售额", index);
+            }
+
+            @Override
+            public int size() {
+                return 501;
+            }
+
+            @Override
+            public String toString() {
+                return "[501 rows]";
+            }
+        };
+
+        assertThrows(IllegalArgumentException.class, () -> ReflectionTestUtils.invokeMethod(
+                service,
+                "validateTestPayload",
+                Map.of(
+                        "fields", List.of(
+                                Map.of("name", "部门", "type", "string"),
+                                Map.of("name", "销售额", "type", "number")
+                        ),
+                        "rows", rows
+                )
+        ));
     }
 
     private MockMultipartFile csv(String name) {

@@ -41,7 +41,7 @@ const waitForThinkingPaint = () =>
     setTimeout(resolve, 0)
   })
 
-export const streamAdvancedAnalysisIntent = async (payload = {}, { onThinking } = {}) => {
+export const streamAdvancedAnalysisIntent = async (payload = {}, { onThinking, signal } = {}) => {
   const token = readToken()
   const headers = {
     Accept: 'text/event-stream',
@@ -54,7 +54,8 @@ export const streamAdvancedAnalysisIntent = async (payload = {}, { onThinking } 
     method: 'POST',
     headers,
     body: JSON.stringify(payload),
-    cache: 'no-store'
+    cache: 'no-store',
+    signal
   })
   if (!response.ok || !response.body) {
     throw new Error(response.status === 401 ? '登录已失效，请重新登录' : `高级分析流式解析失败(${response.status})`)
@@ -113,26 +114,26 @@ export const streamAdvancedAnalysisIntent = async (payload = {}, { onThinking } 
   return result
 }
 
-export const fetchAdvancedAnalysisFieldMeta = (payload) =>
-  http.post('/api/advanced-analysis/field-meta', payload).then(unwrap)
+export const fetchAdvancedAnalysisFieldMeta = (payload, config) =>
+  http.post('/api/advanced-analysis/field-meta', payload, config).then(unwrap)
 
 export const saveAdvancedAnalysisChatRecord = (payload) =>
   http.post('/api/advanced-analysis/chat-records', payload).then(unwrap)
 
-export const runAdvancedForecast = (payload) =>
-  http.post('/api/advanced-analysis/forecast', payload).then(unwrap)
+export const runAdvancedForecast = (payload, config) =>
+  http.post('/api/advanced-analysis/forecast', payload, config).then(unwrap)
 
-export const runAdvancedForecastFromSeries = (payload) =>
-  http.post('/api/advanced-analysis/forecast-series', payload).then(unwrap)
+export const runAdvancedForecastFromSeries = (payload, config) =>
+  http.post('/api/advanced-analysis/forecast-series', payload, config).then(unwrap)
 
-export const runAdvancedWhatIf = (payload) =>
-  http.post('/api/advanced-analysis/what-if', payload).then(unwrap)
+export const runAdvancedWhatIf = (payload, config) =>
+  http.post('/api/advanced-analysis/what-if', payload, config).then(unwrap)
 
 export const explainAdvancedAnalysisResult = (payload) =>
   http.post('/api/advanced-analysis/explain', payload, { timeout: 90000 }).then(unwrap)
 
-export const saveAdvancedAlertRule = (payload) =>
-  http.post('/api/advanced-analysis/alert-rules', payload).then(unwrap)
+export const saveAdvancedAlertRule = (payload, config) =>
+  http.post('/api/advanced-analysis/alert-rules', payload, config).then(unwrap)
 
 export const listAdvancedAlertRules = () =>
   http.post('/api/advanced-analysis/alert-rules', { action: 'list' }).then(unwrap)

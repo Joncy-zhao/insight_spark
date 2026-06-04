@@ -42,6 +42,8 @@ public class AiChartRuleConfigController {
     public ApiResponse<Map<String, Object>> createRule(@RequestBody Map<String, Object> body) {
         try {
             return ApiResponse.success(service.createRule(body));
+        } catch (SecurityException e) {
+            return ApiResponse.forbidden(e.getMessage());
         } catch (IllegalArgumentException e) {
             return ApiResponse.badRequest(e.getMessage());
         }
@@ -51,6 +53,8 @@ public class AiChartRuleConfigController {
     public ApiResponse<Map<String, Object>> updateRule(@PathVariable Long id, @RequestBody Map<String, Object> body) {
         try {
             return ApiResponse.success(service.updateRule(id, body));
+        } catch (SecurityException e) {
+            return ApiResponse.forbidden(e.getMessage());
         } catch (IllegalArgumentException e) {
             return ApiResponse.badRequest(e.getMessage());
         }
@@ -58,20 +62,48 @@ public class AiChartRuleConfigController {
 
     @PatchMapping("/rules/{id}/enabled")
     public ApiResponse<Void> updateEnabled(@PathVariable Long id, @RequestBody Map<String, Object> body) {
-        boolean enabled = Boolean.parseBoolean(String.valueOf(body.getOrDefault("enabled", "true")));
-        service.updateEnabled(id, enabled);
-        return ApiResponse.success(null);
+        try {
+            boolean enabled = Boolean.parseBoolean(String.valueOf(body.getOrDefault("enabled", "true")));
+            service.updateEnabled(id, enabled);
+            return ApiResponse.success(null);
+        } catch (SecurityException e) {
+            return ApiResponse.forbidden(e.getMessage());
+        }
     }
 
     @DeleteMapping("/rules/{id}")
     public ApiResponse<Void> deleteRule(@PathVariable Long id) {
-        service.deleteRule(id);
-        return ApiResponse.success(null);
+        try {
+            service.deleteRule(id);
+            return ApiResponse.success(null);
+        } catch (SecurityException e) {
+            return ApiResponse.forbidden(e.getMessage());
+        }
+    }
+
+    @GetMapping("/rules/{id}/versions")
+    public ApiResponse<List<Map<String, Object>>> listRuleVersions(@PathVariable Long id) {
+        return ApiResponse.success(service.listRuleVersions(id));
+    }
+
+    @PostMapping("/rules/{id}/versions/{versionId}/rollback")
+    public ApiResponse<Map<String, Object>> rollbackRuleVersion(@PathVariable Long id, @PathVariable Long versionId) {
+        try {
+            return ApiResponse.success(service.rollbackRuleVersion(id, versionId));
+        } catch (SecurityException e) {
+            return ApiResponse.forbidden(e.getMessage());
+        } catch (IllegalArgumentException e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
     }
 
     @PostMapping("/rules/test")
     public ApiResponse<Map<String, Object>> testRule(@RequestBody Map<String, Object> body) {
-        return ApiResponse.success(service.testRecommendation(body));
+        try {
+            return ApiResponse.success(service.testRecommendation(body));
+        } catch (IllegalArgumentException e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
     }
 
     @GetMapping("/preferences")
@@ -83,6 +115,8 @@ public class AiChartRuleConfigController {
     public ApiResponse<Map<String, Object>> savePreferences(@RequestBody Map<String, Object> body) {
         try {
             return ApiResponse.success(service.savePreferences(body));
+        } catch (SecurityException e) {
+            return ApiResponse.forbidden(e.getMessage());
         } catch (IllegalArgumentException e) {
             return ApiResponse.badRequest(e.getMessage());
         }
@@ -97,5 +131,30 @@ public class AiChartRuleConfigController {
     public ApiResponse<List<Map<String, Object>>> auditLogs(@RequestParam(required = false) String action,
                                                             @RequestParam(defaultValue = "50") Integer limit) {
         return ApiResponse.success(service.auditLogs(action, limit));
+    }
+
+    @GetMapping("/export")
+    public ApiResponse<Map<String, Object>> exportConfig() {
+        return ApiResponse.success(service.exportConfig());
+    }
+
+    @PostMapping("/import/preview")
+    public ApiResponse<Map<String, Object>> previewImport(@RequestBody Map<String, Object> body) {
+        try {
+            return ApiResponse.success(service.previewImport(body));
+        } catch (IllegalArgumentException e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    @PostMapping("/import")
+    public ApiResponse<Map<String, Object>> importConfig(@RequestBody Map<String, Object> body) {
+        try {
+            return ApiResponse.success(service.importConfig(body));
+        } catch (SecurityException e) {
+            return ApiResponse.forbidden(e.getMessage());
+        } catch (IllegalArgumentException e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
     }
 }
