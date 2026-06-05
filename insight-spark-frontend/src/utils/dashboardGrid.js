@@ -1,17 +1,66 @@
 /** 解析看板 layout_json：支持 v2 网格 items 与 v1 cards 共存 */
 
 import { sanitizeSeriesItemStylesForApi, normalizeChartType } from './chartOptionFromSnapshot.js'
+import {
+  DASHBOARD_GRID_COL_NUM,
+  DASHBOARD_GRID_DEFAULT_ITEM_H,
+  DASHBOARD_GRID_DEFAULT_ITEM_W,
+  DASHBOARD_GRID_LEGACY_COL_NUM,
+  dashboardCanvasStageMinHeight
+} from './dashboardGridCanvas.js'
+import {
+  cloneWidgetFieldsFromItem,
+  serializeWidgetFieldsForApi
+} from './dashboardWidgetVideo.js'
+
+export {
+  DASHBOARD_GRID_COL_NUM,
+  DASHBOARD_GRID_ROW_HEIGHT,
+  DASHBOARD_GRID_MARGIN,
+  DASHBOARD_GRID_DEFAULT_ITEM_W,
+  DASHBOARD_GRID_DEFAULT_ITEM_H,
+  DASHBOARD_CANVAS_CHROME_PX,
+  dashboardCanvasStageMinHeight
+} from './dashboardGridCanvas.js'
+
+export const CANVAS_BACKGROUND_TYPES = Object.freeze({
+  NONE: 'none',
+  COLOR: 'color',
+  IMAGE: 'image',
+  URL: 'url'
+})
+
+/** 画布背景图（本地上传）单张上限 5MB */
+export const CANVAS_BACKGROUND_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+export const CANVAS_BACKGROUND_IMAGE_MAX_DATA_URL_LEN = Math.ceil(CANVAS_BACKGROUND_IMAGE_MAX_BYTES * (4 / 3)) + 64
+
+const VALID_BACKGROUND_TYPES = new Set(Object.values(CANVAS_BACKGROUND_TYPES))
 
 const DEFAULT_CANVAS_STYLE = Object.freeze({
+  backgroundType: CANVAS_BACKGROUND_TYPES.COLOR,
   backgroundColor: '#f3f4f6',
-  borderColor: '#e5e7eb',
-  borderWidth: 1,
-  borderRadius: 12,
-  padding: 16,
-  minHeightVh: 60,
-  /** 可选：本地静态图（Base64），画布右下角角标，无上传接口时仅前端读入 */
-  brandLogoDataUrl: ''
+  backgroundImageDataUrl: '',
+  backgroundImageUrl: '',
+  borderRadius: 8,
+  padding: 8
 })
+
+function cssBackgroundUrl(value) {
+  const v = String(value || '').trim()
+  if (!v) return ''
+  const safe = v.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  return `url("${safe}")`
+}
+
+function inferBackgroundType(input, fallback = CANVAS_BACKGROUND_TYPES.COLOR) {
+  if (!input || typeof input !== 'object') return fallback
+  const t = String(input.backgroundType || '').trim()
+  if (VALID_BACKGROUND_TYPES.has(t)) return t
+  if (input.backgroundImageDataUrl) return CANVAS_BACKGROUND_TYPES.IMAGE
+  if (input.backgroundImageUrl) return CANVAS_BACKGROUND_TYPES.URL
+  if (input.backgroundColor) return CANVAS_BACKGROUND_TYPES.COLOR
+  return fallback
+}
 
 function clamp(n, min, max) {
   const x = Number(n)
@@ -26,24 +75,80 @@ function clamp(n, min, max) {
 export function normalizeCanvasStyle(input) {
   const d = DEFAULT_CANVAS_STYLE
   if (!input || typeof input !== 'object') {
-    return { ...d, brandLogoDataUrl: '' }
+    return { ...d }
   }
-  const logo = String(input.brandLogoDataUrl || '').trim()
+  let padding = clamp(input.padding ?? d.padding, 0, 64)
+  let borderRadius = clamp(input.borderRadius ?? d.borderRadius, 0, 48)
+  // 旧版默认 16px 内边距 + 12px 圆角 → 收紧为助睿风格 8px
+  if (input && Number(input.padding) === 16 && Number(input.borderRadius) === 12) {
+    padding = 8
+    borderRadius = 8
+  }
+  let backgroundType = inferBackgroundType(input, d.backgroundType)
+  if (!('backgroundType' in input)) {
+    backgroundType = CANVAS_BACKGROUND_TYPES.COLOR
+  }
+  const bgImage = String(input.backgroundImageDataUrl || '').trim()
+  const bgUrl = String(input.backgroundImageUrl || '').trim().slice(0, 2048)
   return {
+    backgroundType,
     backgroundColor: String(input.backgroundColor || d.backgroundColor).slice(0, 128),
-    borderColor: String(input.borderColor || d.borderColor).slice(0, 128),
-    borderWidth: clamp(input.borderWidth, 0, 16),
-    borderRadius: clamp(input.borderRadius, 0, 48),
-    padding: clamp(input.padding, 0, 64),
-    minHeightVh: clamp(input.minHeightVh, 40, 92),
-    brandLogoDataUrl: logo.length > 2_000_000 ? '' : logo
+    backgroundImageDataUrl:
+      bgImage.length > CANVAS_BACKGROUND_IMAGE_MAX_DATA_URL_LEN ? '' : bgImage,
+    backgroundImageUrl: bgUrl,
+    borderRadius,
+    padding
   }
+}
+
+/** 画布容器行内样式：无边框，圆角 + 内边距 + 至少一屏高 */
+export function buildCanvasStageInlineStyle(canvasStyle) {
+  const s = normalizeCanvasStyle(canvasStyle)
+  const base = {
+    border: 'none',
+    borderRadius: `${s.borderRadius}px`,
+    padding: `${s.padding}px`,
+    minHeight: dashboardCanvasStageMinHeight(),
+    boxSizing: 'border-box',
+    width: '100%'
+  }
+  if (s.backgroundType === CANVAS_BACKGROUND_TYPES.NONE) {
+    return { ...base, backgroundColor: 'transparent' }
+  }
+  if (s.backgroundType === CANVAS_BACKGROUND_TYPES.IMAGE && s.backgroundImageDataUrl) {
+    return {
+      ...base,
+      backgroundColor: 'transparent',
+      backgroundImage: cssBackgroundUrl(s.backgroundImageDataUrl),
+      backgroundSize: 'cover',
+      backgroundPosition: 'center',
+      backgroundRepeat: 'no-repeat'
+    }
+  }
+  if (s.backgroundType === CANVAS_BACKGROUND_TYPES.URL && s.backgroundImageUrl) {
+    return {
+      ...base,
+      backgroundColor: 'transparent',
+      backgroundImage: cssBackgroundUrl(s.backgroundImageUrl),
+      backgroundSize: 'cover',
+      backgroundPosition: 'center',
+      backgroundRepeat: 'no-repeat'
+    }
+  }
+  return { ...base, backgroundColor: s.backgroundColor }
 }
 
 export function parseDashboardLayout(layoutJson) {
   const text = String(layoutJson || '').trim()
   if (!text) {
-    return { version: '1.0', items: [], cards: [], canvasStyle: normalizeCanvasStyle(), raw: null }
+    return {
+      version: '1.0',
+      items: [],
+      cards: [],
+      gridCols: DASHBOARD_GRID_LEGACY_COL_NUM,
+      canvasStyle: normalizeCanvasStyle(),
+      raw: null
+    }
   }
   try {
     const root = JSON.parse(text)
@@ -52,6 +157,7 @@ export function parseDashboardLayout(layoutJson) {
         version: '2.0',
         items: root,
         cards: [],
+        gridCols: DASHBOARD_GRID_LEGACY_COL_NUM,
         canvasStyle: normalizeCanvasStyle(),
         raw: root
       }
@@ -59,10 +165,12 @@ export function parseDashboardLayout(layoutJson) {
     if (root && typeof root === 'object') {
       const items = Array.isArray(root.items) ? root.items : []
       const cards = Array.isArray(root.cards) ? root.cards : []
+      const gridCols = Number(root.gridCols) || DASHBOARD_GRID_LEGACY_COL_NUM
       return {
         version: String(root.version || '2.0'),
         items,
         cards,
+        gridCols,
         canvasStyle: normalizeCanvasStyle(root.canvasStyle),
         raw: root
       }
@@ -70,7 +178,14 @@ export function parseDashboardLayout(layoutJson) {
   } catch {
     // ignore
   }
-  return { version: '1.0', items: [], cards: [], canvasStyle: normalizeCanvasStyle(), raw: null }
+  return {
+    version: '1.0',
+    items: [],
+    cards: [],
+    gridCols: DASHBOARD_GRID_LEGACY_COL_NUM,
+    canvasStyle: normalizeCanvasStyle(),
+    raw: null
+  }
 }
 
 /** 与列表「图表卡片」统计一致：来自 layout_json.cards 的可渲染图表卡片 */
@@ -106,15 +221,20 @@ export function countChartSlotsForDashboardRow(layoutJson) {
   return extractLegacyChartCards(layoutJson, 'count').length
 }
 
-export function cloneLayoutForGrid(items) {
+export function cloneLayoutForGrid(items, gridCols = DASHBOARD_GRID_COL_NUM) {
   if (!Array.isArray(items)) return []
+  const sourceCols = Number(gridCols) || DASHBOARD_GRID_LEGACY_COL_NUM
+  const scale = sourceCols === DASHBOARD_GRID_COL_NUM ? 1 : DASHBOARD_GRID_COL_NUM / sourceCols
+  const defaultW = scale === 1 ? DASHBOARD_GRID_DEFAULT_ITEM_W : 6
   return items.map((it) => {
+    const rawW = Number(it.w) || defaultW
+    const rawX = Number(it.x) || 0
     const row = {
       i: String(it.i),
-      x: Number(it.x) || 0,
+      x: Math.max(0, Math.round(rawX * scale)),
       y: Number(it.y) || 0,
-      w: Math.min(12, Math.max(1, Number(it.w) || 6)),
-      h: Math.max(1, Number(it.h) || 4),
+      w: Math.min(DASHBOARD_GRID_COL_NUM, Math.max(1, Math.round(rawW * scale))),
+      h: Math.max(1, Number(it.h) || DASHBOARD_GRID_DEFAULT_ITEM_H),
       static: Boolean(it.static)
     }
     const t = String(it.title ?? '').trim()
@@ -125,6 +245,7 @@ export function cloneLayoutForGrid(items) {
     if (Number.isFinite(bmw) && bmw >= 8 && bmw <= 160) row.barMaxWidth = Math.round(bmw)
     const sis = sanitizeSeriesItemStylesForApi(it.seriesItemStyles)
     if (sis) row.seriesItemStyles = sis
+    Object.assign(row, cloneWidgetFieldsFromItem(it))
     return row
   })
 }
@@ -133,22 +254,25 @@ export function cloneLayoutForGrid(items) {
  * 仅有组件表记录、layout_json 尚无 items 时，用 position_config / 默认栅格占位生成初始 items。
  * @param {Array<{ id?: number, chartId?: number, positionConfig?: string }>} components
  */
-export function buildItemsFromComponents(components) {
+export function buildItemsFromComponents(components, gridCols = DASHBOARD_GRID_LEGACY_COL_NUM) {
   if (!Array.isArray(components) || !components.length) return []
+  const sourceCols = Number(gridCols) || DASHBOARD_GRID_LEGACY_COL_NUM
+  const scale = sourceCols === DASHBOARD_GRID_COL_NUM ? 1 : DASHBOARD_GRID_COL_NUM / sourceCols
   let yCursor = 0
   return components.map((c) => {
     const id = String(
       c.id ?? c.ID ?? c.componentId ?? c.component_id ?? c.dashboardComponentId ?? ''
     ).trim()
-    let w = 6
-    let h = 4
+    let w = DASHBOARD_GRID_DEFAULT_ITEM_W
+    let h = DASHBOARD_GRID_DEFAULT_ITEM_H
     const raw = c.positionConfig ?? c.position_config
     if (raw) {
       try {
         const pc = typeof raw === 'string' ? JSON.parse(raw) : raw
         if (pc && typeof pc === 'object') {
-          w = Math.min(12, Math.max(1, Math.round(Number(pc.w) || 6)))
-          h = Math.max(1, Math.round(Number(pc.h) || 4))
+          const legacyW = Math.max(1, Math.round(Number(pc.w) || 6))
+          w = Math.min(DASHBOARD_GRID_COL_NUM, Math.max(1, Math.round(legacyW * scale)))
+          h = Math.max(1, Math.round(Number(pc.h) || DASHBOARD_GRID_DEFAULT_ITEM_H))
         }
       } catch {
         // keep defaults
@@ -167,8 +291,8 @@ export function serializeLayoutForApi(items, cards, canvasStyle) {
       i: String(it.i),
       x: Math.round(Number(it.x) || 0),
       y: Math.round(Number(it.y) || 0),
-      w: Math.min(12, Math.max(1, Math.round(Number(it.w) || 6))),
-      h: Math.max(1, Math.round(Number(it.h) || 4))
+      w: Math.min(DASHBOARD_GRID_COL_NUM, Math.max(1, Math.round(Number(it.w) || DASHBOARD_GRID_DEFAULT_ITEM_W))),
+      h: Math.max(1, Math.round(Number(it.h) || DASHBOARD_GRID_DEFAULT_ITEM_H))
     }
     if (it.static) o.static = true
     const t = String(it.title ?? '').trim()
@@ -179,20 +303,26 @@ export function serializeLayoutForApi(items, cards, canvasStyle) {
     if (Number.isFinite(bmw) && bmw >= 8 && bmw <= 160) o.barMaxWidth = Math.round(bmw)
     const sis = sanitizeSeriesItemStylesForApi(it.seriesItemStyles)
     if (sis) o.seriesItemStyles = sis
+    Object.assign(o, serializeWidgetFieldsForApi(it))
     return o
   })
-  const root = { version: '2.0', items: cleanItems }
+  const root = { version: '2.0', gridCols: DASHBOARD_GRID_COL_NUM, items: cleanItems }
   if (Array.isArray(cards) && cards.length) root.cards = cards
   const cs = normalizeCanvasStyle(canvasStyle)
   root.canvasStyle = {
-    backgroundColor: cs.backgroundColor,
-    borderColor: cs.borderColor,
-    borderWidth: cs.borderWidth,
+    backgroundType: cs.backgroundType,
     borderRadius: cs.borderRadius,
-    padding: cs.padding,
-    minHeightVh: cs.minHeightVh
+    padding: cs.padding
   }
-  if (cs.brandLogoDataUrl) root.canvasStyle.brandLogoDataUrl = cs.brandLogoDataUrl
+  if (cs.backgroundType === CANVAS_BACKGROUND_TYPES.COLOR) {
+    root.canvasStyle.backgroundColor = cs.backgroundColor
+  }
+  if (cs.backgroundType === CANVAS_BACKGROUND_TYPES.IMAGE && cs.backgroundImageDataUrl) {
+    root.canvasStyle.backgroundImageDataUrl = cs.backgroundImageDataUrl
+  }
+  if (cs.backgroundType === CANVAS_BACKGROUND_TYPES.URL && cs.backgroundImageUrl) {
+    root.canvasStyle.backgroundImageUrl = cs.backgroundImageUrl
+  }
   try {
     return JSON.stringify(root)
   } catch {
@@ -203,11 +333,11 @@ export function serializeLayoutForApi(items, cards, canvasStyle) {
 /**
  * 以 layout_json.items 为准；若某看板组件不在 items 中，则追加到网格底部。
  */
-export function mergeGridItemsWithComponents(layoutItems, components) {
+export function mergeGridItemsWithComponents(layoutItems, components, gridCols = DASHBOARD_GRID_COL_NUM) {
   const base =
     Array.isArray(layoutItems) && layoutItems.length > 0
-      ? cloneLayoutForGrid(layoutItems)
-      : buildItemsFromComponents(components || [])
+      ? cloneLayoutForGrid(layoutItems, gridCols)
+      : buildItemsFromComponents(components || [], gridCols)
   const existing = new Set(base.map((x) => String(x.i)))
   let bottom = 0
   for (const it of base) {
@@ -216,7 +346,7 @@ export function mergeGridItemsWithComponents(layoutItems, components) {
   for (const c of components || []) {
     const id = String(c.id ?? c.ID ?? c.componentId ?? c.component_id ?? '').trim()
     if (!id || existing.has(id)) continue
-    base.push({ i: id, x: 0, y: bottom, w: 6, h: 4 })
+    base.push({ i: id, x: 0, y: bottom, w: DASHBOARD_GRID_DEFAULT_ITEM_W, h: DASHBOARD_GRID_DEFAULT_ITEM_H })
     bottom += 4
     existing.add(id)
   }
@@ -480,7 +610,11 @@ export function buildAdvancedAnalysisPreviewCard(comp, item, index, scope) {
 export function buildUnifiedPreviewCards(layoutJson, components, chartPayloadById, scope = 'preview') {
   const legacy = extractLegacyChartCards(layoutJson, scope).map((c) => ({ ...c, _previewKind: 'legacy' }))
   const p = parseDashboardLayout(layoutJson)
-  const mergedItems = mergeGridItemsWithComponents(Array.isArray(p.items) ? p.items : [], components || [])
+  const mergedItems = mergeGridItemsWithComponents(
+    Array.isArray(p.items) ? p.items : [],
+    components || [],
+    p.gridCols
+  )
   const payloadMap = chartPayloadById && typeof chartPayloadById === 'object' ? chartPayloadById : {}
   const gridCards = []
 

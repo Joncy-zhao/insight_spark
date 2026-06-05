@@ -48,6 +48,7 @@ public class StackCSchemaInitializer {
                       `owner_user_id` VARCHAR(64) NOT NULL COMMENT '所有者 user_id',
                       `name` VARCHAR(255) NOT NULL COMMENT '看板名称',
                       `description` VARCHAR(1000) NULL COMMENT '看板描述',
+                      `group_name` VARCHAR(128) NULL COMMENT '分组/用途',
                       `layout_json` LONGTEXT NOT NULL COMMENT '画布与组件布局 JSON',
                       `is_public` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否公共看板',
                       `status` VARCHAR(32) NOT NULL DEFAULT 'ACTIVE' COMMENT '状态',
@@ -91,6 +92,33 @@ public class StackCSchemaInitializer {
                     "CREATE INDEX `idx_dashboard_component_artifact` ON `is_dashboard_component` (`artifact_id`)");
             addIndexIfMissing("is_dashboard_component", "idx_dashboard_component_turn",
                     "CREATE INDEX `idx_dashboard_component_turn` ON `is_dashboard_component` (`turn_id`)");
+
+            addColumnIfMissing("is_dashboard", "group_name",
+                    "`group_name` VARCHAR(128) NULL COMMENT '分组/用途'");
+            addIndexIfMissing("is_dashboard", "idx_dashboard_group_name",
+                    "CREATE INDEX `idx_dashboard_group_name` ON `is_dashboard` (`group_name`)");
+
+            jdbcTemplate.execute("""
+                    CREATE TABLE IF NOT EXISTS `is_dashboard_group` (
+                      `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键',
+                      `parent_id` BIGINT NULL COMMENT '父分组 id',
+                      `owner_user_id` VARCHAR(64) NULL COMMENT '用户个人分组所有者，NULL 表示平台分组',
+                      `name` VARCHAR(128) NOT NULL COMMENT '分组名称',
+                      `sort_order` INT NOT NULL DEFAULT 0 COMMENT '排序',
+                      `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                      PRIMARY KEY (`id`),
+                      KEY `idx_dashboard_group_parent` (`parent_id`)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='看板分组';
+                    """);
+            addColumnIfMissing("is_dashboard_group", "owner_user_id",
+                    "`owner_user_id` VARCHAR(64) NULL COMMENT '用户个人分组所有者，NULL 表示平台分组' AFTER `parent_id`");
+            addIndexIfMissing("is_dashboard_group", "idx_dashboard_group_owner",
+                    "CREATE INDEX `idx_dashboard_group_owner` ON `is_dashboard_group` (`owner_user_id`)");
+            addColumnIfMissing("is_dashboard", "group_id",
+                    "`group_id` BIGINT NULL COMMENT '所属分组 id' AFTER `group_name`");
+            addIndexIfMissing("is_dashboard", "idx_dashboard_group_id",
+                    "CREATE INDEX `idx_dashboard_group_id` ON `is_dashboard` (`group_id`)");
 
             jdbcTemplate.execute("""
                     CREATE TABLE IF NOT EXISTS `is_annotation` (

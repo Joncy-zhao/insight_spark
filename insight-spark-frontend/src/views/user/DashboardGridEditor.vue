@@ -11,10 +11,18 @@
       <div class="dge-head">
         <div class="dge-title">
           <span>设计看板 · {{ board?.name || '看板' }}</span>
-          <el-tag size="small" type="info">grid-layout-plus · 12 列</el-tag>
+          <el-tag size="small" type="info">grid-layout-plus · 24 列</el-tag>
         </div>
         <div class="dge-actions">
-          <el-button v-if="board" @click="canvasStyleDialogOpen = true">画布样式</el-button>
+          <el-button
+            v-if="board"
+            class="dge-palette-trigger"
+            :type="componentPaletteOpen ? 'primary' : 'default'"
+            @click="componentPaletteOpen = !componentPaletteOpen"
+          >
+            基础组件
+          </el-button>
+          <el-button v-if="board" @click="openCanvasStyleDialog">画布样式</el-button>
           <el-button
             v-if="board && gridLayout.length"
             :loading="exportingPng"
@@ -38,7 +46,7 @@
     <div v-if="board" class="dge-body">
       <p v-if="gridLayout.length" class="dge-hint">
         左侧为<strong>您可访问的全部看板</strong>里已钉入的对话图表（按历史图表 ID 去重，并汇总所在看板名称）；可将其中任一图表<strong>加入当前画布</strong>排布。卡片标题区<strong>双击</strong>可改业务名称；右上角可<strong>移除</strong>。
-        在标题区、图表区等<strong>任意区域</strong>按住拖拽即可<strong>在画布上自由摆放</strong>（12 列栅格 + 行高对齐；已关闭垂直压缩）；卡片<strong>四边及四角</strong>均可拖拽调整占位（列宽 w / 行高 h，对齐栅格）。也可在「图表组件」里用数字精确改 w、h。点<strong>图表组件</strong>可设<strong>柱色、柱宽、分项配色</strong>等，并查看问题 / SQL / 字段映射。修改后请点「保存布局」写入
+        在标题区、图表区等<strong>任意区域</strong>按住拖拽即可<strong>在画布上自由摆放</strong>（24 列栅格 + 行高对齐；已关闭垂直压缩）；卡片<strong>四边及四角</strong>均可拖拽调整占位（列宽 w / 行高 h，对齐栅格）。也可在「图表组件」里用数字精确改 w、h。点<strong>图表组件</strong>可设<strong>柱色、柱宽、分项配色</strong>等，并查看问题 / SQL / 字段映射。修改后请点「保存布局」写入
         <code>layout_json.items</code>。
       </p>
       <template v-if="!gridLayout.length">
@@ -66,55 +74,17 @@
           title="当前为旧版「内嵌数据」预览，不支持拖拽改位置。"
           description="请从左侧「已钉入看板的图表」加入画布，或先在对话查询中钉入看板。"
         />
-        <div class="dge-empty-workbench">
-          <aside class="dge-side">
-            <div class="dge-side-head">各看板已钉图表</div>
-            <div class="dge-side-search">
-              <el-input
-                v-model="historyKeyword"
-                clearable
-                size="small"
-                placeholder="筛选问题 / 表名 / 看板名 / 历史 ID"
-              />
-            </div>
-            <div v-loading="sideListLoading" class="dge-side-list">
-              <div v-for="h in displayedPinnedLibrary" :key="h.id" class="dge-side-row">
-                <div class="dge-side-row-main">
-                  <span class="dge-hid">#{{ h.id }}</span>
-                  <el-tag size="small" type="info">{{ h.chartType || 'bar' }}</el-tag>
-                  <el-tag v-if="isChartInGridLayout(h.id)" size="small" type="success">已在画布</el-tag>
-                </div>
-                <div class="dge-side-q">{{ h.question || h.queryText || '（无摘要）' }}</div>
-                <div v-if="h.pinnedDashboardNames" class="dge-side-meta">已在看板：{{ h.pinnedDashboardNames }}</div>
-                <el-button
-                  size="small"
-                  type="primary"
-                  :disabled="isChartInGridLayout(h.id)"
-                  :loading="pinningId === h.id"
-                  @click="pinHistoryChart(h)"
-                >
-                  {{ isChartInGridLayout(h.id) ? '已在画布' : '加入画布' }}
-                </el-button>
-              </div>
-              <el-empty
-                v-if="!sideListLoading && !displayedPinnedLibrary.length"
-                description="暂无任何看板钉入图表，请先在对话查询中钉入某一看板"
-              />
-            </div>
-          </aside>
-          <div v-if="legacyPreviewCards.length" class="dge-legacy-grid">
-            <LegacyInlineChart
-              v-for="c in legacyPreviewCards"
-              :key="c._renderKey"
-              :title="c.title"
-              :chart-type="c.chartType"
-              :data="c.data"
-            />
-          </div>
-        </div>
       </template>
-      <div v-else class="dge-workbench">
-        <aside class="dge-side">
+      <div
+        ref="workbenchRef"
+        class="dge-workbench"
+        :class="{ 'is-side-collapsed': !sidePanelOpen, 'is-side-resizing': isResizingSide }"
+      >
+        <aside
+          v-show="sidePanelOpen"
+          class="dge-side"
+          :style="{ width: `${sidePanelWidth}px` }"
+        >
           <div class="dge-side-head">各看板已钉图表</div>
           <div class="dge-side-search">
             <el-input
@@ -149,22 +119,64 @@
             />
           </div>
         </aside>
-        <div class="dge-canvas-col">
+        <div
+          class="dge-side-rail"
+          role="separator"
+          :title="sidePanelOpen ? '收起图表库' : '展开图表库'"
+        >
+          <button
+            type="button"
+            class="dge-side-rail-toggle"
+            :aria-label="sidePanelOpen ? '收起图表库' : '展开图表库'"
+            @click="toggleSidePanel"
+          >
+            <el-icon :size="12">
+              <DArrowLeft v-if="sidePanelOpen" />
+              <DArrowRight v-else />
+            </el-icon>
+          </button>
+          <div
+            class="dge-side-rail-grip"
+            title="拖拽调整宽度，左拖至底可收起图表库"
+            @mousedown="onSideResizeStart"
+          >
+            <span v-for="dot in 6" :key="dot" class="dge-side-rail-dot" />
+          </div>
+        </div>
+        <div class="dge-main-col">
+          <div v-if="!gridLayout.length && legacyPreviewCards.length" class="dge-legacy-grid">
+            <LegacyInlineChart
+              v-for="c in legacyPreviewCards"
+              :key="c._renderKey"
+              :title="c.title"
+              :chart-type="c.chartType"
+              :data="c.data"
+            />
+          </div>
+          <div v-else class="dge-canvas-col">
           <div
             ref="exportStageRef"
             class="dge-export-stage"
+            :class="{ 'is-palette-drop-active': paletteDropActive }"
             :style="canvasStageInlineStyle"
           >
-          <div class="dge-grid-wrap">
+          <div ref="gridWrapRef" class="dge-grid-wrap">
+            <div
+              v-if="paletteDropPreview.visible"
+              class="dge-drop-preview"
+              :style="paletteDropPreview.style"
+            />
         <GridLayout
+          v-if="gridLayout.length"
           v-model:layout="gridLayout"
-          :col-num="12"
+          :col-num="DASHBOARD_GRID_COL_NUM"
           :row-height="rowHeight"
-          :margin="[12, 12]"
+          :margin="gridMargin"
           :is-draggable="true"
           :is-resizable="true"
           :vertical-compact="false"
-          class="dge-grid"
+          class="dge-grid dashboard-grid-canvas"
+          :style="gridCanvasStyle"
           @layout-updated="onLayoutUpdated"
         >
               <GridItem
@@ -175,75 +187,109 @@
                 @resized="onGridItemResized"
                 @container-resized="onGridItemResized"
               >
-                <div class="dge-card">
-                  <div class="dge-card-meta">
-                    <div
-                      class="dge-card-titlewrap"
-                      title="双击修改标题"
-                      @dblclick.stop="startEditTitle(item)"
-                    >
-                      <el-input
-                        v-if="editingItemId === String(item.i)"
-                        :id="'dge-title-inp-' + item.i"
-                        v-model="titleDraft"
-                        size="small"
-                        maxlength="120"
-                        show-word-limit
-                        @blur="commitTitleEdit(item)"
-                        @keydown.enter.prevent="commitTitleEdit(item)"
-                      />
-                      <span v-else class="dge-card-title">{{ displayTitleForItem(item) }}</span>
+                <div
+                  v-if="isBasicWidgetItem(item)"
+                  class="dge-widget-shell"
+                  :class="{ 'is-selected': selectedItemId === String(item.i) }"
+                  @click.stop="selectGridItem(item)"
+                >
+                  <component
+                    :is="basicWidgetViewForItem(item)"
+                    :config="basicWidgetConfigForItem(item)"
+                    :pinned="Boolean(item.static)"
+                    interactive
+                    @edit="openWidgetInspectorById(String(item.i))"
+                    @remove="removeGridItemById(String(item.i))"
+                    @pin="toggleWidgetPin(item)"
+                  />
+                </div>
+                <div
+                  v-else
+                  class="dge-card"
+                  @click.stop="selectGridItem(item)"
+                >
+                    <div class="dge-card-meta">
+                      <div
+                        class="dge-card-titlewrap"
+                        title="双击修改标题"
+                        @dblclick.stop="startEditTitle(item)"
+                      >
+                        <el-input
+                          v-if="editingItemId === String(item.i)"
+                          :id="'dge-title-inp-' + item.i"
+                          v-model="titleDraft"
+                          size="small"
+                          maxlength="120"
+                          show-word-limit
+                          @blur="commitTitleEdit(item)"
+                          @keydown.enter.prevent="commitTitleEdit(item)"
+                        />
+                        <span v-else class="dge-card-title">{{ displayTitleForItem(item) }}</span>
+                      </div>
+                      <div class="dge-card-actions">
+                        <span v-if="chartIdForItem(item)" class="dge-chart-id">历史 {{ chartIdForItem(item) }}</span>
+                        <span v-if="artifactIdForItem(item)" class="dge-chart-id">Artifact {{ artifactIdForItem(item) }}</span>
+                        <span v-if="turnIdForItem(item)" class="dge-chart-id">Turn {{ turnIdForItem(item) }}</span>
+                        <el-button
+                          v-if="payloadForItem(item)"
+                          type="primary"
+                          link
+                          size="small"
+                          @click.stop="openChartInspector(item)"
+                        >
+                          图表组件
+                        </el-button>
+                        <el-button
+                          type="danger"
+                          link
+                          size="small"
+                          :loading="removingId === String(item.i)"
+                          @click.stop="removeGridItem(item)"
+                        >
+                          移除
+                        </el-button>
+                      </div>
                     </div>
-                    <div class="dge-card-actions">
-                      <span v-if="chartIdForItem(item)" class="dge-chart-id">历史 {{ chartIdForItem(item) }}</span>
-                      <span v-if="artifactIdForItem(item)" class="dge-chart-id">Artifact {{ artifactIdForItem(item) }}</span>
-                      <span v-if="turnIdForItem(item)" class="dge-chart-id">Turn {{ turnIdForItem(item) }}</span>
-                      <el-button
+                    <div class="dge-chart-host">
+                      <DashboardChart
                         v-if="payloadForItem(item)"
-                        type="primary"
-                        link
-                        size="small"
-                        @click.stop="openChartInspector(item)"
-                      >
-                        图表组件
-                      </el-button>
-                      <el-button
-                        type="danger"
-                        link
-                        size="small"
-                        :loading="removingId === String(item.i)"
-                        @click.stop="removeGridItem(item)"
-                      >
-                        移除
-                      </el-button>
+                        :payload="payloadForItem(item)"
+                        :chart-ui="chartUiForItem(item)"
+                        hide-title
+                        @refresh="refreshChartPayloadsFromDynamicConfig"
+                      />
+                      <div v-else class="dge-chart-fallback">
+                        {{ artifactIdForItem(item) ? '高级分析图表数据暂不可用' : (chartIdForItem(item) ? '图表数据暂不可用' : '未关联 chart_id') }}
+                      </div>
                     </div>
-                  </div>
-                  <div class="dge-chart-host">
-                    <DashboardChart
-                      v-if="payloadForItem(item)"
-                      :payload="payloadForItem(item)"
-                      :chart-ui="chartUiForItem(item)"
-                      hide-title
-                      @refresh="refreshChartPayloadsFromDynamicConfig"
-                    />
-                    <div v-else class="dge-chart-fallback">
-                      {{ artifactIdForItem(item) ? '高级分析图表数据暂不可用' : (chartIdForItem(item) ? '图表数据暂不可用' : '未关联 chart_id') }}
-                    </div>
-                  </div>
                 </div>
               </GridItem>
             </GridLayout>
+            <div v-else class="dge-empty-canvas-drop">
+              <p>从左侧拖动或点击「基础组件」加入画布</p>
+            </div>
           </div>
-            <img
-              v-if="canvasStyle.brandLogoDataUrl"
-              :src="canvasStyle.brandLogoDataUrl"
-              class="dge-stage-logo"
-              alt=""
-            />
           </div>
+        </div>
         </div>
       </div>
     </div>
+
+    <DashboardComponentPalette
+      v-model="componentPaletteOpen"
+      @pick-basic="onPickBasicComponent"
+      @drag-start="onPaletteDragStart"
+      @drag-end="onPaletteDragEnd"
+    />
+
+    <component
+      :is="activeBasicWidgetInspector"
+      v-if="activeBasicWidgetInspector"
+      v-model="widgetInspectorOpen"
+      :config="basicWidgetInspectorConfig"
+      @update:config="onBasicWidgetInspectorConfigUpdate"
+      @closed="onWidgetInspectorClosed"
+    />
 
     <el-dialog
       v-model="canvasStyleDialogOpen"
@@ -252,43 +298,55 @@
       append-to-body
       destroy-on-close
     >
-      <el-form label-position="top" size="small">
-        <el-form-item label="背景色">
+      <el-form label-width="88px" size="small">
+        <el-form-item label="背景设置">
+          <el-select v-model="canvasStyle.backgroundType" style="width: 100%">
+            <el-option label="无" value="none" />
+            <el-option label="背景颜色" value="color" />
+            <el-option label="背景图片" value="image" />
+            <el-option label="图片链接" value="url" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="canvasStyle.backgroundType === 'color'" label="默认填充色">
           <el-color-picker v-model="canvasStyle.backgroundColor" show-alpha />
         </el-form-item>
-        <el-form-item label="边框颜色">
-          <el-color-picker v-model="canvasStyle.borderColor" show-alpha />
-        </el-form-item>
-        <el-form-item label="边框宽度 (px)">
-          <el-slider v-model="canvasStyle.borderWidth" :min="0" :max="12" show-input />
+        <template v-else-if="canvasStyle.backgroundType === 'image'">
+          <el-form-item label="背景图片">
+            <div class="dge-logo-row">
+              <el-upload
+                :show-file-list="false"
+                accept="image/*"
+                :auto-upload="false"
+                :on-change="onBackgroundImageFileChange"
+              >
+                <el-button size="small">选择图片</el-button>
+              </el-upload>
+              <el-button
+                size="small"
+                :disabled="!canvasStyle.backgroundImageDataUrl"
+                @click="clearBackgroundImage"
+              >
+                清除
+              </el-button>
+            </div>
+            <div v-if="canvasStyle.backgroundImageDataUrl" class="dge-logo-preview">
+              <img :src="canvasStyle.backgroundImageDataUrl" alt="背景预览" />
+            </div>
+            <p class="dge-form-hint">本地读入 Base64，随布局保存。单张 &lt; 5MB。</p>
+          </el-form-item>
+        </template>
+        <el-form-item v-else-if="canvasStyle.backgroundType === 'url'" label="图片链接">
+          <el-input
+            v-model="canvasStyle.backgroundImageUrl"
+            placeholder="https://example.com/bg.png"
+            clearable
+          />
         </el-form-item>
         <el-form-item label="圆角 (px)">
           <el-slider v-model="canvasStyle.borderRadius" :min="0" :max="32" show-input />
         </el-form-item>
         <el-form-item label="内边距 (px)">
           <el-slider v-model="canvasStyle.padding" :min="0" :max="48" show-input />
-        </el-form-item>
-        <el-form-item label="画布最小高度 (vh)">
-          <el-slider v-model="canvasStyle.minHeightVh" :min="40" :max="85" show-input />
-        </el-form-item>
-        <el-form-item label="角标图（静态，无接口时本地读入 Base64，随布局保存）">
-          <div class="dge-logo-row">
-            <el-upload
-              :show-file-list="false"
-              accept="image/*"
-              :auto-upload="false"
-              :on-change="onLogoFileChange"
-            >
-              <el-button size="small">选择图片</el-button>
-            </el-upload>
-            <el-button size="small" :disabled="!canvasStyle.brandLogoDataUrl" @click="clearLogo">
-              清除
-            </el-button>
-          </div>
-          <div v-if="canvasStyle.brandLogoDataUrl" class="dge-logo-preview">
-            <img :src="canvasStyle.brandLogoDataUrl" alt="角标预览" />
-          </div>
-          <p class="dge-form-hint">整页背景图暂未开放；此处仅右下角角标。单张建议 &lt; 1.5MB。</p>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -369,8 +427,8 @@
               <span class="dge-inspector-k">宽度 w（列）</span>
               <el-input-number
                 :model-value="inspectorItem.w"
-                :min="2"
-                :max="12"
+                :min="4"
+                :max="DASHBOARD_GRID_COL_NUM"
                 size="small"
                 controls-position="right"
                 @change="(v) => patchInspectorGridItem({ w: v })"
@@ -412,15 +470,39 @@
       </template>
       <el-empty v-else description="无图表载荷" />
     </el-drawer>
+
+    <el-dialog
+      v-model="saveMetaVisible"
+      title="保存看板"
+      width="420px"
+      append-to-body
+      :close-on-click-modal="false"
+      @closed="saveMetaPending = false"
+    >
+      <p class="dge-save-meta-hint">请选择看板可见范围，确认后将保存布局并关闭设计器。</p>
+      <el-form label-width="88px">
+        <el-form-item label="看板类型" required>
+          <el-radio-group v-model="saveMetaForm.isPublic">
+            <el-radio :label="false">个人</el-radio>
+            <el-radio :label="true">公共</el-radio>
+          </el-radio-group>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="saveMetaVisible = false">取消</el-button>
+        <el-button type="primary" :loading="saving" @click="confirmSaveLayout">确认保存</el-button>
+      </template>
+    </el-dialog>
   </el-dialog>
 </template>
 
 <script setup>
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import axios from 'axios'
 import html2canvas from 'html2canvas'
 import { jsPDF } from 'jspdf'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { DArrowLeft, DArrowRight } from '@element-plus/icons-vue'
 import { GridLayout, GridItem } from 'grid-layout-plus'
 import { restoreSessionHeader } from '../../store/session'
 import {
@@ -428,10 +510,42 @@ import {
   mergeGridItemsWithComponents,
   serializeLayoutForApi,
   extractLegacyChartCards,
+  CANVAS_BACKGROUND_TYPES,
+  CANVAS_BACKGROUND_IMAGE_MAX_BYTES,
+  CANVAS_BACKGROUND_IMAGE_MAX_DATA_URL_LEN,
   normalizeCanvasStyle,
-  buildAdvancedAnalysisPreviewCard
+  buildAdvancedAnalysisPreviewCard,
+  DASHBOARD_GRID_COL_NUM,
+  DASHBOARD_GRID_MARGIN,
+  buildCanvasStageInlineStyle
 } from '../../utils/dashboardGrid.js'
+import { useDashboardGridCanvasBackground } from '../../utils/dashboardGridCanvas.js'
+import {
+  DASHBOARD_BASIC_WIDGET_DEFAULT_H,
+  DASHBOARD_BASIC_WIDGET_DEFAULT_W,
+  isPaletteComponentAvailable
+} from '../../utils/dashboardBasicComponents.js'
+import {
+  gridItemPixelRect,
+  nextGridRowY,
+  pixelToGridCell
+} from '../../utils/dashboardGridDrop.js'
+import {
+  createVideoWidgetItem,
+  isBasicWidgetItem,
+  normalizeVideoWidgetConfig,
+  videoWidgetConfigEqual
+} from '../../utils/dashboardWidgetVideo.js'
+import { normalizeTextWidgetConfig, textWidgetConfigEqual } from '../../utils/dashboardWidgetText.js'
+import { createTextWidgetItem } from '../../utils/dashboardWidgetText.js'
+import { basicWidgetGridItemProps } from '../../utils/dashboardBasicWidgetGrid.js'
+import {
+  basicWidgetLabelForItem,
+  resolveBasicWidgetEntry
+} from '../../utils/dashboardBasicWidgetRegistry.js'
+import '../../styles/dashboard-grid-canvas.css'
 import DashboardChart from '../../components/dashboard/DashboardChart.vue'
+import DashboardComponentPalette from '../../components/dashboard/DashboardComponentPalette.vue'
 import LegacyInlineChart from '../../components/dashboard/LegacyInlineChart.vue'
 import {
   normalizeChartType,
@@ -441,7 +555,9 @@ import {
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
   initialRow: { type: Object, default: null },
-  apiBase: { type: String, default: 'http://localhost:8080' }
+  apiBase: { type: String, default: 'http://localhost:8080' },
+  /** 管理员保存布局时先选择公共/个人 */
+  promptVisibilityOnSave: { type: Boolean, default: false }
 })
 
 const emit = defineEmits(['update:modelValue', 'saved'])
@@ -461,12 +577,31 @@ let dynamicRefreshInFlight = false
 const allPinnedSummaries = ref([])
 const saving = ref(false)
 const rowHeight = 44
+const gridMargin = DASHBOARD_GRID_MARGIN
+const gridWrapRef = ref(null)
+const { gridCanvasStyle, measure: measureGridCanvas, attach: attachGridCanvas } = useDashboardGridCanvasBackground(
+  gridWrapRef,
+  { rowHeight, interactive: true }
+)
+
+const SIDE_PANEL_STORAGE_KEY = 'insight-spark.dashboard-editor.side-panel'
+const SIDE_PANEL_WIDTH_DEFAULT = 300
+const SIDE_PANEL_MIN_EXPANDED = 180
+const SIDE_PANEL_MAX = 520
+/** 指针位置低于此宽度（px）时视为完全收起 */
+const SIDE_PANEL_COLLAPSE_THRESHOLD = 48
 
 /** 筛选左侧「各看板已钉图表」列表（仅客户端过滤） */
 const historyKeyword = ref('')
+const sidePanelOpen = ref(true)
+const sidePanelWidth = ref(SIDE_PANEL_WIDTH_DEFAULT)
+const isResizingSide = ref(false)
+const workbenchRef = ref(null)
+let sidePanelLastExpandedWidth = SIDE_PANEL_WIDTH_DEFAULT
 const sideListLoading = ref(false)
 const pinningId = ref(null)
 const removingId = ref(null)
+const basicWidgetRemovingId = ref('')
 
 const editingItemId = ref(null)
 const titleDraft = ref('')
@@ -474,54 +609,433 @@ const titleDraft = ref('')
 const inspectorOpen = ref(false)
 const inspectorItem = ref(null)
 
+const selectedItemId = ref('')
+const widgetInspectorOpen = ref(false)
+const widgetInspectorItemId = ref('')
+const widgetInspectorKind = ref('')
+
+const paletteDragType = ref('')
+const paletteDropActive = ref(false)
+const paletteDropPreview = ref({ visible: false, style: {} })
+let paletteWindowDragOver = null
+let paletteWindowDrop = null
+let paletteWindowDragEnd = null
+
 const canvasStyle = reactive(normalizeCanvasStyle())
 const canvasStyleDialogOpen = ref(false)
+const componentPaletteOpen = ref(false)
 const exportStageRef = ref(null)
 const exportingPng = ref(false)
 const exportingPdf = ref(false)
 
-const canvasStageInlineStyle = computed(() => {
-  const s = canvasStyle
-  const bw = Math.max(0, Math.min(16, Number(s.borderWidth) || 0))
-  const br = Math.max(0, Math.min(48, Number(s.borderRadius) || 0))
-  const pad = Math.max(0, Math.min(64, Number(s.padding) || 0))
-  const vh = Math.max(40, Math.min(92, Number(s.minHeightVh) || 60))
-  return {
-    backgroundColor: s.backgroundColor,
-    border: bw > 0 ? `${bw}px solid ${s.borderColor}` : 'none',
-    borderRadius: `${br}px`,
-    padding: `${pad}px`,
-    minHeight: `max(${vh}vh, 480px)`,
-    boxSizing: 'border-box',
-    width: '100%'
-  }
-})
+const canvasStageInlineStyle = computed(() => buildCanvasStageInlineStyle(canvasStyle))
 
-function clearLogo() {
-  canvasStyle.brandLogoDataUrl = ''
+function ensureCanvasBackgroundType() {
+  const t = String(canvasStyle.backgroundType || '').trim()
+  if (!['none', 'color', 'image', 'url'].includes(t)) {
+    canvasStyle.backgroundType = CANVAS_BACKGROUND_TYPES.COLOR
+  }
 }
 
-function onLogoFileChange(uploadFile) {
+function openCanvasStyleDialog() {
+  ensureCanvasBackgroundType()
+  canvasStyleDialogOpen.value = true
+}
+
+const activeBasicWidgetInspector = computed(() => {
+  return resolveBasicWidgetEntry(widgetInspectorKind.value)?.inspector || null
+})
+
+const basicWidgetInspectorConfig = computed(() => {
+  const id = widgetInspectorItemId.value
+  const entry = resolveBasicWidgetEntry(widgetInspectorKind.value)
+  if (!id || !entry) return entry?.defaultConfig?.() || {}
+  const item = gridLayout.value.find((x) => String(x.i) === String(id))
+  return entry.configForItem(item)
+})
+
+function basicWidgetViewForItem(item) {
+  return resolveBasicWidgetEntry(item)?.widget || null
+}
+
+function basicWidgetConfigForItem(item) {
+  const entry = resolveBasicWidgetEntry(item)
+  return entry ? entry.configForItem(item) : {}
+}
+
+function selectGridItem(item) {
+  selectedItemId.value = String(item.i)
+}
+
+function openWidgetInspector(item) {
+  openWidgetInspectorById(String(item?.i || ''))
+}
+
+function openWidgetInspectorById(id) {
+  const item = gridLayout.value.find((x) => String(x.i) === String(id))
+  const entry = resolveBasicWidgetEntry(item)
+  if (!item || !entry) return
+  widgetInspectorKind.value = entry.kind
+  widgetInspectorItemId.value = String(item.i)
+  selectedItemId.value = String(item.i)
+  widgetInspectorOpen.value = true
+}
+
+function removeGridItemById(id) {
+  const item = gridLayout.value.find((x) => String(x.i) === String(id))
+  if (item) removeGridItem(item)
+}
+
+function toggleWidgetPin(item) {
+  const id = String(item.i)
+  const idx = gridLayout.value.findIndex((x) => String(x.i) === id)
+  if (idx < 0) return
+  const next = { ...gridLayout.value[idx], static: !gridLayout.value[idx].static }
+  gridLayout.value.splice(idx, 1, next)
+  ElMessage.success(next.static ? '已固定位置' : '已取消固定')
+}
+
+function onBasicWidgetInspectorConfigUpdate(config) {
+  const id = widgetInspectorItemId.value
+  const entry = resolveBasicWidgetEntry(widgetInspectorKind.value)
+  if (!id || !entry) return
+  const idx = gridLayout.value.findIndex((x) => String(x.i) === String(id))
+  if (idx < 0) return
+  const cur = gridLayout.value[idx]
+  let normalized = config
+  let equal = false
+  if (entry.kind === 'video') {
+    normalized = normalizeVideoWidgetConfig(config)
+    equal = videoWidgetConfigEqual(cur?.widgetConfig, normalized)
+  } else if (entry.kind === 'text') {
+    normalized = normalizeTextWidgetConfig(config)
+    equal = textWidgetConfigEqual(cur?.widgetConfig, normalized)
+  }
+  if (equal) return
+  gridLayout.value.splice(idx, 1, { ...cur, widgetConfig: normalized })
+}
+
+function onWidgetInspectorClosed() {
+  widgetInspectorItemId.value = ''
+  widgetInspectorKind.value = ''
+}
+
+function isPointerOverCanvas(clientX, clientY) {
+  const stage = exportStageRef.value
+  if (!stage) return false
+  const rect = stage.getBoundingClientRect()
+  return (
+    clientX >= rect.left &&
+    clientX <= rect.right &&
+    clientY >= rect.top &&
+    clientY <= rect.bottom
+  )
+}
+
+function resolvePaletteDropContainer() {
+  const wrap = gridWrapRef.value
+  const layout = wrap?.querySelector('.vgl-layout')
+  return layout || wrap || exportStageRef.value
+}
+
+function updatePaletteDropPreview(clientX, clientY) {
+  const container = resolvePaletteDropContainer()
+  if (!container) return
+  const cell = pixelToGridCell(clientX, clientY, container, {
+    rowHeight,
+    margin: gridMargin,
+    itemW: DASHBOARD_BASIC_WIDGET_DEFAULT_W,
+    itemH: DASHBOARD_BASIC_WIDGET_DEFAULT_H
+  })
+  const rect = gridItemPixelRect(
+    cell.x,
+    cell.y,
+    cell.itemW,
+    cell.itemH,
+    cell.metrics
+  )
+  if (!rect) return
+  paletteDropPreview.value = {
+    visible: true,
+    style: {
+      left: `${rect.left}px`,
+      top: `${rect.top}px`,
+      width: `${rect.width}px`,
+      height: `${rect.height}px`
+    }
+  }
+}
+
+function clearPaletteDropPreview() {
+  paletteDropActive.value = false
+  paletteDropPreview.value = { visible: false, style: {} }
+}
+
+function detachPaletteWindowListeners() {
+  if (paletteWindowDragOver) {
+    window.removeEventListener('dragover', paletteWindowDragOver)
+    paletteWindowDragOver = null
+  }
+  if (paletteWindowDrop) {
+    window.removeEventListener('drop', paletteWindowDrop)
+    paletteWindowDrop = null
+  }
+  if (paletteWindowDragEnd) {
+    window.removeEventListener('dragend', paletteWindowDragEnd)
+    paletteWindowDragEnd = null
+  }
+}
+
+function onPaletteDragStart(item) {
+  if (!isPaletteComponentAvailable(item?.type)) return
+  paletteDragType.value = item.type
+  detachPaletteWindowListeners()
+
+  paletteWindowDragOver = (event) => {
+    if (!paletteDragType.value) return
+    if (isPointerOverCanvas(event.clientX, event.clientY)) {
+      event.preventDefault()
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+      paletteDropActive.value = true
+      updatePaletteDropPreview(event.clientX, event.clientY)
+    } else {
+      clearPaletteDropPreview()
+    }
+  }
+
+  paletteWindowDrop = (event) => {
+    if (!paletteDragType.value) return
+    if (!isPointerOverCanvas(event.clientX, event.clientY)) return
+    event.preventDefault()
+    addBasicWidgetAtDrop(event.clientX, event.clientY, paletteDragType.value, item.label)
+    finishPaletteDrag()
+  }
+
+  paletteWindowDragEnd = () => {
+    finishPaletteDrag()
+  }
+
+  window.addEventListener('dragover', paletteWindowDragOver)
+  window.addEventListener('drop', paletteWindowDrop)
+  window.addEventListener('dragend', paletteWindowDragEnd)
+}
+
+function onPaletteDragEnd() {
+  finishPaletteDrag()
+}
+
+function finishPaletteDrag() {
+  paletteDragType.value = ''
+  clearPaletteDropPreview()
+  detachPaletteWindowListeners()
+}
+
+function createBasicWidgetItem(type, { x, y } = {}) {
+  if (type === 'video') return createVideoWidgetItem({ x, y })
+  if (type === 'text') return createTextWidgetItem({ x, y })
+  return null
+}
+
+function basicWidgetSuccessLabel(type) {
+  if (type === 'video') return '已添加视频组件'
+  if (type === 'text') return '已添加文本组件'
+  return '已添加组件'
+}
+
+function addBasicWidgetAtDrop(clientX, clientY, type, label = '') {
+  if (!isPaletteComponentAvailable(type)) {
+    ElMessage.info(`「${label || type}」组件稍后开放`)
+    return null
+  }
+  const container = resolvePaletteDropContainer()
+  const cell = container
+    ? pixelToGridCell(clientX, clientY, container, {
+        rowHeight,
+        margin: gridMargin,
+        itemW: DASHBOARD_BASIC_WIDGET_DEFAULT_W,
+        itemH: DASHBOARD_BASIC_WIDGET_DEFAULT_H
+      })
+    : { x: 0, y: nextGridRowY(gridLayout.value) }
+  const item = createBasicWidgetItem(type, { x: cell.x, y: cell.y })
+  if (!item) return null
+  gridLayout.value = [...gridLayout.value, item]
+  nextTick(() => {
+    attachGridCanvas()
+    selectGridItem(item)
+    onLayoutUpdated()
+  })
+  ElMessage.success(basicWidgetSuccessLabel(type))
+  return item
+}
+
+function addBasicWidgetToCanvas(type, label = '') {
+  if (!isPaletteComponentAvailable(type)) {
+    ElMessage.info(`「${label || type}」组件稍后开放`)
+    return
+  }
+  const item = createBasicWidgetItem(type, {
+    x: 0,
+    y: nextGridRowY(gridLayout.value)
+  })
+  if (!item) return
+  gridLayout.value = [...gridLayout.value, item]
+  nextTick(() => {
+    attachGridCanvas()
+    selectGridItem(item)
+    onLayoutUpdated()
+  })
+  ElMessage.success(basicWidgetSuccessLabel(type))
+}
+
+function onPickBasicComponent(item) {
+  if (item?.source !== 'click') return
+  addBasicWidgetToCanvas(item.type, item.label)
+}
+
+function clearBackgroundImage() {
+  canvasStyle.backgroundImageDataUrl = ''
+}
+
+function readImageUploadAsDataUrl(uploadFile, { onOk, tooLargeMsg, successMsg }) {
   const raw = uploadFile?.raw
   if (!raw) return
   if (!String(raw.type || '').startsWith('image/')) {
     ElMessage.warning('请选择图片文件')
     return
   }
-  if (raw.size > 1.5 * 1024 * 1024) {
-    ElMessage.warning('图片较大，建议压缩到 1.5MB 以下再试（将存入 layout_json）')
+  if (raw.size > CANVAS_BACKGROUND_IMAGE_MAX_BYTES) {
+    ElMessage.error(tooLargeMsg || '图片不能超过 5MB')
+    return
   }
   const reader = new FileReader()
   reader.onload = () => {
     const url = String(reader.result || '')
-    if (url.length > 1_800_000) {
-      ElMessage.error('图片过大，请换更小的文件')
+    if (url.length > CANVAS_BACKGROUND_IMAGE_MAX_DATA_URL_LEN) {
+      ElMessage.error(tooLargeMsg || '图片不能超过 5MB')
       return
     }
-    canvasStyle.brandLogoDataUrl = url
-    ElMessage.success('角标图已读入')
+    onOk(url)
+    if (successMsg) ElMessage.success(successMsg)
   }
   reader.readAsDataURL(raw)
+}
+
+function onBackgroundImageFileChange(uploadFile) {
+  readImageUploadAsDataUrl(uploadFile, {
+    onOk: (url) => {
+      canvasStyle.backgroundImageDataUrl = url
+    },
+    successMsg: '背景图已读入'
+  })
+}
+
+function toggleSidePanel() {
+  if (sidePanelOpen.value) {
+    sidePanelLastExpandedWidth = sidePanelWidth.value
+    sidePanelOpen.value = false
+  } else {
+    sidePanelOpen.value = true
+    sidePanelWidth.value = clampSidePanelWidth(sidePanelLastExpandedWidth || SIDE_PANEL_WIDTH_DEFAULT)
+    sidePanelLastExpandedWidth = sidePanelWidth.value
+  }
+  persistSidePanelPrefs()
+  nextTick(() => {
+    window.dispatchEvent(new Event('resize'))
+  })
+}
+
+function clampSidePanelWidth(width) {
+  return Math.min(SIDE_PANEL_MAX, Math.max(SIDE_PANEL_MIN_EXPANDED, width))
+}
+
+function loadSidePanelPrefs() {
+  try {
+    const raw = localStorage.getItem(SIDE_PANEL_STORAGE_KEY)
+    if (!raw) return
+    const prefs = JSON.parse(raw)
+    if (typeof prefs.open === 'boolean') {
+      sidePanelOpen.value = prefs.open
+    }
+    const savedExpanded = Number(prefs.lastExpandedWidth ?? prefs.width)
+    if (Number.isFinite(savedExpanded) && savedExpanded > SIDE_PANEL_COLLAPSE_THRESHOLD) {
+      sidePanelLastExpandedWidth = clampSidePanelWidth(savedExpanded)
+    }
+    if (sidePanelOpen.value) {
+      sidePanelWidth.value = sidePanelLastExpandedWidth
+    }
+  } catch {
+    // ignore invalid storage
+  }
+}
+
+function persistSidePanelPrefs() {
+  try {
+    localStorage.setItem(
+      SIDE_PANEL_STORAGE_KEY,
+      JSON.stringify({
+        open: sidePanelOpen.value,
+        width: sidePanelOpen.value ? sidePanelWidth.value : sidePanelLastExpandedWidth,
+        lastExpandedWidth: sidePanelLastExpandedWidth
+      })
+    )
+  } catch {
+    // ignore quota / private mode
+  }
+}
+
+function applySidePanelByPointer(clientX, workbenchLeft) {
+  const pointerWidth = clientX - workbenchLeft
+  if (pointerWidth <= SIDE_PANEL_COLLAPSE_THRESHOLD) {
+    if (sidePanelOpen.value) {
+      sidePanelLastExpandedWidth = clampSidePanelWidth(sidePanelWidth.value)
+    }
+    sidePanelOpen.value = false
+    return
+  }
+  sidePanelOpen.value = true
+  const nextWidth = clampSidePanelWidth(pointerWidth)
+  sidePanelWidth.value = nextWidth
+  sidePanelLastExpandedWidth = nextWidth
+}
+
+let sideResizeMoveHandler = null
+let sideResizeUpHandler = null
+
+function finishSideResize() {
+  if (sideResizeMoveHandler) {
+    document.removeEventListener('mousemove', sideResizeMoveHandler)
+    sideResizeMoveHandler = null
+  }
+  if (sideResizeUpHandler) {
+    document.removeEventListener('mouseup', sideResizeUpHandler)
+    sideResizeUpHandler = null
+  }
+  document.body.classList.remove('dge-side-resizing')
+  isResizingSide.value = false
+  window.dispatchEvent(new Event('resize'))
+}
+
+function onSideResizeStart(event) {
+  if (event.button !== 0) return
+  event.preventDefault()
+  const workbenchLeft = workbenchRef.value?.getBoundingClientRect().left ?? 0
+  isResizingSide.value = true
+  document.body.classList.add('dge-side-resizing')
+
+  sideResizeMoveHandler = (moveEvent) => {
+    const left = workbenchRef.value?.getBoundingClientRect().left ?? workbenchLeft
+    applySidePanelByPointer(moveEvent.clientX, left)
+    window.dispatchEvent(new Event('resize'))
+  }
+  sideResizeUpHandler = () => {
+    persistSidePanelPrefs()
+    finishSideResize()
+  }
+
+  document.addEventListener('mousemove', sideResizeMoveHandler)
+  document.addEventListener('mouseup', sideResizeUpHandler)
+  applySidePanelByPointer(event.clientX, workbenchLeft)
+  window.dispatchEvent(new Event('resize'))
 }
 
 function exportBaseName() {
@@ -542,7 +1056,8 @@ async function captureExportStage() {
       scale: 2,
       useCORS: true,
       allowTaint: true,
-      backgroundColor: canvasStyle.backgroundColor || '#f3f4f6',
+      backgroundColor:
+        canvasStyle.backgroundType === 'color' ? canvasStyle.backgroundColor || '#f3f4f6' : null,
       logging: false
     })
   } catch (e) {
@@ -849,23 +1364,8 @@ function allSidesResizeOption() {
   }
 }
 
-const itemProps = (item) => {
-  return {
-    i: item.i,
-    x: item.x,
-    y: item.y,
-    w: item.w,
-    h: item.h,
-    static: Boolean(item.static),
-    minW: 2,
-    maxW: 12,
-    minH: 2,
-    maxH: 24,
-    resizeOption: allSidesResizeOption(),
-    dragIgnoreFrom: 'input, textarea, button, .el-button, a, .el-input, .el-input__inner',
-    resizeIgnoreFrom: 'input, textarea, button, .el-button, .el-input'
-  }
-}
+const itemProps = (item) =>
+  basicWidgetGridItemProps(item, { resizeOption: allSidesResizeOption() })
 
 const componentByItemId = computed(() => {
   const m = new Map()
@@ -1045,14 +1545,18 @@ function commitTitleEdit(item) {
   onLayoutUpdated()
 }
 
+let layoutUpdateRaf = 0
+
 function onGridItemResized() {
   onLayoutUpdated()
 }
 
 function onLayoutUpdated() {
-  nextTick(() => {
+  if (layoutUpdateRaf) return
+  layoutUpdateRaf = requestAnimationFrame(() => {
+    layoutUpdateRaf = 0
+    measureGridCanvas()
     window.dispatchEvent(new Event('resize'))
-    requestAnimationFrame(() => window.dispatchEvent(new Event('resize')))
   })
 }
 
@@ -1100,6 +1604,30 @@ async function pinHistoryChart(row) {
 
 async function removeGridItem(item) {
   const compId = String(item.i)
+  if (isBasicWidgetItem(item)) {
+    if (basicWidgetRemovingId.value === compId) return
+    basicWidgetRemovingId.value = compId
+    const label = basicWidgetLabelForItem(item)
+    try {
+      try {
+        await ElMessageBox.confirm(`从画布移除此${label}组件？`, '确认移除', { type: 'warning' })
+      } catch {
+        return
+      }
+      gridLayout.value = gridLayout.value.filter((x) => String(x.i) !== compId)
+      if (selectedItemId.value === compId) selectedItemId.value = ''
+      if (widgetInspectorItemId.value === compId) {
+        widgetInspectorOpen.value = false
+        widgetInspectorItemId.value = ''
+        widgetInspectorKind.value = ''
+      }
+      onLayoutUpdated()
+      ElMessage.success('已移除')
+    } finally {
+      if (basicWidgetRemovingId.value === compId) basicWidgetRemovingId.value = ''
+    }
+    return
+  }
   try {
     await ElMessageBox.confirm('从看板移除此图表组件？（可稍后在左侧历史再次加入）', '确认移除', {
       type: 'warning'
@@ -1252,13 +1780,35 @@ async function loadBoard() {
   const parsed = parseDashboardLayout(board.value?.layoutJson)
   legacyCards.value = Array.isArray(parsed.cards) ? parsed.cards : []
   Object.assign(canvasStyle, normalizeCanvasStyle(parsed.canvasStyle))
-  gridLayout.value = mergeGridItemsWithComponents(parsed.items, components.value)
+  ensureCanvasBackgroundType()
+  gridLayout.value = mergeGridItemsWithComponents(parsed.items, components.value, parsed.gridCols)
   await loadChartPayloads()
   await nextTick()
+  attachGridCanvas()
   onLayoutUpdated()
 }
 
+const saveMetaVisible = ref(false)
+const saveMetaPending = ref(false)
+const saveMetaForm = reactive({ isPublic: false })
+
 async function saveLayout() {
+  if (!board.value?.id) return
+  if (props.promptVisibilityOnSave) {
+    saveMetaForm.isPublic = Boolean(board.value.isPublic)
+    saveMetaPending.value = true
+    saveMetaVisible.value = true
+    return
+  }
+  await doSaveLayout(Boolean(board.value.isPublic))
+}
+
+async function confirmSaveLayout() {
+  await doSaveLayout(Boolean(saveMetaForm.isPublic))
+  saveMetaVisible.value = false
+}
+
+async function doSaveLayout(isPublic) {
   if (!board.value?.id) return
   saving.value = true
   restoreSessionHeader()
@@ -1268,9 +1818,10 @@ async function saveLayout() {
       name: board.value.name,
       description: board.value.description || null,
       layoutJson,
-      isPublic: Boolean(board.value.isPublic)
+      isPublic
     })
     if (res.data.code !== 200) throw new Error(res.data.message || '保存失败')
+    board.value.isPublic = isPublic
     ElMessage.success('布局已保存')
     emit('saved')
     innerVisible.value = false
@@ -1290,17 +1841,36 @@ function onClosed() {
   dynamicRefreshInFlight = false
   allPinnedSummaries.value = []
   historyKeyword.value = ''
+  finishSideResize()
   editingItemId.value = null
   inspectorOpen.value = false
   inspectorItem.value = null
+  widgetInspectorOpen.value = false
+  widgetInspectorItemId.value = ''
+  widgetInspectorKind.value = ''
+  selectedItemId.value = ''
+  finishPaletteDrag()
+  if (layoutUpdateRaf) {
+    cancelAnimationFrame(layoutUpdateRaf)
+    layoutUpdateRaf = 0
+  }
   canvasStyleDialogOpen.value = false
+  componentPaletteOpen.value = false
   Object.assign(canvasStyle, normalizeCanvasStyle())
 }
+
+watch(
+  () => gridLayout.value.length,
+  () => {
+    nextTick(() => attachGridCanvas())
+  }
+)
 
 watch(
   () => props.modelValue,
   async (open) => {
     if (!open || !props.initialRow?.id) return
+    loadSidePanelPrefs()
     sideListLoading.value = true
     try {
       await loadBoard()
@@ -1312,9 +1882,18 @@ watch(
     }
   }
 )
+
+onBeforeUnmount(() => {
+  finishSideResize()
+  finishPaletteDrag()
+})
 </script>
 
 <style scoped>
+:global(body.dge-side-resizing) {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
 .dge-head {
   display: flex;
   align-items: center;
@@ -1333,7 +1912,12 @@ watch(
   gap: 8px;
 }
 .dge-body {
-  min-height: 200px;
+  flex: 1 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  width: 100%;
+  --dge-canvas-chrome: 168px;
   --vgl-resizer-size: 14px;
   --vgl-resizer-border-color: #3b82f6;
   --vgl-resizer-border-width: 2px;
@@ -1368,20 +1952,103 @@ watch(
 }
 .dge-workbench {
   display: flex;
-  gap: 16px;
+  flex: 1 0 auto;
+  gap: 0;
   align-items: stretch;
-  min-height: 62vh;
+  min-height: calc(100vh - var(--dge-canvas-chrome, 168px));
+}
+.dge-workbench.is-side-collapsed .dge-side {
+  display: none;
 }
 .dge-side {
-  width: 300px;
   flex-shrink: 0;
   border: 1px solid #e5e7eb;
-  border-radius: 10px;
+  border-radius: 10px 0 0 10px;
+  border-right: none;
   background: #fafafa;
   padding: 10px;
   display: flex;
   flex-direction: column;
-  max-height: calc(100vh - 140px);
+  align-self: stretch;
+  max-height: none;
+}
+.dge-side-rail {
+  width: 14px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: #f3f4f6;
+  border-top: 1px solid #e5e7eb;
+  border-bottom: 1px solid #e5e7eb;
+  position: relative;
+  z-index: 2;
+}
+.dge-workbench.is-side-collapsed .dge-side-rail {
+  border-left: 1px solid #e5e7eb;
+  border-radius: 10px 0 0 10px;
+}
+.dge-side-rail-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 28px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-bottom: 1px solid #e5e7eb;
+  background: #eef2f7;
+  color: #64748b;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.dge-side-rail-toggle:hover {
+  background: #dbeafe;
+  color: #2563eb;
+}
+.dge-side-rail-grip {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(2, 3px);
+  grid-template-rows: repeat(3, 3px);
+  gap: 3px;
+  align-content: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 72px;
+  padding: 12px 0;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+  transition: background 0.15s ease;
+}
+.dge-side-rail-grip:hover {
+  background: #e8eef5;
+}
+.dge-workbench.is-side-resizing .dge-side-rail-grip {
+  background: #dbeafe;
+}
+.dge-side-rail-dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: #94a3b8;
+  pointer-events: none;
+}
+.dge-workbench.is-side-resizing .dge-side-rail-dot {
+  background: #64748b;
+}
+.dge-workbench:not(.is-side-collapsed) .dge-main-col .dge-canvas-col,
+.dge-workbench:not(.is-side-collapsed) .dge-main-col .dge-legacy-grid {
+  border: 1px solid #e5e7eb;
+  border-left: none;
+  border-radius: 0 10px 10px 0;
+}
+.dge-workbench.is-side-collapsed .dge-main-col .dge-canvas-col,
+.dge-workbench.is-side-collapsed .dge-main-col .dge-legacy-grid {
+  border: 1px solid #e5e7eb;
+  border-radius: 0 10px 10px 0;
 }
 .dge-side-head {
   font-weight: 600;
@@ -1441,23 +2108,65 @@ watch(
   width: 100%;
   margin-top: 8px;
 }
-.dge-canvas-col {
+.dge-main-col {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+}
+.dge-canvas-col {
+  flex: 1 0 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 .dge-export-stage {
   position: relative;
+  flex: 0 0 auto;
   width: 100%;
+  min-height: calc(100vh - var(--dge-canvas-chrome, 168px));
+  box-sizing: border-box;
 }
-.dge-stage-logo {
+.dge-empty-canvas-drop {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  min-height: 280px;
+  margin: 8px;
+  border: 1px dashed #d1d5db;
+  border-radius: 10px;
+  color: #6b7280;
+  font-size: 14px;
+  background: rgba(255, 255, 255, 0.5);
+}
+.dge-empty-canvas-drop p {
+  margin: 0;
+}
+.dge-grid-wrap {
+  position: relative;
+  width: 100%;
+  min-height: 100%;
+  box-sizing: border-box;
+}
+.dge-export-stage.is-palette-drop-active {
+  outline: 2px dashed #a78bfa;
+  outline-offset: -3px;
+}
+.dge-drop-preview {
   position: absolute;
-  right: 16px;
-  bottom: 16px;
-  max-width: 120px;
-  max-height: 48px;
-  object-fit: contain;
+  z-index: 7;
   pointer-events: none;
-  z-index: 2;
+  border: 2px dashed #8b5cf6;
+  border-radius: 8px;
+  background: rgba(221, 214, 254, 0.45);
+  box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.15);
+  transition: left 80ms ease, top 80ms ease, width 80ms ease, height 80ms ease;
+}
+.dge-grid.vgl-layout {
+  width: 100%;
+  margin: 0;
+  /* 高度由 grid-layout-plus 按 items 的 y+h 自动计算，勿用 flex:1 锁死视口高度 */
 }
 .dge-logo-row {
   display: flex;
@@ -1492,12 +2201,6 @@ watch(
   flex: 1;
   min-width: 280px;
 }
-.dge-grid-wrap {
-  width: 100%;
-}
-.dge-grid {
-  min-height: max(55vh, 480px);
-}
 .dge-grid-item {
   touch-action: none;
 }
@@ -1511,6 +2214,21 @@ watch(
   border-radius: 8px;
   overflow: hidden;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+  cursor: pointer;
+}
+.dge-card.is-selected {
+  border-color: #8b5cf6;
+  box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.25);
+}
+.dge-widget-shell {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.dge-widget-shell.is-selected {
+  box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.45);
 }
 .dge-card-meta {
   flex-shrink: 0;
@@ -1669,7 +2387,22 @@ watch(
 </style>
 
 <style>
-.dge-dialog .el-dialog__body {
+.dge-save-meta-hint {
+  margin: 0 0 14px;
+  font-size: 13px;
+  color: #6b7280;
+  line-height: 1.5;
+}
+.dge-dialog.is-fullscreen {
+  display: flex;
+  flex-direction: column;
+}
+.dge-dialog.is-fullscreen .el-dialog__body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
   padding-top: 8px;
 }
 

@@ -1,0 +1,72 @@
+/* grid-layout-plus 画布：虚线格仅在拖拽/缩放时显示 */
+.dashboard-grid-canvas.vgl-layout {
+  position: relative;
+  --vgl-placeholder-bg: transparent;
+  --vgl-placeholder-opacity: 1;
+  --vgl-placeholder-z-index: 6;
+  --vgl-item-dragging-z-index: 8;
+  --vgl-item-dragging-opacity: 58%;
+}
+
+/* 与 grid-layout-plus calcPosition 一致：首格起点 = margin（非 margin/2） */
+.dashboard-grid-canvas.vgl-layout::before {
+  content: '';
+  position: absolute;
+  left: var(--dge-grid-margin-x, 8px);
+  top: var(--dge-grid-margin-y, 8px);
+  width: calc(100% - 2 * var(--dge-grid-margin-x, 8px));
+  height: calc(100% - 2 * var(--dge-grid-margin-y, 8px));
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0;
+  visibility: hidden;
+  background-image: none;
+  background-size: var(--dge-grid-step-x) var(--dge-grid-step-y);
+  background-repeat: repeat;
+  transition:
+    opacity 120ms ease,
+    visibility 120ms ease;
+}
+
+/* 仅交互中显示（勿用 :has(.vgl-item--placeholder)，库会常驻 placeholder 节点） */
+.dashboard-grid-canvas.vgl-layout.is-grid-interacting::before {
+  opacity: 1;
+  visibility: visible;
+  background-image: var(--dge-grid-cell-bg);
+}
+
+.dashboard-grid-canvas.vgl-layout > .vgl-item:not(.vgl-item--placeholder) {
+  z-index: 1;
+}
+
+/* placeholder 节点常驻 DOM，平时完全隐藏 */
+.dashboard-grid-canvas.vgl-layout > .vgl-item--placeholder {
+  opacity: 0 !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.dashboard-grid-canvas.vgl-layout.is-grid-interacting > .vgl-item--placeholder {
+  visibility: visible !important;
+  opacity: 1 !important;
+  border: 2px dashed #8b5cf6 !important;
+  border-radius: 10px;
+  background: rgba(221, 214, 254, 0.52) !important;
+  box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.12);
+  transition:
+    transform 100ms ease,
+    width 100ms ease,
+    height 100ms ease;
+}
+
+.dashboard-grid-canvas.vgl-layout > .vgl-item--dragging {
+  opacity: var(--vgl-item-dragging-opacity, 58%);
+  z-index: var(--vgl-item-dragging-z-index, 8);
+}
+
+.dashboard-grid-canvas.vgl-layout > .vgl-item--resizing {
+  z-index: var(--vgl-item-resizing-z-index, 7);
+}

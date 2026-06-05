@@ -56,57 +56,13 @@
     </div>
 
     <template v-else>
-      <p class="portal-hint">
-        用户端 · 我的看板（独立页面）。
-      </p>
-      <div class="toolbar">
-        <el-button type="primary" @click="openCreate">新建看板</el-button>
-        <el-button @click="loadList">刷新列表</el-button>
-      </div>
-
-      <DashboardGridEditor
-        v-model="gridEditorVisible"
-        :initial-row="gridEditorRow"
+      <UserDashboardWorkspace
+        ref="workspaceRef"
         :api-base="API_BASE"
-        @saved="loadList"
+        @preview="openPreview"
+        @share="openShareDialog"
+        @copy-share="copyShareLink"
       />
-
-      <el-table :data="rows" border v-loading="loadingList" empty-text="暂无看板">
-        <el-table-column prop="id" label="ID" width="70" />
-        <el-table-column prop="name" label="名称" min-width="140" />
-        <el-table-column label="图表卡片" width="96">
-          <template #default="{ row }">
-            <el-tag size="small" type="info">{{ row.chartCardCount || 0 }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="公开" width="80">
-          <template #default="{ row }">{{ row.isPublic ? '是' : '否' }}</template>
-        </el-table-column>
-        <el-table-column prop="ownerUserId" label="所有者" width="120" />
-        <el-table-column label="分享状态" min-width="220">
-          <template #default="{ row }">
-            <div class="share-cell">
-              <el-tag :type="row.shareToken ? 'success' : 'info'" size="small">
-                {{ row.shareToken ? '已分享' : '未分享' }}
-              </el-tag>
-              <span v-if="row.shareToken" class="share-expire">
-                {{ formatDateTime(row.shareExpireAt) || '长期有效' }}
-              </span>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="500" fixed="right">
-          <template #default="{ row }">
-            <el-button link type="primary" @click="openPreview(row)">查看图表</el-button>
-            <el-button link type="success" @click="openGridEditor(row)">设计看板</el-button>
-            <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
-            <el-button v-if="!row.shareToken" link type="success" @click="openShareDialog(row)">开启分享</el-button>
-            <el-button v-else link type="warning" @click="copyShareLink(row)">复制链接</el-button>
-            <el-button v-if="row.shareToken" link type="danger" @click="disableShare(row)">关闭分享</el-button>
-            <el-button link type="danger" @click="remove(row)">删除</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
 
       <el-dialog
         v-model="previewVisible"
@@ -164,27 +120,6 @@
         <el-empty v-else description="当前看板暂无可渲染图表卡片" />
       </el-dialog>
 
-      <el-dialog v-model="editVisible" :title="editId ? '编辑看板' : '新建看板'" width="640px" destroy-on-close>
-        <el-form label-position="top">
-          <el-form-item label="名称">
-            <el-input v-model="form.name" placeholder="看板名称" />
-          </el-form-item>
-          <el-form-item label="描述">
-            <el-input v-model="form.description" type="textarea" :rows="2" />
-          </el-form-item>
-          <el-form-item label="是否公开看板">
-            <el-switch v-model="form.isPublic" />
-          </el-form-item>
-          <el-form-item label="布局 JSON（图表配置）">
-            <el-input v-model="form.layoutJson" type="textarea" :rows="10" placeholder="{}" />
-          </el-form-item>
-        </el-form>
-        <template #footer>
-          <el-button @click="editVisible = false">取消</el-button>
-          <el-button type="primary" :loading="saving" @click="save">保存</el-button>
-        </template>
-      </el-dialog>
-
       <el-dialog v-model="shareVisible" title="开启分享链接" width="480px" destroy-on-close>
         <el-form label-position="top">
           <el-form-item label="过期时间（可选）">
@@ -208,14 +143,13 @@
 </template>
 
 <script setup>
-import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as echarts from 'echarts'
 import axios from 'axios'
 import { ElLoading, ElMessage, ElMessageBox } from 'element-plus'
 import { restoreSessionHeader } from '../../store/session'
-import DashboardGridEditor from './DashboardGridEditor.vue'
+import UserDashboardWorkspace from '../../components/dashboard/UserDashboardWorkspace.vue'
 import {
-  countChartSlotsForDashboardRow,
   buildUnifiedPreviewCards,
   extractLegacyChartCards,
   dashChartPreviewGridClass,
@@ -227,8 +161,8 @@ const API_BASE = 'http://localhost:8080'
 const workbench = inject('workbench', null)
 const diagnosisLoading = computed(() => Boolean(workbench?.diagnosisLoading?.value))
 
-const rows = ref([])
-const loadingList = ref(false)
+const workspaceRef = ref(null)
+const rows = computed(() => workspaceRef.value?.rows?.value || workspaceRef.value?.rows || [])
 const previewVisible = ref(false)
 const previewTitle = ref('看板图表预览')
 const previewCards = ref([])
@@ -241,11 +175,6 @@ const previewDialogWidth = computed(() =>
   previewChartDialogWidth(previewCards.value.length, { openSql: Boolean(previewSqlOpenKey.value) })
 )
 
-const editVisible = ref(false)
-const saving = ref(false)
-const editId = ref(null)
-const form = reactive({ name: '', description: '', layoutJson: '{}', isPublic: false })
-
 const shareVisible = ref(false)
 const sharing = ref(false)
 const shareTargetId = ref(null)
@@ -254,9 +183,6 @@ const sharePreviewMode = ref(false)
 const sharePreview = ref(null)
 const sharePreviewError = ref('')
 const shareTokenMode = ref(false)
-
-const gridEditorVisible = ref(false)
-const gridEditorRow = ref(null)
 
 const previewChartRefs = new Map()
 const shareChartRefs = new Map()
@@ -456,11 +382,6 @@ const buildChartOption = (card) => {
   return option
 }
 
-const openGridEditor = (row) => {
-  gridEditorRow.value = row ? { ...row } : null
-  gridEditorVisible.value = true
-}
-
 const onPreviewSqlToggle = (renderKey, evt) => {
   const el = evt?.target
   const opened = el && typeof el.open === 'boolean' ? el.open : false
@@ -588,13 +509,15 @@ const generateDiagnosisFromCard = async (card) => {
 const restoreDiagnosisDashboardTarget = async (target) => {
   if (!target || target.route !== 'dashboard') return
   const dashboardId = Number(target.dashboardId || 0)
-  let row = dashboardId ? rows.value.find(item => Number(item.id) === dashboardId) : null
+  const list = Array.isArray(rows.value) ? rows.value : []
+  let row = dashboardId ? list.find(item => Number(item.id) === dashboardId) : null
   if (!row && target.dashboardName) {
-    row = rows.value.find(item => item.name === target.dashboardName)
+    row = list.find(item => item.name === target.dashboardName)
   }
-  if (!row && !rows.value.length) {
-    await loadList()
-    row = dashboardId ? rows.value.find(item => Number(item.id) === dashboardId) : null
+  if (!row && !list.length) {
+    await workspaceRef.value?.reload?.()
+    const refreshed = Array.isArray(rows.value) ? rows.value : []
+    row = dashboardId ? refreshed.find(item => Number(item.id) === dashboardId) : null
   }
   if (!row) {
     ElMessage.warning('未找到诊断报告绑定的看板，已停留在我的看板列表')
@@ -661,22 +584,8 @@ const openPreview = async (row) => {
   }
 }
 
-const loadList = async () => {
-  loadingList.value = true
-  restoreSessionHeader()
-  try {
-    const res = await axios.get(`${API_BASE}/api/c/dashboards`)
-    if (res.data.code !== 200) throw new Error(res.data.message)
-    const list = Array.isArray(res.data.data) ? res.data.data : []
-    rows.value = list.map((row) => ({
-      ...row,
-      chartCardCount: countChartSlotsForDashboardRow(row?.layoutJson)
-    }))
-  } catch (e) {
-    ElMessage.error(e.message || '加载失败')
-  } finally {
-    loadingList.value = false
-  }
+const reloadWorkspace = async () => {
+  await workspaceRef.value?.reload?.()
 }
 
 const openShareDialog = (row) => {
@@ -695,7 +604,7 @@ const enableShare = async () => {
     if (res.data.code !== 200) throw new Error(res.data.message)
     ElMessage.success('已开启分享')
     shareVisible.value = false
-    await loadList()
+    await reloadWorkspace()
     copyShareLink(res.data.data)
   } catch (e) {
     ElMessage.error(e.message || '开启分享失败')
@@ -715,7 +624,7 @@ const disableShare = async (row) => {
     const res = await axios.post(`${API_BASE}/api/c/dashboards/${row.id}/share/disable`)
     if (res.data.code !== 200) throw new Error(res.data.message)
     ElMessage.success('已关闭分享')
-    await loadList()
+    await reloadWorkspace()
   } catch (e) {
     ElMessage.error(e.message || '关闭分享失败')
   }
@@ -767,66 +676,6 @@ const loadSharePreview = async (token) => {
   }
 }
 
-const openCreate = () => {
-  editId.value = null
-  form.name = ''
-  form.description = ''
-  form.layoutJson = '{}'
-  form.isPublic = false
-  editVisible.value = true
-}
-
-const openEdit = (row) => {
-  editId.value = row.id
-  form.name = row.name
-  form.description = row.description || ''
-  form.layoutJson = row.layoutJson || '{}'
-  form.isPublic = Boolean(row.isPublic)
-  editVisible.value = true
-}
-
-const save = async () => {
-  saving.value = true
-  restoreSessionHeader()
-  try {
-    const body = {
-      name: form.name,
-      description: form.description || null,
-      layoutJson: form.layoutJson || '{}',
-      isPublic: form.isPublic
-    }
-    const res = editId.value
-      ? await axios.put(`${API_BASE}/api/c/dashboards/${editId.value}`, body)
-      : await axios.post(`${API_BASE}/api/c/dashboards`, body)
-
-    if (res.data.code !== 200) throw new Error(res.data.message)
-    ElMessage.success('已保存')
-    editVisible.value = false
-    await loadList()
-  } catch (e) {
-    ElMessage.error(e.message || '保存失败')
-  } finally {
-    saving.value = false
-  }
-}
-
-const remove = async (row) => {
-  try {
-    await ElMessageBox.confirm(`确定删除看板「${row.name}」？`, '确认', { type: 'warning' })
-  } catch {
-    return
-  }
-  restoreSessionHeader()
-  try {
-    const res = await axios.delete(`${API_BASE}/api/c/dashboards/${row.id}`)
-    if (res.data.code !== 200) throw new Error(res.data.message)
-    ElMessage.success('已删除')
-    await loadList()
-  } catch (e) {
-    ElMessage.error(e.message || '删除失败')
-  }
-}
-
 watch(previewVisible, async (visible) => {
   if (visible) {
     previewSqlOpenKey.value = null
@@ -859,7 +708,6 @@ onMounted(async () => {
     await loadSharePreview(shareToken)
     return
   }
-  await loadList()
   await restoreDiagnosisDashboardTarget(workbench?.diagnosisRestoreTarget?.value)
 })
 

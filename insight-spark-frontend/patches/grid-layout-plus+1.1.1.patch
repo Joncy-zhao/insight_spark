@@ -1,0 +1,55 @@
+diff --git a/node_modules/grid-layout-plus/es/components/grid-item.vue.mjs b/node_modules/grid-layout-plus/es/components/grid-item.vue.mjs
+index 56ba227..3a2546a 100644
+--- a/node_modules/grid-layout-plus/es/components/grid-item.vue.mjs
++++ b/node_modules/grid-layout-plus/es/components/grid-item.vue.mjs
+@@ -58,7 +58,7 @@ const st = /* @__PURE__ */ Ee({
+       style: {},
+       rtl: !1
+     });
+-    let X = !1, _ = !1, $ = NaN, G = NaN, k = NaN, E = NaN, j = -1, K = -1, V = -1, q = -1, h = i.x, v = i.y, p = i.w, y = i.h;
++    let X = !1, _ = !1, $ = NaN, G = NaN, k = NaN, E = NaN, j = -1, K = -1, V = -1, q = -1, h = i.x, v = i.y, p = i.w, y = i.h, rt = {};
+     const W = Ae(), J = pe({
+       i: Pe(i, "i"),
+       state: e,
+@@ -187,11 +187,12 @@ const st = /* @__PURE__ */ Ee({
+       let a;
+       switch (r) {
+         case "resizestart": {
+-          S(), j = p, K = y, a = B(h, v, p, y), n.width = a.width, n.height = a.height, e.resizing = n, e.isResizing = !0;
++          rt = { ...(t.edges || {}) }, S(), j = p, K = y, a = B(h, v, p, y), n.width = a.width, n.height = a.height, e.resizing = n, e.isResizing = !0;
+           break;
+         }
+         case "resizemove": {
+-          !t.edges.right && !t.edges.left && (k = o), !t.edges.top && !t.edges.bottom && (E = c);
++          const ed = { ...rt, ...(t.edges || {}) };
++          !ed.right && !ed.left && (k = o), !ed.top && !ed.bottom && (E = c);
+           const u = Re(k, E, o, c);
+           m.value ? n.width = e.resizing.width - u.deltaX / e.transformScale : n.width = e.resizing.width + u.deltaX / e.transformScale, n.height = e.resizing.height + u.deltaY / e.transformScale, e.resizing = n;
+           break;
+@@ -201,7 +202,12 @@ const st = /* @__PURE__ */ Ee({
+           break;
+         }
+       }
+-      a = Ne(n.height, n.width), a.w < i.minW && (a.w = i.minW), a.w > i.maxW && (a.w = i.maxW), a.h < i.minH && (a.h = i.minH), a.h > i.maxH && (a.h = i.maxH), a.h < 1 && (a.h = 1), a.w < 1 && (a.w = 1), k = o, E = c, (p !== a.w || y !== a.h) && M("resize", i.i, a.h, a.w, n.height, n.width), t.type === "resizeend" && (j !== p || K !== y) && M("resized", i.i, a.h, a.w, n.height, n.width), g.emit("resizeEvent", t.type, i.i, h, v, a.h, a.w);
++      a = Ne(n.height, n.width), a.w < i.minW && (a.w = i.minW), a.w > i.maxW && (a.w = i.maxW), a.h < i.minH && (a.h = i.minH), a.h > i.maxH && (a.h = i.maxH), a.h < 1 && (a.h = 1), a.w < 1 && (a.w = 1), k = o, E = c, (p !== a.w || y !== a.h) && M("resize", i.i, a.h, a.w, n.height, n.width), t.type === "resizeend" && (j !== p || K !== y) && M("resized", i.i, a.h, a.w, n.height, n.width), (() => {
++        const ed = { ...rt, ...(t.edges || {}) };
++        t.edges && Object.assign(rt, t.edges);
++        let px = h, py = v;
++        !m.value && ed.left && (px = Math.max(0, h + p - a.w)), m.value && ed.right && (px = Math.max(0, h + p - a.w)), ed.top && (py = Math.max(0, v + y - a.h)), px = Math.max(0, Math.min(px, e.cols - a.w)), py = Math.max(0, Math.min(py, e.maxRows - a.h)), g.emit("resizeEvent", t.type, i.i, px, py, a.h, a.w);
++      })();
+     }
+     function ge(t) {
+       if (i.static || e.isResizing) return;
+diff --git a/node_modules/grid-layout-plus/es/components/grid-layout.vue.mjs b/node_modules/grid-layout-plus/es/components/grid-layout.vue.mjs
+index 5cccada..0a571b0 100644
+--- a/node_modules/grid-layout-plus/es/components/grid-layout.vue.mjs
++++ b/node_modules/grid-layout-plus/es/components/grid-layout.vue.mjs
+@@ -204,7 +204,7 @@ const De = /* @__PURE__ */ Q({
+           }), Number.isFinite(p) && (i.w = p - i.x), Number.isFinite(h) && (i.h = h - i.y);
+         }
+       }
+-      v || (i.w = c, i.h = d), e === "resizestart" || e === "resizemove" ? (t.placeholder.i = n, t.placeholder.x = l, t.placeholder.y = f, t.placeholder.w = i.w, t.placeholder.h = i.h, m(() => {
++      v || (i.x = l, i.y = f, i.w = c, i.h = d), e === "resizestart" || e === "resizemove" ? (t.placeholder.i = n, t.placeholder.x = l, t.placeholder.y = f, t.placeholder.w = i.w, t.placeholder.h = i.h, m(() => {
+         t.isDragging = !0;
+       }), r.emit("updateWidth", t.width)) : e && m(() => {
+         t.isDragging = !1;

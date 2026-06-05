@@ -39,6 +39,20 @@ public class StackCDashboardController {
         return ApiResponse.success(dashboardService.listPinnedChartsAcrossAccessibleDashboards());
     }
 
+    /** 当前用户个人私有看板（我的看板页） */
+    @GetMapping("/mine")
+    public ApiResponse<Map<String, Object>> listMine(
+            @RequestParam(required = false) String keyword,
+            @RequestParam(required = false) Long groupId,
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "20") int pageSize) {
+        try {
+            return ApiResponse.success(dashboardService.listForCurrentUserPrivate(keyword, groupId, page, pageSize));
+        } catch (IllegalArgumentException e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
     @GetMapping("/{id}")
     public ApiResponse<Map<String, Object>> get(@PathVariable long id) {
         try {

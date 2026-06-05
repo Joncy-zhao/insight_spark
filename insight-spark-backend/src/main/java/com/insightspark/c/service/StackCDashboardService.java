@@ -38,28 +38,43 @@ public class StackCDashboardService {
     @Autowired
     private ChatConversationService chatConversationService;
 
+    @Autowired
+    private StackCDashboardGroupService dashboardGroupService;
+
     private final SecureRandom secureRandom = new SecureRandom();
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    private static final String DASHBOARD_BASE_COLUMNS = """
+            id, owner_user_id AS ownerUserId, name, description,
+            group_id AS groupId, group_name AS groupName,
+            layout_json AS layoutJson, is_public AS isPublic, status,
+            share_token AS shareToken, share_expire_at AS shareExpireAt,
+            created_at AS createdAt, updated_at AS updatedAt
+            """;
+
+    private static final String DASHBOARD_ADMIN_COLUMNS = """
+            d.id, d.owner_user_id AS ownerUserId, u.username AS ownerUsername, u.nickname AS ownerNickname,
+            d.name, d.description, d.group_id AS groupId, d.group_name AS groupName, d.layout_json AS layoutJson,
+            d.is_public AS isPublic, d.status, d.share_token AS shareToken, d.share_expire_at AS shareExpireAt,
+            d.created_at AS createdAt, d.updated_at AS updatedAt
+            """;
 
     public List<Map<String, Object>> listVisibleForCurrentUser() {
         String uid = AuthContext.userId();
         boolean admin = AuthContext.isAdmin();
         if (admin) {
             return jdbcTemplate.queryForList("""
-                    SELECT id, owner_user_id AS ownerUserId, name, description, layout_json AS layoutJson,
-                           is_public AS isPublic, status, share_token AS shareToken, share_expire_at AS shareExpireAt,
-                           created_at AS createdAt, updated_at AS updatedAt
+                    SELECT %s
                     FROM is_dashboard
                     WHERE status != 'ARCHIVED'
                     ORDER BY updated_at DESC
                     LIMIT 200
-                    """);
+                    """.formatted(DASHBOARD_BASE_COLUMNS));
         }
         return jdbcTemplate.queryForList("""
-                SELECT id, owner_user_id AS ownerUserId, name, description, layout_json AS layoutJson,
-                       is_public AS isPublic, status, share_token AS shareToken, share_expire_at AS shareExpireAt,
-                       created_at AS createdAt, updated_at AS updatedAt
+                SELECT %s
                 FROM is_dashboard
+                """.formatted(DASHBOARD_BASE_COLUMNS) + """
                 WHERE status = 'ACTIVE'
                   AND (
                     owner_user_id = ?
@@ -77,13 +92,145 @@ public class StackCDashboardService {
                 """, uid, uid);
     }
 
+    public Map<String, Object> listForAdmin(
+            String keyword,
+            Integer isPublic,
+            String status,
+            String groupName,
+            Long groupId,
+            int page,
+            int pageSize) {
+        assertAdmin();
+        int safePage = Math.max(1, page);
+        int safePageSize = Math.min(100, Math.max(1, pageSize));
+        int offset = (safePage - 1) * safePageSize;
+
+        StringBuilder where = new StringBuilder(" WHERE d.status != 'ARCHIVED' ");
+        List<Object> args = new ArrayList<>();
+        appendAdminListFilters(where, args, keyword, isPublic, status, groupName, groupId);
+
+        Long total = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*)
+                FROM is_dashboard d
+                LEFT JOIN is_user u ON u.user_id = d.owner_user_id
+                """ + where, Long.class, args.toArray());
+        long totalCount = total == null ? 0L : total;
+
+        List<Object> queryArgs = new ArrayList<>(args);
+        queryArgs.add(safePageSize);
+        queryArgs.add(offset);
+        List<Map<String, Object>> items = jdbcTemplate.queryForList("""
+                SELECT %s
+                FROM is_dashboard d
+                LEFT JOIN is_user u ON u.user_id = d.owner_user_id
+                """.formatted(DASHBOARD_ADMIN_COLUMNS) + where + """
+                ORDER BY d.updated_at DESC
+                LIMIT ? OFFSET ?
+                """, queryArgs.toArray());
+        List<Map<String, Object>> enriched = new ArrayList<>(items.size());
+        for (Map<String, Object> item : items) {
+            Map<String, Object> row = new LinkedHashMap<>(item);
+            row.put("canManage", canManageDashboard(row));
+            Long gid = parseNullableLong(row.get("groupId"));
+            if (gid != null && gid > 0) {
+                String path = dashboardGroupService.resolveGroupPath(gid);
+                if (path != null && !path.isBlank()) {
+                    row.put("groupPath", path);
+                }
+            }
+            enriched.add(row);
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("items", enriched);
+        result.put("total", totalCount);
+        result.put("page", safePage);
+        result.put("pageSize", safePageSize);
+        return result;
+    }
+
+    public Map<String, Object> listForCurrentUserPrivate(String keyword, Long groupId, int page, int pageSize) {
+        String uid = AuthContext.userId();
+        int safePage = Math.max(1, page);
+        int safePageSize = Math.min(100, Math.max(1, pageSize));
+        int offset = (safePage - 1) * safePageSize;
+
+        StringBuilder where = new StringBuilder("""
+                 WHERE d.owner_user_id = ?
+                   AND d.is_public = 0
+                   AND d.status != 'ARCHIVED'
+                """);
+        List<Object> args = new ArrayList<>();
+        args.add(uid);
+
+        String kw = Objects.toString(keyword, "").trim();
+        if (!kw.isBlank()) {
+            where.append(" AND d.name LIKE ? ");
+            args.add("%" + kw + "%");
+        }
+        if (groupId != null) {
+            if (groupId < 0) {
+                where.append(" AND d.group_id IS NULL ");
+            } else {
+                where.append(" AND d.group_id = ? ");
+                args.add(groupId);
+            }
+        }
+
+        Long total = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM is_dashboard d " + where, Long.class, args.toArray());
+        long totalCount = total == null ? 0L : total;
+
+        List<Object> queryArgs = new ArrayList<>(args);
+        queryArgs.add(safePageSize);
+        queryArgs.add(offset);
+        List<Map<String, Object>> items = jdbcTemplate.queryForList("""
+                SELECT %s
+                FROM is_dashboard d
+                """.formatted(DASHBOARD_BASE_COLUMNS) + where + """
+                ORDER BY d.updated_at DESC
+                LIMIT ? OFFSET ?
+                """, queryArgs.toArray());
+
+        List<Map<String, Object>> enriched = new ArrayList<>(items.size());
+        for (Map<String, Object> item : items) {
+            Map<String, Object> row = new LinkedHashMap<>(item);
+            row.put("canManage", true);
+            Long gid = parseNullableLong(row.get("groupId"));
+            if (gid != null && gid > 0) {
+                String path = dashboardGroupService.resolveGroupPath(gid);
+                if (path != null && !path.isBlank()) {
+                    row.put("groupPath", path);
+                }
+            }
+            enriched.add(row);
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("items", enriched);
+        result.put("total", totalCount);
+        result.put("page", safePage);
+        result.put("pageSize", safePageSize);
+        return result;
+    }
+
+    public List<String> listAdminDashboardGroups() {
+        assertAdmin();
+        return jdbcTemplate.queryForList("""
+                SELECT DISTINCT TRIM(group_name) AS groupName
+                FROM is_dashboard
+                WHERE status != 'ARCHIVED'
+                  AND group_name IS NOT NULL
+                  AND TRIM(group_name) != ''
+                ORDER BY groupName
+                """, String.class);
+    }
+
     public Map<String, Object> getById(long id) {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
-                SELECT id, owner_user_id AS ownerUserId, name, description, layout_json AS layoutJson,
-                       is_public AS isPublic, status, share_token AS shareToken, share_expire_at AS shareExpireAt,
-                       created_at AS createdAt, updated_at AS updatedAt
+                SELECT %s
                 FROM is_dashboard WHERE id = ?
-                """, id);
+                """.formatted(DASHBOARD_BASE_COLUMNS), id);
         if (rows.isEmpty()) {
             throw new IllegalArgumentException("\u770b\u677f\u4e0d\u5b58\u5728");
         }
@@ -96,12 +243,15 @@ public class StackCDashboardService {
         String name = requireText(body, "name");
         String description = body.get("description") == null ? null : String.valueOf(body.get("description"));
         String layoutJson = Objects.toString(body.getOrDefault("layoutJson", "{}"));
-        int isPublic = parseTinyInt(body.get("isPublic"), 0);
         String uid = AuthContext.userId();
+        int isPublic = AuthContext.isAdmin() ? parseTinyInt(body.get("isPublic"), 0) : 0;
+        Long groupId = parseNullableLong(body.get("groupId"));
+        dashboardGroupService.assertGroupAllowedForDashboard(groupId, uid, isPublic == 1);
+        String groupName = resolveGroupNameForWrite(groupId, body.get("groupName"));
         jdbcTemplate.update("""
-                INSERT INTO is_dashboard(owner_user_id, name, description, layout_json, is_public, status)
-                VALUES (?, ?, ?, ?, ?, 'ACTIVE')
-                """, uid, name, description, layoutJson, isPublic);
+                INSERT INTO is_dashboard(owner_user_id, name, description, group_id, group_name, layout_json, is_public, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE')
+                """, uid, name, description, groupId, groupName, layoutJson, isPublic);
         Long newId = jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
         return getById(newId == null ? 0L : newId);
     }
@@ -109,16 +259,34 @@ public class StackCDashboardService {
     public Map<String, Object> update(long id, Map<String, Object> body) {
         Map<String, Object> existing = getById(id);
         assertEditorOrAdmin(existing);
-        boolean ownerOrAdmin = isOwnerOrAdmin(existing);
+        boolean canManage = canManageDashboard(existing);
         String name = body.containsKey("name") ? requireText(body, "name") : Objects.toString(existing.get("name"));
         String description = body.containsKey("description") ? Objects.toString(body.get("description"), null) : Objects.toString(existing.get("description"), null);
         String layoutJson = body.containsKey("layoutJson") ? Objects.toString(body.get("layoutJson")) : Objects.toString(existing.get("layoutJson"));
-        int isPublic = ownerOrAdmin && body.containsKey("isPublic") ? parseTinyInt(body.get("isPublic"), 0) : parseTinyInt(existing.get("isPublic"), 0);
-        String status = ownerOrAdmin && body.containsKey("status") ? Objects.toString(body.get("status"), "ACTIVE") : Objects.toString(existing.get("status"), "ACTIVE");
+        int isPublic = canManage && body.containsKey("isPublic") ? parseTinyInt(body.get("isPublic"), 0) : parseTinyInt(existing.get("isPublic"), 0);
+        String status = canManage && body.containsKey("status") ? Objects.toString(body.get("status"), "ACTIVE") : Objects.toString(existing.get("status"), "ACTIVE");
+        Long groupId = canManage && body.containsKey("groupId")
+                ? parseNullableLong(body.get("groupId"))
+                : parseNullableLong(existing.get("groupId"));
+        String groupName = canManage
+                ? resolveGroupNameForWrite(groupId, body.containsKey("groupName") ? body.get("groupName") : existing.get("groupName"))
+                : normalizeGroupName(existing.get("groupName"));
+        if (!canManage) {
+            groupId = parseNullableLong(existing.get("groupId"));
+            isPublic = parseTinyInt(existing.get("isPublic"), 0);
+        } else if (!AuthContext.isAdmin()) {
+            isPublic = 0;
+        }
+        if (canManage) {
+            dashboardGroupService.assertGroupAllowedForDashboard(
+                    groupId,
+                    Objects.toString(existing.get("ownerUserId"), AuthContext.userId()),
+                    isPublic == 1);
+        }
         jdbcTemplate.update("""
-                UPDATE is_dashboard SET name = ?, description = ?, layout_json = ?, is_public = ?, status = ?, updated_at = NOW()
+                UPDATE is_dashboard SET name = ?, description = ?, group_id = ?, group_name = ?, layout_json = ?, is_public = ?, status = ?, updated_at = NOW()
                 WHERE id = ?
-                """, name, description, layoutJson, isPublic, status, id);
+                """, name, description, groupId, groupName, layoutJson, isPublic, status, id);
         return getById(id);
     }
 
@@ -162,13 +330,11 @@ public class StackCDashboardService {
             throw new IllegalArgumentException("\u5206\u4eab\u94fe\u63a5\u65e0\u6548");
         }
         List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
-                SELECT id, owner_user_id AS ownerUserId, name, description, layout_json AS layoutJson,
-                       is_public AS isPublic, status, share_token AS shareToken, share_expire_at AS shareExpireAt,
-                       created_at AS createdAt, updated_at AS updatedAt
+                SELECT %s
                 FROM is_dashboard
                 WHERE share_token = ?
                 LIMIT 1
-                """, token);
+                """.formatted(DASHBOARD_BASE_COLUMNS), token);
         if (rows.isEmpty()) {
             throw new IllegalArgumentException("\u5206\u4eab\u94fe\u63a5\u4e0d\u5b58\u5728\u6216\u5df2\u5931\u6548");
         }
@@ -375,20 +541,40 @@ public class StackCDashboardService {
     }
 
     private void assertOwnerOrAdmin(Map<String, Object> row) {
-        if (!isOwnerOrAdmin(row)) {
+        if (!canManageDashboard(row)) {
             throw new IllegalArgumentException("\u4ec5\u6240\u6709\u8005\u53ef\u4fee\u6539\u6216\u5220\u9664");
         }
     }
 
     private void assertEditorOrAdmin(Map<String, Object> row) {
-        if (isOwnerOrAdmin(row) || hasDashboardPermission(dashboardId(row), "EDIT")) {
-            return;
+        if (!canManageDashboard(row)) {
+            throw new IllegalArgumentException("\u5f53\u524d\u7528\u6237\u65e0\u770b\u677f\u7f16\u8f91\u6743\u9650");
         }
-        throw new IllegalArgumentException("\u5f53\u524d\u7528\u6237\u65e0\u770b\u677f\u7f16\u8f91\u6743\u9650");
+    }
+
+    private boolean isOwner(Map<String, Object> row) {
+        return AuthContext.userId().equals(Objects.toString(row.get("ownerUserId")));
+    }
+
+    private boolean isPublicDashboard(Map<String, Object> row) {
+        return parseTinyInt(row.get("isPublic"), 0) == 1;
+    }
+
+    /**
+     * 管理员对他人私有看板仅可查看；可管理：本人看板、管理员下的公共看板、或被授予 EDIT 的用户。
+     */
+    private boolean canManageDashboard(Map<String, Object> row) {
+        if (isOwner(row)) {
+            return true;
+        }
+        if (AuthContext.isAdmin()) {
+            return isPublicDashboard(row);
+        }
+        return hasDashboardPermission(dashboardId(row), "EDIT");
     }
 
     private boolean isOwnerOrAdmin(Map<String, Object> row) {
-        return AuthContext.isAdmin() || AuthContext.userId().equals(Objects.toString(row.get("ownerUserId")));
+        return canManageDashboard(row);
     }
 
     private boolean hasDashboardPermission(long dashboardId, String permissionType) {
@@ -413,6 +599,103 @@ public class StackCDashboardService {
         } catch (NumberFormatException e) {
             return 0L;
         }
+    }
+
+    private void assertAdmin() {
+        if (!AuthContext.isAdmin()) {
+            throw new IllegalArgumentException("\u4ec5\u7ba1\u7406\u5458\u53ef\u8bbf\u95ee");
+        }
+    }
+
+    private void appendAdminListFilters(
+            StringBuilder where,
+            List<Object> args,
+            String keyword,
+            Integer isPublic,
+            String status,
+            String groupName,
+            Long groupId) {
+        String kw = Objects.toString(keyword, "").trim();
+        if (!kw.isBlank()) {
+            where.append("""
+                     AND (
+                       d.name LIKE ?
+                       OR d.owner_user_id LIKE ?
+                       OR u.username LIKE ?
+                       OR u.nickname LIKE ?
+                     )
+                    """);
+            String like = "%" + kw + "%";
+            args.add(like);
+            args.add(like);
+            args.add(like);
+            args.add(like);
+        }
+        if (isPublic != null) {
+            where.append(" AND d.is_public = ? ");
+            args.add(isPublic);
+        }
+        String statusText = Objects.toString(status, "").trim();
+        if (!statusText.isBlank() && !"ALL".equalsIgnoreCase(statusText)) {
+            where.append(" AND d.status = ? ");
+            args.add(statusText.toUpperCase());
+        }
+        if (groupId != null) {
+            if (groupId < 0) {
+                where.append(" AND d.group_id IS NULL ");
+            } else {
+                where.append(" AND d.group_id = ? ");
+                args.add(groupId);
+            }
+        } else {
+            String group = Objects.toString(groupName, "").trim();
+            if (!group.isBlank() && !"ALL".equalsIgnoreCase(group)) {
+                if ("__UNASSIGNED__".equals(group)) {
+                    where.append(" AND d.group_id IS NULL AND (d.group_name IS NULL OR TRIM(d.group_name) = '') ");
+                } else {
+                    where.append(" AND d.group_name = ? ");
+                    args.add(group);
+                }
+            }
+        }
+    }
+
+    private String resolveGroupNameForWrite(Long groupId, Object legacyGroupName) {
+        if (groupId != null && groupId > 0) {
+            String fromTree = dashboardGroupService.resolveGroupName(groupId);
+            if (fromTree != null && !fromTree.isBlank()) {
+                return fromTree;
+            }
+        }
+        return normalizeGroupName(legacyGroupName);
+    }
+
+    private static Long parseNullableLong(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Number number) {
+            long n = number.longValue();
+            return n <= 0 ? null : n;
+        }
+        String text = String.valueOf(value).trim();
+        if (text.isBlank() || "null".equalsIgnoreCase(text)) {
+            return null;
+        }
+        try {
+            long n = Long.parseLong(text);
+            return n <= 0 ? null : n;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private static String normalizeGroupName(Object value) {
+        String text = Objects.toString(value, "").trim();
+        if (text.isBlank()) {
+            return null;
+        }
+        return text.length() > 128 ? text.substring(0, 128) : text;
     }
 
     private static String requireText(Map<String, Object> body, String key) {
