@@ -173,7 +173,9 @@ import { useVoiceInteraction } from './composables/useVoiceInteraction'
 import {
   applyDynamicInteractionDefaults,
   applyOptionTemplateDefaults,
+  buildAnimationReplayStartOption,
   buildForecastChartOption,
+  getChartAnimationMeta,
   hasForecastSeriesRows
 } from './utils/chartOptionFromSnapshot'
 
@@ -411,6 +413,7 @@ const messages = ref([
 const currentChartType = ref('')
 const chartSortMode = ref('desc')
 const lastAnalysis = ref(null)
+const chartAnimationMeta = ref(null)
 const {
   voiceLocaleOptions,
   recognitionLocale,
@@ -444,6 +447,7 @@ const {
   resumeSpeaking
 } = useVoiceInteraction()
 let chartInstance = null
+let chartRenderVersion = 0
 const handleChartResize = () => {
   chartInstance?.resize()
 }
@@ -743,6 +747,30 @@ const ensureChatChartInstance = () => {
   }
 
   return chartInstance
+}
+
+const resolveChartTemplateHeight = (template) => {
+  const rawHeight = template?.layout?.height ?? template?.height
+  const height = Number(rawHeight)
+  if (!Number.isFinite(height)) return 460
+  return Math.min(800, Math.max(240, Math.round(height)))
+}
+
+const applyChatChartContainerLayout = (template) => {
+  const container = getChatChartContainer()
+  if (!container) return
+  container.style.height = `${resolveChartTemplateHeight(template)}px`
+}
+
+const replayChatChartRenderAnimation = (enabled) => {
+  const container = getChatChartContainer()
+  if (!container) return
+  container.classList.remove('chart-render-animating')
+  if (!enabled) return
+  void container.offsetWidth
+  window.requestAnimationFrame(() => {
+    container.classList.add('chart-render-animating')
+  })
 }
 const loadDatasourceHealth = async (datasourceId) => {
   if (!datasourceId) return
@@ -5193,11 +5221,15 @@ watch(activeModule, (nextModule) => {
 
 const renderChart = (data, type) => {
   if (String(type || '').toLowerCase() === 'table') {
+    chartRenderVersion += 1
     if (chartInstance) {
       chartInstance.clear()
     }
+    chartAnimationMeta.value = null
     return
   }
+  const template = lastAnalysis.value?.optionTemplate || {}
+  applyChatChartContainerLayout(template)
   const instance = ensureChatChartInstance()
   if (!instance) return
   const rawRows = Array.isArray(data) ? data : []
@@ -5207,7 +5239,6 @@ const renderChart = (data, type) => {
   let option = {}
 
   if (type === 'line' && hasForecastSeriesRows(rawRows)) {
-    const template = lastAnalysis.value?.optionTemplate || {}
     const prediction = template?.prediction || {}
     option = buildForecastChartOption(rawRows, {
       metricLabel: lastAnalysis.value?.fieldMapping?.metric || lastAnalysis.value?.forecastMeta?.metricField || '预测值',
@@ -5270,8 +5301,23 @@ const renderChart = (data, type) => {
     }
   }
 
-  option = applyLiveChartOptionTemplate(option, lastAnalysis.value?.optionTemplate)
-  instance.setOption(option, true)
+  option = applyLiveChartOptionTemplate(option, template)
+  chartAnimationMeta.value = getChartAnimationMeta(option)
+  const renderVersion = ++chartRenderVersion
+  const replayStartOption = buildAnimationReplayStartOption(option)
+  if (replayStartOption) {
+    instance.clear()
+    instance.setOption(replayStartOption, { notMerge: true, lazyUpdate: false })
+    instance.resize()
+    window.setTimeout(() => {
+      if (renderVersion !== chartRenderVersion || instance.isDisposed?.()) return
+      instance.setOption(option, { notMerge: false, lazyUpdate: false })
+      instance.resize()
+    }, 80)
+    return
+  }
+  instance.setOption(option, { notMerge: true, lazyUpdate: false })
+  instance.resize()
 }
 
 const applyLiveChartOptionTemplate = (baseOption, template) => {
@@ -5409,6 +5455,7 @@ provide('workbench', {
   lastAnalysisTableRows,
   chartSortMode,
   lastAnalysis,
+  chartAnimationMeta,
   moduleTitle,
   moduleSubtitle,
   isPermissionModule,
@@ -6167,6 +6214,19 @@ provide('workbench', {
 .chart-canvas {
   width: 100%;
   height: 460px;
+}
+
+.chart-canvas.chart-render-animating {
+  animation: chartRenderReplay 0.28s ease-out;
+}
+
+@keyframes chartRenderReplay {
+  0% {
+    opacity: 0.72;
+  }
+  100% {
+    opacity: 1;
+  }
 }
 
 .analysis-meta {

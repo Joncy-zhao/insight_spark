@@ -30,7 +30,8 @@ public class AiChartRuleConfigService {
     private static final int MAX_CONFIG_TEXT_LENGTH = 60_000;
     private static final int MAX_SAFE_STRING_LENGTH = 4_000;
     private static final Set<String> RENDER_ROOT_KEYS = Set.of(
-            "animation", "smooth", "showSymbol", "barMaxWidth", "tooltip", "dataZoom", "label",
+            "animation", "animationDuration", "animationDurationUpdate", "animationEasing",
+            "animationEasingUpdate", "animationThreshold", "smooth", "showSymbol", "barMaxWidth", "tooltip", "dataZoom", "label",
             "prediction", "voiceSummary", "dynamic", "refreshIntervalSeconds", "dynamicRefreshInterval",
             "compare", "sort", "pagination", "sortable", "table"
     );
@@ -741,10 +742,15 @@ public class AiChartRuleConfigService {
         List<Object> x = rows.stream().map(row -> row.getOrDefault(category, row.getOrDefault("category", ""))).toList();
         List<Object> y = rows.stream().map(row -> row.getOrDefault(metric, row.getOrDefault("value", 0))).toList();
         Map<String, Object> option = new LinkedHashMap<>();
+        Map<String, Object> preference = getPreferences();
+        Map<String, Object> font = mapValue(preference.get("fontConfig"));
+        Map<String, Object> layout = mapValue(preference.get("layoutConfig"));
         option.put("title", Map.of("text", Objects.toString(rule.get("ruleName"), "AI chart recommendation")));
         option.put("tooltip", Map.of("trigger", "pie".equals(chartType) || "doughnut".equals(chartType) ? "item" : "axis"));
-        option.put("legend", Map.of("top", "top"));
-        option.put("color", getPreferences().get("colorPalette"));
+        option.put("legend", buildLegendOption(Objects.toString(layout.getOrDefault("legend", "top"), "top"), Map.of()));
+        option.put("color", preference.get("colorPalette"));
+        option.put("textStyle", buildTextStyleOption(font));
+        option.put("layout", Map.of("height", boundedInt(layout.get("height"), 360, 240, 800)));
         if ("pie".equals(chartType) || "doughnut".equals(chartType)) {
             List<Map<String, Object>> data = new ArrayList<>();
             for (int i = 0; i < Math.min(x.size(), y.size()); i++) {
@@ -768,11 +774,16 @@ public class AiChartRuleConfigService {
                                                     Map<String, Object> preference) {
         Map<String, Object> option = new LinkedHashMap<>();
         Map<String, Object> defaultOptions = mapValue(preference.get("defaultOptions"));
+        Map<String, Object> font = mapValue(preference.get("fontConfig"));
+        Map<String, Object> layout = mapValue(preference.get("layoutConfig"));
         Map<String, Object> dynamic = buildDynamicRenderConfig(renderConfig);
-        option.put("animation", renderConfig.containsKey("animation")
-                ? boolValue(renderConfig.get("animation"), true)
-                : boolValue(defaultOptions.get("animation"), true));
+        applyAnimationOption(option, renderConfig, defaultOptions);
         option.put("color", preference.getOrDefault("colorPalette", List.of()));
+        option.put("textStyle", buildTextStyleOption(font));
+        option.put("layout", Map.of(
+                "legend", Objects.toString(layout.getOrDefault("legend", "top"), "top"),
+                "height", boundedInt(layout.get("height"), 360, 240, 800)
+        ));
         option.put("dynamic", dynamic);
         if ("table".equalsIgnoreCase(chartType)) {
             option.put("type", "table");
@@ -783,12 +794,11 @@ public class AiChartRuleConfigService {
             ));
             return option;
         }
-        Map<String, Object> layout = mapValue(preference.get("layoutConfig"));
         String legendPosition = Objects.toString(layout.getOrDefault("legend", "top"), "top");
         option.put("legend", buildLegendOption(legendPosition, dynamic));
         if ("line".equalsIgnoreCase(chartType) || "bar".equalsIgnoreCase(chartType)) {
             option.put("tooltip", buildTooltipOption(chartType, renderConfig));
-            option.put("grid", Map.of("left", 48, "right", 16, "top", 36, "bottom", 56, "containLabel", true));
+            option.put("grid", buildGridOption(legendPosition));
             Map<String, Object> series0 = new LinkedHashMap<>();
             applyDynamicSeriesConfig(series0, dynamic);
             if ("line".equalsIgnoreCase(chartType)) {
@@ -824,6 +834,8 @@ public class AiChartRuleConfigService {
         }
         if (shouldEnableDataZoom(renderConfig.get("dataZoom"), defaultOptions)) {
             option.put("dataZoom", buildDataZoomOption(renderConfig.get("dataZoom"), dynamic));
+        } else if ("line".equalsIgnoreCase(chartType) || "bar".equalsIgnoreCase(chartType)) {
+            option.put("dataZoom", Map.of("enabled", false));
         }
         return option;
     }
@@ -855,6 +867,24 @@ public class AiChartRuleConfigService {
         return dynamic;
     }
 
+    private void applyAnimationOption(Map<String, Object> option, Map<String, Object> renderConfig,
+                                      Map<String, Object> defaultOptions) {
+        boolean enabled = defaultOptions.containsKey("animation")
+                ? boolValue(defaultOptions.get("animation"), true)
+                : (renderConfig.containsKey("animation") ? boolValue(renderConfig.get("animation"), true) : true);
+        option.put("animation", enabled);
+        if (enabled) {
+            option.put("animationDuration", boundedInt(renderConfig.get("animationDuration"), 1500, 100, 5000));
+            option.put("animationDurationUpdate", boundedInt(renderConfig.get("animationDurationUpdate"), 1200, 100, 5000));
+            option.put("animationEasing", Objects.toString(renderConfig.getOrDefault("animationEasing", "cubicOut"), "cubicOut"));
+            option.put("animationEasingUpdate", Objects.toString(renderConfig.getOrDefault("animationEasingUpdate", "cubicOut"), "cubicOut"));
+            option.put("animationThreshold", boundedInt(renderConfig.get("animationThreshold"), 2000, 0, 100000));
+        } else {
+            option.put("animationDuration", 0);
+            option.put("animationDurationUpdate", 0);
+        }
+    }
+
     private Map<String, Object> buildLegendOption(String legendPosition, Map<String, Object> dynamic) {
         String position = Set.of("top", "bottom", "left", "right").contains(legendPosition) ? legendPosition : "top";
         Map<String, Object> legend = new LinkedHashMap<>();
@@ -865,6 +895,24 @@ public class AiChartRuleConfigService {
         legend.put("selector", false);
         legend.put("autoScrollThreshold", dynamic.getOrDefault("autoLegendScrollThreshold", 10));
         return legend;
+    }
+
+    private Map<String, Object> buildTextStyleOption(Map<String, Object> font) {
+        String fontFamily = Objects.toString(font.getOrDefault("fontFamily", "Microsoft YaHei"), "Microsoft YaHei").trim();
+        int fontSize = boundedInt(font.get("fontSize"), 12, 10, 28);
+        Map<String, Object> textStyle = new LinkedHashMap<>();
+        textStyle.put("fontFamily", fontFamily.isBlank() ? "Microsoft YaHei" : fontFamily);
+        textStyle.put("fontSize", fontSize);
+        return textStyle;
+    }
+
+    private Map<String, Object> buildGridOption(String legendPosition) {
+        String position = Set.of("top", "bottom", "left", "right").contains(legendPosition) ? legendPosition : "top";
+        int top = "top".equals(position) ? 48 : 32;
+        int bottom = "bottom".equals(position) ? 72 : 56;
+        int left = "left".equals(position) ? 92 : 48;
+        int right = "right".equals(position) ? 92 : 16;
+        return Map.of("left", left, "right", right, "top", top, "bottom", bottom, "containLabel", true);
     }
 
     private Map<String, Object> buildTooltipOption(String chartType, Map<String, Object> renderConfig) {
@@ -889,6 +937,9 @@ public class AiChartRuleConfigService {
     }
 
     private boolean shouldEnableDataZoom(Object rawDataZoom, Map<String, Object> defaultOptions) {
+        if (defaultOptions.containsKey("dataZoom")) {
+            return boolValue(defaultOptions.get("dataZoom"), false);
+        }
         if (rawDataZoom instanceof Map<?, ?> map) {
             Map<String, Object> normalized = mapValue(map);
             return boolValue(normalized.get("enabled"), true);
