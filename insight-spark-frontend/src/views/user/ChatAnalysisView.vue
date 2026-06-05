@@ -371,6 +371,15 @@
                 <el-tag v-if="currentChartType" type="success" effect="dark" round>
                   {{ chartTypeLabel }}效果
                 </el-tag>
+                <el-tooltip
+                    v-if="chartAnimationMeta && !isLastAnalysisTable"
+                    :content="`${chartAnimationMeta.label}，${chartAnimationMeta.mode}，入场 ${chartAnimationMeta.duration}ms，更新 ${chartAnimationMeta.updateDuration}ms`"
+                    placement="top"
+                >
+                  <el-tag :type="chartAnimationMeta.enabled ? 'success' : 'info'" effect="plain" round>
+                    动画{{ chartAnimationMeta.enabled ? '开启' : '关闭' }} · {{ chartAnimationMeta.duration }}ms
+                  </el-tag>
+                </el-tooltip>
                 <el-button
                     v-if="canRegenerateLastAnalysis"
                     size="small"
@@ -1628,6 +1637,7 @@ const {
   body,
   chartTypeLabel,
   chartSortMode,
+  chartAnimationMeta,
   chatDom,
   createDatasource,
   currentChartType,

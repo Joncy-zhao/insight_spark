@@ -254,7 +254,7 @@ export function buildForecastChartOption(rows, options = {}) {
     })
   }
   return {
-    animation: false,
+    animation: true,
     tooltip: { trigger: 'axis', confine: true },
     legend: {
       top: 2,
@@ -356,6 +356,85 @@ function defaultsDeep(target, source) {
   return out
 }
 
+function normalizeTemplateTextStyle(template) {
+  const raw = template?.textStyle
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const style = {}
+  const fontFamily = String(raw.fontFamily || '').trim()
+  const fontSize = Number(raw.fontSize)
+  if (fontFamily) style.fontFamily = fontFamily
+  if (Number.isFinite(fontSize) && fontSize >= 10 && fontSize <= 28) {
+    style.fontSize = Math.round(fontSize)
+  }
+  return Object.keys(style).length ? style : null
+}
+
+function mergeTemplateTextStyle(target, textStyle) {
+  if (!textStyle || !target || typeof target !== 'object' || Array.isArray(target)) return target
+  return {
+    ...target,
+    textStyle: {
+      ...(target.textStyle && typeof target.textStyle === 'object' && !Array.isArray(target.textStyle) ? target.textStyle : {}),
+      ...textStyle
+    }
+  }
+}
+
+function applyTemplateTextStyleToAxis(axis, textStyle) {
+  if (!textStyle || !axis) return axis
+  const applyOne = item => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return item
+    return {
+      ...item,
+      axisLabel: {
+        ...(item.axisLabel && typeof item.axisLabel === 'object' && !Array.isArray(item.axisLabel) ? item.axisLabel : {}),
+        ...textStyle
+      },
+      nameTextStyle: {
+        ...(item.nameTextStyle && typeof item.nameTextStyle === 'object' && !Array.isArray(item.nameTextStyle) ? item.nameTextStyle : {}),
+        ...textStyle
+      }
+    }
+  }
+  return Array.isArray(axis) ? axis.map(applyOne) : applyOne(axis)
+}
+
+function applyTemplateTextStyleToSeries(series, textStyle) {
+  if (!textStyle || !Array.isArray(series)) return series
+  return series.map(item => {
+    if (!item || typeof item !== 'object') return item
+    return {
+      ...item,
+      label: {
+        ...(item.label && typeof item.label === 'object' && !Array.isArray(item.label) ? item.label : {}),
+        ...textStyle
+      }
+    }
+  })
+}
+
+function applyTemplateTextStyle(option, template) {
+  const textStyle = normalizeTemplateTextStyle(template)
+  if (!textStyle || !option || typeof option !== 'object') return option
+  return {
+    ...option,
+    textStyle: {
+      ...(option.textStyle && typeof option.textStyle === 'object' && !Array.isArray(option.textStyle) ? option.textStyle : {}),
+      ...textStyle
+    },
+    title: Array.isArray(option.title)
+      ? option.title.map(item => mergeTemplateTextStyle(item, textStyle))
+      : mergeTemplateTextStyle(option.title, textStyle),
+    legend: Array.isArray(option.legend)
+      ? option.legend.map(item => mergeTemplateTextStyle(item, textStyle))
+      : mergeTemplateTextStyle(option.legend, textStyle),
+    tooltip: mergeTemplateTextStyle(option.tooltip, textStyle),
+    xAxis: applyTemplateTextStyleToAxis(option.xAxis, textStyle),
+    yAxis: applyTemplateTextStyleToAxis(option.yAxis, textStyle),
+    series: applyTemplateTextStyleToSeries(option.series, textStyle)
+  }
+}
+
 export function applyOptionTemplateDefaults(built, template) {
   if (!template || typeof template !== 'object') return built
   if (!built || typeof built !== 'object') return built
@@ -379,7 +458,7 @@ export function applyOptionTemplateDefaults(built, template) {
   if (Array.isArray(template.color) && template.color.length) {
     out.color = template.color
   }
-  return out
+  return applyTemplateTextStyle(out, template)
 }
 
 function clampNumber(value, min, max, fallback) {
@@ -529,6 +608,182 @@ function applyDynamicSeries(series, dynamic, categoryCount) {
   })
 }
 
+function applyTemplateAnimationDefaults(option, template) {
+  const out = option
+  const hasAnimationSetting = template?.animation != null || out.animation != null
+  const enabled = hasAnimationSetting
+    ? boolValue(template?.animation ?? out.animation, true)
+    : true
+  out.animation = enabled
+  if (enabled) {
+    out.animationDuration = clampNumber(
+      template?.animationDuration ?? out.animationDuration,
+      100,
+      5000,
+      1500
+    )
+    out.animationDurationUpdate = clampNumber(
+      template?.animationDurationUpdate ?? out.animationDurationUpdate,
+      100,
+      5000,
+      1200
+    )
+    out.animationEasing = template?.animationEasing || out.animationEasing || 'cubicOut'
+    out.animationEasingUpdate = template?.animationEasingUpdate || out.animationEasingUpdate || 'cubicOut'
+    out.animationThreshold = clampNumber(
+      template?.animationThreshold ?? out.animationThreshold,
+      0,
+      100000,
+      2000
+    )
+  } else {
+    out.animationDuration = 0
+    out.animationDurationUpdate = 0
+  }
+  return out
+}
+
+function applySeriesAnimationDefaults(series, enabled) {
+  if (!Array.isArray(series)) return series
+  return series.map(item => {
+    if (!item || typeof item !== 'object') return item
+    if (!enabled) {
+      return {
+        ...item,
+        animation: false,
+        animationDuration: 0,
+        animationDurationUpdate: 0
+      }
+    }
+    const next = { ...item }
+    const type = String(next.type || '').toLowerCase()
+    if (next.animation == null) next.animation = true
+    if (next.animationDuration == null) {
+      next.animationDuration = type === 'line' ? 1600 : type === 'pie' ? 1300 : 1450
+    }
+    if (next.animationDurationUpdate == null) next.animationDurationUpdate = 1200
+    if (next.animationEasing == null) next.animationEasing = 'cubicOut'
+    if (next.animationEasingUpdate == null) next.animationEasingUpdate = 'cubicOut'
+    if (type === 'pie') {
+      if (next.animationType == null) next.animationType = 'expansion'
+      if (next.animationTypeUpdate == null) next.animationTypeUpdate = 'transition'
+    }
+    if (next.animationDelay == null) {
+      next.animationDelay = index => {
+        if (type === 'line') return 0
+        if (type === 'pie') return Math.min(index * 28, 360)
+        return Math.min(index * 32, 480)
+      }
+    }
+    if (next.animationDelayUpdate == null) {
+      next.animationDelayUpdate = index => Math.min(index * 12, 180)
+    }
+    return next
+  })
+}
+
+function cloneChartOptionValue(value) {
+  if (Array.isArray(value)) return value.map(cloneChartOptionValue)
+  if (!value || typeof value !== 'object') return value
+  const out = {}
+  for (const [key, item] of Object.entries(value)) {
+    out[key] = cloneChartOptionValue(item)
+  }
+  return out
+}
+
+function isLikelyCategoryDatasetKey(key) {
+  return /^(name|label|category|dimension|date|time|month|year|quarter|week|day|x)$/i.test(String(key || ''))
+}
+
+function isNumericLike(value) {
+  if (typeof value === 'number') return Number.isFinite(value)
+  if (typeof value !== 'string') return false
+  const text = value.trim()
+  if (!text) return false
+  return Number.isFinite(Number(text))
+}
+
+function zeroChartDataValue(value) {
+  if (Array.isArray(value)) {
+    return value.map((item, index) => (index === 0 ? item : (isNumericLike(item) ? 0 : item)))
+  }
+  return isNumericLike(value) ? 0 : value
+}
+
+function zeroSeriesDataItem(item) {
+  if (item == null) return item
+  if (isNumericLike(item)) return 0
+  if (Array.isArray(item)) return zeroChartDataValue(item)
+  if (typeof item === 'object') {
+    const next = { ...item }
+    if (Object.prototype.hasOwnProperty.call(next, 'value')) {
+      next.value = zeroChartDataValue(next.value)
+    }
+    return next
+  }
+  return item
+}
+
+function zeroDatasetSourceRow(row) {
+  if (Array.isArray(row)) {
+    return row.map((item, index) => (index === 0 ? item : (isNumericLike(item) ? 0 : item)))
+  }
+  if (row && typeof row === 'object') {
+    const next = { ...row }
+    for (const [key, value] of Object.entries(next)) {
+      if (!isLikelyCategoryDatasetKey(key) && isNumericLike(value)) {
+        next[key] = 0
+      }
+    }
+    return next
+  }
+  return row
+}
+
+function zeroDatasetSource(source) {
+  return Array.isArray(source) ? source.map(zeroDatasetSourceRow) : source
+}
+
+export function getChartAnimationMeta(option) {
+  const enabled = option?.animation !== false
+  return {
+    enabled,
+    label: enabled ? '动画已开启' : '动画已关闭',
+    duration: enabled ? Number(option?.animationDuration ?? 1500) || 1500 : 0,
+    updateDuration: enabled ? Number(option?.animationDurationUpdate ?? 1200) || 1200 : 0,
+    easing: enabled ? String(option?.animationEasing || 'cubicOut') : 'none',
+    mode: enabled ? '数据从零值过渡到真实值' : '静态渲染'
+  }
+}
+
+export function buildAnimationReplayStartOption(option) {
+  if (!option || typeof option !== 'object' || option.animation === false) return null
+  const start = cloneChartOptionValue(option)
+  start.animation = false
+  start.animationDuration = 0
+  start.animationDurationUpdate = 0
+  if (Array.isArray(start.series)) {
+    start.series = start.series.map(series => {
+      if (!series || typeof series !== 'object') return series
+      const next = { ...series, animation: false, animationDuration: 0, animationDurationUpdate: 0 }
+      if (Array.isArray(next.data)) {
+        next.data = next.data.map(zeroSeriesDataItem)
+      }
+      return next
+    })
+  }
+  if (Array.isArray(start.dataset)) {
+    start.dataset = start.dataset.map(dataset => {
+      if (!dataset || typeof dataset !== 'object') return dataset
+      return { ...dataset, source: zeroDatasetSource(dataset.source) }
+    })
+  } else if (start.dataset && typeof start.dataset === 'object') {
+    start.dataset = { ...start.dataset, source: zeroDatasetSource(start.dataset.source) }
+  }
+  return start
+}
+
 export function resolveDynamicRefreshInterval(optionOrTemplate) {
   const dynamic = normalizeDynamicConfig(optionOrTemplate || {})
   return dynamic.refreshIntervalSeconds >= 5 ? dynamic.refreshIntervalSeconds : 0
@@ -541,9 +796,7 @@ export function applyDynamicInteractionDefaults(option, template, context = {}) 
   const chartType = normalizeChartType(context.chartType || sourceTemplate.type || option?.series?.[0]?.type)
   const categoryCount = optionCategoryCount(option, Number(context.categoryCount) || 0)
   const out = { ...option, dynamic: { ...(option.dynamic || {}), ...dynamic } }
-  if (sourceTemplate.animation != null) {
-    out.animation = boolValue(sourceTemplate.animation, true)
-  }
+  applyTemplateAnimationDefaults(out, sourceTemplate)
   const tooltip = normalizeTooltip(sourceTemplate, chartType === 'pie' ? 'item' : 'axis')
   if (tooltip) {
     out.tooltip = mergeObjects(out.tooltip, tooltip)
@@ -560,10 +813,13 @@ export function applyDynamicInteractionDefaults(option, template, context = {}) 
         out.grid = { ...out.grid, bottom: Math.max(Number(out.grid.bottom) || 0, 72) }
       }
     } else if (isTemplateDataZoomDisabled(sourceTemplate)) {
-      delete out.dataZoom
+      out.dataZoom = []
     }
   }
-  out.series = applyDynamicSeries(out.series, dynamic, categoryCount)
+  out.series = applySeriesAnimationDefaults(
+    applyDynamicSeries(out.series, dynamic, categoryCount),
+    out.animation !== false
+  )
   return out
 }
 
