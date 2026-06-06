@@ -325,10 +325,39 @@ public class BusinessModelAgentService {
                 previewRows
         ).orElseGet(() -> buildBusinessModelPatchFallback(question));
 
-        List<Map<String, Object>> operations = filterPatchOperationsForQuestion(
+        List<Map<String, Object>> normalizedOperations = normalizeSemanticPatchOperations(
                 question,
-                safeListMap(patch.get("operations"))
+                safeListMap(patch.get("operations")),
+                fields,
+                existingMetricDefinitions
         );
+        normalizedOperations = appendSemanticPatchFallbacks(
+                question,
+                normalizedOperations,
+                fields,
+                existingMetricDefinitions
+        );
+        List<Map<String, Object>> operations = filterPatchOperationsForQuestion(question, normalizedOperations);
+        operations = enforceSemanticPatchGuards(
+                question,
+                operations,
+                fields,
+                existingDictionaryEntries,
+                existingMetricDefinitions,
+                existingDimensionDefinitions
+        );
+        if (operations.isEmpty()) {
+            operations = appendSemanticPatchFallbacks(question, List.of(), fields, existingMetricDefinitions);
+            operations = filterPatchOperationsForQuestion(question, operations);
+            operations = enforceSemanticPatchGuards(
+                    question,
+                    operations,
+                    fields,
+                    existingDictionaryEntries,
+                    existingMetricDefinitions,
+                    existingDimensionDefinitions
+            );
+        }
         if (operations.isEmpty()) {
             throw new IllegalArgumentException("未识别到可执行的模型修改动作，请明确说明要新增、修改或删除哪个指标、公式或业务字典映射");
         }
@@ -590,8 +619,14 @@ public class BusinessModelAgentService {
                 "绑定到", "绑定为", "绑定至",
                 "映射到", "映射为", "映射至",
                 "对应到", "对应为", "对应至",
-                "改绑", "重新绑定");
-        boolean hasPatchTarget = containsAny(question, "模型", "字典", "公式", "指标", "维度", "业务", "字段");
+                "改绑", "重新绑定",
+                "口径", "含税", "不含税", "统一用", "统一按", "就按", "按含税收入算", "按收入算", "算作", "当作",
+                "按", "按照", "除以", "乘以", "加上", "减去", "计算", "来算");
+        boolean hasFormulaExpression = question.matches(".*[一-龥A-Za-z0-9_]+\\s*(按|按照).*(除以|乘以|加上|减去|/|\\*|\\+|-).*")
+                || question.matches(".*[一-龥A-Za-z0-9_]+率.*(除以|/).*")
+                || question.matches(".*[一-龥A-Za-z0-9_]+\\s*(=|＝)\\s*.*[A-Za-z_][A-Za-z0-9_]*.*");
+        boolean hasPatchTarget = containsAny(question, "模型", "字典", "公式", "指标", "维度", "业务", "字段", "销售额", "收入", "利润", "GMV", "含税", "毛利率")
+                || hasFormulaExpression;
         return hasPatchVerb && (hasPatchTarget || looksLikeExplicitFieldBindingMutation(question));
     }
 
@@ -912,14 +947,16 @@ public class BusinessModelAgentService {
             String resolvedType = resolveFieldBindingOperationType(operation, existingDictionaryEntries, existingMetricDefinitions, existingDimensionDefinitions);
             String action = trim(Objects.toString(operation.get("action"), "UPSERT")).toUpperCase(Locale.ROOT);
             String name = resolveBindingName(operation);
-            String field = trim(Objects.toString(operation.get("field"), ""));
+            String field = extractBusinessModelFieldRef(operation);
             if (name.isBlank()) {
                 continue;
             }
+            String semanticAction = trim(Objects.toString(operation.get("semanticAction"), ""));
             switch (resolvedType) {
                 case "dictionaryEntry" -> {
                     Map<String, Object> existing = findByName(existingDictionaryEntries, "term", name);
                     Map<String, Object> materialized = new LinkedHashMap<>();
+                    materialized.put("semanticAction", semanticAction.isBlank() ? "DICTIONARY_UPSERT" : semanticAction);
                     materialized.put("targetType", "dictionaryEntry");
                     materialized.put("action", action);
                     materialized.put("term", name);
@@ -932,6 +969,7 @@ public class BusinessModelAgentService {
                 case "dimensionDefinition" -> {
                     Map<String, Object> existing = findByName(existingDimensionDefinitions, "name", name);
                     Map<String, Object> materialized = new LinkedHashMap<>();
+                    materialized.put("semanticAction", semanticAction.isBlank() ? "DIMENSION_BINDING" : semanticAction);
                     materialized.put("targetType", "dimensionDefinition");
                     materialized.put("action", action);
                     materialized.put("name", name);
@@ -943,6 +981,7 @@ public class BusinessModelAgentService {
                 default -> {
                     Map<String, Object> existing = findByName(existingMetricDefinitions, "name", name);
                     Map<String, Object> materialized = new LinkedHashMap<>();
+                    materialized.put("semanticAction", semanticAction.isBlank() ? "FIELD_BINDING" : semanticAction);
                     materialized.put("targetType", "metricDefinition");
                     materialized.put("action", action);
                     materialized.put("name", name);
@@ -969,9 +1008,16 @@ public class BusinessModelAgentService {
         boolean dictionaryMutation = looksLikeExplicitDictionaryMutation(question);
         boolean formulaMutation = looksLikeExplicitFormulaMutation(question);
         boolean fieldBindingMutation = looksLikeExplicitFieldBindingMutation(question);
+        boolean pureDimensionMutation = looksLikePureDimensionBindingMutation(question);
         List<Map<String, Object>> filtered = new ArrayList<>();
         for (Map<String, Object> operation : operations) {
             String targetType = trim(Objects.toString(operation.get("targetType"), ""));
+            if (pureDimensionMutation) {
+                if (isDimensionPatchOperation(operation)) {
+                    filtered.add(operation);
+                }
+                continue;
+            }
             if (dictionaryMutation && !formulaMutation) {
                 if ("dictionaryEntry".equals(targetType)) {
                     filtered.add(operation);
@@ -1002,6 +1048,513 @@ public class BusinessModelAgentService {
         return filtered.isEmpty() ? operations : filtered;
     }
 
+    private List<Map<String, Object>> normalizeSemanticPatchOperations(String question,
+                                                                       List<Map<String, Object>> operations,
+                                                                       List<Map<String, Object>> fields,
+                                                                       List<Map<String, Object>> existingMetricDefinitions) {
+        List<Map<String, Object>> normalized = new ArrayList<>();
+        for (Map<String, Object> operation : operations == null ? List.<Map<String, Object>>of() : operations) {
+            Map<String, Object> copy = new LinkedHashMap<>(operation);
+            normalizeOperationTargetName(copy);
+            String semanticAction = resolveSemanticAction(question, copy);
+            copy.put("semanticAction", semanticAction);
+            if (shouldPromoteBindingToMetricUpdate(question, copy, existingMetricDefinitions)) {
+                String metricName = resolveBindingName(copy);
+                if (metricName.isBlank()) {
+                    metricName = extractPrimaryMetricTarget(question, existingMetricDefinitions);
+                }
+                String formula = resolveMetricFormulaFromQuestion(question, copy, fields, metricName);
+                copy.put("targetType", "metricDefinition");
+                copy.put("name", metricName);
+                copy.put("formula", formula);
+                copy.put("aggregation", inferAggregation(metricName, formula));
+                copy.put("semanticAction", isMetricScopeExpression(question) ? "METRIC_SCOPE_UPDATE" : "METRIC_FORMULA_UPDATE");
+            }
+            normalized.add(copy);
+        }
+        return normalized;
+    }
+
+    private List<Map<String, Object>> appendSemanticPatchFallbacks(String question,
+                                                                   List<Map<String, Object>> operations,
+                                                                   List<Map<String, Object>> fields,
+                                                                   List<Map<String, Object>> existingMetricDefinitions) {
+        List<Map<String, Object>> result = new ArrayList<>(operations == null ? List.of() : operations);
+        boolean hasMetricUpdate = result.stream().anyMatch(item -> "metricDefinition".equals(trim(Objects.toString(item.get("targetType"), ""))));
+        boolean hasFieldBinding = result.stream().anyMatch(item -> "fieldBinding".equals(trim(Objects.toString(item.get("targetType"), ""))));
+        boolean hasDimensionBinding = result.stream().anyMatch(item ->
+                "dimensionDefinition".equals(trim(Objects.toString(item.get("targetType"), "")))
+                        || ("fieldBinding".equals(trim(Objects.toString(item.get("targetType"), "")))
+                        && "dimensionDefinition".equals(trim(Objects.toString(item.get("bindingType"), "")))));
+        if (!hasFieldBinding && !hasMetricUpdate && looksLikeExplicitFieldBindingMutation(question)) {
+            Map<String, Object> operation = buildFieldBindingFallback(question, fields);
+            if (!operation.isEmpty()) {
+                result.add(operation);
+                hasFieldBinding = true;
+                if ("dimensionDefinition".equals(trim(Objects.toString(operation.get("bindingType"), "")))) {
+                    hasDimensionBinding = true;
+                }
+            }
+        }
+        if (!hasDimensionBinding && looksLikeDimensionBindingIntent(question)) {
+            Map<String, Object> operation = buildDimensionBindingFallback(question, fields);
+            if (!operation.isEmpty()) {
+                result.add(operation);
+            }
+        }
+        if (!hasMetricUpdate && (isMetricScopeExpression(question) || looksLikeMetricFormulaExpression(question))) {
+            String metricName = extractPrimaryMetricTarget(question, existingMetricDefinitions);
+            String formula = resolveMetricFormulaFromQuestion(question, Map.of(), fields, metricName);
+            if (!metricName.isBlank() && !formula.isBlank()) {
+                Map<String, Object> operation = new LinkedHashMap<>();
+                operation.put("targetType", "metricDefinition");
+                operation.put("action", "UPSERT");
+                operation.put("name", metricName);
+                operation.put("field", resolvePrimaryFormulaField(formula, fields));
+                operation.put("aggregation", inferAggregation(metricName, formula));
+                operation.put("formula", formula);
+                operation.put("semanticAction", isMetricScopeExpression(question) ? "METRIC_SCOPE_UPDATE" : "METRIC_FORMULA_UPDATE");
+                result.add(operation);
+            }
+        }
+        return result;
+    }
+
+    private void normalizeOperationTargetName(Map<String, Object> operation) {
+        if (operation.containsKey("name")) {
+            String cleaned = cleanBusinessItemName(trim(Objects.toString(operation.get("name"), "")));
+            if (!cleaned.isBlank()) {
+                operation.put("name", cleaned);
+            }
+        } else if (operation.containsKey("term")) {
+            String cleaned = cleanBusinessItemName(trim(Objects.toString(operation.get("term"), "")));
+            if (!cleaned.isBlank()) {
+                operation.put("term", cleaned);
+            }
+        }
+    }
+
+    private Map<String, Object> buildFieldBindingFallback(String question, List<Map<String, Object>> fields) {
+        java.util.regex.Matcher matcher = Pattern.compile("(?:把|将)?(.+?)(?:的)?(?:目标)?(?:字段|指标|公式|维度)?(?:绑定到|绑定为|绑定至|映射到|映射为|映射至|对应到|对应为|对应至|改绑到|关联到|关联为)\\s*([A-Za-z_][A-Za-z0-9_]*)").matcher(question);
+        if (!matcher.find()) {
+            return Map.of();
+        }
+        String name = cleanBusinessItemName(matcher.group(1));
+        String fieldRef = trim(matcher.group(2));
+        Map<String, Object> resolved = resolveUniqueField(fieldRef, fields);
+        String field = resolved == null ? fieldRef : trim(Objects.toString(resolved.get("columnName"), fieldRef));
+        if (name.isBlank() || field.isBlank()) {
+            return Map.of();
+        }
+        String bindingType = inferBindingTypeFromQuestion(question, name);
+        Map<String, Object> operation = new LinkedHashMap<>();
+        operation.put("semanticAction", "dimensionDefinition".equals(bindingType) ? "DIMENSION_BINDING" : "FIELD_BINDING");
+        operation.put("targetType", "fieldBinding");
+        operation.put("action", "UPSERT");
+        operation.put("bindingType", bindingType);
+        operation.put("name", name);
+        operation.put("field", field);
+        return operation;
+    }
+
+    private String inferBindingTypeFromQuestion(String question, String name) {
+        String text = trim(question) + " " + trim(name);
+        if (containsAny(text, "维度", "省份", "城市", "区域", "地区")) {
+            return "dimensionDefinition";
+        }
+        if (containsAny(text, "指标", "公式", "销售额", "收入", "利润", "销量", "毛利率", "金额", "数", "量", "率")) {
+            return "metricDefinition";
+        }
+        if (containsAny(text, "字典", "词典", "术语", "同义词", "客户", "产品")) {
+            return "dictionaryEntry";
+        }
+        return "metricDefinition";
+    }
+
+    private Map<String, Object> buildDimensionBindingFallback(String question, List<Map<String, Object>> fields) {
+        java.util.regex.Matcher matcher = Pattern.compile("(?:把|将)?(.+?)(?:的)?维度(?:字段)?(?:绑定到|绑定为|绑定至|映射到|映射为|映射至|对应到|对应为|对应至)\\s*([A-Za-z_][A-Za-z0-9_]*)").matcher(question);
+        if (!matcher.find()) {
+            return Map.of();
+        }
+        String name = cleanBusinessItemName(matcher.group(1));
+        String fieldRef = trim(matcher.group(2));
+        Map<String, Object> resolved = resolveUniqueField(fieldRef, fields);
+        String field = resolved == null ? fieldRef : trim(Objects.toString(resolved.get("columnName"), fieldRef));
+        if (name.isBlank() || field.isBlank()) {
+            return Map.of();
+        }
+        Map<String, Object> operation = new LinkedHashMap<>();
+        operation.put("semanticAction", "DIMENSION_BINDING");
+        operation.put("targetType", "dimensionDefinition");
+        operation.put("action", "UPSERT");
+        operation.put("name", name);
+        operation.put("field", field);
+        return operation;
+    }
+
+    private List<Map<String, Object>> enforceSemanticPatchGuards(String question,
+                                                                 List<Map<String, Object>> operations,
+                                                                 List<Map<String, Object>> fields,
+                                                                 List<Map<String, Object>> existingDictionaryEntries,
+                                                                 List<Map<String, Object>> existingMetricDefinitions,
+                                                                 List<Map<String, Object>> existingDimensionDefinitions) {
+        boolean scopeOrFormulaIntent = isMetricScopeExpression(question) || looksLikeMetricFormulaExpression(question);
+        List<String> mentionedMetricNames = extractMentionedNames(question, existingMetricDefinitions, "name");
+        if (mentionedMetricNames.isEmpty() && scopeOrFormulaIntent) {
+            String metricTarget = extractPrimaryMetricTarget(question, existingMetricDefinitions);
+            if (!metricTarget.isBlank()) {
+                mentionedMetricNames = List.of(metricTarget);
+            }
+        }
+        List<String> mentionedDictionaryTerms = extractMentionedNames(question, existingDictionaryEntries, "term");
+        List<String> mentionedDimensionNames = extractMentionedNames(question, existingDimensionDefinitions, "name");
+        boolean dimensionIntent = looksLikeDimensionBindingIntent(question);
+        boolean pureDimensionMutation = looksLikePureDimensionBindingMutation(question);
+        boolean dictionaryIntent = looksLikeExplicitDictionaryMutation(question);
+        boolean bindingIntent = looksLikeExplicitFieldBindingMutation(question);
+        List<Map<String, Object>> guarded = new ArrayList<>();
+        for (Map<String, Object> operation : operations == null ? List.<Map<String, Object>>of() : operations) {
+            String targetType = trim(Objects.toString(operation.get("targetType"), ""));
+            String bindingType = trim(Objects.toString(operation.get("bindingType"), ""));
+            String name = resolveBindingName(operation);
+            boolean dimensionOperation = "dimensionDefinition".equals(targetType)
+                    || ("fieldBinding".equals(targetType) && "dimensionDefinition".equals(bindingType));
+            if (pureDimensionMutation && !isDimensionPatchOperation(operation)) {
+                continue;
+            }
+            if (dimensionOperation && !dimensionIntent && !containsMentionedName(name, mentionedDimensionNames)) {
+                continue;
+            }
+            if ("dictionaryEntry".equals(targetType) && scopeOrFormulaIntent && !dictionaryIntent) {
+                continue;
+            }
+            if ("metricDefinition".equals(targetType) && !mentionedMetricNames.isEmpty() && !containsMentionedName(name, mentionedMetricNames)) {
+                continue;
+            }
+            if ("dictionaryEntry".equals(targetType) && !mentionedDictionaryTerms.isEmpty() && !containsMentionedName(name, mentionedDictionaryTerms)) {
+                continue;
+            }
+            Map<String, Object> copy = new LinkedHashMap<>(operation);
+            if ("metricDefinition".equals(targetType)) {
+                normalizeMetricOperationBeforeWrite(copy, question, fields, existingMetricDefinitions);
+            }
+            if ("fieldBinding".equals(targetType) && !bindingIntent && scopeOrFormulaIntent) {
+                continue;
+            }
+            guarded.add(copy);
+        }
+        return guarded;
+    }
+
+    private void normalizeMetricOperationBeforeWrite(Map<String, Object> operation,
+                                                     String question,
+                                                     List<Map<String, Object>> fields,
+                                                     List<Map<String, Object>> existingMetricDefinitions) {
+        String metricName = trim(Objects.toString(operation.get("name"), ""));
+        if (metricName.isBlank()) {
+            metricName = extractPrimaryMetricTarget(question, existingMetricDefinitions);
+            operation.put("name", metricName);
+        }
+        String formula = trim(Objects.toString(operation.get("formula"), ""));
+        if (formula.isBlank() || formula.equals(metricName)) {
+            formula = resolveMetricFormulaFromQuestion(question, operation, fields, metricName);
+            operation.put("formula", formula);
+        }
+        String scopeExpression = extractScopeOrFormulaExpression(question, metricName);
+        if (isMetricScopeExpression(question) && isSingleFieldScopeExpression(scopeExpression)
+                && resolveUniqueField(scopeExpression, fields) == null) {
+            throw new IllegalArgumentException("无法唯一确认「" + scopeExpression + "」对应的字段，请先确认字段后再更新指标口径。");
+        }
+        if (extractBusinessModelFieldRef(operation).isBlank()) {
+            operation.put("field", resolvePrimaryFormulaField(formula, fields));
+        }
+        operation.put("aggregation", inferAggregation(metricName, formula));
+        operation.putIfAbsent("semanticAction", isMetricScopeExpression(question) ? "METRIC_SCOPE_UPDATE" : "METRIC_FORMULA_UPDATE");
+    }
+
+    private boolean shouldPromoteBindingToMetricUpdate(String question,
+                                                       Map<String, Object> operation,
+                                                       List<Map<String, Object>> existingMetricDefinitions) {
+        String targetType = trim(Objects.toString(operation.get("targetType"), ""));
+        if (!"fieldBinding".equals(targetType)) {
+            return false;
+        }
+        if (!isMetricScopeExpression(question) && !looksLikeMetricFormulaExpression(question)) {
+            return false;
+        }
+        String name = resolveBindingName(operation);
+        return name.isBlank()
+                || findByName(existingMetricDefinitions, "name", name) != null
+                || !extractPrimaryMetricTarget(question, existingMetricDefinitions).isBlank();
+    }
+
+    private String resolveSemanticAction(String question, Map<String, Object> operation) {
+        String explicit = trim(Objects.toString(operation.get("semanticAction"), "")).toUpperCase(Locale.ROOT);
+        if (Set.of("FIELD_BINDING", "METRIC_FORMULA_UPDATE", "METRIC_SCOPE_UPDATE", "DICTIONARY_UPSERT", "DIMENSION_BINDING",
+                "MODEL_CREATE", "MODEL_APPLY", "MODEL_PUBLISH").contains(explicit)) {
+            return explicit;
+        }
+        String targetType = trim(Objects.toString(operation.get("targetType"), ""));
+        String bindingType = trim(Objects.toString(operation.get("bindingType"), ""));
+        if ("fieldBinding".equals(targetType)) {
+            if ("dimensionDefinition".equals(bindingType)) return "DIMENSION_BINDING";
+            return "FIELD_BINDING";
+        }
+        if ("metricDefinition".equals(targetType)) {
+            return isMetricScopeExpression(question) ? "METRIC_SCOPE_UPDATE" : "METRIC_FORMULA_UPDATE";
+        }
+        if ("dimensionDefinition".equals(targetType)) return "DIMENSION_BINDING";
+        if ("dictionaryEntry".equals(targetType)) return "DICTIONARY_UPSERT";
+        return "FIELD_BINDING";
+    }
+
+    private boolean isMetricScopeExpression(String question) {
+        return containsAny(question, "口径", "以后", "统一用", "统一按", "改成按", "改为按", "按", "按照", "按含税", "按不含税", "来算", "算作", "当作");
+    }
+
+    private boolean looksLikeMetricFormulaExpression(String question) {
+        return question.matches(".*[一-龥A-Za-z0-9_]+\\s*(按|按照).*(除以|乘以|加上|减去|/|\\*|\\+|-).*")
+                || question.matches(".*[一-龥A-Za-z0-9_]+率.*(除以|/).*")
+                || question.matches(".*[一-龥A-Za-z0-9_]+\\s*(=|＝)\\s*.*[A-Za-z_][A-Za-z0-9_]*.*")
+                || containsAny(question, "公式", "除以", "乘以", "加上", "减去");
+    }
+
+    private boolean looksLikeDimensionBindingIntent(String question) {
+        return containsAny(question, "维度", "省份", "城市", "区域", "地区")
+                && looksLikeExplicitFieldBindingMutation(question);
+    }
+
+    private boolean looksLikePureDimensionBindingMutation(String question) {
+        return looksLikeDimensionBindingIntent(question)
+                && !isMetricScopeExpression(question)
+                && !looksLikeMetricFormulaExpression(question)
+                && !looksLikeExplicitFormulaMutation(question)
+                && !looksLikeExplicitDictionaryMutation(question);
+    }
+
+    private boolean isDimensionPatchOperation(Map<String, Object> operation) {
+        String targetType = trim(Objects.toString(operation.get("targetType"), ""));
+        String bindingType = trim(Objects.toString(operation.get("bindingType"), ""));
+        String semanticAction = trim(Objects.toString(operation.get("semanticAction"), "")).toUpperCase(Locale.ROOT);
+        return "dimensionDefinition".equals(targetType)
+                || ("fieldBinding".equals(targetType) && "dimensionDefinition".equals(bindingType))
+                || "DIMENSION_BINDING".equals(semanticAction);
+    }
+
+    private List<String> extractMentionedNames(String question, List<Map<String, Object>> entries, String keyName) {
+        List<String> names = new ArrayList<>();
+        for (Map<String, Object> entry : entries == null ? List.<Map<String, Object>>of() : entries) {
+            String name = trim(Objects.toString(entry.get(keyName), ""));
+            if (!name.isBlank() && normalize(question).contains(normalize(name))) {
+                names.add(name);
+            }
+        }
+        return names;
+    }
+
+    private boolean containsMentionedName(String name, List<String> mentionedNames) {
+        if (mentionedNames == null || mentionedNames.isEmpty()) {
+            return true;
+        }
+        String normalizedName = normalize(name);
+        if (normalizedName.isBlank()) {
+            return false;
+        }
+        for (String mentioned : mentionedNames) {
+            String normalizedMentioned = normalize(mentioned);
+            if (normalizedName.equals(normalizedMentioned)
+                    || normalizedName.contains(normalizedMentioned)
+                    || normalizedMentioned.contains(normalizedName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String extractPrimaryMetricTarget(String question, List<Map<String, Object>> existingMetricDefinitions) {
+        List<String> mentioned = extractMentionedNames(question, existingMetricDefinitions, "name");
+        if (!mentioned.isEmpty()) {
+            return mentioned.get(0);
+        }
+        java.util.regex.Matcher matcher = Pattern.compile("(?:以后|后续|之后)?(?:报表里(?:的)?|模型里(?:的)?|指标)?\\s*([\\u4e00-\\u9fa5A-Za-z0-9_]{2,20}?)(?:统一用|统一按|按|按照|口径|改成|改为|算作|当作|就按|来算)").matcher(question);
+        if (matcher.find()) {
+            return cleanBusinessItemName(matcher.group(1));
+        }
+        matcher = Pattern.compile("([\\u4e00-\\u9fa5A-Za-z0-9_]{2,20}?)(?:按|按照).*(?:除以|乘以|加上|减去|/|\\*|\\+|-)").matcher(question);
+        if (matcher.find()) {
+            return cleanBusinessItemName(matcher.group(1));
+        }
+        matcher = Pattern.compile("(?:新增|增加|添加|补充)?(?:指标公式|业务公式|公式)?\\s*[：:]?\\s*([\\u4e00-\\u9fa5A-Za-z0-9_]{1,20})\\s*[=＝]").matcher(question);
+        if (matcher.find()) {
+            return cleanBusinessItemName(matcher.group(1));
+        }
+        return "";
+    }
+
+    private String resolveMetricFormulaFromQuestion(String question,
+                                                    Map<String, Object> operation,
+                                                    List<Map<String, Object>> fields,
+                                                    String metricName) {
+        String formula = trim(Objects.toString(operation.get("formula"), ""));
+        if (!formula.isBlank() && !formula.equals(metricName)) {
+            return rewriteFormulaToFieldNames(formula, fields);
+        }
+        String expression = extractScopeOrFormulaExpression(question, metricName);
+        if (expression.isBlank()) {
+            expression = extractBusinessModelFieldRef(operation);
+        }
+        if (expression.isBlank()) {
+            return "";
+        }
+        return rewriteFormulaToFieldNames(normalizeFormulaPhrase(expression), fields);
+    }
+
+    private String extractScopeOrFormulaExpression(String question, String metricName) {
+        String metric = trim(metricName);
+        String prefix = metric.isBlank() ? "" : Pattern.quote(metric);
+        List<Pattern> patterns = new ArrayList<>();
+        if (!prefix.isBlank()) {
+            patterns.add(Pattern.compile(prefix + ".*?(?:统一用|统一按|就按|按|按照|改成|改为|口径改成|口径改为|算作|当作|来算)\\s*([^，。；;\\n]+)"));
+        }
+        patterns.add(Pattern.compile("(?:统一用|统一按|就按|按|按照|改成|改为|口径改成|口径改为|算作|当作|来算)\\s*([^，。；;\\n]+)"));
+        patterns.add(Pattern.compile("(?:指标公式|业务公式|公式)?\\s*[：:]?\\s*[^=＝：:]+\\s*[=＝]\\s*([^，。；;\\n]+)"));
+        for (Pattern pattern : patterns) {
+            java.util.regex.Matcher matcher = pattern.matcher(question);
+            if (matcher.find()) {
+                return cleanFormulaTail(matcher.group(1));
+            }
+        }
+        return "";
+    }
+
+    private String cleanFormulaTail(String text) {
+        String value = trim(text);
+        value = value.replaceFirst("^(字段|指标|公式|口径|用)", "");
+        value = value.replaceFirst("(计算|统计|取数|为准|来算|算)$", "");
+        return value.trim();
+    }
+
+    private boolean isSingleFieldScopeExpression(String expression) {
+        String value = trim(expression);
+        if (value.isBlank()) {
+            return false;
+        }
+        return !value.matches(".*(除以|乘以|加上|减去|[+\\-*/()]).*");
+    }
+
+    private String cleanBusinessItemName(String text) {
+        String value = trim(text);
+        value = value.replace("以后", "")
+                .replace("后续", "")
+                .replace("之后", "")
+                .replace("报表里的", "")
+                .replace("报表里", "")
+                .replace("模型里的", "")
+                .replace("模型里", "")
+                .replace("这个", "")
+                .replace("该", "")
+                .replace("指标", "")
+                .replace("业务", "")
+                .replace("维度", "")
+                .trim();
+        value = MODEL_NAME_PUNCT_PREFIX_PATTERN.matcher(value).replaceFirst("");
+        value = MODEL_NAME_PUNCT_SUFFIX_PATTERN.matcher(value).replaceFirst("");
+        return value;
+    }
+
+    private String normalizeFormulaPhrase(String formula) {
+        String value = trim(formula)
+                .replace("除以", " / ")
+                .replace("乘以", " * ")
+                .replace("加上", " + ")
+                .replace("减去", " - ")
+                .replace("加", " + ")
+                .replace("减", " - ")
+                .replace("乘", " * ")
+                .replace("除", " / ");
+        return value.replaceAll("\\s+", " ").trim();
+    }
+
+    private String rewriteFormulaToFieldNames(String formula, List<Map<String, Object>> fields) {
+        String rewritten = trim(formula);
+        if (rewritten.isBlank()) {
+            return "";
+        }
+        List<String> tokens = new ArrayList<>();
+        java.util.regex.Matcher matcher = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*|[\\u4e00-\\u9fa5]{2,}").matcher(rewritten);
+        while (matcher.find()) {
+            String token = matcher.group();
+            if (!tokens.contains(token)) {
+                tokens.add(token);
+            }
+        }
+        tokens.sort(Comparator.comparingInt(String::length).reversed());
+        for (String token : tokens) {
+            Map<String, Object> field = resolveUniqueField(token, fields);
+            if (field == null) {
+                continue;
+            }
+            String columnName = trim(Objects.toString(field.get("columnName"), ""));
+            if (!columnName.isBlank()) {
+                rewritten = rewritten.replaceAll("(?<![A-Za-z0-9_\\u4e00-\\u9fa5])" + Pattern.quote(token) + "(?![A-Za-z0-9_\\u4e00-\\u9fa5])", columnName);
+            }
+        }
+        return rewritten.trim();
+    }
+
+    private String resolvePrimaryFormulaField(String formula, List<Map<String, Object>> fields) {
+        java.util.regex.Matcher matcher = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*|[\\u4e00-\\u9fa5]{2,}").matcher(trim(formula));
+        while (matcher.find()) {
+            Map<String, Object> field = resolveUniqueField(matcher.group(), fields);
+            if (field != null) {
+                return trim(Objects.toString(field.get("columnName"), ""));
+            }
+        }
+        return "";
+    }
+
+    private Map<String, Object> resolveUniqueField(String reference, List<Map<String, Object>> fields) {
+        String normalized = normalize(reference);
+        if (normalized.isBlank()) {
+            return null;
+        }
+        List<Map<String, Object>> matches = new ArrayList<>();
+        for (Map<String, Object> field : fields == null ? List.<Map<String, Object>>of() : fields) {
+            String columnName = normalize(Objects.toString(field.get("columnName"), ""));
+            String sourceFieldName = normalize(Objects.toString(field.get("sourceFieldName"), ""));
+            String displayName = normalize(Objects.toString(field.get("displayName"), ""));
+            if (normalized.equals(columnName) || normalized.equals(sourceFieldName) || normalized.equals(displayName)) {
+                matches.add(field);
+            }
+        }
+        if (matches.size() == 1) {
+            return matches.get(0);
+        }
+        matches.clear();
+        for (Map<String, Object> field : fields == null ? List.<Map<String, Object>>of() : fields) {
+            String columnName = normalize(Objects.toString(field.get("columnName"), ""));
+            String sourceFieldName = normalize(Objects.toString(field.get("sourceFieldName"), ""));
+            String displayName = normalize(Objects.toString(field.get("displayName"), ""));
+            if ((!columnName.isBlank() && columnName.contains(normalized))
+                    || (!sourceFieldName.isBlank() && sourceFieldName.contains(normalized))
+                    || (!displayName.isBlank() && displayName.contains(normalized))) {
+                matches.add(field);
+            }
+        }
+        return matches.size() == 1 ? matches.get(0) : null;
+    }
+
+    private String inferAggregation(String metricName, String formula) {
+        String text = trim(metricName) + " " + trim(formula);
+        if (containsAny(text, "率", "均", "平均", "占比", "比例") || text.contains("/") || text.contains(" / ")) {
+            return "AVG";
+        }
+        if (containsAny(text, "数", "量", "次数", "人数", "笔数") && !text.matches(".*[+\\-*/].*")) {
+            return "COUNT";
+        }
+        return "SUM";
+    }
+
     private Map<String, Object> withBindingType(Map<String, Object> operation, String bindingType) {
         Map<String, Object> copy = new LinkedHashMap<>(operation);
         copy.put("bindingType", bindingType);
@@ -1025,7 +1578,7 @@ public class BusinessModelAgentService {
         Map<String, Object> normalized = new LinkedHashMap<>();
         String term = trim(Objects.toString(raw.get("term"), Objects.toString(raw.get("name"), "")));
         normalized.put("term", term);
-        normalized.put("field", trim(Objects.toString(raw.get("field"), "")));
+        normalized.put("field", extractBusinessModelFieldRef(raw));
         normalized.put("synonyms", normalizeSynonyms(raw.get("synonyms")));
         return normalized;
     }
@@ -1033,7 +1586,7 @@ public class BusinessModelAgentService {
     private Map<String, Object> normalizeMetricDefinition(Map<String, Object> raw) {
         Map<String, Object> normalized = new LinkedHashMap<>();
         normalized.put("name", trim(Objects.toString(raw.get("name"), Objects.toString(raw.get("term"), ""))));
-        normalized.put("field", trim(Objects.toString(raw.get("field"), "")));
+        normalized.put("field", extractBusinessModelFieldRef(raw));
         String aggregation = trim(Objects.toString(raw.get("aggregation"), "SUM")).toUpperCase(Locale.ROOT);
         normalized.put("aggregation", aggregation.isBlank() ? "SUM" : aggregation);
         normalized.put("formula", trim(Objects.toString(raw.get("formula"), "")));
@@ -1043,8 +1596,18 @@ public class BusinessModelAgentService {
     private Map<String, Object> normalizeDimensionDefinition(Map<String, Object> raw) {
         Map<String, Object> normalized = new LinkedHashMap<>();
         normalized.put("name", trim(Objects.toString(raw.get("name"), Objects.toString(raw.get("term"), ""))));
-        normalized.put("field", trim(Objects.toString(raw.get("field"), "")));
+        normalized.put("field", extractBusinessModelFieldRef(raw));
         return normalized;
+    }
+
+    private String extractBusinessModelFieldRef(Map<String, Object> raw) {
+        for (String key : List.of("field", "columnName", "sourceFieldName", "fieldName", "dimensionField", "targetField")) {
+            String value = trim(Objects.toString(raw.get(key), ""));
+            if (!value.isBlank()) {
+                return value;
+            }
+        }
+        return "";
     }
 
     private String dictionaryEntryKey(Map<String, Object> entry) {
@@ -1084,6 +1647,9 @@ public class BusinessModelAgentService {
                                        Map<String, Object> patch,
                                        List<Map<String, Object>> rawOperations,
                                        List<Map<String, Object>> effectiveOperations) {
+        if (isMetricScopeExpression(question) || looksLikeMetricFormulaExpression(question)) {
+            return "PATCH_MODEL";
+        }
         if (looksLikeExplicitDictionaryMutation(question) || looksLikeExplicitFormulaMutation(question)) {
             return "PATCH_MODEL";
         }
@@ -1111,7 +1677,7 @@ public class BusinessModelAgentService {
             }
             String action = trim(Objects.toString(operation.get("action"), "UPSERT")).toUpperCase(Locale.ROOT);
             String name = resolveBindingName(operation);
-            String field = trim(Objects.toString(operation.get("field"), ""));
+            String field = extractBusinessModelFieldRef(operation);
             String resolvedType = resolveBindingResultType(targetType, bindingType, operation);
             if (name.isBlank()) {
                 continue;
@@ -1138,6 +1704,7 @@ public class BusinessModelAgentService {
             result.put("formula", trim(Objects.toString(operation.get("formula"), "")));
             result.put("fieldDisplayName", resolveFieldDisplayName(field, fields));
             result.put("targetType", resolvedType);
+            result.put("semanticAction", trim(Objects.toString(operation.get("semanticAction"), "")));
             result.put("action", action);
             result.put("label", buildBindingTargetLabel(resolvedType, name));
             results.add(result);
@@ -1193,7 +1760,7 @@ public class BusinessModelAgentService {
         if (operation.containsKey("formula") || operation.containsKey("aggregation")) {
             return "metricDefinition";
         }
-        return "metricDefinition";
+        return "dictionaryEntry";
     }
 
     private String resolveFieldBindingOperationType(Map<String, Object> operation,
@@ -1217,7 +1784,7 @@ public class BusinessModelAgentService {
         if (operation.containsKey("term")) {
             return "dictionaryEntry";
         }
-        return "metricDefinition";
+        return "dictionaryEntry";
     }
 
     private String resolveBindingName(Map<String, Object> operation) {

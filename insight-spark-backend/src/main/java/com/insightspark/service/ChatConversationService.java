@@ -375,6 +375,10 @@ public class ChatConversationService {
         context.put("question", question);
         context.put("tableName", result == null ? null : result.get("tableName"));
         context.put("engine", result == null ? null : result.get("engine"));
+        if (result != null) {
+            context.put("reasoningReplaySteps", result.getOrDefault("reasoningReplaySteps",
+                    result.getOrDefault("reasoningLogs", List.of())));
+        }
         Long turnId = insertTurn(conversationId, parentTurnId, turnNo, "ASSISTANT", message,
                 "ANSWER", context, "REPLY");
         List<Long> artifactIds = new ArrayList<>();
@@ -390,11 +394,13 @@ public class ChatConversationService {
                         Objects.toString(result.getOrDefault("chartType", ""), ""),
                         Objects.toString(result.getOrDefault("riskLevel", "SAFE"), "SAFE")));
             }
-            artifactIds.add(insertArtifact(conversationId, turnId, historyId, "CHART",
-                    buildChartArtifact(result, historyId),
-                    sql,
-                    Objects.toString(result.getOrDefault("chartType", ""), ""),
-                    Objects.toString(result.getOrDefault("riskLevel", "SAFE"), "SAFE")));
+            if (!Boolean.parseBoolean(Objects.toString(result.getOrDefault("skipChartArtifact", false), "false"))) {
+                artifactIds.add(insertArtifact(conversationId, turnId, historyId, "CHART",
+                        buildChartArtifact(result, historyId),
+                        sql,
+                        Objects.toString(result.getOrDefault("chartType", ""), ""),
+                        Objects.toString(result.getOrDefault("riskLevel", "SAFE"), "SAFE")));
+            }
         }
         updateConversationAfterTurn(conversationId, turnId, question, message);
         Map<String, Object> payload = new LinkedHashMap<>();
@@ -1164,9 +1170,41 @@ public class ChatConversationService {
         return row;
     }
 
+    public Map<String, Object> latestChartArtifactForConversation(Long conversationId) {
+        String userId = resolveUserId();
+        if (conversationId == null || userId == null) {
+            return Map.of();
+        }
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT a.id, a.conversation_id AS conversationId, a.turn_id AS turnId, a.history_id AS historyId,
+                       a.artifact_type AS artifactType, a.artifact_json AS artifactJson,
+                       a.sql_text AS sqlText, a.chart_type AS chartType, a.risk_level AS riskLevel,
+                       a.created_at AS createdAt
+                  FROM is_chat_conversation_artifact a
+                  INNER JOIN is_chat_conversation c ON c.id = a.conversation_id
+                 WHERE a.conversation_id = ? AND a.artifact_type = 'CHART'
+                   AND c.user_id = ? AND c.is_deleted = 0
+                   AND a.history_id IS NOT NULL
+                 ORDER BY a.id DESC
+                 LIMIT 20
+                """, conversationId, userId);
+        for (Map<String, Object> candidate : rows) {
+            Map<String, Object> row = new LinkedHashMap<>(candidate);
+            Map<String, Object> artifact = parseJsonMap(row.get("artifactJson"));
+            if (isPinnableChartArtifact(row, artifact)) {
+                row.put("artifact", artifact);
+                return row;
+            }
+        }
+        return Map.of();
+    }
+
     private Map<String, Object> buildChartArtifact(Map<String, Object> result, Long historyId) {
         Map<String, Object> artifact = new LinkedHashMap<>();
         artifact.put("historyId", historyId);
+        artifact.put("responseType", result.get("responseType"));
+        artifact.put("smartIntent", result.get("smartIntent"));
+        artifact.put("dashboardActionStatus", result.get("dashboardActionStatus"));
         artifact.put("tableName", result.get("tableName"));
         artifact.put("chartType", result.get("chartType"));
         artifact.put("fieldMapping", result.get("fieldMapping"));
@@ -1177,7 +1215,30 @@ public class ChatConversationService {
         artifact.put("dimensions", result.get("dimensions"));
         artifact.put("encode", result.get("encode"));
         artifact.put("optionTemplate", result.get("optionTemplate"));
+        artifact.put("reasoningReplaySteps", result.getOrDefault("reasoningReplaySteps",
+                result.getOrDefault("reasoningLogs", List.of())));
         return artifact;
+    }
+
+    private boolean isPinnableChartArtifact(Map<String, Object> row, Map<String, Object> artifact) {
+        String responseType = Objects.toString(artifact.get("responseType"), "").trim().toUpperCase(Locale.ROOT);
+        String smartIntent = Objects.toString(artifact.get("smartIntent"), "").trim().toUpperCase(Locale.ROOT);
+        String dashboardActionStatus = Objects.toString(artifact.get("dashboardActionStatus"), "").trim();
+        if (!dashboardActionStatus.isBlank() || responseType.startsWith("DASHBOARD_") || smartIntent.startsWith("DASHBOARD_")) {
+            return false;
+        }
+        if (Set.of("CLARIFICATION", "CLARIFY", "ALERT_RULE_DRAFT", "WHAT_IF_DRAFT").contains(responseType)) {
+            return false;
+        }
+        Object data = artifact.get("data");
+        if (data instanceof List<?> list && list.size() == 1 && list.get(0) instanceof Map<?, ?> first) {
+            String name = Objects.toString(first.get("name"), "").trim().toUpperCase(Locale.ROOT);
+            if (Set.of("DASHBOARD_PIN", "CLARIFY", "CLARIFICATION", "ALERT_RULE_DRAFT", "WHAT_IF_DRAFT").contains(name)) {
+                return false;
+            }
+        }
+        Long historyId = toLong(row.get("historyId"));
+        return historyId != null && historyId > 0;
     }
 
     private Map<String, Object> mapConversationRow(Map<String, Object> row) {

@@ -404,6 +404,7 @@ const pinDialogVisible = ref(false)
 const pinning = ref(false)
 const pinDashboardId = ref(null)
 const dashboardOptions = ref([])
+const pendingDashboardPinSource = ref(null)
 const voicePanelVisible = ref(false)
 const question = ref('')
 const loading = ref(false)
@@ -1221,6 +1222,53 @@ const buildAdvancedAnalysisFromTurn = (turn, advancedArtifact) => {
   }
 }
 
+const restoreAdvancedThinkingLogsFromTurn = (turn, advancedArtifact, advancedAnalysis) => {
+  const snapshot = normalizeChartArtifactSnapshot(advancedArtifact)
+  const candidates = [
+    advancedArtifact?.artifact?.thinkingLogs,
+    snapshot?.thinkingLogs,
+    snapshot?.advancedAnalysis?.thinkingLogs,
+    advancedAnalysis?.thinkingLogs,
+    turn?.context?.thinkingLogs
+  ]
+  const logs = candidates.find(item => Array.isArray(item) && item.length)
+  return Array.isArray(logs)
+    ? logs.map(item => String(item || '').trim()).filter(Boolean).slice(0, 12)
+    : []
+}
+
+const normalizeThinkingLogs = (logs = []) => {
+  if (!Array.isArray(logs)) return []
+  return logs.map((item, index) => {
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      const title = String(item.title || item.stage || `步骤 ${index + 1}`).trim()
+      const detail = String(item.detail || item.text || item.message || '').trim()
+      return `${title || `步骤 ${index + 1}`}：${detail}`.trim()
+    }
+    return String(item || '').trim()
+  }).filter(Boolean).slice(0, 12)
+}
+
+const restoreThinkingLogsFromTurn = (turn, chartArtifact, advancedArtifact, advancedAnalysis) => {
+  if (advancedAnalysis) {
+    return restoreAdvancedThinkingLogsFromTurn(turn, advancedArtifact, advancedAnalysis)
+  }
+  const snapshot = normalizeChartArtifactSnapshot(chartArtifact)
+  const candidates = [
+    turn?.context?.thinkingLogs,
+    turn?.context?.reasoningReplaySteps,
+    turn?.context?.reasoningLogs,
+    chartArtifact?.artifact?.thinkingLogs,
+    chartArtifact?.artifact?.reasoningReplaySteps,
+    chartArtifact?.artifact?.reasoningLogs,
+    snapshot?.thinkingLogs,
+    snapshot?.reasoningReplaySteps,
+    snapshot?.reasoningLogs
+  ]
+  const logs = candidates.find(item => Array.isArray(item) && item.length)
+  return normalizeThinkingLogs(logs)
+}
+
 const restoreAnalysisFromMessage = (message, options = {}) => {
   const analysis = message?.analysisSnapshot
   if (!analysis || !Array.isArray(analysis.data) || !analysis.data.length) return false
@@ -1549,11 +1597,7 @@ const selectChatSession = async (sessionId) => {
         advancedAnalysis,
         clickableChart: Boolean(analysisSnapshot),
         sourceQuestion: analysisSnapshot?.sourceQuestion || advancedAnalysis?.sourceQuestion || '',
-        thinkingLogs: advancedAnalysis
-          ? (Array.isArray(advancedArtifact?.artifact?.thinkingLogs)
-            ? advancedArtifact.artifact.thinkingLogs
-            : (Array.isArray(turn?.context?.thinkingLogs) ? turn.context.thinkingLogs : []))
-          : undefined,
+        thinkingLogs: restoreThinkingLogsFromTurn(turn, chartArtifact, advancedArtifact, advancedAnalysis),
         thinkingCollapsed: true,
         chatRecordStatus: advancedAnalysis ? 'saved' : undefined
       })
@@ -3808,8 +3852,9 @@ const normalizeFieldBindingResults = (entries) => {
       const formula = String(item?.formula || '').trim()
       const action = String(item?.action || 'UPSERT').trim().toUpperCase()
       const targetType = String(item?.targetType || '').trim()
+      const semanticAction = String(item?.semanticAction || '').trim().toUpperCase()
       const label = String(item?.label || '').trim()
-      if (!name || !field) return null
+      if (!name || (!field && !(targetType === 'metricDefinition' && formula))) return null
       if (targetType === 'metricDefinition' && !formula && /[+\-*/()]/.test(field)) return null
       return {
         name,
@@ -3818,14 +3863,22 @@ const normalizeFieldBindingResults = (entries) => {
         formula,
         action,
         targetType,
-        label: label || (targetType === 'dictionaryEntry'
-          ? `业务字典：${name}`
-          : targetType === 'dimensionDefinition'
-            ? `业务维度：${name}`
-            : `业务公式：${name}`)
+        semanticAction,
+        label: label || resolveFieldBindingItemLabel(name, targetType, semanticAction)
       }
     })
     .filter(Boolean)
+}
+
+const resolveFieldBindingItemLabel = (name, targetType, semanticAction) => {
+  if (semanticAction === 'METRIC_SCOPE_UPDATE') return `指标口径：${name}`
+  if (semanticAction === 'METRIC_FORMULA_UPDATE') return `指标公式：${name}`
+  if (semanticAction === 'DIMENSION_BINDING') return `业务维度：${name}`
+  if (semanticAction === 'DICTIONARY_UPSERT') return `业务字典：${name}`
+  if (semanticAction === 'FIELD_BINDING') return `字段绑定：${name}`
+  if (targetType === 'dictionaryEntry') return `业务字典：${name}`
+  if (targetType === 'dimensionDefinition') return `业务维度：${name}`
+  return `业务公式：${name}`
 }
 
 const looksLikeExplicitDictionaryMutation = (question) => /(?:新增|增加|添加|创建|补充|修改|更新)?(?:业务字典|字典|词典|同义词|术语|映射)/.test(String(question || ''))
@@ -3839,11 +3892,20 @@ const resolveFieldBindingCardTitle = (question, intent, entries) => {
   const hasDelete = entries.some(item => String(item?.action || '').toUpperCase() === 'DELETE')
   const hasUpsert = entries.some(item => String(item?.action || '').toUpperCase() !== 'DELETE')
   const targetTypes = [...new Set(entries.map(item => String(item?.targetType || '').trim()).filter(Boolean))]
+  const semanticActions = [...new Set(entries.map(item => String(item?.semanticAction || '').trim().toUpperCase()).filter(Boolean))]
   const allDictionaryEntries = targetTypes.length === 1 && targetTypes[0] === 'dictionaryEntry'
   const allDimensions = targetTypes.length === 1 && targetTypes[0] === 'dimensionDefinition'
   const allMetrics = targetTypes.length === 1 && targetTypes[0] === 'metricDefinition'
+  const allScopeUpdates = semanticActions.length === 1 && semanticActions[0] === 'METRIC_SCOPE_UPDATE'
+  const allFormulaUpdates = semanticActions.length === 1 && semanticActions[0] === 'METRIC_FORMULA_UPDATE'
+  const allFieldBindings = semanticActions.length === 1 && semanticActions[0] === 'FIELD_BINDING'
+  const allDictionaryUpserts = semanticActions.length === 1 && semanticActions[0] === 'DICTIONARY_UPSERT'
+  const allDimensionBindings = semanticActions.length === 1 && semanticActions[0] === 'DIMENSION_BINDING'
 
   if (normalizedIntent === 'BIND_FIELDS') {
+    if (allFieldBindings) {
+      return hasDelete && !hasUpsert ? '字段解绑结果' : '字段绑定结果'
+    }
     if (looksLikeExplicitDictionaryMutation(q)) {
       return hasDelete && !hasUpsert ? '业务字典删除结果' : '业务字典映射结果'
     }
@@ -3854,6 +3916,18 @@ const resolveFieldBindingCardTitle = (question, intent, entries) => {
       return hasDelete && !hasUpsert ? '字段解绑结果' : '字段修正结果'
     }
     return hasDelete && !hasUpsert ? '字段解绑结果' : '字段修正结果'
+  }
+  if (allScopeUpdates) {
+    return hasDelete && !hasUpsert ? '指标口径删除结果' : '指标口径更新结果'
+  }
+  if (allFormulaUpdates) {
+    return hasDelete && !hasUpsert ? '指标公式删除结果' : '指标公式更新结果'
+  }
+  if (allDictionaryUpserts) {
+    return hasDelete && !hasUpsert ? '业务字典删除结果' : '业务字典映射结果'
+  }
+  if (allDimensionBindings) {
+    return hasDelete && !hasUpsert ? '业务维度删除结果' : '业务维度绑定结果'
   }
   if (allDictionaryEntries || /(业务字典|字典|词典|同义词|术语)/.test(q)) {
     if (hasDelete && !hasUpsert) return '业务字典删除结果'
@@ -4041,11 +4115,48 @@ const loadDashboardOptions = async () => {
   }
 }
 
+const buildPinChartPayload = (analysis = lastAnalysis.value) => {
+  if (!analysis) {
+    return null
+  }
+  const chartIdRaw = analysis?.queryHistoryId ?? analysis?.chartId ?? analysis?.historyId
+  const artifactIdRaw = analysis?.artifactId
+  const turnIdRaw = analysis?.assistantTurnId ?? analysis?.turnId
+  if ((chartIdRaw == null || chartIdRaw === '') && (artifactIdRaw == null || artifactIdRaw === '') && (turnIdRaw == null || turnIdRaw === '')) {
+    return null
+  }
+  return {
+    chartId: chartIdRaw == null || chartIdRaw === '' ? undefined : Number(chartIdRaw),
+    artifactId: artifactIdRaw == null || artifactIdRaw === '' ? undefined : Number(artifactIdRaw),
+    turnId: turnIdRaw == null || turnIdRaw === '' ? undefined : Number(turnIdRaw),
+    title: String(analysis?.sourceQuestion || '图表卡片').slice(0, 80),
+    chartType: analysis?.chartType || currentChartType.value || 'bar',
+    tableName: analysis?.tableName || '',
+    sql: analysis?.sql || '',
+    fieldMapping: analysis?.fieldMapping || {},
+    data: Array.isArray(analysis?.data) ? analysis.data : []
+  }
+}
+
+const pinLastAnalysisToDashboard = async (dashboardId, analysis = lastAnalysis.value) => {
+  const payload = buildPinChartPayload(analysis)
+  if (!payload) {
+    throw new Error('当前结果缺少可绑定的图表记录，暂时无法钉入看板。请重新完成一次对话查询后再试。')
+  }
+  const res = await axios.post(`${API_BASE}/api/c/dashboards/${dashboardId}/pin-chart`, payload)
+  const body = res.data
+  if (body.code && body.code !== 200) {
+    throw new Error(body.message || '钉入失败')
+  }
+  return body.data ?? body
+}
+
 const openPinDialog = async () => {
   if (!canPinLastAnalysis.value) {
     ElMessage.warning('暂无可钉入的图表结果')
     return
   }
+  pendingDashboardPinSource.value = null
   try {
     await loadDashboardOptions()
     if (!dashboardOptions.value.length) {
@@ -4059,43 +4170,108 @@ const openPinDialog = async () => {
 }
 
 const pinChartToDashboard = async () => {
-  if (!lastAnalysis.value || !pinDashboardId.value) {
+  const source = pendingDashboardPinSource.value || lastAnalysis.value
+  if (!source || !pinDashboardId.value) {
     ElMessage.warning('请选择目标看板')
     return
   }
-  const chartIdRaw = lastAnalysis.value?.queryHistoryId ?? lastAnalysis.value?.chartId
-  const artifactIdRaw = lastAnalysis.value?.artifactId
-  const turnIdRaw = lastAnalysis.value?.assistantTurnId ?? lastAnalysis.value?.turnId
-  if ((chartIdRaw == null || chartIdRaw === '') && (artifactIdRaw == null || artifactIdRaw === '') && (turnIdRaw == null || turnIdRaw === '')) {
+  if (!buildPinChartPayload(source)) {
     ElMessage.warning('当前结果缺少可绑定的图表记录，暂时无法钉入看板。请重新完成一次对话查询后再试。')
     return
   }
   pinning.value = true
   try {
-    const payload = {
-      chartId: chartIdRaw == null || chartIdRaw === '' ? undefined : Number(chartIdRaw),
-      artifactId: artifactIdRaw == null || artifactIdRaw === '' ? undefined : Number(artifactIdRaw),
-      turnId: turnIdRaw == null || turnIdRaw === '' ? undefined : Number(turnIdRaw),
-      title: String(lastAnalysis.value?.sourceQuestion || '图表卡片').slice(0, 80),
-      chartType: lastAnalysis.value?.chartType || currentChartType.value || 'bar',
-      tableName: lastAnalysis.value?.tableName || '',
-      sql: lastAnalysis.value?.sql || '',
-      fieldMapping: lastAnalysis.value?.fieldMapping || {},
-      data: Array.isArray(lastAnalysis.value?.data) ? lastAnalysis.value.data : []
-    }
-    const res = await axios.post(`${API_BASE}/api/c/dashboards/${pinDashboardId.value}/pin-chart`, payload)
-    const body = res.data
-    if (body.code && body.code !== 200) {
-      throw new Error(body.message || '钉入失败')
-    }
+    await pinLastAnalysisToDashboard(pinDashboardId.value, source)
     ElMessage.success('图表已钉入看板')
     await loadPinnedHistoryIds()
     pinDialogVisible.value = false
+    pendingDashboardPinSource.value = null
   } catch (error) {
     ElMessage.error(error.message || '钉入看板失败')
   } finally {
     pinning.value = false
   }
+}
+
+const isDashboardPinResult = (data, sourceQuestion = '') => {
+  const intent = String(data?.smartIntent || data?.responseType || data?.draft?.primaryIntent || '').trim().toUpperCase()
+  if (intent === 'DASHBOARD_PIN') return true
+  const text = String(sourceQuestion || data?.queryQuestion || '').trim()
+  return Boolean(text)
+    && /看板|仪表盘|大屏|驾驶舱/.test(text)
+    && /钉|保存到|保存至|存到|放到|放入|加入|添加到|挂到|挂入/.test(text)
+}
+
+const isDashboardPinQuestion = (text) => {
+  const q = String(text || '').trim()
+  if (!q) return false
+  const hasPinAction = /钉|保存到|保存至|存到|放到|放入|加入|添加到|挂到|挂入/.test(q)
+  if (!hasPinAction) return false
+  if (/看板|仪表盘|大屏|驾驶舱/.test(q)) return true
+  return /(?:当前|刚才|上一轮|这个|这张).*(?:图|图表|卡片|结果)|(?:图|图表|卡片|结果).*(?:当前|刚才|上一轮|这个|这张)/.test(q)
+}
+
+const applyDashboardPinResult = async (data, sourceQuestion, updateStreamMessage, thinkingLogs = []) => {
+  const message = String(data?.message || '').trim() || '看板钉入动作已处理'
+  const status = String(data?.dashboardActionStatus || '').trim().toUpperCase()
+  const candidates = Array.isArray(data?.dashboardCandidates) ? data.dashboardCandidates : []
+  const logs = [
+    ...thinkingLogs,
+    `统一语义路由：识别意图 ${data?.smartIntent || data?.responseType || 'DASHBOARD_PIN'}`,
+    status ? `看板动作状态：${status}` : '',
+    data?.dashboardKeyword ? `目标看板关键词：${data.dashboardKeyword}` : '',
+    message
+  ].filter(Boolean).slice(0, 10)
+
+  updateStreamMessage({
+    content: message,
+    sql: '',
+    thinkingLogs: logs,
+    thinkingCollapsed: true,
+    sourceQuestion,
+    sourceTableName: String(data?.queryTableName || data?.tableName || selectedTableName.value || '').trim(),
+    turnId: data?.assistantTurnId == null ? null : String(data.assistantTurnId),
+    parentTurnId: data?.parentTurnId == null ? null : String(data.parentTurnId),
+    artifactId: data?.artifactId == null ? null : String(data.artifactId),
+    artifactIds: Array.isArray(data?.artifactIds) ? data.artifactIds.map(item => String(item || '')).filter(Boolean) : []
+  })
+
+  if (!data?.requiresConfirmation && status === 'PINNED') {
+    ElMessage.success(message)
+    await loadPinnedHistoryIds()
+    return true
+  }
+
+  if (status === 'NO_CHART') {
+    ElMessage.warning(message)
+    return true
+  }
+
+  const source = data?.source && typeof data.source === 'object' ? data.source : null
+  const hasPinnableSource = Boolean(buildPinChartPayload(source || lastAnalysis.value))
+  if (source) {
+    pendingDashboardPinSource.value = {
+      ...source,
+      sourceQuestion: String(source.sourceQuestion || source.title || sourceQuestion || '').trim()
+    }
+  }
+
+  if (candidates.length || hasPinnableSource) {
+    try {
+      await loadDashboardOptions()
+      const candidateIdSet = new Set(candidates.map(item => String(item?.id || '')).filter(Boolean))
+      const matched = dashboardOptions.value.find(item => candidateIdSet.has(String(item.id)))
+      if (matched) {
+        pinDashboardId.value = matched.id
+      }
+      if (dashboardOptions.value.length && hasPinnableSource) {
+        pinDialogVisible.value = true
+      }
+    } catch (error) {
+      ElMessage.error(error.message || '加载看板列表失败')
+    }
+  }
+  return true
 }
 
 const isAbortLikeError = (error) => {
@@ -4384,8 +4560,9 @@ const sendQuestion = async (options = {}) => {
   if (selectedTableName.value !== queryTableName) {
     selectedTableName.value = queryTableName
   }
-  const semanticDraft = shouldCreateBusinessModelFromQuestion(userQuestion) ? resolveSemanticBusinessDraft(userQuestion) : null
-  const businessModelIntent = shouldUseBusinessModelAgent(userQuestion) && !isRegenerate
+  const semanticDraft = null
+  const businessModelIntent = false && shouldUseBusinessModelAgent(userQuestion) && !isRegenerate
+  const dashboardPinIntent = isDashboardPinQuestion(userQuestion) && !isRegenerate
   stopRequested.value = false
   messages.value.push({
     role: 'user',
@@ -4521,6 +4698,7 @@ const sendQuestion = async (options = {}) => {
     const sourceTableName = String(data?.tableName || queryTableName || '').trim()
     const fallbackTag = data.fallbackUsed ? '（规则兜底）' : ''
     const compactLogs = thinkingLogs.slice(0, 8)
+    const fieldBindingResults = normalizeFieldBindingResults(data?.fieldBindingResults)
     lastAnalysis.value = {
       ...data,
       sourceQuestion: userQuestion,
@@ -4534,6 +4712,12 @@ const sendQuestion = async (options = {}) => {
       sql: data.sql,
       thinkingLogs: compactLogs,
       thinkingCollapsed: true,
+      fieldBindingResults,
+      fieldBindingTitle: resolveFieldBindingCardTitle(
+        userQuestion,
+        data?.intent || data?.smartIntent || data?.responseType,
+        fieldBindingResults
+      ),
       sourceQuestion: userQuestion,
       sourceTableName,
       turnId: data?.assistantTurnId == null ? null : String(data.assistantTurnId),
@@ -4552,6 +4736,20 @@ const sendQuestion = async (options = {}) => {
     } else {
       ensureChatChartInstance()?.clear()
       ElMessage.warning('查询成功，但没有符合条件的数据')
+    }
+
+    if (data?.handled && String(data?.responseType || data?.smartIntent || '').startsWith('BUSINESS_MODEL')) {
+      syncBusinessModelContext(data)
+      if (data.refreshBusinessModels) {
+        loadBusinessModels()
+      }
+      if (data.openBusinessDictionary) {
+        const focusId = data.focusModelId ?? data.modelId ?? data.appliedModelId ?? activeBusinessModelId.value
+        if (focusId != null && focusId !== '') {
+          businessDictionaryFocusModelId.value = focusId
+          businessDictionaryPanelVisible.value = true
+        }
+      }
     }
 
     if (activeModule.value === 'chat') {
@@ -4584,6 +4782,10 @@ const sendQuestion = async (options = {}) => {
       const params = new URLSearchParams({ question: userQuestion, tableName: queryTableName })
       if (activeChatSessionId.value) params.set('conversationId', activeChatSessionId.value)
       if (branchParentTurnId) params.set('parentTurnId', branchParentTurnId)
+      if (selectedTableName.value) params.set('selectedTableName', selectedTableName.value)
+      if (activeBusinessModelId.value != null) params.set('activeBusinessModelId', String(activeBusinessModelId.value))
+      if (lastCreatedBusinessModelId.value != null) params.set('lastCreatedBusinessModelId', String(lastCreatedBusinessModelId.value))
+      if (lastAppliedBusinessModelId.value != null) params.set('lastAppliedBusinessModelId', String(lastAppliedBusinessModelId.value))
       const response = await fetch(`${API_BASE}/api/chat/ask-stream?${params.toString()}`, {
         method: 'GET',
         headers: {
@@ -4714,15 +4916,33 @@ const sendQuestion = async (options = {}) => {
         updateStreamMessage({ content: '已手动停止本次生成。' })
         return
       }
+      if (dashboardPinIntent) {
+        const guardLine = '副作用保护：看板写入类指令已停止普通接口重放，避免重复钉入'
+        if (!seenThinkingSet.has(guardLine)) {
+          seenThinkingSet.add(guardLine)
+          thinkingLogs.push(guardLine)
+        }
+        updateStreamMessage({
+          content: `看板钉入的流式结果未完整返回（${streamError.message || '未知错误'}），已停止自动重试以避免重复钉入。请刷新看板确认结果；重复提交也会自动去重。`,
+          sql: '',
+          thinkingLogs: thinkingLogs.slice(0, 8),
+          thinkingCollapsed: true
+        })
+        return
+      }
       let fallbackData
       const fallbackController = new AbortController()
       streamAbortController.value = fallbackController
       try {
-        fallbackData = unwrap(await axios.post(`${API_BASE}/api/chat/ask-enhanced`, {
+        fallbackData = unwrap(await axios.post(`${API_BASE}/api/chat/ask-smart`, {
           question: userQuestion,
           tableName: queryTableName,
           conversationId: activeChatSessionId.value || undefined,
-          parentTurnId: branchParentTurnId || undefined
+          parentTurnId: branchParentTurnId || undefined,
+          selectedTableName: selectedTableName.value || undefined,
+          activeBusinessModelId: activeBusinessModelId.value ?? undefined,
+          lastCreatedBusinessModelId: lastCreatedBusinessModelId.value ?? undefined,
+          lastAppliedBusinessModelId: lastAppliedBusinessModelId.value ?? undefined
         }, {
           signal: fallbackController.signal
         }))
@@ -4753,10 +4973,26 @@ const sendQuestion = async (options = {}) => {
         return
       }
       data = fallbackData
-      ElMessage.warning(`流式通道不可用（${streamError.message}），已自动切换普通模式`)
+      if (!shouldUseBusinessModelAgent(userQuestion)) {
+        ElMessage.warning(`流式通道不可用（${streamError.message}），已自动切换普通模式`)
+      }
     }
 
     if (!isCurrentRequest()) {
+      return
+    }
+    if (isDashboardPinResult(data, userQuestion)) {
+      await applyDashboardPinResult(data, userQuestion, updateStreamMessage, thinkingLogs)
+      if (data?.conversationId) {
+        activeChatSessionId.value = String(data.conversationId)
+      }
+      clearActiveBranchParent()
+      await loadRecentChatQueries()
+      await loadChatSessions()
+
+      if (isAdminUser.value) {
+        await loadAuditLogs()
+      }
       return
     }
     applyAnalysisResult(data)

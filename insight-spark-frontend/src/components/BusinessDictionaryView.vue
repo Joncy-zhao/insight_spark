@@ -375,6 +375,49 @@
           </el-table-column>
         </el-table>
       </div>
+
+      <div class="panel dimension-panel">
+        <div class="panel-header">
+          <div>
+            <h3>业务维度</h3>
+            <p>维护维度名称与模型字段绑定，保存后参与分组、筛选和对比查询。</p>
+          </div>
+          <el-button size="small" @click="addDimensionRow">新增维度</el-button>
+        </div>
+
+        <el-table :data="dimensionSystem" height="240" empty-text="暂无业务维度" table-layout="fixed">
+          <el-table-column label="维度名称" min-width="120">
+            <template #default="{ row }">
+              <el-input v-model="row.name" size="small" placeholder="例如：城市、省份、区域" />
+            </template>
+          </el-table-column>
+          <el-table-column label="字段绑定" min-width="140">
+            <template #default="{ row }">
+              <el-select
+                v-model="row.field"
+                size="small"
+                class="full-width"
+                filterable
+                clearable
+                default-first-option
+                placeholder="请选择字段"
+              >
+                <el-option
+                  v-for="field in editorFieldOptions"
+                  :key="field.columnName"
+                  :label="field.optionLabel"
+                  :value="field.columnName"
+                />
+              </el-select>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="70">
+            <template #default="{ $index }">
+              <el-button size="small" type="danger" link @click="removeDimensionRow($index)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
     </div>
 
     <div v-else class="panel">
@@ -483,6 +526,7 @@ const modelSortBy = ref('updated_desc')
 const enterpriseKeyword = ref('')
 const dictionaryEntries = ref([])
 const metricDefinitions = ref([])
+const dimensionSystem = ref([])
 const createDialogVisible = ref(false)
 const createDialogLoading = ref(false)
 const pendingFocusModelId = ref(null)
@@ -668,7 +712,7 @@ const normalizeDictionaryEntries = (entries) => {
   if (!Array.isArray(entries)) return []
   return entries.map(item => ({
     term: String(item?.term || '').trim(),
-    field: String(item?.field || '').trim(),
+    field: extractModelFieldRef(item),
     synonyms: String(item?.synonyms || '').trim()
   }))
 }
@@ -677,10 +721,27 @@ const normalizeMetricDefinitions = (entries) => {
   if (!Array.isArray(entries)) return []
   return entries.map(item => ({
     name: String(item?.name || '').trim(),
-    field: String(item?.field || '').trim(),
+    field: extractModelFieldRef(item),
     aggregation: String(item?.aggregation || 'SUM').trim().toUpperCase() || 'SUM',
     formula: formatFormulaForDisplay(item?.formula)
   }))
+}
+
+const extractModelFieldRef = (item) => {
+  const keys = ['field', 'columnName', 'sourceFieldName', 'fieldName', 'dimensionField', 'targetField']
+  for (const key of keys) {
+    const value = String(item?.[key] || '').trim()
+    if (value) return value
+  }
+  return ''
+}
+
+const normalizeDimensionSystem = (entries) => {
+  if (!Array.isArray(entries)) return []
+  return entries.map(item => ({
+    name: String(item?.name || item?.term || '').trim(),
+    field: extractModelFieldRef(item)
+  })).filter(item => item.name || item.field)
 }
 
 const resolveFieldLabel = (columnName) => {
@@ -726,6 +787,7 @@ const clearEditor = () => {
   editingRequirement.value = ''
   dictionaryEntries.value = []
   metricDefinitions.value = []
+  dimensionSystem.value = []
 }
 
 const applyModel = (model) => {
@@ -740,6 +802,7 @@ const applyModel = (model) => {
   const json = parseMaybeJson(model.modelJson)
   dictionaryEntries.value = normalizeDictionaryEntries(json.dictionaryEntries)
   metricDefinitions.value = normalizeMetricDefinitions(json.metricDefinitions)
+  dimensionSystem.value = normalizeDimensionSystem(json.dimensionSystem)
 }
 
 const ensureFieldOptionsLoaded = async (tableName) => {
@@ -962,6 +1025,21 @@ const removeMetricRow = (index) => {
   metricDefinitions.value = metricDefinitions.value.filter((_, i) => i !== index)
 }
 
+const addDimensionRow = () => {
+  if (!editingModel.value) {
+    ElMessage.warning('请先选择或创建模型')
+    return
+  }
+  dimensionSystem.value = [
+    ...dimensionSystem.value,
+    { name: '', field: '' }
+  ]
+}
+
+const removeDimensionRow = (index) => {
+  dimensionSystem.value = dimensionSystem.value.filter((_, i) => i !== index)
+}
+
 const saveModel = async () => {
   if (!editingModel.value?.id) {
     ElMessage.warning('请先选择业务模型')
@@ -979,7 +1057,8 @@ const saveModel = async () => {
     metricDefinitions: metricDefinitions.value.map(item => ({
       ...item,
       formula: rewriteFormulaToColumnNames(item.formula)
-    }))
+    })),
+    dimensionSystem: normalizeDimensionSystem(dimensionSystem.value)
   }
   await updateBusinessModel(editingModel.value.id, payload)
   ElMessage.success('业务字典与业务公式已保存')

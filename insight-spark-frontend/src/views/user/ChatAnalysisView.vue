@@ -1607,6 +1607,7 @@ import {
   getAdvancedAlertRule,
   listAdvancedAlertEvents,
   listAdvancedAlertRules,
+  saveAdvancedAnalysisChatRecord,
   saveAdvancedAnalysisPlan,
   saveAdvancedAlertRule,
   parseAdvancedAnalysisIntent,
@@ -2332,6 +2333,37 @@ const parseChartNumber = (value) => {
   return Number.isFinite(parsed) ? parsed : null
 }
 
+const hasExplicitPreviousResultReference = (text = '') => /刚才|上一轮|上一次|这个图|这张图|当前图|这个走势|基于这个|基于刚才|按刚才|按这个|用刚才|用这个/.test(String(text || ''))
+
+const hasExplicitForecastText = (text = '') => /预测|预估|推算|未来|后面|下个月|下季度|下一季度|后续|大概会到|会到多少|继续涨|继续跌|往后推|趋势延伸|forecast|prediction/i.test(String(text || ''))
+
+const looksLikeTemporalName = (value) => {
+  const text = String(value || '').trim()
+  return /^\d{4}([-/.年]\d{1,2})?([-/.月]\d{1,2})?.*/.test(text) ||
+    /^\d{4}-Q[1-4]$/i.test(text) ||
+    /^\d{4}-W\d{1,2}$/i.test(text)
+}
+
+const validateQueryResultForecastSeries = (series = []) => {
+  const rows = Array.isArray(series) ? series : []
+  if (rows.length < 3) {
+    return { ok: false, reason: '上一轮查询结果不足 3 个有效时间点，建议改用原始数据源重新预测。' }
+  }
+  const temporalCount = rows.filter(item => looksLikeTemporalName(item?.name)).length
+  if (temporalCount < Math.max(3, Math.ceil(rows.length * 0.6))) {
+    return { ok: false, reason: '上一轮查询结果不是稳定的时间序列，建议改用原始数据源重新预测。' }
+  }
+  const numericRows = rows.filter(item => Number.isFinite(Number(item?.value)))
+  if (numericRows.length < 3) {
+    return { ok: false, reason: '上一轮查询结果未包含有效数值，建议改用原始数据源重新预测。' }
+  }
+  const hasNonZero = numericRows.some(item => Math.abs(Number(item.value)) > 0.000001)
+  if (!hasNonZero) {
+    return { ok: false, reason: '上一轮查询结果未包含有效数值，建议改用原始数据源重新预测。' }
+  }
+  return { ok: true, reason: '' }
+}
+
 const getRowValueByCandidates = (row, candidates = []) => {
   if (!row || typeof row !== 'object') return undefined
   for (const key of candidates) {
@@ -3052,12 +3084,26 @@ const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = 
       if (!confirmedPayload) {
         throw new Error('已取消预测参数确认')
       }
-      const chartSeries = resolveLastAnalysisTimeSeries()
-      const hasFilterExpression = Boolean(String(confirmedPayload.filterExpression || '').trim())
-      if (!hasFilterExpression && chartSeries.length >= 3) {
+      const payload = {
+        ...inferredPayload,
+        ...confirmedPayload
+      }
+      if (!payload.timeField || !payload.metricField) {
+        const chartSeries = resolveLastAnalysisTimeSeries()
+        const seriesCheck = validateQueryResultForecastSeries(chartSeries)
+        if (!hasExplicitForecastText(text) || !hasExplicitPreviousResultReference(text)) {
+          throw new Error('缺少可用于真实预测的时间字段或数值指标，请先选择字段后再预测。')
+        }
+        if (!seriesCheck.ok) {
+          throw new Error(seriesCheck.reason)
+        }
+        const metric = String(llmIntent.metric || lastAnalysis?.value?.fieldMapping?.metric || inferMetricFromQuestion(text) || '').trim()
+        if (!metric) {
+          throw new Error('上一轮查询结果缺少明确指标，建议改用原始数据源重新预测。')
+        }
         const result = await runAdvancedForecastFromSeries({
           tableName,
-          metric: llmIntent.metric || lastAnalysis?.value?.fieldMapping?.metric || inferMetricFromQuestion(text),
+          metric,
           series: chartSeries,
           horizon: normalizeHorizonCount(mergedParams.horizon),
           algorithm: mergedParams.algorithm,
@@ -3067,13 +3113,6 @@ const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = 
           seasonLength: mergedParams.seasonLength
         }, signal ? { signal } : undefined)
         return buildAnalysisFromRealForecast(result, text, { ...mergedParams, sourceSeries: chartSeries }, llmIntent, fieldMeta)
-      }
-      const payload = {
-        ...inferredPayload,
-        ...confirmedPayload
-      }
-      if (!payload.timeField || !payload.metricField) {
-        throw new Error('缺少可用于真实预测的时间字段或数值指标，且上一轮查询结果不足以预测')
       }
       const result = await runAdvancedForecast(payload, signal ? { signal } : undefined)
       return buildAnalysisFromRealForecast(result, text, {
@@ -3348,6 +3387,83 @@ const buildAdvancedAnalysisMessage = (analysis, userText = '', thinkingLogs = []
   }
 }
 
+const nextAdvancedClientMessageId = () => {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID()
+  return `advanced-chat-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+const applyAdvancedChatRecord = (message, record = {}) => {
+  if (!message || !record || typeof record !== 'object') return
+  const patch = {
+    conversationId: record.conversationId == null ? undefined : String(record.conversationId),
+    userTurnId: record.userTurnId == null ? undefined : String(record.userTurnId),
+    assistantTurnId: record.assistantTurnId == null ? undefined : String(record.assistantTurnId),
+    turnId: record.assistantTurnId == null ? undefined : String(record.assistantTurnId),
+    artifactId: record.artifactId == null ? undefined : String(record.artifactId),
+    chatRecordStatus: record.recorded === false ? 'failed' : 'saved',
+    chatRecord: record
+  }
+  Object.entries(patch).forEach(([key, value]) => {
+    if (value !== undefined) message[key] = value
+  })
+  if (message.advancedAnalysis && typeof message.advancedAnalysis === 'object') {
+    message.advancedAnalysis = {
+      ...message.advancedAnalysis,
+      conversationId: patch.conversationId ?? message.advancedAnalysis.conversationId,
+      userTurnId: patch.userTurnId ?? message.advancedAnalysis.userTurnId,
+      assistantTurnId: patch.assistantTurnId ?? message.advancedAnalysis.assistantTurnId,
+      artifactId: patch.artifactId ?? message.advancedAnalysis.artifactId,
+      chatRecord: record
+    }
+  }
+  if (record.conversationId != null && activeChatSessionId?.value !== undefined) {
+    activeChatSessionId.value = String(record.conversationId)
+  }
+}
+
+const persistAdvancedAnalysisMessage = async (message, analysis, userText = '', thinkingLogs = [], llmIntent = {}) => {
+  if (!analysis || !message || message.chatRecordStatus === 'saved' || message.chatRecordStatus === 'saving') return null
+  message.chatRecordStatus = 'saving'
+  const clientMessageId = message.clientMessageId || nextAdvancedClientMessageId()
+  message.clientMessageId = clientMessageId
+  const payload = {
+    conversationId: activeChatSessionId?.value || undefined,
+    parentTurnId: activeBranchParentTurnMeta?.value?.turnId || undefined,
+    question: userText,
+    tableName: analysis.tableName || selectedTableName?.value || '',
+    type: analysis.type,
+    analysis: withAdvancedChartRecommendation(analysis),
+    message: message.content,
+    llmIntent: llmIntent || {},
+    thinkingLogs: Array.isArray(thinkingLogs) ? thinkingLogs.slice(0, 12) : [],
+    clientMessageId
+  }
+  try {
+    const record = await saveAdvancedAnalysisChatRecord(payload)
+    applyAdvancedChatRecord(message, record)
+    try {
+      if (typeof syncChatSessionListItem === 'function') {
+        syncChatSessionListItem({
+          id: record?.conversationId || activeChatSessionId?.value,
+          title: userText || analysis.title || '高级分析',
+          summary: message.content,
+          tableName: payload.tableName,
+          latestAdvancedType: analysis.type,
+          updatedAt: new Date().toISOString()
+        })
+      }
+    } catch (syncError) {
+      console.warn('sync advanced chat session item failed:', syncError)
+    }
+    return record
+  } catch (error) {
+    message.chatRecordStatus = 'failed'
+    console.warn('save advanced analysis chat record failed:', error)
+    ElMessage.warning('高级分析卡片已生成，但保存到会话历史失败，刷新后可能无法恢复')
+    return null
+  }
+}
+
 const pushAdvancedAnalysisMessage = (analysis, userText = '') => {
   messages.value.push(buildAdvancedAnalysisMessage(analysis, userText))
   scrollChatToBottom()
@@ -3619,7 +3735,9 @@ const sendChatQuestion = async () => {
       })
       return
     }
-    messages.value.splice(placeholderIndex, 1, buildAdvancedAnalysisMessage(analysis, text, thinkingLogs))
+    const advancedMessage = buildAdvancedAnalysisMessage(analysis, text, thinkingLogs)
+    messages.value.splice(placeholderIndex, 1, advancedMessage)
+    await persistAdvancedAnalysisMessage(advancedMessage, analysis, text, thinkingLogs, llmIntent || {})
     clearActiveBranchParent()
     scrollChatToBottom()
   } catch (error) {

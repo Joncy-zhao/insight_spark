@@ -9,11 +9,13 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.Locale;
 
@@ -269,6 +271,12 @@ public class ChatBiService {
             generationTrace.add("nl2sqlEngine=java-fallback;reason=" + fallbackReason);
         }
 
+        SemanticSqlCorrection semanticCorrection = applySemanticSqlGuard(question, queryTableName, fields,
+                generatedSql, chartType, fieldMapping, generationTrace);
+        generatedSql = semanticCorrection.sql();
+        chartType = semanticCorrection.chartType();
+        fieldMapping = semanticCorrection.fieldMapping();
+
         log.info("Generated SQL: {}", generatedSql);
         ensureNotCancelled("SQL 审计前");
 
@@ -421,7 +429,11 @@ public class ChatBiService {
 
         attachChartEncodingSpec(response, chartType, aiResult.orElse(null));
         applyConfiguredChartRecommendation(response, chartRecommendation);
-        applyAutoForecastIfNeeded(response, chartRecommendation, fieldMapping, activeTable, question, generationTrace);
+        if (!Boolean.FALSE.equals(safeOptions.get("autoForecastEnabled"))) {
+            applyAutoForecastIfNeeded(response, chartRecommendation, fieldMapping, activeTable, question, generationTrace);
+        } else {
+            generationTrace.add("autoForecast=SKIPPED;reason=SMART_QUERY_INTENT");
+        }
 
         return response;
     }
@@ -495,23 +507,45 @@ public class ChatBiService {
             generationTrace.add("autoForecast=SKIPPED;reason=DETAIL_INTENT");
             return;
         }
+        if (!isExplicitForecastIntent(question)) {
+            generationTrace.add("autoForecast=SKIPPED;reason=NO_EXPLICIT_FORECAST_INTENT");
+            return;
+        }
+        if (!isPreviousResultForecastIntent(question)) {
+            generationTrace.add("autoForecast=SKIPPED;reason=PREFER_REAL_SOURCE_FORECAST");
+            return;
+        }
         if (!shouldAutoRunForecast(response, recommendation, rows)) {
             return;
         }
         List<Map<String, Object>> sourceSeries = buildForecastSourceSeries(rows);
+        if (!looksLikeTemporalSeries(sourceSeries)) {
+            generationTrace.add("autoForecast=SKIPPED;reason=NON_TEMPORAL_SERIES");
+            return;
+        }
         if (sourceSeries.size() < 3) {
             generationTrace.add("autoForecast=SKIPPED;reason=INSUFFICIENT_POINTS;points=" + sourceSeries.size());
+            return;
+        }
+        if (isAllZeroSeries(sourceSeries)) {
+            response.put("autoForecastRejected", true);
+            response.put("autoForecastRejectReason", "上一轮查询结果未包含有效数值，建议改用原始数据源重新预测。");
+            generationTrace.add("autoForecast=SKIPPED;reason=ALL_ZERO_SERIES");
+            return;
+        }
+        String metricLabel = Objects.toString(firstNonBlank(
+                fieldMapping == null ? null : fieldMapping.get("metric"),
+                fieldMapping == null ? null : fieldMapping.get("metricKey"),
+                response.get("metricField")), "").trim();
+        if (metricLabel.isBlank()) {
+            generationTrace.add("autoForecast=SKIPPED;reason=UNKNOWN_METRIC");
             return;
         }
         try {
             Map<String, Object> prediction = predictionConfig(response, recommendation);
             Map<String, Object> forecastRequest = new LinkedHashMap<>();
             forecastRequest.put("tableName", tableName);
-            forecastRequest.put("metric", firstNonBlank(
-                    fieldMapping.get("metric"),
-                    fieldMapping.get("metricKey"),
-                    response.get("metricField"),
-                    "核心指标"));
+            forecastRequest.put("metric", metricLabel);
             forecastRequest.put("series", sourceSeries);
             forecastRequest.put("horizon", prediction.getOrDefault("horizon", 3));
             forecastRequest.put("algorithm", prediction.getOrDefault("algorithm", "Holt-Winters"));
@@ -547,6 +581,20 @@ public class ChatBiService {
                 recommendation == null ? "" : recommendation.getOrDefault("scenarioType", "")), "");
         return "TIME_SERIES".equalsIgnoreCase(scenario) || "line".equalsIgnoreCase(Objects.toString(
                 recommendation == null ? "" : recommendation.getOrDefault("chartType", ""), ""));
+    }
+
+    private boolean isExplicitForecastIntent(String question) {
+        String text = Objects.toString(question, "");
+        String lower = text.toLowerCase(Locale.ROOT);
+        return containsAny(lower, "预测", "预估", "推算", "未来", "后面", "下个月", "下季度", "下一季度",
+                "后续", "大概会到", "会到多少", "继续涨", "继续跌", "往后推", "趋势延伸")
+                || lower.contains("forecast") || lower.contains("prediction");
+    }
+
+    private boolean isPreviousResultForecastIntent(String question) {
+        String text = Objects.toString(question, "").toLowerCase(Locale.ROOT);
+        return containsAny(text, "刚才", "上一轮", "上一次", "这个图", "这张图", "当前图", "这个走势",
+                "基于这个", "基于刚才", "按刚才", "按这个", "用刚才", "用这个");
     }
 
     private boolean isExplicitDetailIntent(String question) {
@@ -611,7 +659,7 @@ public class ChatBiService {
                 continue;
             }
             String name = Objects.toString(firstNonBlankValue(row, "name", "dim_name", "dimension"), "").trim();
-            Double value = toDouble(firstNonBlankValue(row, "value", "metric_value", "metric"));
+            Double value = toDouble(firstNonBlankValue(row, "value", "history", "metric_value", "metric", "amount", "total"));
             if (name.isBlank() || value == null) {
                 continue;
             }
@@ -621,6 +669,40 @@ public class ChatBiService {
             series.add(item);
         }
         return series;
+    }
+
+    private boolean looksLikeTemporalSeries(List<Map<String, Object>> series) {
+        if (series == null || series.size() < 3) {
+            return false;
+        }
+        int temporalCount = 0;
+        for (Map<String, Object> item : series) {
+            String name = Objects.toString(item.get("name"), "").trim();
+            if (name.matches("\\d{4}([-/.年]\\d{1,2})?([-/.月]\\d{1,2})?.*")
+                    || name.matches("\\d{4}-Q[1-4]")
+                    || name.matches("\\d{4}-W\\d{1,2}")) {
+                temporalCount++;
+            }
+        }
+        return temporalCount >= Math.max(3, (int) Math.ceil(series.size() * 0.6D));
+    }
+
+    private boolean isAllZeroSeries(List<Map<String, Object>> series) {
+        if (series == null || series.isEmpty()) {
+            return true;
+        }
+        int numericCount = 0;
+        for (Map<String, Object> item : series) {
+            Double value = toDouble(item == null ? null : item.get("value"));
+            if (value == null) {
+                continue;
+            }
+            numericCount++;
+            if (Math.abs(value) > 0.000001D) {
+                return false;
+            }
+        }
+        return numericCount == 0 || numericCount == series.size();
     }
 
     private void mergeForecastResult(Map<String, Object> response,
@@ -963,6 +1045,556 @@ public class ChatBiService {
         return jdbcTemplate.queryForList(sql);
     }
 
+    private record SemanticSqlCorrection(String sql, String chartType, Map<String, Object> fieldMapping) {
+    }
+
+    private SemanticSqlCorrection applySemanticSqlGuard(String question, String queryTableName,
+            List<Map<String, Object>> fields, String generatedSql, String chartType,
+            Map<String, Object> fieldMapping, List<String> generationTrace) {
+        SemanticSqlCorrection dataProfileCorrection = applyGeoValueDataProfileGuard(question, queryTableName,
+                fields, generatedSql, chartType, fieldMapping, generationTrace);
+        if (!Objects.equals(dataProfileCorrection.sql(), generatedSql)) {
+            return dataProfileCorrection;
+        }
+
+        SemanticSqlCorrection valueFilterCorrection = applyValueFilterDimensionConsistencyGuard(question, queryTableName,
+                fields, generatedSql, chartType, fieldMapping, generationTrace);
+        if (!Objects.equals(valueFilterCorrection.sql(), generatedSql)) {
+            return valueFilterCorrection;
+        }
+
+        Set<String> macroRegionValues = extractMacroRegionValues(question);
+        if (macroRegionValues.isEmpty() || fields == null || fields.isEmpty()) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        Map<String, Object> regionField = findMacroRegionField(fields);
+        if (regionField == null) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        String regionColumn = fieldColumn(regionField);
+        boolean provinceBreakdown = asksProvinceBreakdown(question);
+        Map<String, Object> provinceField = provinceBreakdown ? findProvinceField(fields) : null;
+        Map<String, Object> dimensionField = provinceField == null ? regionField : provinceField;
+        String dimensionColumn = fieldColumn(dimensionField);
+        String currentDimension = Objects.toString(fieldMapping == null ? "" : fieldMapping.get("dimensionKey"), "").trim();
+        if (regionColumn.isBlank() || dimensionColumn.isBlank()) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        if (!provinceBreakdown && regionColumn.equals(currentDimension)) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        Map<String, Object> metricField = findMetricField(fields, fieldMapping, question);
+        if (metricField == null) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        String metricColumn = fieldColumn(metricField);
+        if (metricColumn.isBlank()) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+
+        StringBuilder sql = new StringBuilder();
+        sql.append("SELECT `").append(dimensionColumn).append("` AS dim_name, ")
+                .append("SUM(CAST(NULLIF(`").append(metricColumn).append("`, '') AS DECIMAL(18,2))) AS metric_value ")
+                .append("FROM `").append(queryTableName).append("` WHERE `").append(dimensionColumn)
+                .append("` IS NOT NULL AND `").append(dimensionColumn).append("` <> '' ");
+        sql.append("AND (");
+        int index = 0;
+        for (String value : macroRegionValues) {
+            if (index++ > 0) {
+                sql.append(" OR ");
+            }
+            String escapedValue = escapeSqlLiteral(value);
+            sql.append("`").append(regionColumn).append("` = '").append(escapedValue).append("'")
+                    .append(" OR `").append(regionColumn).append("` LIKE '%").append(escapedValue).append("%'");
+        }
+        sql.append(") ");
+        appendRecentTimeFilter(sql, queryTableName, fields, question);
+        sql.append("GROUP BY `").append(dimensionColumn).append("` ORDER BY metric_value DESC LIMIT 30");
+
+        Map<String, Object> correctedMapping = new LinkedHashMap<>(fieldMapping == null ? Map.of() : fieldMapping);
+        correctedMapping.put("dimension", fieldDisplayName(dimensionField));
+        correctedMapping.put("dimensionKey", dimensionColumn);
+        correctedMapping.put("dimensionExpr", "`" + dimensionColumn + "`");
+        correctedMapping.put("metric", fieldDisplayName(metricField));
+        correctedMapping.put("metricKey", metricColumn);
+        correctedMapping.put("metricExpr",
+                "SUM(CAST(NULLIF(`" + metricColumn + "`, '') AS DECIMAL(18,2)))");
+
+        String reason = provinceField == null
+                ? "MACRO_REGION_FIELD_CORRECTION"
+                : "MACRO_REGION_FILTER_WITH_PROVINCE_DIMENSION";
+        generationTrace.add("semanticSqlGuard=APPLIED;reason=" + reason + ";from="
+                + currentDimension + ";to=" + dimensionColumn + ";filter=" + regionColumn
+                + ";values=" + String.join(",", macroRegionValues));
+        return new SemanticSqlCorrection(sql.toString(), "bar", correctedMapping);
+    }
+
+    private SemanticSqlCorrection applyGeoValueDataProfileGuard(String question, String queryTableName,
+            List<Map<String, Object>> fields, String generatedSql, String chartType,
+            Map<String, Object> fieldMapping, List<String> generationTrace) {
+        if (fields == null || fields.isEmpty()) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        Set<String> values = extractGeoFilterValues(generatedSql);
+        if (values.isEmpty()) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        List<Map<String, Object>> geoFields = fields.stream()
+                .filter(this::isGeoDimensionField)
+                .toList();
+        if (geoFields.isEmpty()) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        Map<String, Object> metricField = findMetricField(fields, fieldMapping, question);
+        if (metricField == null || fieldColumn(metricField).isBlank()) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        List<GeoValueBinding> bindings = new ArrayList<>();
+        for (String value : values) {
+            GeoValueBinding binding = resolveGeoValueBinding(queryTableName, geoFields, value);
+            if (binding != null) {
+                bindings.add(binding);
+            }
+        }
+        if (bindings.isEmpty() || bindings.size() < values.size()) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        String existingDimension = parseSelectedDimensionColumn(generatedSql);
+        String targetDimension = bindings.get(0).column();
+        boolean sameColumn = bindings.stream().allMatch(binding -> binding.column().equals(targetDimension));
+        boolean alreadyConsistent = sameColumn && targetDimension.equals(existingDimension)
+                && generatedSql.contains("`" + targetDimension + "` =");
+        if (alreadyConsistent && usesDataMaxRecentWindow(generatedSql)) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+
+        String metricColumn = fieldColumn(metricField);
+        StringBuilder sql = new StringBuilder();
+        if (sameColumn) {
+            sql.append("SELECT `").append(targetDimension).append("` AS dim_name, ")
+                    .append("SUM(CAST(NULLIF(`").append(metricColumn).append("`, '') AS DECIMAL(18,2))) AS metric_value ")
+                    .append("FROM `").append(queryTableName).append("` WHERE `").append(targetDimension)
+                    .append("` IS NOT NULL AND `").append(targetDimension).append("` <> '' ");
+            appendValueFilter(sql, targetDimension, values);
+            appendRecentTimeFilter(sql, queryTableName, fields, question);
+            sql.append("GROUP BY `").append(targetDimension).append("` ORDER BY metric_value DESC LIMIT 30");
+        } else {
+            sql.append("SELECT dim_name, SUM(metric_value) AS metric_value FROM (");
+            for (int i = 0; i < bindings.size(); i++) {
+                if (i > 0) {
+                    sql.append(" UNION ALL ");
+                }
+                GeoValueBinding binding = bindings.get(i);
+                sql.append("SELECT '").append(escapeSqlLiteral(binding.value())).append("' AS dim_name, ")
+                        .append("SUM(CAST(NULLIF(`").append(metricColumn).append("`, '') AS DECIMAL(18,2))) AS metric_value ")
+                        .append("FROM `").append(queryTableName).append("` WHERE ");
+                appendSingleValuePredicate(sql, binding.column(), binding.value());
+                appendRecentTimeFilter(sql, queryTableName, fields, question);
+            }
+            sql.append(") geo_compare GROUP BY dim_name ORDER BY metric_value DESC LIMIT 30");
+        }
+
+        Map<String, Object> dimensionField = sameColumn
+                ? findFieldByColumn(fields, targetDimension)
+                : Map.of("displayName", "对比对象", "columnName", "dim_name");
+        Map<String, Object> correctedMapping = new LinkedHashMap<>(fieldMapping == null ? Map.of() : fieldMapping);
+        correctedMapping.put("dimension", sameColumn ? fieldDisplayName(dimensionField) : "对比对象");
+        correctedMapping.put("dimensionKey", sameColumn ? targetDimension : "dim_name");
+        correctedMapping.put("dimensionExpr", sameColumn ? "`" + targetDimension + "`" : "dim_name");
+        correctedMapping.put("metric", fieldDisplayName(metricField));
+        correctedMapping.put("metricKey", metricColumn);
+        correctedMapping.put("metricExpr",
+                "SUM(CAST(NULLIF(`" + metricColumn + "`, '') AS DECIMAL(18,2)))");
+
+        generationTrace.add("semanticSqlGuard=APPLIED;reason=GEO_VALUE_DATA_PROFILE;bindings="
+                + bindings.stream().map(binding -> binding.value() + "->" + binding.column())
+                        .reduce((left, right) -> left + "," + right).orElse(""));
+        return new SemanticSqlCorrection(sql.toString(), chartType == null || chartType.isBlank() ? "bar" : chartType,
+                correctedMapping);
+    }
+
+    private record GeoValueBinding(String value, String column) {
+    }
+
+    private Set<String> extractGeoFilterValues(String sql) {
+        Set<String> values = new LinkedHashSet<>();
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+                .compile("(?i)`[^`]+`\\s*(?:=|like)\\s*'([^']{1,80})'")
+                .matcher(Objects.toString(sql, ""));
+        while (matcher.find()) {
+            String value = matcher.group(1).replace("%", "").trim();
+            if (!value.isBlank() && !isSqlControlLiteral(value)) {
+                values.add(value);
+            }
+        }
+        return values;
+    }
+
+    private GeoValueBinding resolveGeoValueBinding(String tableName, List<Map<String, Object>> geoFields, String value) {
+        Map<String, Object> bestField = null;
+        int bestScore = Integer.MIN_VALUE;
+        for (Map<String, Object> field : geoFields) {
+            String column = fieldColumn(field);
+            if (column.isBlank()) {
+                continue;
+            }
+            int matchScore = geoValueExists(tableName, column, value, false) ? 1000
+                    : geoValueExists(tableName, column, value, true) ? 500 : 0;
+            if (matchScore <= 0) {
+                continue;
+            }
+            int score = matchScore + geoFieldSpecificityScore(field);
+            if (score > bestScore) {
+                bestScore = score;
+                bestField = field;
+            }
+        }
+        return bestField == null ? null : new GeoValueBinding(value, fieldColumn(bestField));
+    }
+
+    private boolean geoValueExists(String tableName, String column, String value, boolean fuzzy) {
+        String predicate = fuzzy
+                ? "`" + column + "` LIKE '%" + escapeSqlLiteral(value) + "%'"
+                : "`" + column + "` = '" + escapeSqlLiteral(value) + "'";
+        String sql = "SELECT 1 FROM `" + tableName + "` WHERE " + predicate + " LIMIT 1";
+        try {
+            return !jdbcTemplate.queryForList(sql).isEmpty();
+        } catch (Exception e) {
+            log.debug("地理值探测失败 table={}, column={}, value={}, fuzzy={}: {}",
+                    tableName, column, value, fuzzy, e.getMessage());
+            return false;
+        }
+    }
+
+    private int geoFieldSpecificityScore(Map<String, Object> field) {
+        String haystack = fieldSemanticText(field);
+        if (containsAny(haystack, "city", "城市", "市")) {
+            return 40;
+        }
+        if (containsAny(haystack, "province", "prov", "state", "省份", "省市", "省")) {
+            return 30;
+        }
+        if (containsAny(haystack, "region", "area", "zone", "district", "区域", "大区", "地区")) {
+            return 20;
+        }
+        return 0;
+    }
+
+    private SemanticSqlCorrection applyValueFilterDimensionConsistencyGuard(String question, String queryTableName,
+            List<Map<String, Object>> fields, String generatedSql, String chartType,
+            Map<String, Object> fieldMapping, List<String> generationTrace) {
+        if (!extractMacroRegionValues(question).isEmpty() || fields == null || fields.isEmpty()) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        String dimensionColumn = parseSelectedDimensionColumn(generatedSql);
+        if (dimensionColumn.isBlank() && fieldMapping != null) {
+            dimensionColumn = Objects.toString(fieldMapping.get("dimensionKey"), "").trim();
+        }
+        if (dimensionColumn.isBlank()) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        Map<String, Object> dimensionField = findFieldByColumn(fields, dimensionColumn);
+        if (dimensionField == null || !isGeoDimensionField(dimensionField)) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        FilterValueMatch mismatchedFilter = findMismatchedGeoValueFilter(generatedSql, fields, dimensionColumn);
+        if (mismatchedFilter == null || mismatchedFilter.values().isEmpty()) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        Set<String> values = mismatchedFilter.values();
+        Map<String, Object> metricField = findMetricField(fields, fieldMapping, question);
+        if (metricField == null || fieldColumn(metricField).isBlank()) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+
+        String metricColumn = fieldColumn(metricField);
+        StringBuilder sql = new StringBuilder();
+        sql.append("SELECT `").append(dimensionColumn).append("` AS dim_name, ")
+                .append("SUM(CAST(NULLIF(`").append(metricColumn).append("`, '') AS DECIMAL(18,2))) AS metric_value ")
+                .append("FROM `").append(queryTableName).append("` WHERE `").append(dimensionColumn)
+                .append("` IS NOT NULL AND `").append(dimensionColumn).append("` <> '' ");
+        appendValueFilter(sql, dimensionColumn, values);
+        appendRecentTimeFilter(sql, queryTableName, fields, question);
+        sql.append("GROUP BY `").append(dimensionColumn).append("` ORDER BY metric_value DESC LIMIT 30");
+
+        Map<String, Object> correctedMapping = new LinkedHashMap<>(fieldMapping == null ? Map.of() : fieldMapping);
+        correctedMapping.put("dimension", fieldDisplayName(dimensionField));
+        correctedMapping.put("dimensionKey", dimensionColumn);
+        correctedMapping.put("dimensionExpr", "`" + dimensionColumn + "`");
+        correctedMapping.put("metric", fieldDisplayName(metricField));
+        correctedMapping.put("metricKey", metricColumn);
+        correctedMapping.put("metricExpr",
+                "SUM(CAST(NULLIF(`" + metricColumn + "`, '') AS DECIMAL(18,2)))");
+
+        generationTrace.add("semanticSqlGuard=APPLIED;reason=VALUE_FILTER_DIMENSION_CONSISTENCY;fromFilter="
+                + mismatchedFilter.column() + ";toFilter=" + dimensionColumn + ";values=" + String.join(",", values));
+        return new SemanticSqlCorrection(sql.toString(), chartType == null || chartType.isBlank() ? "bar" : chartType,
+                correctedMapping);
+    }
+
+    private record FilterValueMatch(String column, Set<String> values) {
+    }
+
+    private void appendValueFilter(StringBuilder sql, String column, Set<String> values) {
+        sql.append("AND (");
+        int index = 0;
+        for (String value : values) {
+            if (index++ > 0) {
+                sql.append(" OR ");
+            }
+            String escapedValue = escapeSqlLiteral(value);
+            sql.append("`").append(column).append("` = '").append(escapedValue).append("'")
+                    .append(" OR `").append(column).append("` LIKE '%").append(escapedValue).append("%'");
+        }
+        sql.append(") ");
+    }
+
+    private void appendSingleValuePredicate(StringBuilder sql, String column, String value) {
+        String escapedValue = escapeSqlLiteral(value);
+        sql.append("(`").append(column).append("` = '").append(escapedValue).append("'")
+                .append(" OR `").append(column).append("` LIKE '%").append(escapedValue).append("%') ");
+    }
+
+    private void appendRecentTimeFilter(StringBuilder sql, String tableName, List<Map<String, Object>> fields,
+            String question) {
+        Map<String, Object> timeField = findTimeField(fields);
+        if (timeField == null || !hasRecentTimeSemantics(question)) {
+            return;
+        }
+        String timeColumn = fieldColumn(timeField);
+        if (timeColumn.isBlank()) {
+            return;
+        }
+        sql.append("AND `").append(timeColumn).append("` >= DATE_SUB((SELECT MAX(`")
+                .append(timeColumn).append("`) FROM `").append(tableName).append("`), INTERVAL 90 DAY) ");
+    }
+
+    private boolean usesDataMaxRecentWindow(String sql) {
+        String normalized = Objects.toString(sql, "").toLowerCase(Locale.ROOT);
+        return normalized.contains("select max(") && normalized.contains("interval 90 day");
+    }
+
+    private String escapeSqlLiteral(String value) {
+        return Objects.toString(value, "").replace("'", "''");
+    }
+
+    private String parseSelectedDimensionColumn(String sql) {
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+                .compile("(?i)select\\s+`([^`]+)`\\s+as\\s+(?:dim_name|name)")
+                .matcher(Objects.toString(sql, ""));
+        return matcher.find() ? matcher.group(1).trim() : "";
+    }
+
+    private FilterValueMatch findMismatchedGeoValueFilter(String sql, List<Map<String, Object>> fields,
+            String dimensionColumn) {
+        Map<String, Set<String>> valuesByColumn = new LinkedHashMap<>();
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+                .compile("(?i)`([^`]+)`\\s*(?:=|like)\\s*'([^']{1,80})'")
+                .matcher(Objects.toString(sql, ""));
+        while (matcher.find()) {
+            String column = matcher.group(1).trim();
+            String value = matcher.group(2).replace("%", "").trim();
+            if (column.equals(dimensionColumn) || value.isBlank() || isSqlControlLiteral(value)) {
+                continue;
+            }
+            Map<String, Object> filterField = findFieldByColumn(fields, column);
+            if (filterField == null || !isGeoDimensionField(filterField)) {
+                continue;
+            }
+            valuesByColumn.computeIfAbsent(column, ignored -> new LinkedHashSet<>()).add(value);
+        }
+        return valuesByColumn.entrySet().stream()
+                .findFirst()
+                .map(entry -> new FilterValueMatch(entry.getKey(), entry.getValue()))
+                .orElse(null);
+    }
+
+    private boolean isSqlControlLiteral(String value) {
+        String text = Objects.toString(value, "").trim();
+        return text.isBlank() || text.matches("[-+]?\\d+(?:\\.\\d+)?")
+                || text.length() > 32
+                || text.contains("%Y") || text.contains("%m") || text.contains("%d");
+    }
+
+    private Map<String, Object> findFieldByColumn(List<Map<String, Object>> fields, String column) {
+        return fields.stream()
+                .filter(field -> column.equals(fieldColumn(field)))
+                .findFirst()
+                .orElse(null);
+    }
+
+    private boolean isGeoDimensionField(Map<String, Object> field) {
+        if ("NUMBER".equalsIgnoreCase(Objects.toString(field.get("fieldType"), ""))) {
+            return false;
+        }
+        String haystack = fieldSemanticText(field);
+        return containsAny(haystack, "city", "province", "prov", "state", "region", "area",
+                "城市", "市", "省份", "省市", "省", "区域", "大区", "地区");
+    }
+
+    private Set<String> extractMacroRegionValues(String question) {
+        String text = Objects.toString(question, "");
+        Set<String> values = new LinkedHashSet<>();
+        for (String value : List.of("华东", "华南", "华北", "华中", "中南", "西南", "西北", "东北", "东南", "港澳台")) {
+            if (text.contains(value)) {
+                values.add(value);
+            }
+        }
+        return values;
+    }
+
+    private Map<String, Object> findMacroRegionField(List<Map<String, Object>> fields) {
+        return fields.stream()
+                .filter(field -> !"NUMBER".equalsIgnoreCase(Objects.toString(field.get("fieldType"), "")))
+                .map(field -> Map.entry(field, macroRegionFieldScore(field)))
+                .filter(entry -> entry.getValue() > 0)
+                .max(Map.Entry.comparingByValue())
+                .map(Map.Entry::getKey)
+                .orElse(null);
+    }
+
+    private boolean asksProvinceBreakdown(String question) {
+        String text = Objects.toString(question, "");
+        return text.contains("各省") || text.contains("省份") || text.contains("分省")
+                || text.contains("省级") || text.contains("按省") || text.contains("省排名");
+    }
+
+    private Map<String, Object> findProvinceField(List<Map<String, Object>> fields) {
+        return fields.stream()
+                .filter(field -> !"NUMBER".equalsIgnoreCase(Objects.toString(field.get("fieldType"), "")))
+                .map(field -> Map.entry(field, provinceFieldScore(field)))
+                .filter(entry -> entry.getValue() > 0)
+                .max(Map.Entry.comparingByValue())
+                .map(Map.Entry::getKey)
+                .orElse(null);
+    }
+
+    private int provinceFieldScore(Map<String, Object> field) {
+        String haystack = fieldSemanticText(field);
+        int score = 0;
+        if (containsAny(haystack, "province", "prov", "state", "省份", "省市", "省")) {
+            score += 120;
+        }
+        if (containsAny(haystack, "region", "area", "zone", "district", "区域", "大区", "片区")) {
+            score -= 160;
+        }
+        if (containsAny(haystack, "city", "城市", "市")) {
+            score -= 100;
+        }
+        return score;
+    }
+
+    private int macroRegionFieldScore(Map<String, Object> field) {
+        String haystack = fieldSemanticText(field);
+        int score = 0;
+        if (containsAny(haystack, "region", "area", "zone", "district", "territory")) {
+            score += 120;
+        }
+        if (containsAny(haystack, "区域", "大区", "片区", "战区", "地区")) {
+            score += 110;
+        }
+        if (containsAny(haystack, "province", "prov", "state", "省份", "省市", "省")) {
+            score -= 180;
+        }
+        if (containsAny(haystack, "city", "城市", "市")) {
+            score -= 120;
+        }
+        return score;
+    }
+
+    private Map<String, Object> findMetricField(List<Map<String, Object>> fields, Map<String, Object> fieldMapping,
+            String question) {
+        String mappedMetric = Objects.toString(fieldMapping == null ? "" : fieldMapping.get("metricKey"), "").trim();
+        if (!mappedMetric.isBlank()) {
+            Optional<Map<String, Object>> mapped = fields.stream()
+                    .filter(field -> mappedMetric.equals(fieldColumn(field)))
+                    .filter(this::isNumericField)
+                    .findFirst();
+            if (mapped.isPresent()) {
+                return mapped.get();
+            }
+        }
+        return fields.stream()
+                .filter(this::isNumericField)
+                .map(field -> Map.entry(field, metricFieldScore(field, question)))
+                .filter(entry -> entry.getValue() > 0)
+                .max(Map.Entry.comparingByValue())
+                .map(Map.Entry::getKey)
+                .orElseGet(() -> fields.stream().filter(this::isNumericField).findFirst().orElse(null));
+    }
+
+    private int metricFieldScore(Map<String, Object> field, String question) {
+        String haystack = fieldSemanticText(field);
+        String text = Objects.toString(question, "");
+        int score = 0;
+        if (containsAny(haystack, "sales_amt", "sales", "amount", "amt", "revenue", "gmv", "income")) {
+            score += 120;
+        }
+        if (containsAny(haystack, "销售额", "销售", "金额", "收入", "营收", "订单金额")) {
+            score += 120;
+        }
+        if (text.contains(fieldDisplayName(field)) || text.contains(fieldColumn(field))) {
+            score += 80;
+        }
+        return score;
+    }
+
+    private Map<String, Object> findTimeField(List<Map<String, Object>> fields) {
+        return fields.stream()
+                .map(field -> Map.entry(field, timeFieldScore(field)))
+                .filter(entry -> entry.getValue() > 0)
+                .max(Map.Entry.comparingByValue())
+                .map(Map.Entry::getKey)
+                .orElse(null);
+    }
+
+    private int timeFieldScore(Map<String, Object> field) {
+        String haystack = fieldSemanticText(field);
+        int score = "DATE".equalsIgnoreCase(Objects.toString(field.get("fieldType"), "")) ? 120 : 0;
+        if (containsAny(haystack, "date", "time", "day", "month", "year", "日期", "时间", "月份", "年月", "年度")) {
+            score += 80;
+        }
+        return score;
+    }
+
+    private boolean hasRecentTimeSemantics(String question) {
+        String text = Objects.toString(question, "");
+        return text.contains("最近") || text.contains("近") || text.contains("近期") || text.contains("这段时间");
+    }
+
+    private boolean isNumericField(Map<String, Object> field) {
+        return "NUMBER".equalsIgnoreCase(Objects.toString(field.get("fieldType"), ""));
+    }
+
+    private String fieldColumn(Map<String, Object> field) {
+        return Objects.toString(field.get("columnName"), "").trim();
+    }
+
+    private String fieldDisplayName(Map<String, Object> field) {
+        String displayName = Objects.toString(field.get("displayName"), "").trim();
+        if (!displayName.isBlank()) {
+            return displayName;
+        }
+        String sourceFieldName = Objects.toString(field.get("sourceFieldName"), "").trim();
+        return sourceFieldName.isBlank() ? fieldColumn(field) : sourceFieldName;
+    }
+
+    private String fieldSemanticText(Map<String, Object> field) {
+        return (Objects.toString(field.get("columnName"), "") + " "
+                + Objects.toString(field.get("displayName"), "") + " "
+                + Objects.toString(field.get("sourceFieldName"), "") + " "
+                + Objects.toString(field.get("fieldComment"), "")).toLowerCase(Locale.ROOT);
+    }
+
+    private boolean containsAny(String text, String... needles) {
+        for (String needle : needles) {
+            if (text.contains(needle.toLowerCase(Locale.ROOT))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private Map<String, Object> inferBestColumnsFromPreview(String question, List<Map<String, Object>> fields,
             List<Map<String, Object>> previewRows) {
         Map<String, Object> result = new HashMap<>();
@@ -1290,8 +1922,51 @@ public class ChatBiService {
         if (value instanceof Number number) {
             return number.doubleValue();
         }
+        String raw = Objects.toString(value, "").trim();
+        if (raw.isBlank()) {
+            return null;
+        }
+        String normalized = raw
+                .replace(",", "")
+                .replace("，", "")
+                .replace("￥", "")
+                .replace("¥", "")
+                .replace("$", "")
+                .replace("元", "")
+                .trim();
+        double multiplier = 1D;
+        if (normalized.contains("%")) {
+            multiplier = 0.01D;
+            normalized = normalized.replace("%", "");
+        }
+        if (normalized.contains("亿")) {
+            multiplier *= 100000000D;
+            normalized = normalized.replace("亿", "");
+        }
+        if (normalized.contains("万")) {
+            multiplier *= 10000D;
+            normalized = normalized.replace("万", "");
+        }
+        if (normalized.contains("千")) {
+            multiplier *= 1000D;
+            normalized = normalized.replace("千", "");
+        }
+        String lower = normalized.toLowerCase(Locale.ROOT);
+        if (lower.endsWith("k")) {
+            multiplier *= 1000D;
+            normalized = normalized.substring(0, normalized.length() - 1);
+        } else if (lower.endsWith("w")) {
+            multiplier *= 10000D;
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+                .compile("[-+]?\\d+(?:\\.\\d+)?")
+                .matcher(normalized);
+        if (!matcher.find()) {
+            return null;
+        }
         try {
-            double parsed = Double.parseDouble(Objects.toString(value, "").replace(",", "").trim());
+            double parsed = Double.parseDouble(matcher.group()) * multiplier;
             return Double.isFinite(parsed) ? parsed : null;
         } catch (Exception e) {
             return null;

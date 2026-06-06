@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Comparator;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -119,6 +120,89 @@ public class StackCDashboardService {
                 ORDER BY updated_at DESC
                 LIMIT 100
                 """, uid, uid);
+    }
+
+    public List<Map<String, Object>> listEditableForCurrentUser() {
+        List<Map<String, Object>> visible = listVisibleForCurrentUser();
+        List<Map<String, Object>> editable = new ArrayList<>();
+        for (Map<String, Object> row : visible) {
+            Map<String, Object> item = new LinkedHashMap<>(row);
+            boolean canManage = canManageDashboard(item);
+            item.put("canManage", canManage);
+            if (canManage) {
+                editable.add(item);
+            }
+        }
+        return editable;
+    }
+
+    public Map<String, Object> smartPinChart(String question, Map<String, Object> source) {
+        Map<String, Object> target = source == null ? Map.of() : source;
+        Long artifactId = toLong(target.get("artifactId"));
+        Long turnId = toLong(target.get("turnId"));
+        Long chartId = toLong(target.get("historyId"));
+        if ((chartId == null || chartId <= 0) && (artifactId == null || artifactId <= 0) && (turnId == null || turnId <= 0)) {
+            throw new IllegalArgumentException("当前会话暂无可钉入的图表结果，请先完成一次图表查询");
+        }
+
+        List<Map<String, Object>> dashboards = listEditableForCurrentUser();
+        if (dashboards.isEmpty()) {
+            Map<String, Object> result = dashboardPinDraft(
+                    "暂无可编辑看板，请先到“我的看板”创建或申请编辑权限",
+                    "NO_EDITABLE_DASHBOARD",
+                    null,
+                    dashboards,
+                    true
+            );
+            result.put("source", target);
+            return result;
+        }
+
+        DashboardMatch match = resolveDashboardMatch(question, dashboards);
+        if (match.status() != DashboardMatchStatus.UNIQUE || match.dashboard() == null) {
+            String message = match.status() == DashboardMatchStatus.AMBIGUOUS
+                    ? "已识别为钉入看板，但目标看板不唯一，请选择后确认"
+                    : "已识别为钉入看板，请选择目标看板后确认";
+            Map<String, Object> result = dashboardPinDraft(
+                    message,
+                    match.status().name(),
+                    match.keyword(),
+                    match.candidates(),
+                    true
+            );
+            result.put("source", target);
+            return result;
+        }
+
+        Map<String, Object> dashboard = match.dashboard();
+        Map<String, Object> payload = new LinkedHashMap<>();
+        if (artifactId != null && artifactId > 0) {
+            payload.put("artifactId", artifactId);
+        } else if (turnId != null && turnId > 0) {
+            payload.put("turnId", turnId);
+        } else {
+            payload.put("chartId", chartId);
+        }
+        payload.put("title", firstText(
+                target.get("title"),
+                target.get("sourceQuestion"),
+                target.get("message"),
+                "图表卡片"
+        ));
+        Map<String, Object> pinnedDashboard = pinChart(dashboardId(dashboard), payload);
+        Map<String, Object> result = dashboardPinDraft(
+                "已将当前图表钉入「" + Objects.toString(dashboard.get("name"), "目标看板") + "」",
+                "PINNED",
+                match.keyword(),
+                List.of(dashboard),
+                false
+        );
+        result.put("dashboardId", dashboard.get("id"));
+        result.put("dashboardName", dashboard.get("name"));
+        result.put("source", target);
+        result.put("pinnedDashboard", pinnedDashboard);
+        result.put("pinPayload", payload);
+        return result;
     }
 
     public Map<String, Object> listForAdmin(
@@ -778,6 +862,10 @@ public class StackCDashboardService {
         assertCanMutateDashboard(dashboard);
 
         PinnedTarget target = resolvePinnedTarget(body);
+        Long existingComponentId = existingPinnedComponentId(id, target);
+        if (existingComponentId != null) {
+            return getById(id);
+        }
         KeyHolder compKeys = new GeneratedKeyHolder();
         jdbcTemplate.update(connection -> {
             PreparedStatement ps = connection.prepareStatement("""
@@ -836,6 +924,29 @@ public class StackCDashboardService {
                 WHERE id = ?
                 """, layoutJson, id);
         return getById(id);
+    }
+
+    private Long existingPinnedComponentId(long dashboardId, PinnedTarget target) {
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT id
+                FROM is_dashboard_component
+                WHERE dashboard_id = ?
+                  AND chart_id = ?
+                  AND ((artifact_id IS NULL AND ? IS NULL) OR artifact_id = ?)
+                  AND ((turn_id IS NULL AND ? IS NULL) OR turn_id = ?)
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                dashboardId,
+                target.chartId(),
+                target.artifactId(),
+                target.artifactId(),
+                target.turnId(),
+                target.turnId());
+        if (rows.isEmpty()) {
+            return null;
+        }
+        return toLong(rows.get(0).get("id"));
     }
 
     /**
@@ -1169,6 +1280,213 @@ public class StackCDashboardService {
         return String.valueOf(v).trim();
     }
 
+    private Map<String, Object> dashboardPinDraft(String message,
+                                                  String status,
+                                                  String keyword,
+                                                  List<Map<String, Object>> candidates,
+                                                  boolean requiresConfirmation) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("responseType", "DASHBOARD_PIN");
+        result.put("message", message);
+        result.put("chartType", "table");
+        result.put("data", List.of(Map.of(
+                "name", "DASHBOARD_PIN",
+                "value", message
+        )));
+        result.put("dimensions", List.of("name", "value"));
+        result.put("handled", !requiresConfirmation);
+        result.put("dashboardActionStatus", status);
+        result.put("dashboardKeyword", Objects.toString(keyword, ""));
+        result.put("dashboardCandidates", simplifyDashboards(candidates));
+        result.put("requiresConfirmation", requiresConfirmation);
+        result.put("smartRouted", true);
+        result.put("skipChartArtifact", true);
+        return result;
+    }
+
+    private List<Map<String, Object>> simplifyDashboards(List<Map<String, Object>> dashboards) {
+        if (dashboards == null || dashboards.isEmpty()) {
+            return List.of();
+        }
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Map<String, Object> dashboard : dashboards) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", dashboard.get("id"));
+            item.put("name", dashboard.get("name"));
+            item.put("isPublic", parseTinyInt(dashboard.get("isPublic"), 0) == 1);
+            item.put("canManage", true);
+            Object groupName = firstPresent(dashboard.get("groupPath"), dashboard.get("groupName"));
+            if (groupName != null) {
+                item.put("groupName", groupName);
+            }
+            result.add(item);
+        }
+        return result;
+    }
+
+    private DashboardMatch resolveDashboardMatch(String question, List<Map<String, Object>> dashboards) {
+        if (dashboards == null || dashboards.isEmpty()) {
+            return new DashboardMatch(DashboardMatchStatus.NONE, "", null, List.of());
+        }
+        String keyword = extractDashboardKeyword(question);
+        String normalizedKeyword = normalizeDashboardName(keyword);
+        if (normalizedKeyword.isBlank()) {
+            if (dashboards.size() == 1) {
+                return new DashboardMatch(DashboardMatchStatus.UNIQUE, keyword, dashboards.get(0), dashboards);
+            }
+            return new DashboardMatch(DashboardMatchStatus.MISSING_TARGET, keyword, null, dashboards);
+        }
+        if (isWeakDashboardKeyword(keyword, normalizedKeyword)) {
+            return new DashboardMatch(DashboardMatchStatus.MISSING_TARGET, keyword, null, dashboards);
+        }
+        List<Map<String, Object>> scored = new ArrayList<>();
+        int bestScore = 0;
+        for (Map<String, Object> dashboard : dashboards) {
+            int score = dashboardMatchScore(question, normalizedKeyword, dashboard);
+            if (score > 0) {
+                Map<String, Object> item = new LinkedHashMap<>(dashboard);
+                item.put("matchScore", score);
+                scored.add(item);
+                bestScore = Math.max(bestScore, score);
+            }
+        }
+        if (scored.isEmpty()) {
+            if (dashboards.size() == 1) {
+                return new DashboardMatch(DashboardMatchStatus.UNIQUE, keyword, dashboards.get(0), dashboards);
+            }
+            return new DashboardMatch(DashboardMatchStatus.NOT_FOUND, keyword, null, dashboards);
+        }
+        int threshold = Math.max(1, bestScore - 8);
+        List<Map<String, Object>> candidates = scored.stream()
+                .filter(item -> layoutInt(item.get("matchScore"), 0) >= threshold)
+                .sorted(Comparator.comparingInt((Map<String, Object> item) -> layoutInt(item.get("matchScore"), 0)).reversed())
+                .toList();
+        if (candidates.size() == 1) {
+            return new DashboardMatch(DashboardMatchStatus.UNIQUE, keyword, candidates.get(0), candidates);
+        }
+        List<Map<String, Object>> exact = candidates.stream()
+                .filter(item -> dashboardMatchScore(question, normalizedKeyword, item) >= 100)
+                .toList();
+        if (exact.size() == 1) {
+            return new DashboardMatch(DashboardMatchStatus.UNIQUE, keyword, exact.get(0), exact);
+        }
+        return new DashboardMatch(DashboardMatchStatus.AMBIGUOUS, keyword, null, candidates);
+    }
+
+    private int dashboardMatchScore(String question, String normalizedKeyword, Map<String, Object> dashboard) {
+        if (normalizedKeyword == null || normalizedKeyword.isBlank()) {
+            return 0;
+        }
+        String rawName = Objects.toString(dashboard.get("name"), "").trim();
+        String name = normalizeDashboardName(rawName);
+        String group = normalizeDashboardName(firstPresent(dashboard.get("groupPath"), dashboard.get("groupName")));
+        String q = normalizeDashboardName(question);
+        int score = 0;
+        if (!name.isBlank()) {
+            if (name.equals(normalizedKeyword)) {
+                score = Math.max(score, 120);
+            } else if (name.contains(normalizedKeyword)) {
+                score = Math.max(score, 96 + Math.min(12, normalizedKeyword.length()));
+            } else if (normalizedKeyword.contains(name)) {
+                score = Math.max(score, 88 + Math.min(10, name.length()));
+            }
+            if (!q.isBlank() && q.contains(name)) {
+                score = Math.max(score, 102);
+            }
+        }
+        if (!group.isBlank()) {
+            if (group.equals(normalizedKeyword)) {
+                score = Math.max(score, 92);
+            } else if (group.contains(normalizedKeyword) || normalizedKeyword.contains(group)) {
+                score = Math.max(score, 78);
+            }
+        }
+        return score;
+    }
+
+    private boolean isWeakDashboardKeyword(String rawKeyword, String normalizedKeyword) {
+        String raw = Objects.toString(rawKeyword, "").trim();
+        String keyword = Objects.toString(normalizedKeyword, "").trim();
+        if (keyword.isBlank()) {
+            return true;
+        }
+        if (containsAny(raw, "看板", "驾驶舱", "仪表盘", "大屏")) {
+            return false;
+        }
+        return keyword.length() <= 2
+                && !keyword.endsWith("看板")
+                && !keyword.endsWith("驾驶舱")
+                && !keyword.endsWith("仪表盘")
+                && !keyword.endsWith("大屏");
+    }
+
+    private String extractDashboardKeyword(String question) {
+        String q = Objects.toString(question, "").trim();
+        if (q.isBlank()) {
+            return "";
+        }
+        String[] patterns = {
+                "(?:钉入|钉到|钉在|保存到|保存至|存到|放到|放入|加入|添加到|挂到|挂入)(.+)",
+                "(?:到|至|进)(.+?)(?:看板|仪表盘|大屏|驾驶舱)",
+                "(.+?)(?:看板|仪表盘|大屏|驾驶舱)"
+        };
+        for (String pattern : patterns) {
+            java.util.regex.Matcher matcher = java.util.regex.Pattern.compile(pattern).matcher(q);
+            if (matcher.find()) {
+                String value = cleanDashboardKeyword(matcher.group(1));
+                if (!value.isBlank()) {
+                    return value;
+                }
+            }
+        }
+        return cleanDashboardKeyword(q);
+    }
+
+    private String cleanDashboardKeyword(String value) {
+        String text = Objects.toString(value, "").trim();
+        if (text.isBlank()) {
+            return "";
+        }
+        return text.replaceAll("[，。！？、,.!?；;：:\\s]+$", "")
+                .replaceAll("^(把|将|请|帮我|麻烦|当前|这张|这个|刚才|上一轮|上一个|图表|图|卡片|结果|分析结果)+", "")
+                .replaceAll("(当前|这张|这个|刚才|上一轮|上一个|图表|图|卡片|结果|分析结果)$", "")
+                .trim();
+    }
+
+    private String normalizeDashboardName(Object value) {
+        return Objects.toString(value, "").toLowerCase()
+                .replaceAll("[`\"'“”‘’\\[\\]（）(){}<>《》]", "")
+                .replaceAll("(我的|当前|这张|这个|刚才|上一轮|上一个|图表|图|卡片|结果|分析结果)", "")
+                .replaceAll("(看板|仪表盘|大屏|驾驶舱|dashboard)", "")
+                .replaceAll("[\\s_\\-，。！？、,.!?；;：:/\\\\]+", "")
+                .trim();
+    }
+
+    private Object firstPresent(Object... values) {
+        for (Object value : values) {
+            if (value != null && !Objects.toString(value, "").trim().isBlank()) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private String firstText(Object... values) {
+        Object value = firstPresent(values);
+        return value == null ? "" : Objects.toString(value, "").trim();
+    }
+
+    private boolean containsAny(String text, String... candidates) {
+        String source = Objects.toString(text, "");
+        for (String candidate : candidates) {
+            String item = Objects.toString(candidate, "").trim();
+            if (!item.isBlank() && source.contains(item)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static int parseTinyInt(Object v, int def) {
         if (v == null) {
             return def;
@@ -1455,5 +1773,19 @@ public class StackCDashboardService {
     }
 
     private record PinnedTarget(Long chartId, Long artifactId, Long turnId) {
+    }
+
+    private record DashboardMatch(DashboardMatchStatus status,
+                                  String keyword,
+                                  Map<String, Object> dashboard,
+                                  List<Map<String, Object>> candidates) {
+    }
+
+    private enum DashboardMatchStatus {
+        UNIQUE,
+        NONE,
+        MISSING_TARGET,
+        NOT_FOUND,
+        AMBIGUOUS
     }
 }

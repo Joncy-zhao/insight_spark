@@ -201,6 +201,29 @@ public class PythonAiService {
         }
     }
 
+    public Optional<Map<String, Object>> smartChatRoute(String question, String tableName,
+                                                        Map<String, Object> context) {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("question", question);
+        request.put("tableName", tableName);
+        request.put("context", context == null ? Map.of() : context);
+
+        try {
+            Map<String, Object> response = restTemplate.postForObject(
+                    aiServiceUrl + "/ai/smart-chat/route",
+                    request,
+                    Map.class
+            );
+            return response == null ? Optional.empty() : Optional.of(response);
+        } catch (HttpClientErrorException e) {
+            log.warn("Python AI 智能对话路由失败: {}", e.getResponseBodyAsString());
+            return Optional.empty();
+        } catch (RestClientException e) {
+            log.warn("Python AI 智能对话路由不可用: {}", e.getMessage());
+            return Optional.empty();
+        }
+    }
+
     public Optional<Map<String, Object>> explainAdvancedAnalysis(String type,
                                                                  String question,
                                                                  Map<String, Object> result,

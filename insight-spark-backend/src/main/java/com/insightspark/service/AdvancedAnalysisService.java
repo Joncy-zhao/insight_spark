@@ -310,7 +310,15 @@ public class AdvancedAnalysisService {
                 ? (List<Map<String, Object>>) (List<?>) list
                 : List.of();
         List<Point> rawHistory = inputRows.stream()
-                .map(row -> new Point(text(row.get("name")), parseDouble(row.get("value"), Double.NaN)))
+                .map(row -> new Point(firstText(
+                        row.get("name"), row.get("bucket_name"), row.get("dim_name"), row.get("dimension")),
+                        parseDouble(firstText(
+                                row.get("value"),
+                                row.get("history"),
+                                row.get("metric_value"),
+                                row.get("metric"),
+                                row.get("amount"),
+                                row.get("total")), Double.NaN)))
                 .filter(point -> !point.name().isBlank() && !Double.isNaN(point.value()))
                 .toList();
         String inferredGranularity = inferGranularity(rawHistory);
@@ -1178,18 +1186,13 @@ public class AdvancedAnalysisService {
     private List<Point> loadSeries(String tableName, String timeField, String metricField, String granularity, int limit, String filterExpression) {
         String physicalTable = physicalTable(tableName);
         String timeExpr = dateBucketExpr(timeField, granularity);
-        String metricExpr = numericExpr(metricField);
-        String sql = "SELECT " + timeExpr + " AS bucket_name, SUM(" + metricExpr + ") AS metric_value "
+        String sql = "SELECT " + timeExpr + " AS bucket_name, `" + metricField + "` AS metric_value "
                 + "FROM `" + physicalTable + "` "
                 + "WHERE `" + timeField + "` IS NOT NULL AND `" + timeField + "` <> '' "
                 + (filterExpression.isBlank() ? "" : "AND (" + filterExpression + ") ")
-                + "GROUP BY bucket_name ORDER BY bucket_name ASC LIMIT " + Math.max(12, Math.min(limit, 500));
+                + "ORDER BY bucket_name ASC LIMIT " + Math.max(500, Math.min(limit * 50, 10000));
         List<Map<String, Object>> rows = query(tableName, sql);
-        return rows.stream()
-                .map(row -> new Point(text(row.get("bucket_name")), parseDouble(row.get("metric_value"), 0D)))
-                .filter(point -> !point.name().isBlank())
-                .sorted(Comparator.comparing(Point::name))
-                .toList();
+        return aggregateSeriesRows(rows);
     }
 
     private List<Point> loadSeriesAroundBucket(String tableName,
@@ -1204,27 +1207,38 @@ public class AdvancedAnalysisService {
         }
         String physicalTable = physicalTable(tableName);
         String timeExpr = dateBucketExpr(timeField, granularity);
-        String metricExpr = numericExpr(metricField);
         String inValues = bucketWindow.stream()
                 .map(this::sqlStringLiteral)
                 .reduce((left, right) -> left + ", " + right)
                 .orElse("");
-        String sql = "SELECT " + timeExpr + " AS bucket_name, SUM(" + metricExpr + ") AS metric_value "
+        String sql = "SELECT " + timeExpr + " AS bucket_name, `" + metricField + "` AS metric_value "
                 + "FROM `" + physicalTable + "` "
                 + "WHERE `" + timeField + "` IS NOT NULL AND `" + timeField + "` <> '' "
                 + (filterExpression.isBlank() ? "" : "AND (" + filterExpression + ") ")
                 + "AND " + timeExpr + " IN (" + inValues + ") "
-                + "GROUP BY bucket_name ORDER BY bucket_name ASC";
+                + "ORDER BY bucket_name ASC LIMIT 10000";
         List<Map<String, Object>> rows = query(tableName, sql);
-        List<Point> points = rows.stream()
-                .map(row -> new Point(text(row.get("bucket_name")), parseDouble(row.get("metric_value"), 0D)))
-                .filter(point -> !point.name().isBlank())
-                .sorted(Comparator.comparing(Point::name))
-                .toList();
+        List<Point> points = aggregateSeriesRows(rows);
         if (points.size() > 1) {
             return points;
         }
         return loadSeries(tableName, timeField, metricField, granularity, 240, filterExpression);
+    }
+
+    private List<Point> aggregateSeriesRows(List<Map<String, Object>> rows) {
+        Map<String, Double> buckets = new LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            String bucket = text(row.get("bucket_name"));
+            if (bucket.isBlank()) {
+                continue;
+            }
+            buckets.put(bucket, buckets.getOrDefault(bucket, 0D) + parseDouble(row.get("metric_value"), 0D));
+        }
+        return buckets.entrySet().stream()
+                .map(entry -> new Point(entry.getKey(), entry.getValue()))
+                .filter(point -> !point.name().isBlank())
+                .sorted(Comparator.comparing(Point::name))
+                .toList();
     }
 
     private SeriesPreprocessResult preprocessSeries(List<Point> rawHistory, String granularity) {
@@ -3737,7 +3751,7 @@ public class AdvancedAnalysisService {
 
     private String forecastCacheKey(String scope, Map<String, Object> payload) {
         String normalizedPayload = toJson(normalizeCachePayload(payload));
-        return "insight:advanced-analysis:forecast:" + scope + ":" + sha256(normalizedPayload);
+        return "insight:advanced-analysis:forecast:v2:" + scope + ":" + sha256(normalizedPayload);
     }
 
     @SuppressWarnings("unchecked")
@@ -4792,8 +4806,50 @@ public class AdvancedAnalysisService {
     }
 
     private double parseDouble(Object value, double fallback) {
+        String raw = text(value);
+        if (raw.isBlank()) {
+            return fallback;
+        }
+        String normalized = raw
+                .replace(",", "")
+                .replace("，", "")
+                .replace("￥", "")
+                .replace("¥", "")
+                .replace("$", "")
+                .replace("元", "")
+                .trim();
+        double multiplier = 1D;
+        if (normalized.contains("%")) {
+            multiplier = 0.01D;
+            normalized = normalized.replace("%", "");
+        }
+        if (normalized.contains("亿")) {
+            multiplier *= 100000000D;
+            normalized = normalized.replace("亿", "");
+        }
+        if (normalized.contains("万")) {
+            multiplier *= 10000D;
+            normalized = normalized.replace("万", "");
+        }
+        if (normalized.contains("千")) {
+            multiplier *= 1000D;
+            normalized = normalized.replace("千", "");
+        }
+        if (normalized.toLowerCase(Locale.ROOT).endsWith("k")) {
+            multiplier *= 1000D;
+            normalized = normalized.substring(0, normalized.length() - 1);
+        } else if (normalized.toLowerCase(Locale.ROOT).endsWith("w")) {
+            multiplier *= 10000D;
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+                .compile("[-+]?\\d+(?:\\.\\d+)?")
+                .matcher(normalized);
+        if (!matcher.find()) {
+            return fallback;
+        }
         try {
-            return Double.parseDouble(text(value).replace(",", ""));
+            return Double.parseDouble(matcher.group()) * multiplier;
         } catch (NumberFormatException e) {
             return fallback;
         }

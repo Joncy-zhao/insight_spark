@@ -515,6 +515,15 @@ const forecastQualityRows = computed(() => {
 
 const forecastQualityMessage = computed(() => props.analysis?.dataQuality?.message || '')
 
+const forecastSeriesRows = computed(() => {
+  if (Array.isArray(props.analysis?.series) && props.analysis.series.length) return props.analysis.series
+  if (Array.isArray(props.analysis?.data) && props.analysis.data.length) return props.analysis.data
+  const advanced = props.analysis?.advancedAnalysisResult
+  if (Array.isArray(advanced?.series) && advanced.series.length) return advanced.series
+  if (Array.isArray(advanced?.data) && advanced.data.length) return advanced.data
+  return []
+})
+
 const forecastInsightRows = computed(() => {
   const insights = Array.isArray(props.analysis?.insights) ? props.analysis.insights : []
   return insights.filter(item => !['历史点数', '真实序列点数'].includes(String(item?.label || '').trim()))
@@ -537,9 +546,7 @@ const findInsightValue = (label) => {
 const buildFallbackExplanation = () => {
   const type = props.analysis?.type
   if (type === 'forecast') {
-    const forecastRows = Array.isArray(props.analysis?.series)
-      ? props.analysis.series.filter(item => item?.forecast != null)
-      : []
+    const forecastRows = forecastSeriesRows.value.filter(item => item?.forecast != null)
     const lastForecast = forecastRows[forecastRows.length - 1]?.forecast ?? findInsightValue('末期预测')
     return {
       source: 'rule',
@@ -659,7 +666,7 @@ const getForecastZoomRange = (rows) => {
 }
 
 const buildForecastOption = () => {
-  const rows = props.analysis.series || []
+  const rows = forecastSeriesRows.value
   const zoomRange = getForecastZoomRange(rows)
   const prediction = props.analysis?.optionTemplate?.prediction || {}
   const option = buildForecastChartOption(rows, {

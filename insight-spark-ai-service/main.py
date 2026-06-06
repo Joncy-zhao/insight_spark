@@ -142,6 +142,12 @@ class AdvancedAnalysisParseRequest(BaseModel):
     context: dict[str, Any] = {}
 
 
+class SmartChatRouteRequest(BaseModel):
+    question: str
+    tableName: str = ""
+    context: dict[str, Any] = {}
+
+
 class AdvancedAnalysisExplainRequest(BaseModel):
     type: str
     question: str = ""
@@ -277,6 +283,14 @@ def text_to_sql(payload: TextToSqlRequest) -> dict[str, Any]:
                 reasoning = ai_result.get("reasoning")
                 if isinstance(reasoning, list):
                     reasoning.append("图谱提示与模型输出存在偏差，已按图谱映射自动纠偏")
+            if should_override_sql_with_semantic_plan(str(ai_result.get("sql", "")), ai_result, payload):
+                guided = build_graph_guided_sql_result(payload, graph_plan, str(ai_result.get("chartType", "")))
+                ai_result["sql"] = guided["sql"]
+                ai_result["fieldMapping"] = guided["fieldMapping"]
+                ai_result["chartType"] = guided["chartType"]
+                reasoning = ai_result.get("reasoning")
+                if isinstance(reasoning, list):
+                    reasoning.append("模型 SQL 与语义计划不一致，已按 TopN/对比/时间/字段语义自动纠偏")
             ai_result["graphSqlHintsUsed"] = graph_plan["used"]
             ai_result["graphDecision"] = graph_plan["decision"]
             if graph_plan["used"] and isinstance(ai_result.get("reasoning"), list):
@@ -337,6 +351,18 @@ def advanced_analysis_parse(payload: AdvancedAnalysisParseRequest) -> dict[str, 
         if ai_result:
             return normalize_advanced_analysis_parse_result(ai_result, payload)
     return build_rule_based_advanced_analysis_parse_result(payload)
+
+
+@app.post("/ai/smart-chat/route")
+def smart_chat_route(payload: SmartChatRouteRequest) -> dict[str, Any]:
+    question = (payload.question or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="智能路由问题不能为空。")
+    if OPENAI_API_KEY:
+        ai_result = call_openai_smart_chat_route(payload)
+        if ai_result:
+            return normalize_smart_chat_route_result(ai_result, payload)
+    return build_rule_based_smart_chat_route_result(payload)
 
 
 @app.post("/ai/advanced-analysis/explain")
@@ -453,7 +479,7 @@ def build_dimension_expression(question: str, dimension: FieldMeta) -> str:
     column = f"`{dimension.columnName}`"
     if dimension.fieldType == "DATE":
         return date_expression(column, question)
-    if any(token in question for token in ["按月", "月份", "月度"]):
+    if any(token in question for token in ["按月", "每月", "每个月", "月份", "月度"]):
         return f"DATE_FORMAT({column}, '%Y-%m')"
     if any(token in question for token in ["按年", "年度"]):
         return f"DATE_FORMAT({column}, '%Y')"
@@ -467,14 +493,14 @@ def build_dimension_expression(question: str, dimension: FieldMeta) -> str:
 def build_dimension_filter(question: str, dimension: FieldMeta) -> str:
     column = f"`{dimension.columnName}`"
     if dimension.fieldType == "DATE":
-        if any(token in question for token in ["按月", "月份", "月度"]):
+        if any(token in question for token in ["按月", "每月", "每个月", "月份", "月度"]):
             return f"{column} IS NOT NULL"
         return f"{column} IS NOT NULL"
     return f"{column} IS NOT NULL AND {column} <> ''"
 
 
 def date_expression(column: str, question: str) -> str:
-    if any(token in question for token in ["按月", "月份", "月度"]):
+    if any(token in question for token in ["按月", "每月", "每个月", "月份", "月度"]):
         return f"DATE_FORMAT({column}, '%Y-%m')"
     if any(token in question for token in ["按年", "年度"]):
         return f"DATE_FORMAT({column}, '%Y')"
@@ -1527,6 +1553,49 @@ def call_openai_advanced_analysis_parse(payload: AdvancedAnalysisParseRequest) -
         return None
 
 
+def call_openai_smart_chat_route(payload: SmartChatRouteRequest) -> dict[str, Any] | None:
+    prompt = build_smart_chat_route_prompt(payload)
+    body = json.dumps({
+        "model": OPENAI_MODEL,
+        "messages": [
+            {"role": "system", "content": (
+                "你是企业 BI 对话入口的全局语义路由器。\n"
+                "你必须先理解用户真实动作意图，再选择唯一 primaryIntent。\n"
+                "只输出严格 JSON，不要 Markdown，不要解释性前后缀。\n"
+                "不要因为出现“以后、未来、刚才、趋势、提醒”等单个词就机械触发预测或预警；必须结合整句动作。\n"
+                "涉及创建预警、权限、发布、邀请等有副作用操作时 requiresConfirmation 必须为 true。"
+            )},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.05,
+        "max_tokens": 900,
+    }).encode("utf-8")
+
+    req = request.Request(
+        f"{OPENAI_BASE_URL}/chat/completions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=20) as resp:
+            payload_json = json.loads(resp.read().decode("utf-8"))
+        content = str(payload_json["choices"][0]["message"]["content"]).strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:json)?\s*", "", content)
+            content = re.sub(r"\s*```$", "", content)
+        parsed = json.loads(content)
+        if not isinstance(parsed, dict):
+            return None
+        parsed.setdefault("model", OPENAI_MODEL)
+        return parsed
+    except (error.URLError, error.HTTPError, KeyError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def call_openai_advanced_analysis_explain(payload: AdvancedAnalysisExplainRequest) -> dict[str, Any] | None:
     prompt = build_advanced_analysis_explain_prompt(payload)
     body = json.dumps({
@@ -1574,6 +1643,143 @@ def normalize_advanced_intent(value: Any) -> str:
     if text in {"alert", "warning", "anomaly"}:
         return "alert"
     return "none"
+
+
+SMART_CHAT_INTENTS = {
+    "QUERY_SQL",
+    "FORECAST",
+    "ALERT_RULE_CREATE",
+    "WHAT_IF",
+    "BUSINESS_MODEL_CREATE",
+    "BUSINESS_MODEL_PATCH",
+    "BUSINESS_MODEL_APPLY",
+    "BUSINESS_MODEL_PUBLISH",
+    "DASHBOARD_PIN",
+    "DASHBOARD_CREATE",
+    "CHART_RULE_UPDATE",
+    "FIELD_SEMANTIC_FIX",
+    "FEDERATED_QUERY",
+    "PERMISSION_POLICY_CREATE",
+    "AUDIT_QUERY",
+    "REPORT_GENERATE",
+    "TASK_STATUS_QUERY",
+    "COLLABORATION_INVITE",
+    "CLARIFY",
+}
+
+
+def build_smart_chat_route_prompt(payload: SmartChatRouteRequest) -> str:
+    context = payload.context if isinstance(payload.context, dict) else {}
+    fields = context.get("fields") if isinstance(context.get("fields"), list) else []
+    compact_fields = []
+    for item in fields[:80]:
+        if not isinstance(item, dict):
+            continue
+        compact_fields.append({
+            "columnName": item.get("columnName"),
+            "displayName": item.get("displayName"),
+            "fieldType": item.get("fieldType"),
+            "fieldComment": item.get("fieldComment"),
+            "synonyms": item.get("synonyms"),
+        })
+    return (
+        f"用户输入：{payload.question}\n"
+        f"当前数据源：{payload.tableName or '未指定'}\n"
+        f"字段摘要：{json.dumps(compact_fields, ensure_ascii=False)}\n\n"
+        "请输出严格 JSON：\n"
+        "{\n"
+        '  "primaryIntent": "",\n'
+        '  "confidence": 0.0,\n'
+        '  "requiresConfirmation": false,\n'
+        '  "slots": {},\n'
+        '  "missingSlots": [],\n'
+        '  "reasoning": "",\n'
+        '  "executionMode": "DIRECT | DRAFT | CLARIFY"\n'
+        "}\n\n"
+        "primaryIntent 只能从以下枚举中选择：\n"
+        "QUERY_SQL, FORECAST, ALERT_RULE_CREATE, WHAT_IF, BUSINESS_MODEL_CREATE, BUSINESS_MODEL_PATCH, "
+        "BUSINESS_MODEL_APPLY, BUSINESS_MODEL_PUBLISH, DASHBOARD_PIN, DASHBOARD_CREATE, CHART_RULE_UPDATE, "
+        "FIELD_SEMANTIC_FIX, FEDERATED_QUERY, PERMISSION_POLICY_CREATE, AUDIT_QUERY, REPORT_GENERATE, "
+        "TASK_STATUS_QUERY, COLLABORATION_INVITE, CLARIFY。\n\n"
+        "分类准则：\n"
+        "1. 查询排名、分组、明细、占比、对比、分布、汇总，选 QUERY_SQL；不要附带预测。\n"
+        "2. 只有用户明确要求预测、预估未来数值、未来走势外推，才选 FORECAST。\n"
+        "3. 创建阈值提醒、异常通知、告警规则，选 ALERT_RULE_CREATE 且 requiresConfirmation=true。\n"
+        "4. 假设变量变化并测算结果，选 WHAT_IF；普通查询中的“增长/下降”不等于 WHAT_IF。\n"
+        "5. 字段绑定、术语映射、业务字典、指标口径、公式、以后按某口径计算，选 BUSINESS_MODEL_PATCH。\n"
+        "6. 新建业务模型，选 BUSINESS_MODEL_CREATE；套用/发布模型分别选 APPLY/PUBLISH。\n"
+        "7. 把图表保存、钉到、加入看板，选 DASHBOARD_PIN；新建看板选 DASHBOARD_CREATE。\n"
+        "8. 权限、发布、协作邀请、预警创建等有副作用动作必须先生成草稿或澄清。\n"
+        "9. 若多个意图混合，选择用户最主要的业务动作，并在 slots.secondaryIntents 中列出次要意图。\n"
+        "10. 不确定时选 CLARIFY 或低 confidence，不要强行执行。\n\n"
+        "容易混淆的语义边界：\n"
+        "- “以后销售额就按含税收入算”是指标口径/建模修改，不是预测。\n"
+        "- “把刚才这个图钉到销售看板”是看板资产操作，不是预测。\n"
+        "- “看一下各省销售额排名”是查询排名，不是预测。\n"
+        "- “把销售额绑定到 sales_amt”是字段绑定/业务字典维护，不是普通查询。\n\n"
+        "slots 要尽量抽取字段：metricField、timeField、dimensionField、threshold、operator、horizon、dashboardName、businessTerm、physicalField。"
+    )
+
+
+def normalize_smart_chat_intent(value: Any) -> str:
+    raw = str(value or "").strip().upper().replace("-", "_")
+    aliases = {
+        "QUERY": "QUERY_SQL",
+        "SQL": "QUERY_SQL",
+        "TEXT_TO_SQL": "QUERY_SQL",
+        "PREDICTION": "FORECAST",
+        "TIME_SERIES_FORECAST": "FORECAST",
+        "ALERT": "ALERT_RULE_CREATE",
+        "WARNING": "ALERT_RULE_CREATE",
+        "WHATIF": "WHAT_IF",
+        "SIMULATION": "WHAT_IF",
+        "SCENARIO": "WHAT_IF",
+        "BUSINESS_MODEL": "BUSINESS_MODEL_PATCH",
+        "MODEL_PATCH": "BUSINESS_MODEL_PATCH",
+        "DASHBOARD": "DASHBOARD_PIN",
+    }
+    intent = aliases.get(raw, raw)
+    return intent if intent in SMART_CHAT_INTENTS else "CLARIFY"
+
+
+def normalize_smart_chat_route_result(parsed: dict[str, Any], payload: SmartChatRouteRequest) -> dict[str, Any]:
+    intent = normalize_smart_chat_intent(parsed.get("primaryIntent") or parsed.get("intent") or parsed.get("type"))
+    if has_alert_semantics(payload.question):
+        intent = "ALERT_RULE_CREATE"
+    slots = parsed.get("slots") if isinstance(parsed.get("slots"), dict) else {}
+    missing = parsed.get("missingSlots") if isinstance(parsed.get("missingSlots"), list) else []
+    confidence = read_float(parsed.get("confidence"))
+    if confidence <= 0:
+        confidence = 0.55 if intent != "CLARIFY" else 0.35
+    requires_confirmation = as_bool(parsed.get("requiresConfirmation"))
+    if intent in {"ALERT_RULE_CREATE", "PERMISSION_POLICY_CREATE", "BUSINESS_MODEL_PUBLISH",
+                  "COLLABORATION_INVITE", "DASHBOARD_PIN", "DASHBOARD_CREATE"}:
+        requires_confirmation = True
+    if intent == "QUERY_SQL":
+        slots = {**slots, "autoForecastEnabled": False}
+    reasoning = str(parsed.get("reasoning") or parsed.get("reason") or "").strip()
+    if not reasoning:
+        reasoning = f"全局语义路由识别为 {intent}"
+    return {
+        "primaryIntent": intent,
+        "confidence": max(0.0, min(confidence, 1.0)),
+        "requiresConfirmation": requires_confirmation,
+        "slots": slots,
+        "missingSlots": [str(item) for item in missing if str(item).strip()][:8],
+        "reasoning": reasoning,
+        "executionMode": str(parsed.get("executionMode") or ("DRAFT" if requires_confirmation else "DIRECT")).strip(),
+        "model": parsed.get("model") or OPENAI_MODEL,
+        "fallbackUsed": bool(parsed.get("fallbackUsed", False)),
+    }
+
+
+def has_alert_semantics(question: str) -> bool:
+    q = str(question or "").strip().lower()
+    if not q:
+        return False
+    has_notify_action = re.search(r"提醒|通知|预警|告警|警报|alert|warning|钉钉|邮件", q, re.I) is not None
+    has_threshold_condition = re.search(r"低于|高于|超过|跌破|小于|大于|以下|以上|阈值|异常|z-?score", q, re.I) is not None
+    return has_notify_action and has_threshold_condition
 
 
 def normalize_advanced_analysis_parse_result(parsed: dict[str, Any], payload: AdvancedAnalysisParseRequest) -> dict[str, Any]:
@@ -1652,12 +1858,12 @@ def build_rule_based_advanced_analysis_parse_result(payload: AdvancedAnalysisPar
     question = payload.question or ""
     lowered = question.lower()
     intent = "none"
-    if re.search(r"预测|预估|未来|走势|forecast|prophet|holt", lowered):
+    if re.search(r"预警|提醒|告警|低于|高于|超过|跌破|异常|阈值|通知|钉钉|邮件|z-?score", lowered):
+        intent = "alert"
+    elif re.search(r"预测|预估|未来|走势外推|forecast|prophet|holt", lowered):
         intent = "forecast"
     elif re.search(r"what-?if|如果|若|假设|提升|下降|降低|增长|推演|模拟|利润变化", lowered):
         intent = "whatIf"
-    elif re.search(r"预警|提醒|告警|低于|高于|超过|异常|阈值|通知|钉钉|邮件|z-?score", lowered):
-        intent = "alert"
     result = {
         "intent": intent,
         "metric": infer_advanced_metric(question, payload.context),
@@ -1676,6 +1882,73 @@ def build_rule_based_advanced_analysis_parse_result(payload: AdvancedAnalysisPar
             "channel": "both",
         })
     return result
+
+
+def build_rule_based_smart_chat_route_result(payload: SmartChatRouteRequest) -> dict[str, Any]:
+    question = str(payload.question or "").strip()
+    lowered = question.lower()
+    intent = "QUERY_SQL"
+    requires_confirmation = False
+    slots: dict[str, Any] = {}
+    reasoning = "AI 总路由不可用，已使用保守语义兜底"
+
+    query_words = r"看一下|查看|查询|统计|排名|排行|top|明细|列表|分布|占比|对比|汇总|各省|各市|各区域|各部门"
+    model_words = r"业务模型|建模|模型|业务字典|字典|术语|同义词|字段绑定|绑定到|绑定为|映射到|映射为|对应到|对应为|口径|公式|算作|当作|按.*算"
+    dashboard_words = r"看板|仪表盘|大屏|驾驶舱"
+    pin_words = r"钉|固定|保存|放到|放入|加入|添加|挂到"
+    forecast_words = r"预测|预估|推算|估一下|大概会|会到多少|还会继续|未来(?:\d+|一|二|三|四|五|六|七|八|九|十|下个|下月|下季度|下半年|一年)|下个月|下季度|走势外推|forecast|prediction"
+    alert_words = r"预警|告警|警报|提醒|通知|低于|高于|超过|跌破|阈值|异常|alert|warning"
+    what_if_words = r"what-?if|如果|若|假设|推演|模拟|测算"
+
+    if re.search(model_words, question, re.I):
+        intent = "BUSINESS_MODEL_CREATE" if re.search(r"创建|新建|生成|建立|搭建", question) else "BUSINESS_MODEL_PATCH"
+        physical = re.search(r"[A-Za-z_][A-Za-z0-9_]*", question)
+        if physical:
+            slots["physicalField"] = physical.group(0)
+        reasoning += "，识别为业务模型维护动作"
+    elif re.search(dashboard_words, question, re.I) and re.search(pin_words + r"|新建|创建", question, re.I):
+        intent = "DASHBOARD_CREATE" if re.search(r"新建|创建|生成", question) else "DASHBOARD_PIN"
+        requires_confirmation = True
+        reasoning += "，识别为看板资产动作"
+    elif re.search(query_words, question, re.I) and not re.search(forecast_words + r"|" + alert_words + r"|" + what_if_words, question, re.I):
+        intent = "QUERY_SQL"
+        slots["autoForecastEnabled"] = False
+        reasoning += "，识别为查数/图表查询"
+    elif re.search(alert_words, question, re.I):
+        intent = "ALERT_RULE_CREATE"
+        requires_confirmation = True
+        reasoning += "，识别为预警规则草稿"
+    elif re.search(forecast_words, question, re.I):
+        intent = "FORECAST"
+        reasoning += "，识别为明确预测请求"
+    elif re.search(what_if_words, question, re.I):
+        intent = "WHAT_IF"
+        requires_confirmation = True
+        reasoning += "，识别为情景推演草稿"
+    elif re.search(r"权限|授权|角色|只能看|开放给", question):
+        intent = "PERMISSION_POLICY_CREATE"
+        requires_confirmation = True
+        reasoning += "，识别为权限策略草稿"
+    elif re.search(r"审计|危险查询|慢查询|拦截", question):
+        intent = "AUDIT_QUERY"
+        reasoning += "，识别为审计查询"
+    elif re.search(r"诊断|报告|原因分析|下降原因|归因", question):
+        intent = "REPORT_GENERATE"
+        requires_confirmation = True
+        reasoning += "，识别为报告生成草稿"
+
+    confidence = 0.6 if intent != "QUERY_SQL" else 0.58
+    return {
+        "primaryIntent": intent,
+        "confidence": confidence,
+        "requiresConfirmation": requires_confirmation,
+        "slots": slots,
+        "missingSlots": [],
+        "reasoning": reasoning,
+        "executionMode": "DRAFT" if requires_confirmation else "DIRECT",
+        "model": "rule-based-smart-route-fallback",
+        "fallbackUsed": True,
+    }
 
 
 def normalize_advanced_formula(value: Any) -> str:
@@ -2004,9 +2277,9 @@ def build_business_model_patch_prompt(payload: BusinessModelPatchRequest) -> str
         "{\n"
         '  "intent": "BIND_FIELDS | PATCH_MODEL",\n'
         '  "operations": [\n'
-        '    {"targetType": "metricDefinition", "action": "UPSERT", "name": "", "field": "", "aggregation": "SUM|COUNT|AVG|MAX|MIN", "formula": ""},\n'
-        '    {"targetType": "dictionaryEntry", "action": "UPSERT", "term": "", "field": "", "synonyms": ""},\n'
-        '    {"targetType": "fieldBinding", "action": "UPSERT", "bindingType": "AUTO|dictionaryEntry|metricDefinition|dimensionDefinition", "name": "", "field": ""}\n'
+        '    {"semanticAction": "FIELD_BINDING|METRIC_FORMULA_UPDATE|METRIC_SCOPE_UPDATE|DICTIONARY_UPSERT|DIMENSION_BINDING", "targetType": "metricDefinition", "action": "UPSERT", "name": "", "field": "", "aggregation": "SUM|COUNT|AVG|MAX|MIN", "formula": ""},\n'
+        '    {"semanticAction": "DICTIONARY_UPSERT", "targetType": "dictionaryEntry", "action": "UPSERT", "term": "", "field": "", "synonyms": ""},\n'
+        '    {"semanticAction": "FIELD_BINDING|DIMENSION_BINDING", "targetType": "fieldBinding", "action": "UPSERT", "bindingType": "AUTO|dictionaryEntry|metricDefinition|dimensionDefinition", "name": "", "field": ""}\n'
         "  ],\n"
         '  "reasoning": ["", ""],\n'
         '  "confidence": 0.0\n'
@@ -2016,10 +2289,14 @@ def build_business_model_patch_prompt(payload: BusinessModelPatchRequest) -> str
         "2. 新增或修改业务字典/术语映射，输出 targetType=dictionaryEntry。\n"
         "3. 如果用户是在修正字段绑定，例如“把销售额绑定到sales_amt”“将省份维度对应到province”，优先输出 targetType=fieldBinding，并把 intent 设为 BIND_FIELDS。\n"
         "4. bindingType 用于提示目标类型，可选 dictionaryEntry、metricDefinition、dimensionDefinition，无法确定时填 AUTO。\n"
-        "5. 如果用户表达“删除/移除/去掉”，对应 action=DELETE。\n"
-        "6. 修改已有公式时，name 必须尽量对齐已有指标名。\n"
-        "7. 一句话中可能包含多条操作，要全部拆开。\n"
-        "8. 若没有可执行修改动作，operations 返回空数组。"
+        "5. 用户表达“口径/以后/统一用/统一按/按…算/以后报表里…”时，优先输出 semanticAction=METRIC_SCOPE_UPDATE 或 METRIC_FORMULA_UPDATE，targetType=metricDefinition，不要输出 dictionaryEntry 或普通 fieldBinding。\n"
+        "6. 用户只提到某一个指标，例如“收入”，operations 只能修改该指标；不得联想修改“销售额、省份”等未提到对象。\n"
+        "7. 用户没有提到维度，不得生成维度操作。\n"
+        "8. 如果“含税金额”等口径来源对应多个字段或无法确定，operations 返回空数组，并在 reasoning 中说明需要用户确认字段。\n"
+        "9. 如果用户表达“删除/移除/去掉”，对应 action=DELETE。\n"
+        "10. 修改已有公式时，name 必须尽量对齐已有指标名。\n"
+        "11. 一句话中可能包含多条操作，要全部拆开。\n"
+        "12. 若没有可执行修改动作，operations 返回空数组。"
     )
 
 
@@ -2309,7 +2586,16 @@ def is_id_like_field(field: FieldMeta) -> bool:
 
 def wants_region_dimension(question: str) -> bool:
     q = question.lower()
-    return has_any_term(q, ["省份", "省市", "省区", "按省", "地区", "区域", "大区", "省"])
+    return has_any_term(q, ["省份", "省市", "省区", "按省", "地区", "区域", "大区", "省", "华东", "华南", "华北", "华中", "中南", "西南", "西北", "东北"])
+
+
+def has_macro_region_value(question: str) -> bool:
+    return has_any_term(str(question or ""), ["华东", "华南", "华北", "华中", "中南", "西南", "西北", "东北", "东南"])
+
+
+def wants_city_dimension(question: str) -> bool:
+    q = question.lower()
+    return has_any_term(q, ["城市", "各城", "按城市", "城市排行", "城市排名"])
 
 
 def wants_amount_metric(question: str) -> bool:
@@ -2324,12 +2610,23 @@ def wants_count_metric(question: str) -> bool:
 
 def wants_time_dimension(question: str) -> bool:
     q = question.lower()
-    return has_any_term(q, ["趋势", "变化", "日期", "时间", "按月", "按年", "按周", "按天", "月份", "月度", "季度", "年度", "下单日期", "每日"])
+    return has_any_term(q, ["趋势", "变化", "日期", "时间", "按月", "每月", "每个月", "按年", "按周", "按天", "月份", "月度", "季度", "年度", "下单日期", "每日"])
 
 
 def region_field_match(field: FieldMeta) -> bool:
     text = field_text_blob(field)
-    return has_any_term(text, ["province", "prov", "state", "region", "area", "省", "省份", "地区", "区域", "大区", "city", "城市"])
+    return has_any_term(text, ["province", "prov", "state", "region", "area", "省", "省份", "地区", "区域", "大区"])
+
+
+def macro_region_field_match(field: FieldMeta) -> bool:
+    text = field_text_blob(field)
+    return has_any_term(text, ["region", "area", "zone", "district", "地区", "区域", "大区"]) \
+        and not has_any_term(text, ["province", "prov", "省份", "省"])
+
+
+def city_field_match(field: FieldMeta) -> bool:
+    text = field_text_blob(field)
+    return has_any_term(text, ["city", "城市", "市"])
 
 
 def time_field_match(field: FieldMeta) -> bool:
@@ -2348,7 +2645,13 @@ def count_field_match(field: FieldMeta) -> bool:
 
 
 def is_dimension_semantic_mismatch(question: str, field: FieldMeta) -> bool:
+    if wants_city_dimension(question):
+        return not city_field_match(field)
     if wants_region_dimension(question):
+        if has_macro_region_value(question) and macro_region_field_match(field):
+            return False
+        if has_macro_region_value(question) and not macro_region_field_match(field):
+            return True
         if region_field_match(field):
             return False
         return True
@@ -2385,6 +2688,21 @@ def choose_dimension(question: str, fields: list[FieldMeta], preferred: FieldMet
         date_fallback = first_date_like_field([field for field in fields if field.fieldType != "NUMBER"])
         if date_fallback:
             return date_fallback
+
+    if wants_city_dimension(question):
+        city_ranked = [(score, field) for score, field in non_number_ranked if city_field_match(field)]
+        if city_ranked:
+            return city_ranked[0][1]
+
+    if has_macro_region_value(question):
+        macro_region_ranked = [(score, field) for score, field in non_number_ranked if macro_region_field_match(field)]
+        if macro_region_ranked:
+            return macro_region_ranked[0][1]
+
+    if wants_region_dimension(question):
+        region_ranked = [(score, field) for score, field in non_number_ranked if region_field_match(field)]
+        if region_ranked:
+            return region_ranked[0][1]
 
     if non_number_ranked:
         return non_number_ranked[0][1]
@@ -2433,7 +2751,7 @@ def first_date_like_field(fields: list[FieldMeta]) -> FieldMeta | None:
 def choose_chart_type(question: str, dimension: FieldMeta) -> str:
     if any(word in question for word in ["占比", "比例", "分类", "结构", "分布"]):
         return "pie"
-    if dimension.fieldType == "DATE" or any(word in question for word in ["趋势", "变化", "每日", "月度", "年度", "季度"]):
+    if dimension.fieldType == "DATE" or any(word in question for word in ["趋势", "变化", "每日", "每月", "每个月", "月度", "年度", "季度"]):
         return "line"
     return "bar"
 
@@ -2478,12 +2796,18 @@ def score_field(question: str, field: FieldMeta) -> int:
     q = question.lower()
 
     if field.fieldType == "DATE":
-        score += 30 if any(term in q for term in ["趋势", "日期", "时间", "每日", "按月", "按年", "按周", "月份", "月度", "季度", "年度"]) else 0
+        score += 30 if any(term in q for term in ["趋势", "日期", "时间", "每日", "每月", "每个月", "按月", "按年", "按周", "月份", "月度", "季度", "年度"]) else 0
     if field.fieldType == "NUMBER":
         score += 20 if any(term in q for term in ["销售", "金额", "收入", "营收", "利润", "数量", "销量", "总额", "成交", "订单数", "笔数"]) else 0
     if field.fieldType == "TEXT":
         score += 10 if any(term in q for term in ["省", "地区", "城市", "分类", "品类", "产品", "名称", "客户", "门店", "渠道"]) else 0
 
+    if wants_city_dimension(question) and city_field_match(field):
+        score += 95
+    if has_macro_region_value(question) and macro_region_field_match(field):
+        score += 120
+    if has_macro_region_value(question) and region_field_match(field) and not macro_region_field_match(field):
+        score -= 60
     if wants_region_dimension(question) and region_field_match(field):
         score += 85
     if wants_amount_metric(question) and amount_field_match(field):
@@ -2532,6 +2856,98 @@ def score_field(question: str, field: FieldMeta) -> int:
 
 def first_by_type(fields: list[FieldMeta], field_type: str) -> FieldMeta | None:
     return next((field for field in fields if field.fieldType == field_type), None)
+
+
+CHINESE_NUMBERS = {
+    "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+    "十一": 11, "十二": 12, "十五": 15, "二十": 20, "三十": 30,
+}
+
+
+def parse_nl_limit(question: str, default_limit: int = 30) -> int:
+    q = str(question or "")
+    numeric = re.search(r"(?:top|前|最高的前|最低的前|排名前)\s*(\d{1,3})", q, re.I)
+    if numeric:
+        return max(1, min(int(numeric.group(1)), 100))
+    chinese = re.search(r"(?:前|最高的前|最低的前|排名前)\s*([一二两三四五六七八九十]{1,3})\s*个?", q)
+    if chinese:
+        return max(1, min(CHINESE_NUMBERS.get(chinese.group(1), default_limit), 100))
+    return default_limit
+
+
+def wants_ascending_rank(question: str) -> bool:
+    return has_any_term(str(question or ""), ["最低", "最少", "倒数", "升序", "从低到高"])
+
+
+def extract_region_values(question: str) -> list[str]:
+    q = str(question or "")
+    regions = [
+        "华东", "华南", "华北", "华中", "中南", "西南", "西北", "东北", "东南",
+        "华东区", "华南区", "华北区", "华中区", "中南区", "西南区", "西北区", "东北区",
+        "北京", "上海", "广州", "深圳",
+    ]
+    found = [region for region in regions if region in q]
+    compare_match = re.search(r"对比(?:一下)?(.+?)(?:最近|近|的|销售|表现|$)", q)
+    if compare_match:
+        for token in re.split(r"和|与|、|,|，|及|以及|vs|VS|/|\\s+", compare_match.group(1)):
+            value = re.sub(r"^(一下|下|看看|看)?", "", token).strip()
+            value = re.sub(r"(区域|地区|大区|省份|省|城市|市)$", "", value).strip()
+            if 2 <= len(value) <= 6 and re.match(r"^[\u4e00-\u9fa5]+$", value):
+                found.append(value)
+    result: list[str] = []
+    seen = set()
+    for value in found:
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def build_region_value_filter(field: FieldMeta, values: list[str]) -> str:
+    if not values:
+        return ""
+    column = f"`{field.columnName}`"
+    clauses = []
+    for value in values:
+        escaped = value.replace("'", "''")
+        clauses.append(f"{column} = '{escaped}'")
+        clauses.append(f"{column} LIKE '%{escaped}%'")
+    return "(" + " OR ".join(clauses) + ")"
+
+
+def build_time_filter(question: str, fields: list[FieldMeta]) -> str:
+    q = str(question or "")
+    time_field = (first_by_type(fields, "DATE") or first_date_like_field(fields))
+    if not time_field or not (time_field.fieldType == "DATE" or time_field_match(time_field)):
+        return ""
+    column = f"`{time_field.columnName}`"
+    if "今年" in q:
+        return f"YEAR({column}) = YEAR(CURDATE())"
+    if "去年" in q:
+        return f"YEAR({column}) = YEAR(CURDATE()) - 1"
+    if "最近" in q or "近" in q:
+        month_match = re.search(r"(?:最近|近)\s*(\d+)\s*个?月", q)
+        if month_match:
+            return f"{column} >= DATE_SUB(CURDATE(), INTERVAL {int(month_match.group(1))} MONTH)"
+        day_match = re.search(r"(?:最近|近)\s*(\d+)\s*天", q)
+        if day_match:
+            return f"{column} >= DATE_SUB(CURDATE(), INTERVAL {int(day_match.group(1))} DAY)"
+        return f"{column} >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)"
+    return ""
+
+
+def build_semantic_filters(question: str, dimension: FieldMeta, fields: list[FieldMeta]) -> list[str]:
+    filters = [build_dimension_filter(question, dimension)]
+    region_values = extract_region_values(question)
+    if region_values:
+        region_field = dimension if region_field_match(dimension) else choose_dimension("区域", fields)
+        if region_field:
+            filters.append(build_region_value_filter(region_field, region_values))
+    time_filter = build_time_filter(question, fields)
+    if time_filter:
+        filters.append(time_filter)
+    return [item for item in filters if item]
 
 
 def resolve_graph_sql_plan(payload: TextToSqlRequest) -> dict[str, Any]:
@@ -2633,13 +3049,18 @@ def build_graph_guided_sql_result(payload: TextToSqlRequest, graph_plan: dict[st
         metric_key = "value"
 
     dimension_expr = build_dimension_expression(payload.question, dimension)
-    order_expr = "dim_name ASC" if final_chart_type == "line" else "metric_value DESC"
+    limit = parse_nl_limit(payload.question, 30)
+    if final_chart_type == "line":
+        order_expr = "dim_name ASC"
+    else:
+        order_expr = "metric_value ASC" if wants_ascending_rank(payload.question) else "metric_value DESC"
+    where_expr = " AND ".join(build_semantic_filters(payload.question, dimension, payload.fields))
     sql = (
         f"SELECT {dimension_expr} AS dim_name, {value_expr} AS metric_value "
         f"FROM `{payload.tableName}` "
-        f"WHERE {build_dimension_filter(payload.question, dimension)} "
+        f"WHERE {where_expr} "
         f"GROUP BY {dimension_expr} "
-        f"ORDER BY {order_expr} LIMIT 30"
+        f"ORDER BY {order_expr} LIMIT {limit}"
     )
     return {
         "sql": sql,
@@ -2678,6 +3099,38 @@ def should_override_sql_with_graph_plan(sql: str, graph_plan: dict[str, Any], pa
     elif metric_field and f"`{metric_field.columnName.lower()}`" not in sql_lower:
         return True
 
+    return False
+
+
+def should_override_sql_with_semantic_plan(sql: str, ai_result: dict[str, Any], payload: TextToSqlRequest) -> bool:
+    sql_lower = str(sql or "").lower()
+    question = payload.question or ""
+    if not sql_lower:
+        return True
+
+    expected_dimension = choose_dimension(question, payload.fields)
+    expected_metric = choose_metric(question, payload.fields)
+    mapping = ai_result.get("fieldMapping") if isinstance(ai_result.get("fieldMapping"), dict) else {}
+    mapped_dimension = str(mapping.get("dimensionKey") or mapping.get("dimension") or "").strip().lower()
+    mapped_metric = str(mapping.get("metricKey") or mapping.get("metric") or "").strip().lower()
+
+    if expected_dimension and has_macro_region_value(question) and expected_dimension.columnName.lower() not in sql_lower:
+        return True
+    if expected_dimension and expected_dimension.columnName.lower() not in sql_lower and expected_dimension.columnName.lower() != mapped_dimension:
+        return True
+    if expected_metric and expected_metric.columnName.lower() not in sql_lower and expected_metric.columnName.lower() != mapped_metric:
+        return True
+    if parse_nl_limit(question, 30) != 30 and f"limit {parse_nl_limit(question, 30)}" not in sql_lower:
+        return True
+    for value in extract_region_values(question):
+        if value.lower() not in sql_lower and value not in sql:
+            return True
+    if ("今年" in question and "year(" not in sql_lower) or ("最近" in question and "date_sub" not in sql_lower and "interval" not in sql_lower):
+        return True
+    if wants_ascending_rank(question) and "metric_value asc" not in sql_lower and " asc" not in sql_lower:
+        return True
+    if not wants_ascending_rank(question) and any(token in question for token in ["最高", "最多", "排名", "排行", "top", "前"]) and " desc" not in sql_lower:
+        return True
     return False
 
 
@@ -2927,7 +3380,8 @@ def has_dictionary_intent(question: str) -> bool:
 
 def has_formula_intent(question: str) -> bool:
     q = (question or "").strip()
-    return any(token in q for token in ["业务公式", "指标公式", "公式", "衍生指标", "利润率", "转化率", "同比", "环比", "核心指标包含"])
+    return any(token in q for token in ["业务公式", "指标公式", "公式", "衍生指标", "利润率", "毛利率", "转化率", "同比", "环比", "核心指标包含"]) \
+        or bool(re.search(r".+(?:按|按照).+(?:除以|乘以|加上|减去|/|\*|\+|-).+(?:算|计算)?", q))
 
 
 def split_top_level_segments(text: str, separators: list[str] | None = None) -> list[str]:
@@ -3033,6 +3487,7 @@ def normalize_patch_operations(entries: Any, fields: list[FieldMeta]) -> list[di
             continue
         if action not in {"UPSERT", "DELETE"}:
             action = "UPSERT"
+        semantic_action = normalize_model_semantic_action(item.get("semanticAction"), target_type, item.get("bindingType"))
         if target_type == "fieldBinding":
             name = str(item.get("name") or item.get("term") or item.get("label") or "").strip()
             field_ref = str(item.get("field") or "").strip()
@@ -3042,6 +3497,7 @@ def normalize_patch_operations(entries: Any, fields: list[FieldMeta]) -> list[di
             if not name or not field_name:
                 continue
             result.append({
+                "semanticAction": semantic_action,
                 "targetType": "fieldBinding",
                 "action": action,
                 "bindingType": binding_type,
@@ -3058,6 +3514,7 @@ def normalize_patch_operations(entries: Any, fields: list[FieldMeta]) -> list[di
             if not term:
                 continue
             result.append({
+                "semanticAction": semantic_action,
                 "targetType": "dictionaryEntry",
                 "action": action,
                 "term": term,
@@ -3075,6 +3532,7 @@ def normalize_patch_operations(entries: Any, fields: list[FieldMeta]) -> list[di
         if not name:
             continue
         result.append({
+            "semanticAction": semantic_action,
             "targetType": "metricDefinition",
             "action": action,
             "name": name,
@@ -3083,6 +3541,31 @@ def normalize_patch_operations(entries: Any, fields: list[FieldMeta]) -> list[di
             "formula": rewrite_formula_to_column_names(formula, fields),
         })
     return deduplicate_patch_operations(result)
+
+
+def normalize_model_semantic_action(value: Any, target_type: str, binding_type: Any = "") -> str:
+    raw = str(value or "").strip().upper().replace("-", "_")
+    allowed = {
+        "FIELD_BINDING",
+        "METRIC_FORMULA_UPDATE",
+        "METRIC_SCOPE_UPDATE",
+        "DICTIONARY_UPSERT",
+        "DIMENSION_BINDING",
+        "MODEL_CREATE",
+        "MODEL_APPLY",
+        "MODEL_PUBLISH",
+    }
+    if raw in allowed:
+        return raw
+    normalized_target = str(target_type or "").strip()
+    normalized_binding = str(binding_type or "").strip()
+    if normalized_target == "metricDefinition":
+        return "METRIC_FORMULA_UPDATE"
+    if normalized_target == "dictionaryEntry":
+        return "DICTIONARY_UPSERT"
+    if normalized_target == "dimensionDefinition" or normalized_binding == "dimensionDefinition":
+        return "DIMENSION_BINDING"
+    return "FIELD_BINDING"
 
 
 def normalize_metric_definitions(entries: Any, fields: list[FieldMeta]) -> list[dict[str, Any]]:
@@ -3153,15 +3636,27 @@ def build_patch_operations_from_question(
     existing_dimensions: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
     operations: list[dict[str, Any]] = []
-    operations.extend(build_field_binding_patch_operations(
-        question,
-        fields,
-        existing_dictionary_entries or [],
-        existing_metric_definitions or [],
-        existing_dimensions or [],
-    ))
-    operations.extend(build_dictionary_patch_operations(question, fields))
     operations.extend(build_metric_patch_operations(question, fields, existing_metric_definitions or []))
+    implicit_metric = build_implicit_metric_formula_from_question(question, fields)
+    if implicit_metric:
+        operations.append({
+            "semanticAction": "METRIC_FORMULA_UPDATE",
+            "targetType": "metricDefinition",
+            "action": "UPSERT",
+            "name": implicit_metric["name"],
+            "field": implicit_metric.get("field", ""),
+            "aggregation": implicit_metric.get("aggregation", "AVG"),
+            "formula": implicit_metric.get("formula", ""),
+        })
+    if not has_metric_scope_or_formula_intent(question):
+        operations.extend(build_field_binding_patch_operations(
+            question,
+            fields,
+            existing_dictionary_entries or [],
+            existing_metric_definitions or [],
+            existing_dimensions or [],
+        ))
+        operations.extend(build_dictionary_patch_operations(question, fields))
     if any(token in question for token in ["删除", "移除", "去掉", "取消"]) and ((existing_dictionary_entries or []) or (existing_metric_definitions or [])):
         operations.extend(build_delete_patch_operations(question, existing_dictionary_entries, existing_metric_definitions or []))
     return deduplicate_patch_operations(operations)
@@ -3212,6 +3707,7 @@ def build_field_binding_patch_operations(
                     overall_binding_type,
                 )
             operations.append({
+                "semanticAction": "DIMENSION_BINDING" if binding_type == "dimensionDefinition" else "FIELD_BINDING",
                 "targetType": "fieldBinding",
                 "action": "UPSERT",
                 "bindingType": binding_type,
@@ -3250,7 +3746,7 @@ def build_metric_patch_operations(question: str, fields: list[FieldMeta], existi
     segments = split_top_level_segments(question, separators=["；", ";", "\n"])
     for item in segments:
         cleaned = strip_model_operation_prefix(item, ["指标公式", "业务公式", "公式"])
-        parts = split_top_level_segments(cleaned, separators=["，", ",", "、"])
+        parts = [cleaned] if looks_like_single_formula_assignment(cleaned) else split_top_level_segments(cleaned, separators=["，", ",", "、"])
         if not parts:
             parts = [cleaned]
         for part in parts:
@@ -3258,6 +3754,22 @@ def build_metric_patch_operations(question: str, fields: list[FieldMeta], existi
             if metric_op:
                 operations.append(metric_op)
     return operations
+
+
+def has_metric_scope_or_formula_intent(question: str) -> bool:
+    q = str(question or "").strip()
+    if not q:
+        return False
+    return bool(re.search(r"口径|以后|后续|之后|统一用|统一按|就按|按.*算|按.*统计|按照|除以|乘以|加上|减去|公式", q)
+                or looks_like_single_formula_assignment(q))
+
+
+def looks_like_single_formula_assignment(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    return bool(re.search(r"[\u4e00-\u9fa5A-Za-z0-9_]{1,30}\s*(=|＝|:|：)\s*.+[A-Za-z_][A-Za-z0-9_]*", value)
+                and re.search(r"[+\-*/]|除以|乘以|加上|减去", value))
 
 
 def parse_metric_operation_segment(
@@ -3269,28 +3781,40 @@ def parse_metric_operation_segment(
     if not text:
         return None
 
-    direct_match = re.match(r"(.+?)\s*[=:：]\s*(.+)$", text)
+    scope_match = re.search(r"(?:以后|后续|之后)?(?:报表里(?:的)?|模型里(?:的)?|指标)?\s*([\u4e00-\u9fa5A-Za-z0-9_]{2,20}?)(?:统一用|统一按|就按|按|按照|口径改成|口径改为|改成|改为|算作|当作)\s*([^，。；;\n]+)", text)
+    if scope_match:
+        name = match_existing_metric_name(str(scope_match.group(1) or "").strip(), existing_metric_definitions)
+        formula = str(scope_match.group(2) or "").strip()
+        return build_metric_patch_operation(name, formula, fields, "METRIC_SCOPE_UPDATE")
+
+    formula_match = re.search(r"([\u4e00-\u9fa5A-Za-z0-9_]{2,20}?)(?:按|按照)\s*(.+?(?:除以|乘以|加上|减去|/|\*|\+|-).+?)(?:算|计算|统计)?$", text)
+    if formula_match:
+        name = match_existing_metric_name(str(formula_match.group(1) or "").strip(), existing_metric_definitions)
+        formula = str(formula_match.group(2) or "").strip()
+        return build_metric_patch_operation(name, formula, fields, "METRIC_FORMULA_UPDATE")
+
+    direct_match = re.match(r"(.+?)\s*[=:：＝]\s*(.+)$", text)
     if direct_match:
         name = str(direct_match.group(1) or "").strip()
         formula = str(direct_match.group(2) or "").strip()
-        return build_metric_patch_operation(name, formula, fields)
+        return build_metric_patch_operation(name, formula, fields, "METRIC_FORMULA_UPDATE")
 
     modify_match = re.search(r"(?:把|将)?(.+?)(?:指标|公式)?(?:改成|修改为|更新为|调整为|设为)\s*(.+)$", text)
     if modify_match:
         name = match_existing_metric_name(str(modify_match.group(1) or "").strip(), existing_metric_definitions)
         formula = str(modify_match.group(2) or "").strip()
-        return build_metric_patch_operation(name, formula, fields)
+        return build_metric_patch_operation(name, formula, fields, "METRIC_FORMULA_UPDATE")
 
     add_match = re.search(r"(?:新增|增加|添加|补充)(?:一个|一条)?(.+?)(?:指标|公式)[，,:： ]*(?:公式是|为)?\s*(.+)$", text)
     if add_match:
         name = str(add_match.group(1) or "").strip()
         formula = str(add_match.group(2) or "").strip()
-        return build_metric_patch_operation(name, formula, fields)
+        return build_metric_patch_operation(name, formula, fields, "METRIC_FORMULA_UPDATE")
 
     return None
 
 
-def build_metric_patch_operation(name: str, formula: str, fields: list[FieldMeta]) -> dict[str, Any] | None:
+def build_metric_patch_operation(name: str, formula: str, fields: list[FieldMeta], semantic_action: str = "METRIC_FORMULA_UPDATE") -> dict[str, Any] | None:
     metric_name = cleanup_business_item_name(name)
     metric_formula = normalize_formula_phrase(str(formula or "").strip())
     if not metric_name or not metric_formula:
@@ -3303,6 +3827,7 @@ def build_metric_patch_operation(name: str, formula: str, fields: list[FieldMeta
             primary = matched.columnName
             break
     return {
+        "semanticAction": semantic_action,
         "targetType": "metricDefinition",
         "action": "UPSERT",
         "name": metric_name,
@@ -3532,7 +4057,34 @@ def build_metric_entries_from_question(question: str, fields: list[FieldMeta]) -
                 "aggregation": "AVG" if any(token in name for token in ["率", "均", "平均"]) else "SUM",
                 "formula": normalized_formula,
             })
+    implicit = build_implicit_metric_formula_from_question(question, fields)
+    if implicit:
+        entries.append(implicit)
     return normalize_metric_definitions(entries, fields)
+
+
+def build_implicit_metric_formula_from_question(question: str, fields: list[FieldMeta]) -> dict[str, Any] | None:
+    text = str(question or "").strip()
+    match = re.search(r"(.+?)(?:就)?(?:按|按照)\s*(.+?)(?:来算|计算|算)?$", text)
+    if not match:
+        return None
+    name = cleanup_business_item_name(match.group(1))
+    formula = normalize_formula_phrase(match.group(2))
+    if not name or not formula:
+        return None
+    rewritten = rewrite_formula_to_column_names(formula, fields)
+    primary = ""
+    for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", rewritten):
+        matched = resolve_field_from_ref(token, fields)
+        if matched:
+            primary = matched.columnName
+            break
+    return {
+        "name": name,
+        "field": primary,
+        "aggregation": "AVG" if any(token in name for token in ["率", "均", "平均"]) else "SUM",
+        "formula": rewritten,
+    }
 
 
 def rewrite_sql_alias(sql: str, dimension_key: str, metric_key: str) -> str:

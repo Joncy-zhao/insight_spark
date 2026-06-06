@@ -8,6 +8,7 @@ import com.insightspark.service.BusinessModelAgentService;
 import com.insightspark.service.ChatBiService;
 import com.insightspark.service.ChatConversationService;
 import com.insightspark.service.ChatQueryHistoryService;
+import com.insightspark.service.SmartChatService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
@@ -15,11 +16,18 @@ import org.springframework.web.bind.annotation.*;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.lang.reflect.Array;
+import java.time.temporal.TemporalAccessor;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -50,6 +58,9 @@ public class ChatController {
     @Autowired
     private StackCDashboardService stackCDashboardService;
 
+    @Autowired
+    private SmartChatService smartChatService;
+
     @PostMapping("/ask")
     public ApiResponse<Map<String, Object>> askQuestion(@RequestBody Map<String, Object> request) {
         return executeQuestion(text(request.get("question")), text(request.get("tableName")), false,
@@ -68,6 +79,13 @@ public class ChatController {
     public ApiResponse<Map<String, Object>> askQuestionEnhanced(@RequestBody Map<String, Object> request) {
         return executeQuestion(text(request.get("question")), text(request.get("tableName")), true,
                 toLong(request.get("conversationId")), toLong(request.get("parentTurnId")));
+    }
+
+    @PostMapping("/ask-smart")
+    public ApiResponse<Map<String, Object>> askQuestionSmart(@RequestBody Map<String, Object> request) {
+        return executeSmartQuestion(text(request.get("question")), text(request.get("tableName")),
+                toLong(request.get("conversationId")), toLong(request.get("parentTurnId")),
+                request == null ? Map.of() : request);
     }
 
     @PostMapping("/sessions")
@@ -306,32 +324,44 @@ public class ChatController {
 
     @GetMapping(value = "/ask-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public void askQuestionStream(@RequestParam String question,
-                                  @RequestParam(required = false) String tableName,
-                                  @RequestParam(required = false) Long conversationId,
-                                  @RequestParam(required = false) Long parentTurnId,
-                                  HttpServletResponse response) throws IOException {
-        streamQuestion(question, tableName, conversationId, parentTurnId, response);
+                                   @RequestParam(required = false) String tableName,
+                                   @RequestParam(required = false) Long conversationId,
+                                   @RequestParam(required = false) Long parentTurnId,
+                                   @RequestParam(required = false) String selectedTableName,
+                                   @RequestParam(required = false) String activeBusinessModelId,
+                                   @RequestParam(required = false) String lastCreatedBusinessModelId,
+                                   @RequestParam(required = false) String lastAppliedBusinessModelId,
+                                   HttpServletResponse response) throws IOException {
+        streamQuestion(question, tableName, conversationId, parentTurnId,
+                businessModelContext(selectedTableName, activeBusinessModelId, lastCreatedBusinessModelId, lastAppliedBusinessModelId),
+                response);
     }
 
     @GetMapping(value = "/sessions/{sessionId}/messages/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public void askSessionQuestionStream(@PathVariable Long sessionId,
-                                         @RequestParam String question,
-                                         @RequestParam(required = false) String tableName,
-                                         @RequestParam(required = false) Long parentTurnId,
-                                         HttpServletResponse response) throws IOException {
-        streamQuestion(question, tableName, sessionId, parentTurnId, response);
+                                          @RequestParam String question,
+                                          @RequestParam(required = false) String tableName,
+                                          @RequestParam(required = false) Long parentTurnId,
+                                          @RequestParam(required = false) String selectedTableName,
+                                          @RequestParam(required = false) String activeBusinessModelId,
+                                          @RequestParam(required = false) String lastCreatedBusinessModelId,
+                                          @RequestParam(required = false) String lastAppliedBusinessModelId,
+                                          HttpServletResponse response) throws IOException {
+        streamQuestion(question, tableName, sessionId, parentTurnId,
+                businessModelContext(selectedTableName, activeBusinessModelId, lastCreatedBusinessModelId, lastAppliedBusinessModelId),
+                response);
     }
 
     @PostMapping(value = "/sessions/{sessionId}/messages/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public void postSessionQuestionStream(@PathVariable Long sessionId,
-                                          @RequestBody Map<String, Object> request,
-                                          HttpServletResponse response) throws IOException {
+                                           @RequestBody Map<String, Object> request,
+                                           HttpServletResponse response) throws IOException {
         streamQuestion(text(request.get("question")), text(request.get("tableName")),
-                sessionId, toLong(request.get("parentTurnId")), response);
+                sessionId, toLong(request.get("parentTurnId")), request == null ? Map.of() : request, response);
     }
 
     private void streamQuestion(String question, String tableName, Long conversationId, Long parentTurnId,
-                                HttpServletResponse response) throws IOException {
+                                Map<String, Object> requestContext, HttpServletResponse response) throws IOException {
         response.setCharacterEncoding("UTF-8");
         response.setContentType(MediaType.TEXT_EVENT_STREAM_VALUE);
         response.setHeader("Cache-Control", "no-cache");
@@ -350,14 +380,16 @@ public class ChatController {
                 question, tableName, Map.of("transport", "SSE"));
         Long userTurnId = toLong(userTurn.get("id"));
         String executionQuestion = safeBuildExecutionQuestion(activeConversationId, userTurnId, question);
+        Map<String, Object> executionContext = new LinkedHashMap<>(requestContext == null ? Map.of() : requestContext);
+        executionContext.put("rawQuestion", question);
         long startedAt = System.currentTimeMillis();
         CompletableFuture<Map<String, Object>> queryFuture = new CompletableFuture<>();
         AtomicBoolean clientDisconnected = new AtomicBoolean(false);
         Thread queryThread = new Thread(() -> {
             try {
                 AuthContext.set(principal);
-                queryFuture.complete(chatBiService.executeChat(buildChatQueryRequest(
-                        executionQuestion, tableName, activeConversationId, parentTurnId
+                queryFuture.complete(smartChatService.executeSmart(buildChatQueryRequest(
+                        executionQuestion, tableName, activeConversationId, parentTurnId, executionContext
                 )));
             } catch (Exception e) {
                 queryFuture.completeExceptionally(e);
@@ -520,6 +552,12 @@ public class ChatController {
 
     private ChatBiService.ChatQueryRequest buildChatQueryRequest(String question, String tableName,
                                                                  Long conversationId, Long parentTurnId) {
+        return buildChatQueryRequest(question, tableName, conversationId, parentTurnId, Map.of());
+    }
+
+    private ChatBiService.ChatQueryRequest buildChatQueryRequest(String question, String tableName,
+                                                                 Long conversationId, Long parentTurnId,
+                                                                 Map<String, Object> requestContext) {
         ChatBiService.ChatQueryRequest request = new ChatBiService.ChatQueryRequest();
         request.setQuestion(question);
         request.setConversationId(conversationId);
@@ -529,6 +567,11 @@ public class ChatController {
         if (tableName != null && !tableName.isBlank()) {
             filters.put("tableName", tableName);
         }
+        putIfPresent(filters, "selectedTableName", requestContext == null ? null : requestContext.get("selectedTableName"));
+        putIfPresent(filters, "activeBusinessModelId", requestContext == null ? null : requestContext.get("activeBusinessModelId"));
+        putIfPresent(filters, "lastCreatedBusinessModelId", requestContext == null ? null : requestContext.get("lastCreatedBusinessModelId"));
+        putIfPresent(filters, "lastAppliedBusinessModelId", requestContext == null ? null : requestContext.get("lastAppliedBusinessModelId"));
+        putIfPresent(filters, "rawQuestion", requestContext == null ? null : requestContext.get("rawQuestion"));
         request.setFilters(filters);
         request.setMode("CHAT");
         return request;
@@ -581,6 +624,8 @@ public class ChatController {
         String riskReason = trimTo(Objects.toString(result == null ? null : result.get("riskReason"), ""), 120);
         int dataCount = countResultRows(result == null ? null : result.get("data"));
         List<String> reasoningLogs = toStringList(result == null ? null : result.get("reasoningLogs"));
+        String smartIntent = Objects.toString(result == null ? null : result.get("smartIntent"), "");
+        boolean smartNonQuery = !smartIntent.isBlank() && !"QUERY_SQL".equalsIgnoreCase(smartIntent);
 
         steps.add(step("收到问题", safeQuestion.isBlank()
                 ? "已接收用户查询，开始进入分析流程"
@@ -588,9 +633,15 @@ public class ChatController {
         steps.add(step("图谱导航", safeTableName.isBlank()
                 ? "正在结合数据源与字段元信息定位分析对象"
                 : "已定位数据表 " + safeTableName + "，正在结合图谱与字段元信息分析"));
-        steps.add(step("语义改写", "已将自然语言问题拆解为结构化分析意图，准备生成 SQL"));
-        steps.add(step("SQL 生成", "已生成 " + chartLabel + " 所需 SQL，并完成字段映射"));
-        steps.add(step("安全检测", "SQL 安全审计 " + riskLevel + (riskReason.isBlank() ? "" : "，" + riskReason)));
+        steps.add(step("语义改写", smartNonQuery
+                ? "已将自然语言问题拆解为智能动作意图：" + smartIntent
+                : "已将自然语言问题拆解为结构化分析意图，准备生成 SQL"));
+        steps.add(step(smartNonQuery ? "动作编排" : "SQL 生成", smartNonQuery
+                ? "已根据语义路由选择预测、预警、建模或草稿生成等业务动作"
+                : "已生成 " + chartLabel + " 所需 SQL，并完成字段映射"));
+        steps.add(step("安全检测", smartNonQuery
+                ? "已执行参数完整性、确认策略和副作用保护检查"
+                : "SQL 安全审计 " + riskLevel + (riskReason.isBlank() ? "" : "，" + riskReason)));
         steps.add(step("执行查询", dataCount > 0
                 ? "查询执行完成，返回 " + dataCount + " 行结果"
                 : "查询已完成，返回结果待整理"));
@@ -647,6 +698,62 @@ public class ChatController {
         }
         return text.substring(0, maxLength).trim();
     }
+
+    private ApiResponse<Map<String, Object>> executeSmartQuestion(String question, String tableName,
+                                                                  Long conversationId, Long parentTurnId,
+                                                                  Map<String, Object> requestContext) {
+        if (question == null || question.isBlank()) {
+            return ApiResponse.badRequest("问题不能为空");
+        }
+        long startedAt = System.currentTimeMillis();
+        Long activeConversationId = safeEnsureConversation(conversationId, question, tableName);
+        Map<String, Object> userTurn = safeRecordUserTurn(activeConversationId, parentTurnId,
+                question, tableName, Map.of("transport", "HTTP_SMART"));
+        Long userTurnId = toLong(userTurn.get("id"));
+        String executionQuestion = safeBuildExecutionQuestion(activeConversationId, userTurnId, question);
+        Map<String, Object> executionContext = new LinkedHashMap<>(requestContext == null ? Map.of() : requestContext);
+        executionContext.put("rawQuestion", question);
+        try {
+            Map<String, Object> result = smartChatService.executeSmart(buildChatQueryRequest(
+                    executionQuestion, tableName, activeConversationId, parentTurnId, executionContext
+            ));
+            enrichEnhancedResponse(result, question, tableName);
+            attachHistoryReplaySteps(result, question, tableName);
+            Long historyId = chatQueryHistoryService.recordSuccess(question, tableName, result, System.currentTimeMillis() - startedAt);
+            if (historyId != null) {
+                result.put("queryHistoryId", historyId);
+            }
+            Map<String, Object> assistantTurn = safeRecordAssistantResult(
+                    activeConversationId, userTurnId, question, result, historyId);
+            attachConversationResponse(result, activeConversationId, userTurnId, assistantTurn);
+            attachHistoryConversationMetadata(historyId, activeConversationId, userTurn, assistantTurn,
+                    question, tableName, result);
+            return ApiResponse.success(result);
+        } catch (Exception e) {
+            chatQueryHistoryService.recordFailure(question, tableName, rootMessage(e), System.currentTimeMillis() - startedAt);
+            safeRecordAssistantFailure(activeConversationId, userTurnId, question, rootMessage(e));
+            return ApiResponse.error("智能分析失败：" + e.getMessage());
+        }
+    }
+
+    private Map<String, Object> businessModelContext(String selectedTableName,
+                                                     String activeBusinessModelId,
+                                                     String lastCreatedBusinessModelId,
+                                                     String lastAppliedBusinessModelId) {
+        Map<String, Object> context = new LinkedHashMap<>();
+        putIfPresent(context, "selectedTableName", selectedTableName);
+        putIfPresent(context, "activeBusinessModelId", activeBusinessModelId);
+        putIfPresent(context, "lastCreatedBusinessModelId", lastCreatedBusinessModelId);
+        putIfPresent(context, "lastAppliedBusinessModelId", lastAppliedBusinessModelId);
+        return context;
+    }
+
+    private void putIfPresent(Map<String, Object> target, String key, Object value) {
+        String text = text(value);
+        if (!text.isBlank()) {
+            target.put(key, text);
+        }
+    }
     private Long safeEnsureConversation(Long conversationId, String question, String tableName) {
         try {
             return chatConversationService.ensureConversation(conversationId, question, tableName);
@@ -702,12 +809,65 @@ public class ChatController {
     }
 
     private void writeSse(PrintWriter writer, String eventName, Object payload) throws IOException {
+        Object safePayload = toJsonSafeValue(payload);
         writer.write("event: " + eventName + "\n");
-        writer.write("data: " + objectMapper.writeValueAsString(payload) + "\n\n");
+        writer.write("data: " + objectMapper.writeValueAsString(safePayload) + "\n\n");
         writer.flush();
         if (writer.checkError()) {
             throw new IOException("SSE client disconnected");
         }
+    }
+
+    private Object toJsonSafeValue(Object value) {
+        return toJsonSafeValue(value, Collections.newSetFromMap(new IdentityHashMap<>()));
+    }
+
+    private Object toJsonSafeValue(Object value, Set<Object> visiting) {
+        if (value == null || value instanceof String || value instanceof Number || value instanceof Boolean) {
+            return value;
+        }
+        if (value instanceof Enum<?> enumValue) {
+            return enumValue.name();
+        }
+        if (value instanceof TemporalAccessor || value instanceof Date) {
+            return String.valueOf(value);
+        }
+        if (value instanceof Map<?, ?> map) {
+            if (!visiting.add(value)) {
+                return "[Circular]";
+            }
+            Map<String, Object> safe = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                safe.put(String.valueOf(entry.getKey()), toJsonSafeValue(entry.getValue(), visiting));
+            }
+            visiting.remove(value);
+            return safe;
+        }
+        if (value instanceof Collection<?> collection) {
+            if (!visiting.add(value)) {
+                return List.of("[Circular]");
+            }
+            List<Object> safe = new ArrayList<>();
+            for (Object item : collection) {
+                safe.add(toJsonSafeValue(item, visiting));
+            }
+            visiting.remove(value);
+            return safe;
+        }
+        Class<?> type = value.getClass();
+        if (type.isArray()) {
+            if (!visiting.add(value)) {
+                return List.of("[Circular]");
+            }
+            int length = Array.getLength(value);
+            List<Object> safe = new ArrayList<>(length);
+            for (int i = 0; i < length; i++) {
+                safe.add(toJsonSafeValue(Array.get(value, i), visiting));
+            }
+            visiting.remove(value);
+            return safe;
+        }
+        return String.valueOf(value);
     }
 
     private void cancelQuery(CompletableFuture<Map<String, Object>> queryFuture, Thread queryThread) {

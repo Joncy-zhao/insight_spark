@@ -778,7 +778,7 @@ public class DataUploadService {
             modelJson.put("metricDefinitions", sanitizeMetricDefinitions(request.get("metricDefinitions"), tableName));
         }
         if (request.containsKey("dimensionSystem")) {
-            modelJson.put("dimensionSystem", sanitizeDimensionSystem(request.get("dimensionSystem")));
+            modelJson.put("dimensionSystem", sanitizeDimensionSystem(request.get("dimensionSystem"), tableName));
         }
         if (request.containsKey("analysisLogic")) {
             modelJson.put("analysisLogic", sanitizeAnalysisLogic(request.get("analysisLogic")));
@@ -1088,7 +1088,7 @@ public class DataUploadService {
                 continue;
             }
             String term = Objects.toString(raw.get("term"), "").trim();
-            String rawField = Objects.toString(raw.get("field"), "").trim();
+            String rawField = extractBusinessModelFieldRef(raw);
             String synonymsText = Objects.toString(raw.get("synonyms"), "").trim();
             List<String> synonyms = splitAndTrim(synonymsText);
             String inferredField = resolveFieldBindingByCandidates(
@@ -1125,7 +1125,7 @@ public class DataUploadService {
                 continue;
             }
             String name = Objects.toString(raw.get("name"), "").trim();
-            String rawField = Objects.toString(raw.get("field"), "").trim();
+            String rawField = extractBusinessModelFieldRef(raw);
             String aggregation = Objects.toString(raw.get("aggregation"), "").trim();
             String formula = Objects.toString(raw.get("formula"), "").trim();
             if (name.isBlank()) {
@@ -1163,7 +1163,7 @@ public class DataUploadService {
                 continue;
             }
             String name = Objects.toString(raw.get("name"), "").trim();
-            String rawField = Objects.toString(raw.get("field"), "").trim();
+            String rawField = extractBusinessModelFieldRef(raw);
             String inferredField = resolveFieldBindingByCandidates(
                     tableFields,
                     joinNonBlank(List.of(name, rawField))
@@ -1269,6 +1269,16 @@ public class DataUploadService {
             }
         }
         return result;
+    }
+
+    private String extractBusinessModelFieldRef(Map<?, ?> raw) {
+        for (String key : List.of("field", "columnName", "sourceFieldName", "fieldName", "dimensionField", "targetField")) {
+            String value = Objects.toString(raw.get(key), "").trim();
+            if (!value.isBlank()) {
+                return value;
+            }
+        }
+        return "";
     }
 
     private String normalizeFieldToken(String value) {
