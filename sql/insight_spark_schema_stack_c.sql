@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS `is_dashboard` (
   `status` VARCHAR(32) NOT NULL DEFAULT 'ACTIVE' COMMENT '鐘舵€侊細ACTIVE 浣跨敤涓?/ ARCHIVED 褰掓。 / DISABLED 鍋滅敤',
   `share_token` VARCHAR(64) NULL COMMENT '鍒嗕韩閾炬帴 token锛岀┖琛ㄧず鏈紑鍚垎浜?,
   `share_expire_at` DATETIME NULL COMMENT '鍒嗕韩杩囨湡鏃堕棿',
+  `view_count` BIGINT NOT NULL DEFAULT 0 COMMENT '访问量（打开次数）',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '鍒涘缓鏃堕棿',
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '鏇存柊鏃堕棿',
   PRIMARY KEY (`id`),

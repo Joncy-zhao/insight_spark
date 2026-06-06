@@ -54,6 +54,7 @@ public class StackCSchemaInitializer {
                       `status` VARCHAR(32) NOT NULL DEFAULT 'ACTIVE' COMMENT '状态',
                       `share_token` VARCHAR(64) NULL COMMENT '分享 token',
                       `share_expire_at` DATETIME NULL COMMENT '分享过期时间',
+                      `view_count` BIGINT NOT NULL DEFAULT 0 COMMENT '访问量（打开次数）',
                       `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
                       `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
                       PRIMARY KEY (`id`),
@@ -119,6 +120,17 @@ public class StackCSchemaInitializer {
                     "`group_id` BIGINT NULL COMMENT '所属分组 id' AFTER `group_name`");
             addIndexIfMissing("is_dashboard", "idx_dashboard_group_id",
                     "CREATE INDEX `idx_dashboard_group_id` ON `is_dashboard` (`group_id`)");
+            addColumnIfMissing("is_dashboard", "view_count",
+                    "`view_count` BIGINT NOT NULL DEFAULT 0 COMMENT '访问量（打开次数）' AFTER `share_expire_at`");
+            addColumnIfMissing("is_dashboard", "author_user_id",
+                    "`author_user_id` VARCHAR(64) NULL COMMENT '看板原作者 user_id' AFTER `owner_user_id`");
+            addColumnIfMissing("is_dashboard", "source_dashboard_id",
+                    "`source_dashboard_id` BIGINT NULL COMMENT '另存来源看板 id' AFTER `author_user_id`");
+            addColumnIfMissing("is_dashboard", "save_as_user_id",
+                    "`save_as_user_id` VARCHAR(64) NULL COMMENT '另存/复制生成者 user_id' AFTER `source_dashboard_id`");
+            addColumnIfMissing("is_dashboard", "publisher_user_id",
+                    "`publisher_user_id` VARCHAR(64) NULL COMMENT '执行发布者 user_id' AFTER `save_as_user_id`");
+            backfillDashboardAuthorAndPublisher();
 
             jdbcTemplate.execute("""
                     CREATE TABLE IF NOT EXISTS `is_annotation` (
@@ -200,6 +212,70 @@ public class StackCSchemaInitializer {
         } catch (Exception e) {
             log.error("全栈 C 表初始化失败", e);
             throw e;
+        }
+    }
+
+    private void backfillDashboardAuthorAndPublisher() {
+        Integer tableCount = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM information_schema.tables
+                WHERE table_schema = DATABASE() AND table_name = 'is_dashboard'
+                """, Integer.class);
+        if (tableCount == null || tableCount == 0) {
+            return;
+        }
+        Integer authorColumn = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM information_schema.columns
+                WHERE table_schema = DATABASE() AND table_name = 'is_dashboard' AND column_name = 'author_user_id'
+                """, Integer.class);
+        if (authorColumn != null && authorColumn > 0) {
+            jdbcTemplate.update("""
+                    UPDATE is_dashboard
+                    SET author_user_id = owner_user_id
+                    WHERE author_user_id IS NULL OR TRIM(author_user_id) = ''
+                    """);
+            Integer sourceColumn = jdbcTemplate.queryForObject("""
+                    SELECT COUNT(*) FROM information_schema.columns
+                    WHERE table_schema = DATABASE() AND table_name = 'is_dashboard' AND column_name = 'source_dashboard_id'
+                    """, Integer.class);
+            if (sourceColumn != null && sourceColumn > 0) {
+                jdbcTemplate.update("""
+                        UPDATE is_dashboard d
+                        INNER JOIN is_dashboard s ON s.id = d.source_dashboard_id
+                        SET d.author_user_id = COALESCE(NULLIF(TRIM(s.author_user_id), ''), s.owner_user_id)
+                        WHERE d.source_dashboard_id IS NOT NULL
+                        """);
+            }
+        }
+        Integer publisherColumn = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM information_schema.columns
+                WHERE table_schema = DATABASE() AND table_name = 'is_dashboard' AND column_name = 'publisher_user_id'
+                """, Integer.class);
+        if (publisherColumn != null && publisherColumn > 0) {
+            Integer saveAsColumn = jdbcTemplate.queryForObject("""
+                    SELECT COUNT(*) FROM information_schema.columns
+                    WHERE table_schema = DATABASE() AND table_name = 'is_dashboard' AND column_name = 'save_as_user_id'
+                    """, Integer.class);
+            if (saveAsColumn != null && saveAsColumn > 0) {
+                jdbcTemplate.update("""
+                        UPDATE is_dashboard
+                        SET save_as_user_id = publisher_user_id
+                        WHERE source_dashboard_id IS NOT NULL
+                          AND (save_as_user_id IS NULL OR TRIM(save_as_user_id) = '')
+                          AND publisher_user_id IS NOT NULL
+                          AND TRIM(publisher_user_id) != ''
+                        """);
+            }
+            jdbcTemplate.update("""
+                    UPDATE is_dashboard
+                    SET publisher_user_id = NULL
+                    WHERE status != 'ACTIVE'
+                    """);
+            jdbcTemplate.update("""
+                    UPDATE is_dashboard
+                    SET publisher_user_id = owner_user_id
+                    WHERE status = 'ACTIVE'
+                      AND (publisher_user_id IS NULL OR TRIM(publisher_user_id) = '')
+                    """);
         }
     }
 

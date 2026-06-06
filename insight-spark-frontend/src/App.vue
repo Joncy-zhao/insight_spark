@@ -51,7 +51,7 @@
         </div>
       </el-header>
 
-      <el-main class="main-stage">
+      <el-main class="main-stage" :class="{ 'main-stage--dashboard': isDashboardFlushLayout }">
         <DataUploadView v-if="activeModule === 'upload'" />
         <ChatAnalysisView v-if="activeModule === 'chat'" />
         <PermissionCenterView v-if="isPermissionModule" />
@@ -454,6 +454,7 @@ const handleChartResize = () => {
 
 const moduleTitle = computed(() => moduleMap[activeModule.value].title)
 const moduleSubtitle = computed(() => moduleMap[activeModule.value].subtitle)
+const isDashboardFlushLayout = computed(() => activeModule.value === 'dashboard' || activeModule.value === 'adminDashboard')
 const asideWidth = computed(() => isAsideCollapsed.value ? '64px' : '248px')
 const visibleMenuGroups = computed(() => {
   const role = currentUser.value?.role || 'USER'
@@ -5650,9 +5651,16 @@ provide('workbench', {
 
 <style>
 .app-shell {
+  height: 100vh;
   min-height: 100vh;
   background: #f5f7fb;
   color: #172033;
+  overflow: hidden;
+}
+
+.app-shell > .el-container {
+  flex: 1;
+  min-height: 0;
 }
 
 .app-aside {
@@ -5994,7 +6002,18 @@ provide('workbench', {
 }
 
 .main-stage {
+  flex: 1;
+  min-height: 0;
   padding: 20px;
+  box-sizing: border-box;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.main-stage.main-stage--dashboard {
+  padding: 20px 20px 0;
+  overflow: hidden;
 }
 
 .workspace-grid {

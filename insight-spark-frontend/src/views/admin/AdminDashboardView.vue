@@ -3,213 +3,253 @@
     <div class="adm-head">
       <div>
         <h1 class="adm-title">看板管理</h1>
-        <p class="adm-sub">管理平台公共看板分类与批量运维；分组仅用于公共看板，公共/个人在保存时选择。</p>
+        <p class="adm-sub">管理平台公共看板与批量运维；分组在编辑看板时指定，公共/私密在保存时选择。</p>
+      </div>
+    </div>
+
+    <div class="adm-stats-wrap" v-loading="loadingStats">
+      <div class="adm-stat-grid">
+        <article class="adm-stat-card adm-stat-card--blue">
+          <span class="adm-stat-label">看板总数</span>
+          <strong class="adm-stat-value">{{ stats.totalCount }}</strong>
+          <small class="adm-stat-hint">私密 + 公共合计</small>
+        </article>
+        <article class="adm-stat-card adm-stat-card--amber">
+          <span class="adm-stat-label">公共看板</span>
+          <strong class="adm-stat-value">{{ stats.publicCount }}</strong>
+          <small class="adm-stat-hint">开放类型 = 公共</small>
+        </article>
+        <article class="adm-stat-card adm-stat-card--indigo">
+          <span class="adm-stat-label">私密看板</span>
+          <strong class="adm-stat-value">{{ stats.privateCount }}</strong>
+          <small class="adm-stat-hint">开放类型 = 私密</small>
+        </article>
+        <article class="adm-stat-card adm-stat-card--green">
+          <span class="adm-stat-label">总访问量</span>
+          <strong class="adm-stat-value">{{ stats.totalViews }}</strong>
+          <small class="adm-stat-hint">全平台访问量求和</small>
+        </article>
+      </div>
+      <div class="adm-charts-grid">
+        <section class="adm-chart-panel">
+          <h3 class="adm-chart-title">看板类型占比</h3>
+          <p class="adm-chart-sub">公共 / 私密看板数量（南丁格尔玫瑰图）</p>
+          <div ref="typeChartRef" class="adm-chart-canvas" />
+        </section>
+        <section class="adm-chart-panel">
+          <h3 class="adm-chart-title">TOP5 热门看板</h3>
+          <p class="adm-chart-sub">按访问量倒排，便于性能治理</p>
+          <div ref="topChartRef" class="adm-chart-canvas" />
+        </section>
       </div>
     </div>
 
     <div class="adm-body">
-      <aside class="adm-sidebar">
-        <div class="adm-nav-toolbar">
-          <el-dropdown trigger="click" @command="onCreateCommand">
-            <button type="button" class="adm-nav-add" title="新建">
-              <el-icon :size="16"><Plus /></el-icon>
-              <el-icon class="adm-nav-add-caret" :size="10"><ArrowDown /></el-icon>
-            </button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item command="new-group">
-                  <span class="adm-dropdown-item">
-                    <el-icon><Folder /></el-icon>
-                    新建分组
-                  </span>
-                </el-dropdown-item>
-                <el-dropdown-item command="new-board">
-                  <span class="adm-dropdown-item">
-                    <el-icon><Odometer /></el-icon>
-                    新建看板
-                  </span>
-                </el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
-          <el-input
-            v-model="treeSearch"
-            class="adm-nav-search"
-            clearable
-            placeholder="搜索"
-            :prefix-icon="Search"
-          />
-          <div class="adm-nav-actions">
-            <el-button link class="adm-nav-icon-btn" :loading="loadingTree" title="刷新" @click="refreshAll">
-              <el-icon><Refresh /></el-icon>
-            </el-button>
-          </div>
-        </div>
-
-        <el-tree
-          ref="groupTreeRef"
-          v-loading="loadingTree"
-          class="adm-group-tree"
-          :data="navTree"
-          node-key="nodeKey"
-          :props="treeProps"
-          highlight-current
-          default-expand-all
-          :expand-on-click-node="false"
-          @node-click="onTreeNodeClick"
-        >
-          <template #default="{ data }">
-            <div class="adm-tree-node" :class="`is-${data.kind}`">
-              <el-icon v-if="data.kind === 'group'" class="adm-tree-type-icon is-folder" :size="15">
-                <Folder />
-              </el-icon>
-              <el-icon v-else-if="data.kind === 'board'" class="adm-tree-type-icon is-board" :size="15">
-                <Odometer />
-              </el-icon>
-              <el-icon v-else class="adm-tree-type-icon is-folder" :size="15">
-                <Folder />
-              </el-icon>
-              <el-tag
-                v-if="data.kind === 'board'"
-                size="small"
-                class="adm-tree-status"
-                :type="boardStatusTagType(data)"
-                effect="light"
-              >
-                {{ boardStatusTag(data) }}
-              </el-tag>
-              <span class="adm-tree-label" :title="data.name">{{ data.name }}</span>
-              <el-dropdown
-                v-if="showTreeNodeMenu(data)"
-                trigger="click"
-                @command="(cmd) => onTreeNodeCommand(cmd, data)"
-                @click.stop
-              >
-                <button type="button" class="adm-tree-more" title="更多操作" @click.stop>
-                  <el-icon :size="14"><More /></el-icon>
-                </button>
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <template v-if="data.kind === 'group' || data.kind === 'virtual'">
-                      <el-dropdown-item command="new-group">
-                        <span class="adm-dropdown-item">
-                          <el-icon><Folder /></el-icon>
-                          新建分组
-                        </span>
-                      </el-dropdown-item>
-                      <el-dropdown-item command="new-board">
-                        <span class="adm-dropdown-item">
-                          <el-icon><Odometer /></el-icon>
-                          新建看板
-                        </span>
-                      </el-dropdown-item>
-                    </template>
-                    <template v-if="data.kind === 'group' || data.kind === 'virtual'">
-                      <el-dropdown-item command="rename" divided>
-                        <span class="adm-dropdown-item">
-                          <el-icon><EditPen /></el-icon>
-                          重命名
-                        </span>
-                      </el-dropdown-item>
-                      <el-dropdown-item command="delete">
-                        <span class="adm-dropdown-item">
-                          <el-icon><Delete /></el-icon>
-                          删除
-                        </span>
-                      </el-dropdown-item>
-                    </template>
-                    <template v-if="data.kind === 'board'">
-                      <el-dropdown-item command="rename">
-                        <span class="adm-dropdown-item">
-                          <el-icon><EditPen /></el-icon>
-                          重命名
-                        </span>
-                      </el-dropdown-item>
-                      <el-dropdown-item command="delete">
-                        <span class="adm-dropdown-item">
-                          <el-icon><Delete /></el-icon>
-                          删除
-                        </span>
-                      </el-dropdown-item>
-                    </template>
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
-            </div>
-          </template>
-        </el-tree>
-        <el-empty v-if="!navTree.length && !loadingTree" :image-size="56" description="暂无分组或看板" />
-      </aside>
-
       <div class="adm-main">
         <div class="adm-filters">
           <el-input
             v-model="filters.keyword"
             class="adm-filter-search"
             clearable
-            placeholder="按看板名称或所有者搜索…"
+            placeholder="按看板名称或作者搜索…"
             :prefix-icon="Search"
             @keyup.enter="onSearch"
             @clear="onSearch"
           />
           <el-select v-model="filters.isPublic" class="adm-filter-select" @change="onSearch">
-            <el-option label="看板类型：全部" value="ALL" />
-            <el-option label="公共" value="1" />
-            <el-option label="个人" value="0" />
+            <el-option label="开放类型：全部" value="ALL" />
+            <el-option label="开放类型：公共" value="1" />
+            <el-option label="开放类型：私密" value="0" />
+          </el-select>
+          <el-select
+            v-model="filters.groupId"
+            class="adm-filter-select adm-filter-group"
+            popper-class="adm-group-filter-popper"
+            @change="onSearch"
+          >
+            <el-option label="分组：全部" value="ALL" />
+            <el-option label="分组：根目录" value="-1" />
+            <el-option
+              v-for="g in platformGroupOptions"
+              :key="g.id"
+              :label="`分组：${g.name}`"
+              :value="String(g.id)"
+            >
+              <div class="adm-group-filter-option">
+                <span class="adm-group-filter-name" :title="g.name">{{ g.name }}</span>
+                <div class="adm-group-filter-actions">
+                  <el-button
+                    link
+                    type="primary"
+                    class="adm-group-filter-edit"
+                    title="重命名"
+                    @click.stop="openEditPlatformGroup(g)"
+                  >
+                    <el-icon><EditPen /></el-icon>
+                  </el-button>
+                  <el-button
+                    link
+                    type="danger"
+                    class="adm-group-filter-del"
+                    title="删除分组"
+                    @click.stop="removePlatformGroup(g)"
+                  >
+                    <el-icon><Delete /></el-icon>
+                  </el-button>
+                </div>
+              </div>
+            </el-option>
           </el-select>
           <el-select v-model="filters.status" class="adm-filter-select" @change="onSearch">
-            <el-option label="运行状态：全部" value="ALL" />
-            <el-option label="启用" value="ACTIVE" />
-            <el-option label="停用" value="DISABLED" />
+            <el-option label="发布状态：全部" value="ALL" />
+            <el-option label="发布状态：已发布" value="ACTIVE" />
+            <el-option label="发布状态：待发布" value="DISABLED" />
           </el-select>
+          <div class="adm-filter-actions">
+            <el-dropdown trigger="click" @command="onCreateCommand">
+              <el-button type="primary">
+                <el-icon><Plus /></el-icon>
+                新建
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="new-group">
+                    <span class="adm-dropdown-item">
+                      <el-icon><Folder /></el-icon>
+                      新建分组
+                    </span>
+                  </el-dropdown-item>
+                  <el-dropdown-item command="new-board">
+                    <span class="adm-dropdown-item">
+                      <el-icon><Odometer /></el-icon>
+                      新建看板
+                    </span>
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+            <el-button :loading="loadingList" @click="refreshAll">
+              <el-icon><Refresh /></el-icon>
+              刷新
+            </el-button>
+          </div>
         </div>
 
-        <el-table :data="rows" border v-loading="loadingList" empty-text="暂无看板" class="adm-table">
+        <el-table
+          :data="rows"
+          border
+          size="small"
+          v-loading="loadingList"
+          empty-text="暂无看板"
+          class="adm-table"
+        >
           <el-table-column prop="id" label="ID" width="72" />
-          <el-table-column prop="name" label="看板名称" min-width="160" show-overflow-tooltip />
-          <el-table-column label="分组" min-width="140" show-overflow-tooltip>
+          <el-table-column prop="name" label="看板名称" min-width="88" show-overflow-tooltip />
+          <el-table-column label="作者" min-width="72" show-overflow-tooltip>
+            <template #default="{ row }">{{ authorDisplay(row) }}</template>
+          </el-table-column>
+          <el-table-column label="另存人" min-width="72" show-overflow-tooltip>
+            <template #default="{ row }">{{ saveAsDisplay(row) }}</template>
+          </el-table-column>
+          <el-table-column label="发布者" min-width="72" show-overflow-tooltip>
+            <template #default="{ row }">{{ publisherDisplay(row) }}</template>
+          </el-table-column>
+          <el-table-column label="开放类型" width="72" align="center">
             <template #default="{ row }">
-              {{ groupDisplay(row) }}
+              <el-tag :type="row.isPublic ? 'warning' : 'info'" size="small">
+                {{ boardVisibilityLabel(row.isPublic) }}
+              </el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="看板类型" width="108">
+          <el-table-column label="分组" min-width="64" show-overflow-tooltip>
+            <template #default="{ row }">{{ boardGroupDisplay(row) }}</template>
+          </el-table-column>
+          <el-table-column label="图表数" width="60" align="center">
             <template #default="{ row }">
-              <span class="adm-type" :class="row.isPublic ? 'is-public' : 'is-personal'">
-                <el-icon :size="14">
-                  <OfficeBuilding v-if="row.isPublic" />
-                  <User v-else />
-                </el-icon>
-                {{ row.isPublic ? '公共' : '个人' }}
-              </span>
+              <button
+                v-if="(row.chartCardCount || 0) > 0"
+                type="button"
+                class="adm-chart-count-btn"
+                :title="`查看 ${row.chartCardCount} 张图表`"
+                @click="previewDialogsRef?.openChartList(row)"
+              >
+                <el-tag size="small" type="primary" effect="plain" class="adm-chart-count-tag">
+                  {{ row.chartCardCount }}
+                </el-tag>
+              </button>
+              <el-tag v-else size="small" type="info" effect="plain">0</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="所有者" min-width="120" show-overflow-tooltip>
+          <el-table-column label="组件数" width="60" align="center">
             <template #default="{ row }">
-              {{ ownerDisplay(row) }}
+              <button
+                v-if="(row.basicWidgetCount || 0) > 0"
+                type="button"
+                class="adm-chart-count-btn"
+                :title="`查看 ${row.basicWidgetCount} 个基础组件`"
+                @click="previewDialogsRef?.openWidgetList(row)"
+              >
+                <el-tag size="small" type="warning" effect="plain" class="adm-chart-count-tag">
+                  {{ row.basicWidgetCount }}
+                </el-tag>
+              </button>
+              <el-tag v-else size="small" type="info" effect="plain">0</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="运行状态" width="100">
+          <el-table-column label="访问量" width="64" align="center">
             <template #default="{ row }">
-              <span class="adm-status" :class="statusTone(row)">
-                <i class="adm-status-dot" />
-                {{ statusLabel(row) }}
-              </span>
+              <el-tag size="small" type="info" effect="plain">{{ row.viewCount ?? 0 }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="更新时间" width="120">
+          <el-table-column label="发布状态" width="76" align="center">
             <template #default="{ row }">
-              {{ formatDate(row.updatedAt) }}
+              <el-tag :type="boardStatusTagType(row)" size="small" effect="light">
+                {{ boardStatusTag(row) }}
+              </el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="300" fixed="right">
+          <el-table-column label="更新时间" width="128" show-overflow-tooltip>
+            <template #default="{ row }">{{ formatDate(row.updatedAt) }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="360" fixed="right">
             <template #default="{ row }">
               <el-button link type="primary" @click="openViewBoard(row)">查看看板</el-button>
               <template v-if="canManageRow(row)">
-                <el-button link type="primary" @click="openGridEditor(row)">设计布局</el-button>
-                <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
+                <el-button
+                  v-if="canDesignBoard(row)"
+                  link
+                  type="primary"
+                  @click="openGridEditor(row)"
+                >
+                  设计看板
+                </el-button>
+                <el-button
+                  v-if="isBoardOwner(row)"
+                  link
+                  type="primary"
+                  @click="openEdit(row)"
+                >
+                  编辑
+                </el-button>
+                <el-button
+                  v-if="isBoardPublished(row)"
+                  link
+                  type="primary"
+                  @click="openShareDialog(row)"
+                >
+                  分享
+                </el-button>
+                <el-button
+                  v-if="!isBoardOwner(row) && isBoardPublished(row)"
+                  link
+                  type="warning"
+                  :loading="unpublishingId === row.id"
+                  @click="unpublishRow(row)"
+                >
+                  强制下线
+                </el-button>
                 <el-button link type="danger" @click="remove(row)">删除</el-button>
               </template>
-              <el-tag v-else size="small" type="info" class="adm-view-only-tag">仅查看</el-tag>
             </template>
           </el-table-column>
         </el-table>
@@ -229,11 +269,15 @@
       </div>
     </div>
 
+    <DashboardPreviewDialogs ref="previewDialogsRef" :api-base="API_BASE" />
+
     <DashboardGridEditor
       v-model="gridEditorVisible"
       :initial-row="gridEditorRow"
       :api-base="API_BASE"
       :prompt-visibility-on-save="gridEditorPromptVisibility"
+      :group-select-tree="groupSelectTree"
+      :save-as-platform-group-tree="groupSelectTree"
       @saved="onGridSaved"
     />
 
@@ -246,7 +290,7 @@
 
     <el-dialog
       v-model="groupVisible"
-      :title="groupEditId ? '编辑分组' : '新建分组'"
+      :title="groupEditId ? '重命名分组' : '新建分组'"
       width="480px"
       destroy-on-close
     >
@@ -295,7 +339,7 @@
             style="width: 100%"
           />
         </el-form-item>
-        <p class="adm-board-hint">公共/个人将在设计器中点击「保存布局」时选择。</p>
+        <p class="adm-board-hint">公共/私密将在设计器中点击「保存布局」时选择。</p>
       </el-form>
       <template #footer>
         <el-button @click="boardVisible = false">取消</el-button>
@@ -322,16 +366,16 @@
             style="width: 100%"
           />
         </el-form-item>
-        <el-form-item label="看板类型">
+        <el-form-item label="开放类型">
           <el-radio-group v-model="form.isPublic">
-            <el-radio :label="false">个人</el-radio>
+            <el-radio :label="false">私密</el-radio>
             <el-radio :label="true">公共</el-radio>
           </el-radio-group>
         </el-form-item>
-        <el-form-item label="运行状态">
+        <el-form-item label="发布状态">
           <el-radio-group v-model="form.status">
-            <el-radio label="ACTIVE">启用</el-radio>
-            <el-radio label="DISABLED">停用</el-radio>
+            <el-radio label="ACTIVE">已发布</el-radio>
+            <el-radio label="DISABLED">待发布</el-radio>
           </el-radio-group>
         </el-form-item>
       </el-form>
@@ -340,54 +384,106 @@
         <el-button type="primary" :loading="saving" @click="saveEdit">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="shareVisible" title="分享看板" width="520px" destroy-on-close @closed="onShareDialogClosed">
+      <p class="adm-board-hint">
+        设置分享有效期后点击「生成链接」；不填过期时间则为永久有效。链接生成后请自行复制分享，重新生成后原链接立即失效。
+      </p>
+      <el-form label-position="top">
+        <el-form-item label="过期时间（可选）">
+          <el-date-picker
+            v-model="shareExpireAt"
+            type="datetime"
+            value-format="YYYY-MM-DD HH:mm:ss"
+            placeholder="不填则长期有效"
+            clearable
+            style="width: 100%;"
+          />
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" :loading="sharing" @click="generateShareLink">生成链接</el-button>
+        </el-form-item>
+        <el-form-item v-if="shareLinkText" label="分享链接">
+          <el-input v-model="shareLinkText" readonly>
+            <template #append>
+              <el-button @click="copyShareLinkText">复制链接</el-button>
+            </template>
+          </el-input>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="shareVisible = false">取消</el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import * as echarts from 'echarts'
 import axios from 'axios'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  ArrowDown,
   Delete,
   EditPen,
   Folder,
-  More,
   Odometer,
-  OfficeBuilding,
   Plus,
   Refresh,
-  Search,
-  User
+  Search
 } from '@element-plus/icons-vue'
 import { currentUser, restoreSessionHeader } from '../../store/session'
 import DashboardBoardViewer from '../../components/dashboard/DashboardBoardViewer.vue'
+import DashboardPreviewDialogs from '../../components/dashboard/DashboardPreviewDialogs.vue'
 import DashboardGridEditor from '../user/DashboardGridEditor.vue'
+import { countChartSlotsForDashboardRow, countBasicWidgetSlotsForDashboardRow } from '../../utils/dashboardGrid.js'
+import {
+  boardGroupDisplay,
+  boardStatusTag,
+  boardStatusTagType,
+  boardIsPublic,
+  boardVisibilityLabel,
+  canDesignBoard,
+  canDirectEditBoard,
+  authorDisplay,
+  flattenGroupOptions,
+  isBoardOwner,
+  isBoardPublished,
+  isPublicSaveAsDesign,
+  publisherDisplay,
+  saveAsDisplay
+} from '../../utils/dashboardManageTree.js'
 
 const API_BASE = 'http://localhost:8080'
 /** 所属分组下拉：根目录（对应 parent_id = null） */
 const GROUP_ROOT_PARENT_ID = 0
 
 const rows = ref([])
-const allBoards = ref([])
 const groupTree = ref([])
 const loadingList = ref(false)
-const loadingTree = ref(false)
-const groupTreeRef = ref(null)
-const treeSearch = ref('')
+const loadingStats = ref(false)
 
-const treeProps = { label: 'name', children: 'children' }
+const stats = reactive({
+  totalCount: 0,
+  publicCount: 0,
+  privateCount: 0,
+  totalViews: 0,
+  topByViews: []
+})
+
+const typeChartRef = ref(null)
+const topChartRef = ref(null)
+let typeChart = null
+let topChart = null
+
 const treeSelectProps = { label: 'name', value: 'id', children: 'children' }
 
 const filters = reactive({
   keyword: '',
   isPublic: '1',
+  groupId: 'ALL',
   status: 'ALL'
 })
-
-const groupFilter = ref({ kind: 'all' })
-/** 侧栏树当前选中上下文，用于「新建」默认上级分组 */
-const selectedTreeContext = ref({ kind: 'all', groupId: null })
 
 const pagination = reactive({
   page: 1,
@@ -398,9 +494,16 @@ const pagination = reactive({
 const gridEditorVisible = ref(false)
 const gridEditorRow = ref(null)
 const gridEditorPromptVisibility = ref(false)
+const previewDialogsRef = ref(null)
 
 const boardViewerVisible = ref(false)
 const boardViewerRow = ref(null)
+
+const shareVisible = ref(false)
+const sharing = ref(false)
+const shareTargetId = ref(null)
+const shareExpireAt = ref('')
+const shareLinkText = ref('')
 
 const groupVisible = ref(false)
 const groupSaving = ref(false)
@@ -420,6 +523,7 @@ const boardForm = reactive({
 
 const editVisible = ref(false)
 const saving = ref(false)
+const unpublishingId = ref(null)
 const editId = ref(null)
 const form = reactive({
   name: '',
@@ -429,9 +533,9 @@ const form = reactive({
   status: 'ACTIVE'
 })
 
-const navTree = computed(() => buildNavTree(groupTree.value, allBoards.value, treeSearch.value))
-
 const groupSelectTree = computed(() => decorateGroupNodesOnly(groupTree.value))
+
+const platformGroupOptions = computed(() => flattenGroupOptions(groupTree.value))
 
 const groupParentSelectTree = computed(() => [
   {
@@ -451,140 +555,25 @@ function decorateGroupNodesOnly(nodes) {
   }))
 }
 
-function toBoardTreeNode(board) {
-  return {
-    kind: 'board',
-    nodeKey: `b-${board.id}`,
-    id: board.id,
-    name: board.name || `看板 #${board.id}`,
-    status: board.status,
-    isPublic: board.isPublic,
-    groupId: board.groupId,
-    raw: board
-  }
-}
-
-function buildNavTree(groups, boards, keyword) {
-  const boardsByGroupId = new Map()
-  const unassignedBoards = []
-  for (const board of Array.isArray(boards) ? boards : []) {
-    const gid = Number(board.groupId)
-    const node = toBoardTreeNode(board)
-    if (Number.isFinite(gid) && gid > 0) {
-      if (!boardsByGroupId.has(gid)) boardsByGroupId.set(gid, [])
-      boardsByGroupId.get(gid).push(node)
-    } else {
-      unassignedBoards.push(node)
-    }
-  }
-
-  function mapGroup(node) {
-    const childGroups = (node.children || []).map(mapGroup)
-    const childBoards = boardsByGroupId.get(Number(node.id)) || []
-    childBoards.sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh-CN'))
-    return {
-      kind: 'group',
-      nodeKey: `g-${node.id}`,
-      id: node.id,
-      name: node.name,
-      parentId: node.parentId,
-      children: [...childGroups, ...childBoards]
-    }
-  }
-
-  const roots = (Array.isArray(groups) ? groups : []).map(mapGroup)
-  unassignedBoards.sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh-CN'))
-  roots.unshift({
-    kind: 'virtual',
-    nodeKey: 'unassigned',
-    name: '未分组',
-    children: unassignedBoards
-  })
-
-  const kw = String(keyword || '').trim().toLowerCase()
-  if (!kw) return roots
-  return filterNavTree(roots, kw)
-}
-
-function filterNavTree(nodes, keyword) {
-  const result = []
-  for (const node of nodes) {
-    const children = Array.isArray(node.children) ? filterNavTree(node.children, keyword) : []
-    const selfMatch = String(node.name || '').toLowerCase().includes(keyword)
-    if (selfMatch || children.length) {
-      result.push({
-        ...node,
-        children: selfMatch ? node.children || [] : children
-      })
-    }
-  }
-  return result
-}
-
-function boardStatusTag(data) {
-  const s = String(data?.status || 'ACTIVE').toUpperCase()
-  if (s === 'ACTIVE') return '已发布'
-  if (s === 'DISABLED') return '已停用'
-  return s
-}
-
-function boardStatusTagType(data) {
-  const s = String(data?.status || 'ACTIVE').toUpperCase()
-  return s === 'ACTIVE' ? 'success' : 'info'
-}
-
 function canManageRow(row) {
   if (row?.canManage != null) return Boolean(row.canManage)
-  if (Boolean(row?.isPublic)) return true
+  if (boardIsPublic(row)) return true
   const ownerId = String(row?.ownerUserId || '').trim()
   const me = String(currentUser.value?.userId || '').trim()
   return Boolean(ownerId && me && ownerId === me)
 }
 
-function canManageTreeBoard(data) {
-  return canManageRow(data?.raw || data)
-}
-
-function showTreeNodeMenu(data) {
-  if (data.kind === 'group' || data.kind === 'virtual') return true
-  if (data.kind === 'board') return canManageTreeBoard(data)
-  return false
-}
-
-function ownerDisplay(row) {
-  const nick = String(row?.ownerNickname || '').trim()
-  const user = String(row?.ownerUsername || '').trim()
-  const uid = String(row?.ownerUserId || '').trim()
-  return nick || user || uid || '—'
-}
-
-function groupDisplay(row) {
-  const path = String(row?.groupPath || '').trim()
-  if (path) return path
-  const name = String(row?.groupName || '').trim()
-  return name || '未分组'
-}
-
-function statusLabel(row) {
-  const s = String(row?.status || 'ACTIVE').toUpperCase()
-  if (s === 'ACTIVE') return '启用'
-  if (s === 'DISABLED') return '停用'
-  return s
-}
-
-function statusTone(row) {
-  const s = String(row?.status || 'ACTIVE').toUpperCase()
-  return s === 'ACTIVE' ? 'is-on' : 'is-off'
-}
 
 function formatDate(value) {
   if (!value) return '—'
   const d = new Date(value)
-  if (Number.isNaN(d.getTime())) return String(value).slice(0, 10)
+  if (Number.isNaN(d.getTime())) return String(value).slice(0, 16)
   const y = d.getFullYear()
   const m = String(d.getMonth() + 1).padStart(2, '0')
   const day = String(d.getDate()).padStart(2, '0')
-  return `${y}-${m}-${day}`
+  const h = String(d.getHours()).padStart(2, '0')
+  const min = String(d.getMinutes()).padStart(2, '0')
+  return `${y}-${m}-${day} ${h}:${min}`
 }
 
 function buildListParams() {
@@ -594,14 +583,96 @@ function buildListParams() {
   }
   const kw = String(filters.keyword || '').trim()
   if (kw) params.keyword = kw
-  if (groupFilter.value.kind === 'group' && groupFilter.value.id) {
-    params.groupId = groupFilter.value.id
-  } else if (groupFilter.value.kind === 'unassigned') {
-    params.groupId = -1
-  }
   if (filters.isPublic !== 'ALL') params.isPublic = Number(filters.isPublic)
+  if (filters.groupId && filters.groupId !== 'ALL') params.groupId = Number(filters.groupId)
   if (filters.status && filters.status !== 'ALL') params.status = filters.status
   return params
+}
+
+function renderTypeChart() {
+  if (!typeChartRef.value) return
+  if (!typeChart) {
+    typeChart = echarts.getInstanceByDom(typeChartRef.value) || echarts.init(typeChartRef.value)
+  }
+  const pub = Number(stats.publicCount) || 0
+  const priv = Number(stats.privateCount) || 0
+  const seriesData = []
+  if (pub > 0) seriesData.push({ name: '公共看板', value: pub })
+  if (priv > 0) seriesData.push({ name: '私密看板', value: priv })
+  if (!seriesData.length) {
+    seriesData.push({ name: '暂无看板', value: 1, itemStyle: { color: '#e5e7eb' } })
+  }
+  typeChart.setOption({
+    color: ['#f59e0b', '#6366f1', '#e5e7eb'],
+    tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
+    legend: { bottom: 0, left: 'center', textStyle: { fontSize: 12 } },
+    series: [{
+      type: 'pie',
+      radius: ['16%', '68%'],
+      center: ['50%', '44%'],
+      roseType: 'area',
+      itemStyle: { borderRadius: 4 },
+      label: { fontSize: 12, formatter: '{b}\n{c}' },
+      data: seriesData
+    }]
+  }, true)
+}
+
+function renderTopChart() {
+  if (!topChartRef.value) return
+  if (!topChart) {
+    topChart = echarts.getInstanceByDom(topChartRef.value) || echarts.init(topChartRef.value)
+  }
+  const items = (Array.isArray(stats.topByViews) ? stats.topByViews : []).slice(0, 5)
+  const names = items.map((row) => String(row?.name || `#${row?.id || ''}`)).reverse()
+  const views = items.map((row) => Number(row?.viewCount) || 0).reverse()
+  topChart.setOption({
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    grid: { left: 8, right: 16, top: 8, bottom: 8, containLabel: true },
+    xAxis: { type: 'value', minInterval: 1, splitLine: { lineStyle: { type: 'dashed', color: '#e5e7eb' } } },
+    yAxis: {
+      type: 'category',
+      data: names.length ? names : ['暂无数据'],
+      axisLabel: { width: 96, overflow: 'truncate', fontSize: 12 }
+    },
+    series: [{
+      type: 'bar',
+      data: names.length ? views : [0],
+      itemStyle: { color: '#3b82f6', borderRadius: [0, 4, 4, 0] },
+      barMaxWidth: 22
+    }]
+  }, true)
+}
+
+function renderStatsCharts() {
+  renderTypeChart()
+  renderTopChart()
+}
+
+function onStatsResize() {
+  typeChart?.resize()
+  topChart?.resize()
+}
+
+async function loadStats() {
+  loadingStats.value = true
+  restoreSessionHeader()
+  try {
+    const res = await axios.get(`${API_BASE}/api/c/admin/dashboards/stats`)
+    if (res.data.code !== 200) throw new Error(res.data.message)
+    const data = res.data.data || {}
+    stats.totalCount = Number(data.totalCount) || 0
+    stats.publicCount = Number(data.publicCount) || 0
+    stats.privateCount = Number(data.privateCount) || 0
+    stats.totalViews = Number(data.totalViews) || 0
+    stats.topByViews = Array.isArray(data.topByViews) ? data.topByViews : []
+    await nextTick()
+    renderStatsCharts()
+  } catch (e) {
+    ElMessage.error(e.message || '统计加载失败')
+  } finally {
+    loadingStats.value = false
+  }
 }
 
 async function loadGroupTree() {
@@ -615,28 +686,6 @@ async function loadGroupTree() {
   }
 }
 
-async function loadAllBoardsForTree() {
-  restoreSessionHeader()
-  try {
-    const res = await axios.get(`${API_BASE}/api/c/admin/dashboards`, {
-      params: { page: 1, pageSize: 500 }
-    })
-    if (res.data.code !== 200) throw new Error(res.data.message)
-    allBoards.value = Array.isArray(res.data.data?.items) ? res.data.data.items : []
-  } catch {
-    allBoards.value = []
-  }
-}
-
-async function loadTreeData() {
-  loadingTree.value = true
-  try {
-    await Promise.all([loadGroupTree(), loadAllBoardsForTree()])
-  } finally {
-    loadingTree.value = false
-  }
-}
-
 async function loadList() {
   loadingList.value = true
   restoreSessionHeader()
@@ -644,7 +693,11 @@ async function loadList() {
     const res = await axios.get(`${API_BASE}/api/c/admin/dashboards`, { params: buildListParams() })
     if (res.data.code !== 200) throw new Error(res.data.message)
     const data = res.data.data || {}
-    rows.value = Array.isArray(data.items) ? data.items : []
+    rows.value = (Array.isArray(data.items) ? data.items : []).map((row) => ({
+      ...row,
+      chartCardCount: countChartSlotsForDashboardRow(row?.layoutJson),
+      basicWidgetCount: countBasicWidgetSlotsForDashboardRow(row?.layoutJson)
+    }))
     pagination.total = Number(data.total) || 0
     pagination.page = Number(data.page) || pagination.page
     pagination.pageSize = Number(data.pageSize) || pagination.pageSize
@@ -656,7 +709,7 @@ async function loadList() {
 }
 
 async function refreshAll() {
-  await Promise.all([loadTreeData(), loadList()])
+  await Promise.all([loadStats(), loadGroupTree(), loadList()])
 }
 
 function onSearch() {
@@ -669,51 +722,10 @@ function onPageSizeChange() {
   loadList()
 }
 
-function onTreeNodeClick(data) {
-  if (data.kind === 'board') {
-    selectedTreeContext.value = { kind: 'board', groupId: normalizeTreeId(data.groupId) }
-    groupFilter.value = { kind: 'all' }
-    filters.keyword = data.name || ''
-    pagination.page = 1
-    loadList()
-    return
-  }
-  if (data.kind === 'virtual') {
-    selectedTreeContext.value = { kind: data.nodeKey, groupId: null }
-    groupFilter.value = data.nodeKey === 'unassigned' ? { kind: 'unassigned' } : { kind: 'all' }
-  } else if (data.kind === 'group') {
-    selectedTreeContext.value = { kind: 'group', groupId: normalizeTreeId(data.id) }
-    groupFilter.value = { kind: 'group', id: data.id }
-    filters.keyword = ''
-  } else {
-    selectedTreeContext.value = { kind: 'all', groupId: null }
-    groupFilter.value = { kind: 'all' }
-  }
-  pagination.page = 1
-  loadList()
-}
-
 function normalizeTreeId(value) {
   if (value == null || value === '') return null
   const n = Number(value)
   return Number.isFinite(n) && n > 0 ? n : null
-}
-
-function defaultParentGroupId() {
-  const ctx = selectedTreeContext.value
-  if (ctx.kind === 'group' && ctx.groupId) return normalizeTreeId(ctx.groupId)
-  if (ctx.kind === 'board' && ctx.groupId) return normalizeTreeId(ctx.groupId)
-
-  const current = groupTreeRef.value?.getCurrentNode?.()
-  if (current?.kind === 'group') return normalizeTreeId(current.id)
-  if (current?.kind === 'board') return normalizeTreeId(current.groupId)
-  return null
-}
-
-/** explicitParent: 从树节点菜单传入；undefined 表示用侧栏当前选中分组 */
-function resolveCreateParentGroupId(explicitParent) {
-  if (explicitParent !== undefined) return normalizeTreeId(explicitParent)
-  return defaultParentGroupId()
 }
 
 function resetGroupForm() {
@@ -726,31 +738,41 @@ function normalizeGroupParentId(value) {
   return normalizeTreeId(value)
 }
 
-function openNewGroup(explicitParent = undefined) {
-  groupEditId.value = null
-  resetGroupForm()
-  const parentId = resolveCreateParentGroupId(explicitParent)
+function findGroupInTree(nodes, id) {
+  const targetId = normalizeTreeId(id)
+  if (!targetId) return null
+  for (const node of Array.isArray(nodes) ? nodes : []) {
+    const nodeId = normalizeTreeId(node?.id)
+    if (nodeId === targetId) return node
+    const found = findGroupInTree(node?.children, targetId)
+    if (found) return found
+  }
+  return null
+}
+
+function openEditGroup(data) {
+  const id = normalizeTreeId(data?.id)
+  if (!id) return
+  groupEditId.value = id
+  groupForm.name = String(data?.name || '').trim()
+  const parentId = normalizeTreeId(data?.parentId)
   groupForm.parentId = parentId ?? GROUP_ROOT_PARENT_ID
   groupVisible.value = true
 }
 
-function openEditGroup(data) {
-  groupEditId.value = data.id
-  groupForm.name = data.name || ''
-  groupForm.parentId = data.parentId ? data.parentId : GROUP_ROOT_PARENT_ID
-  groupVisible.value = true
-}
-
-function syncTreeContextFromNode(data) {
-  if (data.kind === 'group') {
-    selectedTreeContext.value = { kind: 'group', groupId: normalizeTreeId(data.id) }
-    groupTreeRef.value?.setCurrentKey(data.nodeKey)
+function openEditPlatformGroup(group) {
+  const node = findGroupInTree(groupTree.value, group?.id)
+  if (!node) {
+    ElMessage.warning('分组不存在或已删除')
     return
   }
-  if (data.kind === 'virtual') {
-    selectedTreeContext.value = { kind: data.nodeKey, groupId: null }
-    groupTreeRef.value?.setCurrentKey(data.nodeKey)
-  }
+  openEditGroup(node)
+}
+
+function openNewGroup() {
+  groupEditId.value = null
+  resetGroupForm()
+  groupVisible.value = true
 }
 
 function onCreateCommand(command) {
@@ -763,50 +785,10 @@ function onCreateCommand(command) {
   }
 }
 
-function onTreeNodeCommand(command, data) {
-  syncTreeContextFromNode(data)
-  if (data.kind === 'board') {
-    const row = data.raw || data
-    if (command === 'rename') {
-      openEdit(row)
-      return
-    }
-    if (command === 'delete') {
-      remove(row)
-    }
-    return
-  }
-  if (command === 'new-group') {
-    openNewGroup(data.kind === 'group' ? normalizeTreeId(data.id) : null)
-    return
-  }
-  if (command === 'new-board') {
-    openNewBoard(data.kind === 'group' ? normalizeTreeId(data.id) : null)
-    return
-  }
-  if (data.kind === 'virtual') {
-    if (command === 'rename') {
-      ElMessage.info('「未分组」为系统分类，无法重命名')
-      return
-    }
-    if (command === 'delete') {
-      ElMessage.info('「未分组」为系统分类，无法删除')
-    }
-    return
-  }
-  if (command === 'rename') {
-    openEditGroup(data)
-    return
-  }
-  if (command === 'delete') {
-    removeGroup(data)
-  }
-}
-
-function openNewBoard(explicitGroupId = undefined) {
+function openNewBoard() {
   boardForm.name = ''
   boardForm.description = ''
-  boardForm.groupId = resolveCreateParentGroupId(explicitGroupId)
+  boardForm.groupId = null
   boardVisible.value = true
 }
 
@@ -832,7 +814,7 @@ async function saveGroup() {
     }
     ElMessage.success('分组已保存')
     groupVisible.value = false
-    await loadTreeData()
+    await refreshAll()
   } catch (e) {
     ElMessage.error(e.message || '保存失败')
   } finally {
@@ -840,30 +822,32 @@ async function saveGroup() {
   }
 }
 
-function boardFormGroupIdOrNull(value) {
-  return normalizeTreeId(value)
-}
-
-async function removeGroup(data) {
+async function removePlatformGroup(group) {
+  const id = normalizeTreeId(group?.id)
+  const name = String(group?.name || '').trim()
+  if (!id) return
   try {
-    await ElMessageBox.confirm(`确定删除分组「${data.name}」？`, '确认删除', { type: 'warning' })
+    await ElMessageBox.confirm(`确定删除分组「${name}」？`, '确认删除', { type: 'warning' })
   } catch {
     return
   }
   restoreSessionHeader()
   try {
-    const res = await axios.delete(`${API_BASE}/api/c/admin/dashboard-groups/${data.id}`)
+    const res = await axios.delete(`${API_BASE}/api/c/admin/dashboard-groups/${id}`)
     if (res.data.code !== 200) throw new Error(res.data.message)
-    ElMessage.success('已删除')
-    if (groupFilter.value.kind === 'group' && groupFilter.value.id === data.id) {
-      groupFilter.value = { kind: 'all' }
+    ElMessage.success('分组已删除')
+    if (filters.groupId === String(id)) {
+      filters.groupId = 'ALL'
+      pagination.page = 1
     }
     await refreshAll()
-    await nextTick()
-    groupTreeRef.value?.setCurrentKey(null)
   } catch (e) {
     ElMessage.error(e.message || '删除失败')
   }
+}
+
+function boardFormGroupIdOrNull(value) {
+  return normalizeTreeId(value)
 }
 
 async function createBoard() {
@@ -886,7 +870,7 @@ async function createBoard() {
     const created = res.data.data || {}
     ElMessage.success('看板已创建')
     boardVisible.value = false
-    await Promise.all([loadList(), loadAllBoardsForTree()])
+    await loadList()
     gridEditorRow.value = created
     gridEditorPromptVisibility.value = true
     gridEditorVisible.value = true
@@ -911,6 +895,13 @@ function openGridEditor(row) {
     ElMessage.warning('用户私有看板仅可查看，无法编辑布局')
     return
   }
+  if (!canDesignBoard(row)) {
+    ElMessage.warning(row?.isPublic ? '未发布的公共看板仅可预览，请先发布后再设计' : '当前看板不可设计')
+    return
+  }
+  if (isPublicSaveAsDesign(row) && !canDirectEditBoard(row)) {
+    ElMessage.info('他人已发布公共看板须先「另存为」副本后再编辑')
+  }
   gridEditorRow.value = row ? { ...row } : null
   gridEditorPromptVisibility.value = true
   gridEditorVisible.value = true
@@ -919,6 +910,10 @@ function openGridEditor(row) {
 function openEdit(row) {
   if (!canManageRow(row)) {
     ElMessage.warning('用户私有看板仅可查看，无法编辑')
+    return
+  }
+  if (!isBoardOwner(row)) {
+    ElMessage.warning('他人看板不可编辑，请使用「另存为」保存副本后再操作')
     return
   }
   editId.value = row.id
@@ -930,6 +925,41 @@ function openEdit(row) {
   editVisible.value = true
 }
 
+function buildEditBody() {
+  return {
+    name: String(form.name || '').trim(),
+    description: String(form.description || '').trim() || null,
+    groupId: boardFormGroupIdOrNull(form.groupId),
+    isPublic: Boolean(form.isPublic),
+    status: form.status
+  }
+}
+
+async function unpublishRow(row) {
+  if (!row?.id || isBoardOwner(row) || !isBoardPublished(row)) return
+  try {
+    await ElMessageBox.confirm(
+      `确定将看板「${row.name || row.id}」强制下线？下线后须由创建者本人重新发布。`,
+      '强制下线',
+      { type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  unpublishingId.value = row.id
+  restoreSessionHeader()
+  try {
+    const res = await axios.put(`${API_BASE}/api/c/dashboards/${row.id}`, { status: 'DISABLED' })
+    if (res.data.code !== 200) throw new Error(res.data.message)
+    ElMessage.success('已强制下线')
+    await refreshAll()
+  } catch (e) {
+    ElMessage.error(e.message || '下线失败')
+  } finally {
+    unpublishingId.value = null
+  }
+}
+
 async function saveEdit() {
   const name = String(form.name || '').trim()
   if (!name) {
@@ -939,13 +969,7 @@ async function saveEdit() {
   saving.value = true
   restoreSessionHeader()
   try {
-    const body = {
-      name,
-      description: String(form.description || '').trim() || null,
-      groupId: boardFormGroupIdOrNull(form.groupId),
-      isPublic: Boolean(form.isPublic),
-      status: form.status
-    }
+    const body = buildEditBody()
     const res = await axios.put(`${API_BASE}/api/c/dashboards/${editId.value}`, body)
     if (res.data.code !== 200) throw new Error(res.data.message)
     ElMessage.success('已保存')
@@ -955,6 +979,62 @@ async function saveEdit() {
     ElMessage.error(e.message || '保存失败')
   } finally {
     saving.value = false
+  }
+}
+
+function onShareDialogClosed() {
+  shareLinkText.value = ''
+  shareTargetId.value = null
+}
+
+function buildShareLink(row) {
+  const token = String(row?.shareToken || '').trim()
+  if (!token) return ''
+  const url = new URL(window.location.href)
+  url.searchParams.set('shareToken', token)
+  return url.toString()
+}
+
+function openShareDialog(row) {
+  if (!isBoardPublished(row)) {
+    ElMessage.warning('待发布看板无法分享，请先发布')
+    return
+  }
+  shareTargetId.value = row.id
+  shareExpireAt.value = row.shareExpireAt ? String(row.shareExpireAt).replace('T', ' ').slice(0, 19) : ''
+  shareLinkText.value = ''
+  shareVisible.value = true
+}
+
+async function generateShareLink() {
+  if (!shareTargetId.value) return
+  sharing.value = true
+  restoreSessionHeader()
+  try {
+    const body = shareExpireAt.value ? { expireAt: shareExpireAt.value } : {}
+    const res = await axios.post(`${API_BASE}/api/c/dashboards/${shareTargetId.value}/share/enable`, body)
+    if (res.data.code !== 200) throw new Error(res.data.message)
+    shareLinkText.value = buildShareLink(res.data.data)
+    ElMessage.success('链接已生成，原链接已失效，请复制下方链接')
+    await loadList()
+  } catch (e) {
+    ElMessage.error(e.message || '生成链接失败')
+  } finally {
+    sharing.value = false
+  }
+}
+
+async function copyShareLinkText() {
+  const link = String(shareLinkText.value || '').trim()
+  if (!link) {
+    ElMessage.warning('请先生成分享链接')
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(link)
+    ElMessage.success('分享链接已复制')
+  } catch {
+    ElMessage.error('复制失败，请手动复制')
   }
 }
 
@@ -985,7 +1065,16 @@ async function onGridSaved() {
 }
 
 onMounted(async () => {
+  window.addEventListener('resize', onStatsResize)
   await refreshAll()
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', onStatsResize)
+  typeChart?.dispose()
+  topChart?.dispose()
+  typeChart = null
+  topChart = null
 })
 </script>
 
@@ -999,7 +1088,74 @@ onMounted(async () => {
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
+  margin-bottom: 14px;
+}
+.adm-stats-wrap {
   margin-bottom: 16px;
+}
+.adm-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.adm-stat-card {
+  padding: 16px 18px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.04);
+}
+.adm-stat-card--blue { border-top: 3px solid #3b82f6; }
+.adm-stat-card--amber { border-top: 3px solid #f59e0b; }
+.adm-stat-card--indigo { border-top: 3px solid #6366f1; }
+.adm-stat-card--green { border-top: 3px solid #22c55e; }
+.adm-stat-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
+}
+.adm-stat-value {
+  display: block;
+  margin-top: 8px;
+  font-size: 28px;
+  line-height: 1.1;
+  font-weight: 700;
+  color: #111827;
+}
+.adm-stat-hint {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  color: #9ca3af;
+  line-height: 1.4;
+}
+.adm-charts-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.adm-chart-panel {
+  padding: 14px 16px 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #fff;
+}
+.adm-chart-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: #111827;
+}
+.adm-chart-sub {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #9ca3af;
+}
+.adm-chart-canvas {
+  width: 100%;
+  height: 240px;
 }
 .adm-title {
   margin: 0 0 6px;
@@ -1014,172 +1170,15 @@ onMounted(async () => {
   line-height: 1.5;
 }
 .adm-body {
-  display: flex;
-  gap: 16px;
-  align-items: stretch;
   min-height: 520px;
-}
-.adm-sidebar {
-  width: 220px;
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  background: #fff;
-  overflow: hidden;
-}
-.adm-nav-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 6px;
-  border-bottom: 1px solid #eef0f3;
-  background: #fafbfc;
-}
-.adm-nav-add {
-  position: relative;
-  width: 28px;
-  height: 28px;
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid #d8dee6;
-  border-radius: 6px;
-  background: #fff;
-  color: #374151;
-  cursor: pointer;
-  padding: 0;
-}
-.adm-nav-add:hover {
-  border-color: #b8c0cc;
-  color: #2563eb;
-}
-.adm-nav-add-caret {
-  position: absolute;
-  right: 2px;
-  bottom: 1px;
-  color: #9ca3af;
-}
-.adm-nav-search {
-  flex: 1;
-  min-width: 0;
-}
-.adm-nav-search :deep(.el-input__wrapper) {
-  border-radius: 14px;
-  box-shadow: 0 0 0 1px #e5e7eb inset;
-  padding: 0 8px;
-}
-.adm-nav-search :deep(.el-input__inner) {
-  font-size: 12px;
-}
-.adm-nav-actions {
-  display: flex;
-  align-items: center;
-  gap: 0;
-  flex-shrink: 0;
-}
-.adm-nav-icon-btn {
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  color: #6b7280;
-}
-.adm-nav-icon-btn:hover {
-  color: #2563eb;
 }
 .adm-dropdown-item {
   display: inline-flex;
   align-items: center;
   gap: 8px;
 }
-.adm-group-tree {
-  flex: 1;
-  overflow: auto;
-  padding: 4px 2px 8px;
-  background: #fff;
-}
-.adm-group-tree :deep(.el-tree-node__content) {
-  height: 30px;
-  border-radius: 4px;
-  padding-right: 4px;
-}
-.adm-group-tree :deep(.el-tree-node__expand-icon) {
-  color: #9ca3af;
-}
-.adm-group-tree :deep(.el-tree-node__expand-icon.is-leaf) {
-  width: 18px;
-  padding: 0;
-}
-.adm-group-tree :deep(.el-tree-node__content:hover) {
-  background: #f3f0ff;
-}
-.adm-group-tree :deep(.el-tree-node.is-current > .el-tree-node__content) {
-  background: #eef4ff;
-}
-.adm-tree-node {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  width: 100%;
-  min-width: 0;
-  padding-right: 4px;
-}
-.adm-tree-type-icon {
-  flex-shrink: 0;
-  color: #6b7280;
-}
-.adm-tree-type-icon.is-folder {
-  color: #f59e0b;
-}
-.adm-tree-type-icon.is-board {
-  color: #6366f1;
-}
-.adm-tree-status {
-  flex-shrink: 0;
-  height: 18px;
-  line-height: 16px;
-  padding: 0 4px;
-  font-size: 10px;
-  border-radius: 3px;
-}
-.adm-tree-label {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12px;
-  color: #374151;
-}
-.adm-tree-more {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: #6b7280;
-  cursor: pointer;
-  opacity: 0;
-  flex-shrink: 0;
-  transition: opacity 0.15s ease, background 0.15s ease;
-}
-.adm-tree-node:hover .adm-tree-more,
-.adm-group-tree :deep(.el-tree-node__content:hover) .adm-tree-more {
-  opacity: 1;
-  background: #e8eaef;
-}
-.adm-tree-more:hover {
-  color: #374151;
-  background: #dfe3ea;
-}
 .adm-main {
-  flex: 1;
+  width: 100%;
   min-width: 0;
 }
 .adm-filters {
@@ -1199,53 +1198,47 @@ onMounted(async () => {
 .adm-filter-select {
   width: 160px;
 }
+.adm-filter-group {
+  width: min(200px, 100%);
+}
+.adm-group-filter-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+.adm-group-filter-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.adm-group-filter-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  margin-right: -4px;
+}
+.adm-group-filter-edit,
+.adm-group-filter-del {
+  padding: 0 2px;
+}
+.adm-filter-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
 .adm-table {
   width: 100%;
-}
-.adm-type {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 13px;
-}
-.adm-type.is-public {
-  color: #2563eb;
-}
-.adm-type.is-personal {
-  color: #6b7280;
-}
-.adm-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-}
-.adm-status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #9ca3af;
-}
-.adm-status.is-on {
-  color: #15803d;
-}
-.adm-status.is-on .adm-status-dot {
-  background: #22c55e;
-}
-.adm-status.is-off {
-  color: #b91c1c;
-}
-.adm-status.is-off .adm-status-dot {
-  background: #ef4444;
 }
 .adm-pager {
   display: flex;
   justify-content: flex-end;
   margin-top: 14px;
-}
-.adm-view-only-tag {
-  margin-left: 4px;
-  vertical-align: middle;
 }
 .adm-board-hint {
   margin: 0 0 0 88px;
@@ -1253,15 +1246,36 @@ onMounted(async () => {
   color: #6b7280;
   line-height: 1.5;
 }
+.adm-edit-status-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
 @media (max-width: 900px) {
   .adm-head {
     flex-direction: column;
   }
-  .adm-body {
-    flex-direction: column;
+  .adm-stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .adm-sidebar {
+  .adm-charts-grid {
+    grid-template-columns: 1fr;
+  }
+  .adm-filter-actions {
+    margin-left: 0;
     width: 100%;
+    justify-content: flex-end;
   }
+}
+@media (max-width: 560px) {
+  .adm-stat-grid {
+    grid-template-columns: 1fr;
+  }
+}
+</style>
+
+<style>
+.adm-group-filter-popper .el-select-dropdown__item {
+  padding-right: 10px;
 }
 </style>

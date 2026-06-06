@@ -3,6 +3,10 @@
  * 新增基础组件时在此登记，并保证画布组件带 .dbw-drag-grip 拖动手柄
  */
 
+import DashboardCarouselWidget from '../components/dashboard/DashboardCarouselWidget.vue'
+import DashboardCarouselWidgetInspector from '../components/dashboard/DashboardCarouselWidgetInspector.vue'
+import DashboardImageWidget from '../components/dashboard/DashboardImageWidget.vue'
+import DashboardImageWidgetInspector from '../components/dashboard/DashboardImageWidgetInspector.vue'
 import DashboardTextWidget from '../components/dashboard/DashboardTextWidget.vue'
 import DashboardTextWidgetInspector from '../components/dashboard/DashboardTextWidgetInspector.vue'
 import DashboardVideoWidget from '../components/dashboard/DashboardVideoWidget.vue'
@@ -12,6 +16,18 @@ import {
   defaultTextWidgetConfig,
   textConfigForItem
 } from './dashboardWidgetText.js'
+import {
+  DASHBOARD_WIDGET_KIND_CAROUSEL,
+  carouselConfigForItem,
+  defaultCarouselWidgetConfig,
+  isCarouselWidgetItem
+} from './dashboardWidgetCarousel.js'
+import {
+  DASHBOARD_WIDGET_KIND_IMAGE,
+  defaultImageWidgetConfig,
+  imageConfigForItem,
+  isImageWidgetItem
+} from './dashboardWidgetImage.js'
 import {
   DASHBOARD_WIDGET_KIND_VIDEO,
   defaultVideoWidgetConfig,
@@ -37,6 +53,24 @@ export const BASIC_WIDGET_REGISTRY = Object.freeze({
     configForItem: textConfigForItem,
     defaultConfig: defaultTextWidgetConfig,
     isItem: (item) => String(item?.widgetKind || '').trim() === DASHBOARD_WIDGET_KIND_TEXT
+  }),
+  [DASHBOARD_WIDGET_KIND_IMAGE]: Object.freeze({
+    kind: DASHBOARD_WIDGET_KIND_IMAGE,
+    label: '图片',
+    widget: DashboardImageWidget,
+    inspector: DashboardImageWidgetInspector,
+    configForItem: imageConfigForItem,
+    defaultConfig: defaultImageWidgetConfig,
+    isItem: isImageWidgetItem
+  }),
+  [DASHBOARD_WIDGET_KIND_CAROUSEL]: Object.freeze({
+    kind: DASHBOARD_WIDGET_KIND_CAROUSEL,
+    label: '轮播图',
+    widget: DashboardCarouselWidget,
+    inspector: DashboardCarouselWidgetInspector,
+    configForItem: carouselConfigForItem,
+    defaultConfig: defaultCarouselWidgetConfig,
+    isItem: isCarouselWidgetItem
   })
 })
 

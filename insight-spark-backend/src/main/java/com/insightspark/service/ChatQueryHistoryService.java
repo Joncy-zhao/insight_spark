@@ -214,6 +214,46 @@ public class ChatQueryHistoryService {
                 .toList();
     }
 
+    /**
+     * 分享看板免登录加载图表：仅返回已钉入该看板的 chart_id 对应快照。
+     */
+    public List<Map<String, Object>> batchChartSnapshotsForSharedDashboard(List<Long> ids, long dashboardId) {
+        if (ids == null || ids.isEmpty() || dashboardId <= 0) {
+            return List.of();
+        }
+        List<Long> pinned = jdbcTemplate.queryForList("""
+                        SELECT chart_id
+                        FROM is_dashboard_component
+                        WHERE dashboard_id = ? AND chart_id > 0
+                        """, Long.class, dashboardId)
+                .stream()
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (pinned.isEmpty()) {
+            return List.of();
+        }
+        List<Long> limited = ids.stream()
+                .filter(Objects::nonNull)
+                .filter(pinned::contains)
+                .distinct()
+                .limit(50)
+                .collect(Collectors.toList());
+        if (limited.isEmpty()) {
+            return List.of();
+        }
+        String in = limited.stream().map(id -> "?").collect(Collectors.joining(","));
+        List<Object> args = new ArrayList<>(limited);
+        String sql = """
+                SELECT id, chart_type AS chartType, chart_snapshot AS chartSnapshot, generated_sql AS generatedSql,
+                       query_table_name AS queryTableName, query_text AS queryText
+                FROM is_chat_query_history
+                WHERE id IN (""" + in + ") AND is_deleted = 0";
+        return jdbcTemplate.queryForList(sql, args.toArray()).stream()
+                .map(this::hydrateLatestInteractiveOptionTemplate)
+                .toList();
+    }
+
     private Map<String, Object> hydrateLatestInteractiveOptionTemplate(Map<String, Object> row) {
         Map<String, Object> item = new LinkedHashMap<>(row);
         Map<String, Object> snapshot = parseJsonMap(row.get("chartSnapshot"));

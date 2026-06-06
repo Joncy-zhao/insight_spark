@@ -11,44 +11,50 @@
       <div class="dge-head">
         <div class="dge-title">
           <span>设计看板 · {{ board?.name || '看板' }}</span>
-          <el-tag size="small" type="info">grid-layout-plus · 24 列</el-tag>
+          <el-tag v-if="saveAsMode" size="small" type="warning">他人公共看板 · 须另存为</el-tag>
+          <el-tag v-else size="small" type="info">grid-layout-plus · 24 列</el-tag>
         </div>
         <div class="dge-actions">
           <el-button
-            v-if="board"
+            v-if="board && !saveAsMode"
             class="dge-palette-trigger"
             :type="componentPaletteOpen ? 'primary' : 'default'"
             @click="componentPaletteOpen = !componentPaletteOpen"
           >
             基础组件
           </el-button>
-          <el-button v-if="board" @click="openCanvasStyleDialog">画布样式</el-button>
+          <el-button v-if="board && !saveAsMode" @click="openCanvasStyleDialog">画布样式</el-button>
           <el-button
-            v-if="board && gridLayout.length"
-            :loading="exportingPng"
-            @click="exportCanvasPng"
+            v-if="board && !saveAsMode"
+            type="primary"
+            :loading="saving"
+            @click="saveLayout"
           >
-            导出 PNG
+            保存布局
           </el-button>
           <el-button
-            v-if="board && gridLayout.length"
-            :loading="exportingPdf"
-            @click="exportCanvasPdf"
+            v-if="board && saveAsMode"
+            type="primary"
+            :loading="saving"
+            @click="openSaveAsDialog"
           >
-            导出 PDF
+            另存为
           </el-button>
-          <el-button type="primary" :loading="saving" @click="saveLayout">保存布局</el-button>
           <el-button @click="innerVisible = false">关闭</el-button>
         </div>
       </div>
     </template>
 
     <div v-if="board" class="dge-body">
-      <p v-if="gridLayout.length" class="dge-hint">
-        左侧为<strong>您可访问的全部看板</strong>里已钉入的对话图表（按历史图表 ID 去重，并汇总所在看板名称）；可将其中任一图表<strong>加入当前画布</strong>排布。卡片标题区<strong>双击</strong>可改业务名称；右上角可<strong>移除</strong>。
-        在标题区、图表区等<strong>任意区域</strong>按住拖拽即可<strong>在画布上自由摆放</strong>（24 列栅格 + 行高对齐；已关闭垂直压缩）；卡片<strong>四边及四角</strong>均可拖拽调整占位（列宽 w / 行高 h，对齐栅格）。也可在「图表组件」里用数字精确改 w、h。点<strong>图表组件</strong>可设<strong>柱色、柱宽、分项配色</strong>等，并查看问题 / SQL / 字段映射。修改后请点「保存布局」写入
-        <code>layout_json.items</code>。
-      </p>
+      <el-alert
+        v-if="saveAsMode"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="dge-save-as-alert"
+        title="他人已发布公共看板为只读预览"
+        description="您不是该看板的所有者或另存人，移动、拖拽、增删组件等操作均不可用。任何修改须点击右上角「另存为」保存副本，原看板不会被直接覆盖。"
+      />
       <template v-if="!gridLayout.length">
         <el-alert type="warning" show-icon :closable="false" class="dge-alert">
           <template #title>为什么列表里显示有图表，这里却是空的？</template>
@@ -78,44 +84,49 @@
       <div
         ref="workbenchRef"
         class="dge-workbench"
-        :class="{ 'is-side-collapsed': !sidePanelOpen, 'is-side-resizing': isResizingSide }"
+        :class="{
+          'is-side-collapsed': !sidePanelOpen,
+          'is-side-resizing': isResizingSide,
+          'is-save-as-readonly': saveAsMode
+        }"
       >
         <aside
           v-show="sidePanelOpen"
           class="dge-side"
           :style="{ width: `${sidePanelWidth}px` }"
         >
-          <div class="dge-side-head">各看板已钉图表</div>
+          <div class="dge-side-head-row">
+            <div class="dge-side-head">本看板已钉图表</div>
+            <el-button size="small" type="primary" plain @click="openChartLibrary">图表库</el-button>
+          </div>
           <div class="dge-side-search">
             <el-input
               v-model="historyKeyword"
               clearable
               size="small"
-              placeholder="筛选问题 / 表名 / 看板名 / 历史 ID"
+              placeholder="筛选名称"
             />
           </div>
           <div v-loading="sideListLoading" class="dge-side-list">
             <div v-for="h in displayedPinnedLibrary" :key="h.id" class="dge-side-row">
-              <div class="dge-side-row-main">
-                <span class="dge-hid">#{{ h.id }}</span>
-                <el-tag size="small" type="info">{{ h.chartType || 'bar' }}</el-tag>
-                <el-tag v-if="isChartInGridLayout(h.id)" size="small" type="success">已在画布</el-tag>
+              <div v-if="isChartInGridLayout(h.id)" class="dge-side-row-status">
+                <el-tag size="small" type="success" effect="light">已在画布</el-tag>
               </div>
               <div class="dge-side-q">{{ h.question || h.queryText || '（无摘要）' }}</div>
-              <div v-if="h.pinnedDashboardNames" class="dge-side-meta">已在看板：{{ h.pinnedDashboardNames }}</div>
               <el-button
                 size="small"
                 type="primary"
-                :disabled="isChartInGridLayout(h.id)"
+                :plain="isChartInGridLayout(h.id)"
+                :disabled="saveAsMode"
                 :loading="pinningId === h.id"
-                @click="pinHistoryChart(h)"
+                @click="onPinnedLibraryAction(h)"
               >
-                {{ isChartInGridLayout(h.id) ? '已在画布' : '加入画布' }}
+                {{ isChartInGridLayout(h.id) ? '从画布移除' : '加入画布' }}
               </el-button>
             </div>
             <el-empty
               v-if="!sideListLoading && !displayedPinnedLibrary.length"
-              description="暂无任何看板钉入图表，请先在对话查询中钉入某一看板"
+              description="本看板暂未钉入图表，请先在对话查询中钉入本看板"
             />
           </div>
         </aside>
@@ -172,8 +183,8 @@
           :col-num="DASHBOARD_GRID_COL_NUM"
           :row-height="rowHeight"
           :margin="gridMargin"
-          :is-draggable="true"
-          :is-resizable="true"
+          :is-draggable="!saveAsMode"
+          :is-resizable="!saveAsMode"
           :vertical-compact="false"
           class="dge-grid dashboard-grid-canvas"
           :style="gridCanvasStyle"
@@ -197,72 +208,41 @@
                     :is="basicWidgetViewForItem(item)"
                     :config="basicWidgetConfigForItem(item)"
                     :pinned="Boolean(item.static)"
-                    interactive
+                    :interactive="!saveAsMode"
                     @edit="openWidgetInspectorById(String(item.i))"
                     @remove="removeGridItemById(String(item.i))"
                     @pin="toggleWidgetPin(item)"
                   />
                 </div>
-                <div
+                <DashboardChartGridItem
                   v-else
-                  class="dge-card"
-                  @click.stop="selectGridItem(item)"
+                  :selected="selectedItemId === String(item.i)"
+                  :interactive="!saveAsMode"
+                  :pinned="Boolean(item.static)"
+                  :editing="editingItemId === String(item.i)"
+                  :title-draft="titleDraft"
+                  :display-title="displayTitleForItem(item)"
+                  :title-input-id="'dge-title-inp-' + item.i"
+                  :can-edit="Boolean(payloadForItem(item))"
+                  @select="selectGridItem(item)"
+                  @pin="toggleWidgetPin(item)"
+                  @edit="openChartInspector(item)"
+                  @remove="removeGridItem(item)"
+                  @start-edit-title="startEditTitle(item)"
+                  @commit-title="commitTitleEdit(item)"
+                  @update:title-draft="titleDraft = $event"
                 >
-                    <div class="dge-card-meta">
-                      <div
-                        class="dge-card-titlewrap"
-                        title="双击修改标题"
-                        @dblclick.stop="startEditTitle(item)"
-                      >
-                        <el-input
-                          v-if="editingItemId === String(item.i)"
-                          :id="'dge-title-inp-' + item.i"
-                          v-model="titleDraft"
-                          size="small"
-                          maxlength="120"
-                          show-word-limit
-                          @blur="commitTitleEdit(item)"
-                          @keydown.enter.prevent="commitTitleEdit(item)"
-                        />
-                        <span v-else class="dge-card-title">{{ displayTitleForItem(item) }}</span>
-                      </div>
-                      <div class="dge-card-actions">
-                        <span v-if="chartIdForItem(item)" class="dge-chart-id">历史 {{ chartIdForItem(item) }}</span>
-                        <span v-if="artifactIdForItem(item)" class="dge-chart-id">Artifact {{ artifactIdForItem(item) }}</span>
-                        <span v-if="turnIdForItem(item)" class="dge-chart-id">Turn {{ turnIdForItem(item) }}</span>
-                        <el-button
-                          v-if="payloadForItem(item)"
-                          type="primary"
-                          link
-                          size="small"
-                          @click.stop="openChartInspector(item)"
-                        >
-                          图表组件
-                        </el-button>
-                        <el-button
-                          type="danger"
-                          link
-                          size="small"
-                          :loading="removingId === String(item.i)"
-                          @click.stop="removeGridItem(item)"
-                        >
-                          移除
-                        </el-button>
-                      </div>
-                    </div>
-                    <div class="dge-chart-host">
-                      <DashboardChart
-                        v-if="payloadForItem(item)"
-                        :payload="payloadForItem(item)"
-                        :chart-ui="chartUiForItem(item)"
-                        hide-title
-                        @refresh="refreshChartPayloadsFromDynamicConfig"
-                      />
-                      <div v-else class="dge-chart-fallback">
-                        {{ artifactIdForItem(item) ? '高级分析图表数据暂不可用' : (chartIdForItem(item) ? '图表数据暂不可用' : '未关联 chart_id') }}
-                      </div>
-                    </div>
-                </div>
+                  <DashboardChart
+                    v-if="payloadForItem(item)"
+                    :payload="payloadForItem(item)"
+                    :chart-ui="chartUiForItem(item)"
+                    hide-title
+                    @refresh="refreshChartPayloadsFromDynamicConfig"
+                  />
+                  <div v-else class="dge-chart-fallback">
+                    {{ artifactIdForItem(item) ? '高级分析图表数据暂不可用' : (chartIdForItem(item) ? '图表数据暂不可用' : '未关联 chart_id') }}
+                  </div>
+                </DashboardChartGridItem>
               </GridItem>
             </GridLayout>
             <div v-else class="dge-empty-canvas-drop">
@@ -276,6 +256,7 @@
     </div>
 
     <DashboardComponentPalette
+      v-if="!saveAsMode"
       v-model="componentPaletteOpen"
       @pick-basic="onPickBasicComponent"
       @drag-start="onPaletteDragStart"
@@ -479,20 +460,69 @@
       :close-on-click-modal="false"
       @closed="saveMetaPending = false"
     >
-      <p class="dge-save-meta-hint">请选择看板可见范围，确认后将保存布局并关闭设计器。</p>
+      <p class="dge-save-meta-hint">请选择开放类型。「仅保存」将保存布局并设为待发布；「保存并发布」将同时发布看板。</p>
       <el-form label-width="88px">
-        <el-form-item label="看板类型" required>
+        <el-form-item label="开放类型" required>
           <el-radio-group v-model="saveMetaForm.isPublic">
-            <el-radio :label="false">个人</el-radio>
+            <el-radio :label="false">私密</el-radio>
             <el-radio :label="true">公共</el-radio>
           </el-radio-group>
         </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="saveMetaVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="confirmSaveLayout">确认保存</el-button>
+        <el-button :loading="saving" @click="confirmSaveLayout">仅保存</el-button>
+        <el-button type="primary" :loading="saving" @click="confirmSaveAndPublish">保存并发布</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="saveAsVisible"
+      title="另存为看板"
+      width="480px"
+      append-to-body
+      :close-on-click-modal="false"
+    >
+      <p class="dge-save-meta-hint">将当前布局另存为新看板副本，原看板不会被直接覆盖。</p>
+      <p class="dge-save-meta-hint dge-save-meta-hint--sub">{{ saveAsDialogHintSub }}</p>
+      <el-form label-width="88px">
+        <el-form-item label="开放类型" required>
+          <el-radio-group v-model="saveAsForm.isPublic">
+            <el-radio :label="false">私密</el-radio>
+            <el-radio :label="true">公共</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="看板名称" required>
+          <el-input v-model="saveAsForm.name" maxlength="255" show-word-limit />
+        </el-form-item>
+        <el-form-item label="所属分组">
+          <el-tree-select
+            :key="saveAsGroupTreeKey"
+            v-model="saveAsForm.groupId"
+            :data="saveAsGroupSelectTree"
+            :props="groupTreeSelectProps"
+            check-strictly
+            clearable
+            default-expand-all
+            placeholder="根目录"
+            style="width: 100%"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="saveAsVisible = false">取消</el-button>
+        <el-button type="primary" :loading="saving" @click="confirmSaveAs">确认另存为</el-button>
+      </template>
+    </el-dialog>
+
+    <DashboardChartLibraryDrawer
+      v-model="chartLibraryOpen"
+      :api-base="props.apiBase"
+      :dashboard-id="board?.id"
+      :readonly="saveAsMode"
+      :is-on-board="isChartOnBoard"
+      @pinned="onChartLibraryPinned"
+    />
   </el-dialog>
 </template>
 
@@ -505,6 +535,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { DArrowLeft, DArrowRight } from '@element-plus/icons-vue'
 import { GridLayout, GridItem } from 'grid-layout-plus'
 import { restoreSessionHeader } from '../../store/session'
+import { isPublicSaveAsDesign, decorateGroupNodesOnly } from '../../utils/dashboardManageTree.js'
 import {
   parseDashboardLayout,
   mergeGridItemsWithComponents,
@@ -537,6 +568,8 @@ import {
   videoWidgetConfigEqual
 } from '../../utils/dashboardWidgetVideo.js'
 import { normalizeTextWidgetConfig, textWidgetConfigEqual } from '../../utils/dashboardWidgetText.js'
+import { createCarouselWidgetItem } from '../../utils/dashboardWidgetCarousel.js'
+import { createImageWidgetItem } from '../../utils/dashboardWidgetImage.js'
 import { createTextWidgetItem } from '../../utils/dashboardWidgetText.js'
 import { basicWidgetGridItemProps } from '../../utils/dashboardBasicWidgetGrid.js'
 import {
@@ -545,7 +578,9 @@ import {
 } from '../../utils/dashboardBasicWidgetRegistry.js'
 import '../../styles/dashboard-grid-canvas.css'
 import DashboardChart from '../../components/dashboard/DashboardChart.vue'
+import DashboardChartGridItem from '../../components/dashboard/DashboardChartGridItem.vue'
 import DashboardComponentPalette from '../../components/dashboard/DashboardComponentPalette.vue'
+import DashboardChartLibraryDrawer from '../../components/dashboard/DashboardChartLibraryDrawer.vue'
 import LegacyInlineChart from '../../components/dashboard/LegacyInlineChart.vue'
 import {
   normalizeChartType,
@@ -556,11 +591,20 @@ const props = defineProps({
   modelValue: { type: Boolean, default: false },
   initialRow: { type: Object, default: null },
   apiBase: { type: String, default: 'http://localhost:8080' },
-  /** 管理员保存布局时先选择公共/个人 */
-  promptVisibilityOnSave: { type: Boolean, default: false }
+  /** 管理员端：保存布局时选择开放类型；另存为分组恒为平台分组 */
+  promptVisibilityOnSave: { type: Boolean, default: false },
+  groupSelectTree: { type: Array, default: () => [] },
+  /** 用户端：为 true 时另存为「私密」直接使用 groupSelectTree 作为个人分组树 */
+  useParentGroupTreeForSaveAs: { type: Boolean, default: false },
+  /** 用户端另存为「私密」可选的个人分组树 */
+  saveAsPersonalGroupTree: { type: Array, default: undefined },
+  /** 管理员端另存为可选的平台分组树（与开放类型无关） */
+  saveAsPlatformGroupTree: { type: Array, default: undefined },
+  /** 打开并加载完成后自动导出：png | pdf */
+  autoExport: { type: String, default: '' }
 })
 
-const emit = defineEmits(['update:modelValue', 'saved'])
+const emit = defineEmits(['update:modelValue', 'saved', 'auto-export-done'])
 
 const innerVisible = computed({
   get: () => props.modelValue,
@@ -573,8 +617,6 @@ const legacyCards = ref([])
 const components = ref([])
 const chartPayloadById = ref({})
 let dynamicRefreshInFlight = false
-/** 当前用户所有可访问看板中已钉入的 chart 汇总（来自 GET /pinned-charts） */
-const allPinnedSummaries = ref([])
 const saving = ref(false)
 const rowHeight = 44
 const gridMargin = DASHBOARD_GRID_MARGIN
@@ -591,7 +633,7 @@ const SIDE_PANEL_MAX = 520
 /** 指针位置低于此宽度（px）时视为完全收起 */
 const SIDE_PANEL_COLLAPSE_THRESHOLD = 48
 
-/** 筛选左侧「各看板已钉图表」列表（仅客户端过滤） */
+/** 筛选左侧「本看板已钉图表」列表（仅客户端过滤） */
 const historyKeyword = ref('')
 const sidePanelOpen = ref(true)
 const sidePanelWidth = ref(SIDE_PANEL_WIDTH_DEFAULT)
@@ -638,6 +680,7 @@ function ensureCanvasBackgroundType() {
 }
 
 function openCanvasStyleDialog() {
+  if (!requireSaveAsBeforeMutate()) return
   ensureCanvasBackgroundType()
   canvasStyleDialogOpen.value = true
 }
@@ -672,6 +715,7 @@ function openWidgetInspector(item) {
 }
 
 function openWidgetInspectorById(id) {
+  if (!requireSaveAsBeforeMutate()) return
   const item = gridLayout.value.find((x) => String(x.i) === String(id))
   const entry = resolveBasicWidgetEntry(item)
   if (!item || !entry) return
@@ -682,11 +726,13 @@ function openWidgetInspectorById(id) {
 }
 
 function removeGridItemById(id) {
+  if (!requireSaveAsBeforeMutate()) return
   const item = gridLayout.value.find((x) => String(x.i) === String(id))
   if (item) removeGridItem(item)
 }
 
 function toggleWidgetPin(item) {
+  if (!requireSaveAsBeforeMutate()) return
   const id = String(item.i)
   const idx = gridLayout.value.findIndex((x) => String(x.i) === id)
   if (idx < 0) return
@@ -696,6 +742,7 @@ function toggleWidgetPin(item) {
 }
 
 function onBasicWidgetInspectorConfigUpdate(config) {
+  if (!requireSaveAsBeforeMutate()) return
   const id = widgetInspectorItemId.value
   const entry = resolveBasicWidgetEntry(widgetInspectorKind.value)
   if (!id || !entry) return
@@ -787,6 +834,7 @@ function detachPaletteWindowListeners() {
 }
 
 function onPaletteDragStart(item) {
+  if (!requireSaveAsBeforeMutate()) return
   if (!isPaletteComponentAvailable(item?.type)) return
   paletteDragType.value = item.type
   detachPaletteWindowListeners()
@@ -833,16 +881,21 @@ function finishPaletteDrag() {
 function createBasicWidgetItem(type, { x, y } = {}) {
   if (type === 'video') return createVideoWidgetItem({ x, y })
   if (type === 'text') return createTextWidgetItem({ x, y })
+  if (type === 'image') return createImageWidgetItem({ x, y })
+  if (type === 'carousel') return createCarouselWidgetItem({ x, y })
   return null
 }
 
 function basicWidgetSuccessLabel(type) {
   if (type === 'video') return '已添加视频组件'
   if (type === 'text') return '已添加文本组件'
+  if (type === 'image') return '已添加图片组件'
+  if (type === 'carousel') return '已添加轮播图组件'
   return '已添加组件'
 }
 
 function addBasicWidgetAtDrop(clientX, clientY, type, label = '') {
+  if (!requireSaveAsBeforeMutate()) return null
   if (!isPaletteComponentAvailable(type)) {
     ElMessage.info(`「${label || type}」组件稍后开放`)
     return null
@@ -869,6 +922,7 @@ function addBasicWidgetAtDrop(clientX, clientY, type, label = '') {
 }
 
 function addBasicWidgetToCanvas(type, label = '') {
+  if (!requireSaveAsBeforeMutate()) return
   if (!isPaletteComponentAvailable(type)) {
     ElMessage.info(`「${label || type}」组件稍后开放`)
     return
@@ -893,6 +947,7 @@ function onPickBasicComponent(item) {
 }
 
 function clearBackgroundImage() {
+  if (!requireSaveAsBeforeMutate()) return
   canvasStyle.backgroundImageDataUrl = ''
 }
 
@@ -921,6 +976,7 @@ function readImageUploadAsDataUrl(uploadFile, { onOk, tooLargeMsg, successMsg })
 }
 
 function onBackgroundImageFileChange(uploadFile) {
+  if (!requireSaveAsBeforeMutate()) return
   readImageUploadAsDataUrl(uploadFile, {
     onOk: (url) => {
       canvasStyle.backgroundImageDataUrl = url
@@ -1076,6 +1132,19 @@ function downloadDataUrl(dataUrl, filename) {
   document.body.removeChild(a)
 }
 
+async function runAutoExportIfNeeded() {
+  const fmt = String(props.autoExport || '').trim().toLowerCase()
+  if (fmt !== 'png' && fmt !== 'pdf') return
+  await nextTick()
+  await nextTick()
+  window.dispatchEvent(new Event('resize'))
+  await new Promise((r) => setTimeout(r, 480))
+  if (fmt === 'png') await exportCanvasPng()
+  else await exportCanvasPdf()
+  emit('auto-export-done')
+  innerVisible.value = false
+}
+
 async function exportCanvasPng() {
   if (exportingPng.value) return
   exportingPng.value = true
@@ -1132,6 +1201,7 @@ function parseChartSnapshot(raw) {
 }
 
 function openChartInspector(item) {
+  if (!requireSaveAsBeforeMutate()) return
   inspectorItem.value = item
   inspectorOpen.value = true
 }
@@ -1259,6 +1329,7 @@ const inspectorBarMaxWidthModel = computed(() => {
 })
 
 function patchInspectorGridItem(patch) {
+  if (!requireSaveAsBeforeMutate()) return
   const it = inspectorItem.value
   if (!it) return
   const idx = gridLayout.value.findIndex((x) => String(x.i) === String(it.i))
@@ -1314,31 +1385,25 @@ const legacyPreviewCards = computed(() =>
   extractLegacyChartCards(board.value?.layoutJson, `dge-${board.value?.id || 'x'}`)
 )
 
-/**
- * 左侧图表库：数据仅来自 allPinnedSummaries（全库接口或「逐看板拉组件」汇总），即<strong>全部看板</strong>已钉图表，不含仅当前看板兜底。
- */
+/** 左侧图表库：仅当前看板 components 表中已钉入的图表 */
 const pinnedLibraryRows = computed(() => {
   const rows = []
-  for (const s of allPinnedSummaries.value || []) {
-    const rawId = s.chart_id ?? s.chartId ?? s.CHART_ID ?? s.chartid
+  const seen = new Set()
+  for (const c of components.value || []) {
+    const rawId = c.chartId ?? c.chart_id ?? c.CHART_ID
     if (rawId == null) continue
     const idStr = String(rawId).trim()
-    if (!idStr) continue
+    if (!idStr || seen.has(idStr)) continue
+    seen.add(idStr)
     const p = chartPayloadById.value[idStr]
     const snap = p ? parseChartSnapshot(p.chartSnapshot) : {}
     const question = readableTitleFromPayload(p) || `图表 #${idStr}`
-    const dnames = String(
-      s.dashboardNames ?? s.dashboard_names ?? s.dashboardnames ?? ''
-    ).trim()
-    const dcount = Number(s.dashboardCount ?? s.dashboard_count ?? s.dashboardcount) || 0
     rows.push({
       id: Number(rawId),
       chartType: normalizeChartType(p?.chartType || snap.chartType || 'bar'),
       question,
       queryText: p?.queryText,
       tableName: String(snap.tableName || p?.queryTableName || '').trim(),
-      pinnedDashboardNames: dnames,
-      pinnedDashboardCount: dcount,
       executionStatus: 1
     })
   }
@@ -1350,12 +1415,12 @@ const displayedPinnedLibrary = computed(() => {
   const kw = String(historyKeyword.value || '').trim().toLowerCase()
   if (!kw) return pinnedLibraryRows.value
   return pinnedLibraryRows.value.filter((h) => {
-    const q = String(h.question || '').toLowerCase()
-    const t = String(h.tableName || '').toLowerCase()
-    const d = String(h.pinnedDashboardNames || '').toLowerCase()
-    return q.includes(kw) || t.includes(kw) || d.includes(kw) || String(h.id).includes(kw)
+    const q = String(h.question || h.queryText || '').toLowerCase()
+    return q.includes(kw)
   })
 })
+
+const chartLibraryOpen = ref(false)
 
 /** 四边及四角均可缩放（interact.js 使用网格项边缘）；角部可同时改变 w 与 h */
 function allSidesResizeOption() {
@@ -1364,8 +1429,11 @@ function allSidesResizeOption() {
   }
 }
 
-const itemProps = (item) =>
-  basicWidgetGridItemProps(item, { resizeOption: allSidesResizeOption() })
+const itemProps = (item) => {
+  const base = basicWidgetGridItemProps(item, { resizeOption: allSidesResizeOption() })
+  if (saveAsMode.value) return { ...base, static: true }
+  return base
+}
 
 const componentByItemId = computed(() => {
   const m = new Map()
@@ -1519,6 +1587,7 @@ function isChartInGridLayout(historyId) {
 }
 
 function startEditTitle(item) {
+  if (!requireSaveAsBeforeMutate()) return
   editingItemId.value = String(item.i)
   titleDraft.value = displayTitleForItem(item)
   nextTick(() => {
@@ -1530,6 +1599,7 @@ function startEditTitle(item) {
 }
 
 function commitTitleEdit(item) {
+  if (!requireSaveAsBeforeMutate()) return
   if (editingItemId.value !== String(item.i)) return
   const v = String(titleDraft.value || '').trim()
   const def = defaultTitleFromPayload(item)
@@ -1552,6 +1622,15 @@ function onGridItemResized() {
 }
 
 function onLayoutUpdated() {
+  if (saveAsMode.value && readonlyGridLayoutClone.value.length) {
+    const cur = JSON.stringify(gridLayout.value)
+    const frozen = JSON.stringify(readonlyGridLayoutClone.value)
+    if (cur !== frozen) {
+      gridLayout.value = JSON.parse(frozen)
+      ElMessage.warning(SAVE_AS_FIRST_MSG)
+      return
+    }
+  }
   if (layoutUpdateRaf) return
   layoutUpdateRaf = requestAnimationFrame(() => {
     layoutUpdateRaf = 0
@@ -1560,7 +1639,49 @@ function onLayoutUpdated() {
   })
 }
 
+function findGridItemByChartId(chartId) {
+  const id = String(chartId)
+  return (gridLayout.value || []).find((item) => {
+    const comp = componentByItemId.value.get(String(item.i))
+    if (!comp) return false
+    const cid = comp.chartId ?? comp.chart_id ?? comp.CHART_ID
+    return cid != null && String(cid) === id
+  }) || null
+}
+
+async function onPinnedLibraryAction(row) {
+  if (!requireSaveAsBeforeMutate()) return
+  if (isChartInGridLayout(row?.id)) {
+    await unpinChartFromCanvas(row)
+    return
+  }
+  await pinHistoryChart(row)
+}
+
+function openChartLibrary() {
+  chartLibraryOpen.value = true
+}
+
+async function onChartLibraryPinned() {
+  await loadBoard()
+}
+
+async function unpinChartFromCanvas(row) {
+  const item = findGridItemByChartId(row?.id)
+  if (!item) {
+    ElMessage.info('该图表不在当前画布中')
+    return
+  }
+  pinningId.value = row?.id
+  try {
+    await removeGridItem(item)
+  } finally {
+    pinningId.value = null
+  }
+}
+
 async function pinHistoryChart(row) {
+  if (!requireSaveAsBeforeMutate()) return
   const chartId = row?.id
   if (chartId == null) {
     ElMessage.warning('无效的图表')
@@ -1603,6 +1724,7 @@ async function pinHistoryChart(row) {
 }
 
 async function removeGridItem(item) {
+  if (!requireSaveAsBeforeMutate()) return
   const compId = String(item.i)
   if (isBasicWidgetItem(item)) {
     if (basicWidgetRemovingId.value === compId) return
@@ -1651,73 +1773,10 @@ async function removeGridItem(item) {
   }
 }
 
-async function loadAllPinnedSummaries() {
-  restoreSessionHeader()
-  const res = await axios.get(`${props.apiBase}/api/c/dashboards/pinned-charts`)
-  if (res.data.code !== 200) throw new Error(res.data.message || '加载各看板已钉图表失败')
-  allPinnedSummaries.value = Array.isArray(res.data.data) ? res.data.data : []
-}
-
-/**
- * 当 /pinned-charts 失败或返回空时：遍历「看板列表 + 各看板 components」汇总全部已钉 chart（与后端 SQL 语义一致，纯前端兜底）。
- */
-async function loadPinnedSummariesByScanningDashboards() {
-  restoreSessionHeader()
-  const listRes = await axios.get(`${props.apiBase}/api/c/dashboards`)
-  if (listRes.data.code !== 200) return
-  const list = Array.isArray(listRes.data.data) ? listRes.data.data : []
-  const byChart = new Map()
-  const concurrency = 6
-  for (let i = 0; i < list.length; i += concurrency) {
-    const chunk = list.slice(i, i + concurrency)
-    await Promise.all(
-      chunk.map(async (b) => {
-        const bid = b.id ?? b.ID
-        const bname = String(b.name ?? '').trim() || `看板 ${bid}`
-        if (bid == null) return
-        try {
-          const cr = await axios.get(`${props.apiBase}/api/c/dashboards/${bid}/components`)
-          if (cr.data.code !== 200) return
-          const comps = Array.isArray(cr.data.data) ? cr.data.data : []
-          for (const c of comps) {
-            const cid = c.chart_id ?? c.chartId ?? c.CHART_ID
-            if (cid == null) continue
-            const key = String(cid).trim()
-            if (!key) continue
-            const numericId = Number(key)
-            if (Number.isFinite(numericId) && numericId <= 0) continue
-            if (!byChart.has(key)) byChart.set(key, new Set())
-            byChart.get(key).add(bname)
-          }
-        } catch {
-          // 单个看板无权或无组件时跳过
-        }
-      })
-    )
-  }
-  const rows = []
-  for (const [chartIdStr, names] of byChart) {
-    const arr = [...names].sort()
-    rows.push({
-      chart_id: Number(chartIdStr),
-      dashboard_count: arr.length,
-      dashboard_names: arr.join('、')
-    })
-  }
-  rows.sort((a, b) => b.chart_id - a.chart_id)
-  allPinnedSummaries.value = rows
-}
-
 async function loadChartPayloads() {
   const idSet = new Set()
   for (const c of components.value || []) {
     const raw = c.chartId ?? c.chart_id ?? c.CHART_ID
-    if (raw == null) continue
-    const n = Number(raw)
-    if (Number.isFinite(n) && n > 0) idSet.add(n)
-  }
-  for (const s of allPinnedSummaries.value || []) {
-    const raw = s.chart_id ?? s.chartId ?? s.CHART_ID ?? s.chartid
     if (raw == null) continue
     const n = Number(raw)
     if (Number.isFinite(n) && n > 0) idSet.add(n)
@@ -1728,7 +1787,11 @@ async function loadChartPayloads() {
     return
   }
   restoreSessionHeader()
-  const res = await axios.post(`${props.apiBase}/api/chat/history/charts-batch`, { ids: unique })
+  const dashboardId = board.value?.id ?? props.initialRow?.id
+  const res = await axios.post(`${props.apiBase}/api/chat/history/charts-batch`, {
+    ids: unique,
+    ...(dashboardId ? { dashboardId } : {})
+  })
   if (res.data.code !== 200) throw new Error(res.data.message || '批量加载图表失败')
   const rows = Array.isArray(res.data.data) ? res.data.data : []
   const map = {}
@@ -1765,18 +1828,6 @@ async function loadBoard() {
   if (compRes.data.code !== 200) throw new Error(compRes.data.message || '加载组件失败')
   board.value = dashRes.data.data
   components.value = Array.isArray(compRes.data.data) ? compRes.data.data : []
-  try {
-    await loadAllPinnedSummaries()
-  } catch {
-    allPinnedSummaries.value = []
-  }
-  if (!allPinnedSummaries.value.length) {
-    try {
-      await loadPinnedSummariesByScanningDashboards()
-    } catch {
-      // 保持空列表
-    }
-  }
   const parsed = parseDashboardLayout(board.value?.layoutJson)
   legacyCards.value = Array.isArray(parsed.cards) ? parsed.cards : []
   Object.assign(canvasStyle, normalizeCanvasStyle(parsed.canvasStyle))
@@ -1786,43 +1837,255 @@ async function loadBoard() {
   await nextTick()
   attachGridCanvas()
   onLayoutUpdated()
+  captureLayoutSnapshot()
+  captureReadonlyGridLayout()
 }
+
+const GROUP_ROOT_PARENT_ID = 0
+const groupTreeSelectProps = { label: 'name', value: 'id', children: 'children' }
 
 const saveMetaVisible = ref(false)
 const saveMetaPending = ref(false)
 const saveMetaForm = reactive({ isPublic: false })
+const saveAsVisible = ref(false)
+const saveAsForm = reactive({ name: '', groupId: null, isPublic: false })
+const saveAsPersonalGroupTreeFetched = ref([])
+const saveAsPlatformGroupTreeFetched = ref([])
+const saveAsGroupTreeKey = ref(0)
+
+const saveAsPersonalGroupBranches = computed(() => {
+  if (props.saveAsPersonalGroupTree !== undefined) {
+    return props.saveAsPersonalGroupTree
+  }
+  if (props.useParentGroupTreeForSaveAs && props.groupSelectTree.length) {
+    return props.groupSelectTree
+  }
+  return saveAsPersonalGroupTreeFetched.value
+})
+
+const saveAsPlatformGroupBranches = computed(() => {
+  if (props.saveAsPlatformGroupTree !== undefined) {
+    return props.saveAsPlatformGroupTree
+  }
+  return saveAsPlatformGroupTreeFetched.value
+})
+
+/** 管理员端：分组恒为平台分组，与开放类型无关 */
+const saveAsUsesPlatformGroupsOnly = computed(
+  () => props.promptVisibilityOnSave && saveAsPlatformGroupBranches.value.length > 0
+)
+
+const saveAsGroupBranches = computed(() => {
+  if (saveAsUsesPlatformGroupsOnly.value) {
+    return saveAsPlatformGroupBranches.value
+  }
+  if (saveAsForm.isPublic && saveAsPlatformGroupBranches.value.length) {
+    return saveAsPlatformGroupBranches.value
+  }
+  return saveAsPersonalGroupBranches.value
+})
+
+const saveAsGroupSelectTree = computed(() => [
+  { id: GROUP_ROOT_PARENT_ID, name: '根目录', children: saveAsGroupBranches.value }
+])
+const layoutSnapshot = ref('')
+const readonlyGridLayoutClone = ref([])
+
+const SAVE_AS_FIRST_MSG = '他人已发布公共看板须先另存为副本，再进行编辑'
+
+const saveAsMode = computed(() => isPublicSaveAsDesign(board.value || props.initialRow))
+
+const saveAsDialogHintSub = computed(() => {
+  if (saveAsUsesPlatformGroupsOnly.value) {
+    return '管理员端分组均为平台分组，与开放类型（公共/私密）无关，不会继承原看板的分组。'
+  }
+  if (saveAsForm.isPublic) {
+    return saveAsPlatformGroupBranches.value.length
+      ? '公共看板可选择平台分组，不会继承原看板的分组。'
+      : '公共看板可归入您的个人分组，不会继承原看板的分组。'
+  }
+  return '私密看板仅可选择您自己的个人分组，不会继承原看板的分组。'
+})
+
+function requireSaveAsBeforeMutate() {
+  if (!saveAsMode.value) return true
+  ElMessage.warning(SAVE_AS_FIRST_MSG)
+  return false
+}
+
+const isLayoutDirty = computed(() => {
+  if (!layoutSnapshot.value || !board.value?.id) return false
+  return (
+    serializeLayoutForApi(gridLayout.value, legacyCards.value, canvasStyle) !== layoutSnapshot.value
+  )
+})
+
+function captureLayoutSnapshot() {
+  layoutSnapshot.value = serializeLayoutForApi(gridLayout.value, legacyCards.value, canvasStyle)
+}
+
+function captureReadonlyGridLayout() {
+  if (saveAsMode.value) {
+    readonlyGridLayoutClone.value = JSON.parse(JSON.stringify(gridLayout.value))
+  } else {
+    readonlyGridLayoutClone.value = []
+  }
+}
+
+function normalizeGroupIdForApi(value) {
+  if (value == null || value === '' || Number(value) === GROUP_ROOT_PARENT_ID) return null
+  const n = Number(value)
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
+async function openSaveAsDialog() {
+  saveAsForm.name = `${board.value?.name || '看板'} 副本`
+  saveAsForm.groupId = null
+  saveAsForm.isPublic = false
+  await loadSaveAsGroupTrees()
+  saveAsGroupTreeKey.value += 1
+  saveAsVisible.value = true
+}
+
+async function loadSaveAsPersonalGroupTree() {
+  if (props.saveAsPersonalGroupTree !== undefined) return
+  if (props.useParentGroupTreeForSaveAs && props.groupSelectTree.length) return
+  restoreSessionHeader()
+  try {
+    const res = await axios.get(`${props.apiBase}/api/c/dashboard-groups/tree`)
+    if (res.data.code !== 200) throw new Error(res.data.message)
+    saveAsPersonalGroupTreeFetched.value = decorateGroupNodesOnly(
+      Array.isArray(res.data.data) ? res.data.data : []
+    )
+  } catch (e) {
+    saveAsPersonalGroupTreeFetched.value = []
+    ElMessage.warning(e?.message || '个人分组加载失败，请稍后重试')
+  }
+}
+
+async function loadSaveAsPlatformGroupTree() {
+  if (props.saveAsPlatformGroupTree !== undefined) return
+  if (!props.promptVisibilityOnSave) return
+  restoreSessionHeader()
+  try {
+    const res = await axios.get(`${props.apiBase}/api/c/admin/dashboard-groups/tree`)
+    if (res.data.code !== 200) throw new Error(res.data.message)
+    saveAsPlatformGroupTreeFetched.value = decorateGroupNodesOnly(
+      Array.isArray(res.data.data) ? res.data.data : []
+    )
+  } catch (e) {
+    saveAsPlatformGroupTreeFetched.value = []
+    ElMessage.warning(e?.message || '平台分组加载失败，请稍后重试')
+  }
+}
+
+async function loadSaveAsGroupTrees() {
+  await Promise.all([loadSaveAsPersonalGroupTree(), loadSaveAsPlatformGroupTree()])
+}
+
+function isGroupIdInSaveAsTree(groupId, nodes = saveAsGroupBranches.value) {
+  if (groupId == null || groupId === '' || Number(groupId) === GROUP_ROOT_PARENT_ID) return true
+  const target = Number(groupId)
+  for (const node of Array.isArray(nodes) ? nodes : []) {
+    if (Number(node.id) === target) return true
+    if (isGroupIdInSaveAsTree(groupId, node.children)) return true
+  }
+  return false
+}
+
+async function confirmSaveAs() {
+  const name = String(saveAsForm.name || '').trim()
+  if (!name) {
+    ElMessage.warning('请填写看板名称')
+    return
+  }
+  if (!board.value?.id) return
+  const groupId = normalizeGroupIdForApi(saveAsForm.groupId)
+  if (groupId != null && !isGroupIdInSaveAsTree(groupId)) {
+    ElMessage.warning(
+      saveAsUsesPlatformGroupsOnly.value ||
+        (saveAsForm.isPublic && saveAsPlatformGroupBranches.value.length)
+        ? '请选择有效的平台分组，或留空归入根目录'
+        : '请选择您自己的分组，或留空归入根目录'
+    )
+    return
+  }
+  saving.value = true
+  restoreSessionHeader()
+  try {
+    const layoutJson = serializeLayoutForApi(gridLayout.value, legacyCards.value, canvasStyle)
+    const body = {
+      name,
+      layoutJson,
+      publish: false,
+      isPublic: Boolean(saveAsForm.isPublic)
+    }
+    body.groupId = groupId
+    const res = await axios.post(`${props.apiBase}/api/c/dashboards/${board.value.id}/duplicate`, body)
+    if (res.data.code !== 200) throw new Error(res.data.message || '另存失败')
+    ElMessage.success(`已另存为${saveAsForm.isPublic ? '公共' : '私密'}看板`)
+    saveAsVisible.value = false
+    emit('saved', res.data.data)
+    innerVisible.value = false
+  } catch (e) {
+    ElMessage.error(e.message || '另存失败')
+  } finally {
+    saving.value = false
+  }
+}
 
 async function saveLayout() {
   if (!board.value?.id) return
+  if (saveAsMode.value) {
+    openSaveAsDialog()
+    return
+  }
   if (props.promptVisibilityOnSave) {
     saveMetaForm.isPublic = Boolean(board.value.isPublic)
     saveMetaPending.value = true
     saveMetaVisible.value = true
     return
   }
-  await doSaveLayout(Boolean(board.value.isPublic))
+  await doSaveLayout({ isPublic: Boolean(board.value.isPublic), publish: false })
 }
 
 async function confirmSaveLayout() {
-  await doSaveLayout(Boolean(saveMetaForm.isPublic))
+  await doSaveLayout({ isPublic: Boolean(saveMetaForm.isPublic), publish: false })
   saveMetaVisible.value = false
 }
 
-async function doSaveLayout(isPublic) {
+async function confirmSaveAndPublish() {
+  await doSaveLayout({ isPublic: Boolean(saveMetaForm.isPublic), publish: true })
+  saveMetaVisible.value = false
+}
+
+async function doSaveLayout(isPublicOrOptions) {
   if (!board.value?.id) return
+  if (isPublicSaveAsDesign(board.value || props.initialRow)) {
+    ElMessage.warning('他人已发布公共看板不可直接保存，请使用「另存为」')
+    return
+  }
+  const opts =
+    isPublicOrOptions != null && typeof isPublicOrOptions === 'object'
+      ? isPublicOrOptions
+      : { isPublic: Boolean(isPublicOrOptions), publish: false }
+  const { isPublic, publish = false } = opts
   saving.value = true
   restoreSessionHeader()
   try {
     const layoutJson = serializeLayoutForApi(gridLayout.value, legacyCards.value, canvasStyle)
+    const status = publish ? 'ACTIVE' : 'DISABLED'
     const res = await axios.put(`${props.apiBase}/api/c/dashboards/${board.value.id}`, {
       name: board.value.name,
       description: board.value.description || null,
       layoutJson,
-      isPublic
+      isPublic,
+      status
     })
     if (res.data.code !== 200) throw new Error(res.data.message || '保存失败')
     board.value.isPublic = isPublic
-    ElMessage.success('布局已保存')
+    board.value.status = status
+    ElMessage.success(publish ? '已保存并发布' : '已保存，发布状态已更新为待发布')
     emit('saved')
     innerVisible.value = false
   } catch (e) {
@@ -1838,8 +2101,9 @@ function onClosed() {
   legacyCards.value = []
   components.value = []
   chartPayloadById.value = {}
+  layoutSnapshot.value = ''
+  saveAsVisible.value = false
   dynamicRefreshInFlight = false
-  allPinnedSummaries.value = []
   historyKeyword.value = ''
   finishSideResize()
   editingItemId.value = null
@@ -1860,6 +2124,27 @@ function onClosed() {
 }
 
 watch(
+  () => saveAsForm.isPublic,
+  () => {
+    if (saveAsUsesPlatformGroupsOnly.value) return
+    saveAsForm.groupId = null
+    saveAsGroupTreeKey.value += 1
+  }
+)
+
+watch(saveAsMode, (readonly) => {
+  if (readonly) {
+    componentPaletteOpen.value = false
+    widgetInspectorOpen.value = false
+    canvasStyleDialogOpen.value = false
+    inspectorOpen.value = false
+    captureReadonlyGridLayout()
+  } else {
+    readonlyGridLayoutClone.value = []
+  }
+})
+
+watch(
   () => gridLayout.value.length,
   () => {
     nextTick(() => attachGridCanvas())
@@ -1874,6 +2159,7 @@ watch(
     sideListLoading.value = true
     try {
       await loadBoard()
+      await runAutoExportIfNeeded()
     } catch (e) {
       ElMessage.error(e.message || '加载失败')
       innerVisible.value = false
@@ -1922,16 +2208,6 @@ onBeforeUnmount(() => {
   --vgl-resizer-border-color: #3b82f6;
   --vgl-resizer-border-width: 2px;
 }
-.dge-hint {
-  margin: 0 0 12px;
-  padding: 10px 12px;
-  font-size: 13px;
-  line-height: 1.55;
-  color: #374151;
-  background: #eff6ff;
-  border: 1px solid #bfdbfe;
-  border-radius: 8px;
-}
 .dge-legacy-tip {
   margin-bottom: 12px;
 }
@@ -1944,11 +2220,17 @@ onBeforeUnmount(() => {
   line-height: 1.65;
   color: #606266;
 }
+.dge-save-as-alert {
+  margin-bottom: 12px;
+}
 .dge-empty-workbench {
   display: flex;
   gap: 16px;
   align-items: flex-start;
   flex-wrap: wrap;
+}
+.dge-workbench.is-save-as-readonly :deep(.vue-resizable-handle) {
+  display: none !important;
 }
 .dge-workbench {
   display: flex;
@@ -2050,10 +2332,17 @@ onBeforeUnmount(() => {
   border: 1px solid #e5e7eb;
   border-radius: 0 10px 10px 0;
 }
+.dge-side-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
 .dge-side-head {
   font-weight: 600;
   font-size: 14px;
-  margin-bottom: 10px;
+  margin-bottom: 0;
   color: #111827;
 }
 .dge-side-search {
@@ -2070,39 +2359,37 @@ onBeforeUnmount(() => {
   min-height: 120px;
 }
 .dge-side-row {
-  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
   margin-bottom: 8px;
   background: #fff;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
 }
-.dge-side-row-main {
+.dge-side-row-status {
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin-bottom: 4px;
-}
-.dge-hid {
-  font-size: 11px;
-  color: #9ca3af;
 }
 .dge-side-q {
-  font-size: 12px;
-  color: #374151;
+  font-size: 13px;
+  font-weight: 600;
+  color: #111827;
   line-height: 1.45;
-  margin-bottom: 4px;
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
 .dge-side-meta {
-  font-size: 11px;
+  font-size: 12px;
   color: #9ca3af;
-  line-height: 1.4;
-  margin-bottom: 6px;
+  line-height: 1.5;
   word-break: break-word;
+}
+.dge-side-row .el-button {
+  align-self: stretch;
 }
 .dge-load-more {
   width: 100%;
@@ -2254,16 +2541,6 @@ onBeforeUnmount(() => {
   line-height: 1.4;
   word-break: break-word;
 }
-.dge-card-actions {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.dge-chart-id {
-  font-size: 11px;
-  color: #9ca3af;
-}
 .dge-chart-host {
   flex: 1;
   min-height: 0;
@@ -2392,6 +2669,11 @@ onBeforeUnmount(() => {
   font-size: 13px;
   color: #6b7280;
   line-height: 1.5;
+}
+.dge-save-meta-hint--sub {
+  margin-top: -8px;
+  font-size: 12px;
+  color: #9ca3af;
 }
 .dge-dialog.is-fullscreen {
   display: flex;

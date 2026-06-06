@@ -207,7 +207,7 @@ function onFileChange(event) {
 .dvwi-upload-plus {
   font-size: 32px;
   line-height: 1;
-  color: #c4b5fd;
+  color: #3b82f6;
 }
 .dvwi-upload-preview {
   width: 100%;

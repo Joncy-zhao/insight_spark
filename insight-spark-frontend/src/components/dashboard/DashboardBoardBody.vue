@@ -36,6 +36,7 @@
                   </div>
                   <div class="dbv-card-actions">
                     <span v-if="chartIdForItem(item)" class="dbv-chart-id">历史 {{ chartIdForItem(item) }}</span>
+                    <span v-if="artifactIdForItem(item)" class="dbv-chart-id">Artifact {{ artifactIdForItem(item) }}</span>
                     <el-tag v-else-if="legacyInlineCardAt(slotIndex)" size="small" type="warning">
                       内嵌 cards 兜底
                     </el-tag>
@@ -55,7 +56,7 @@
                     :data="legacyInlineCardAt(slotIndex).data"
                   />
                   <div v-else class="dbv-chart-fallback">
-                    {{ chartIdForItem(item) ? '图表数据暂不可用' : '未关联 chart_id' }}
+                    {{ chartFallbackMessage(item) }}
                   </div>
                 </div>
               </div>
@@ -87,7 +88,12 @@
 <script setup>
 import { computed } from 'vue'
 import { GridLayout, GridItem } from 'grid-layout-plus'
-import { chartUiFromGridItem, DASHBOARD_GRID_COL_NUM, DASHBOARD_GRID_MARGIN } from '../../utils/dashboardGrid.js'
+import {
+  buildAdvancedAnalysisPreviewCard,
+  chartUiFromGridItem,
+  DASHBOARD_GRID_COL_NUM,
+  DASHBOARD_GRID_MARGIN
+} from '../../utils/dashboardGrid.js'
 import DashboardChart from './DashboardChart.vue'
 import LegacyInlineChart from './LegacyInlineChart.vue'
 import { resolveBasicWidgetEntry } from '../../utils/dashboardBasicWidgetRegistry.js'
@@ -141,17 +147,67 @@ function itemProps(item) {
   }
 }
 
+function componentForItem(item) {
+  return componentByItemId.value.get(String(item?.i)) || null
+}
+
 function chartIdForItem(item) {
-  const c = componentByItemId.value.get(String(item.i))
+  const c = componentForItem(item)
   if (!c) return ''
   const raw = c.chartId ?? c.chart_id ?? c.CHART_ID
-  return raw != null ? String(raw) : ''
+  if (raw == null) return ''
+  const n = Number(raw)
+  if (Number.isFinite(n) && n <= 0) return ''
+  return String(raw)
+}
+
+function artifactIdForItem(item) {
+  const c = componentForItem(item)
+  if (!c) return ''
+  const raw = c.artifactId ?? c.artifact_id ?? c.ARTIFACT_ID
+  return raw != null && String(raw).trim() !== '' ? String(raw) : ''
+}
+
+function advancedPayloadForItem(item) {
+  const c = componentForItem(item)
+  if (!c) return null
+  const card = buildAdvancedAnalysisPreviewCard(c, item, 0, `dbv-${props.board?.id || 'board'}`)
+  if (!card) return null
+  const analysis = card.advancedAnalysis || {}
+  return {
+    id: Number(c.chartId ?? c.chart_id ?? c.CHART_ID ?? 0) || 0,
+    artifactId: c.artifactId ?? c.artifact_id ?? c.ARTIFACT_ID ?? null,
+    turnId: c.turnId ?? c.turn_id ?? c.TURN_ID ?? null,
+    chartType: card.chartType,
+    queryText: card.title,
+    queryTableName: card.tableName,
+    generatedSql: '',
+    option: card.option,
+    chartSnapshot: {
+      module: 'advancedAnalysis',
+      type: analysis.type || '',
+      message: card.title,
+      chartType: card.chartType,
+      tableName: card.tableName,
+      fieldMapping: analysis.fieldMapping || {},
+      data: card.data,
+      advancedAnalysis: analysis
+    }
+  }
 }
 
 function payloadForItem(item) {
+  const advancedPayload = advancedPayloadForItem(item)
+  if (advancedPayload) return advancedPayload
   const cid = chartIdForItem(item)
   if (!cid) return null
   return props.chartPayloadById[cid] || null
+}
+
+function chartFallbackMessage(item) {
+  if (artifactIdForItem(item)) return '高级分析图表数据暂不可用'
+  if (chartIdForItem(item)) return '图表数据暂不可用'
+  return '未关联 chart_id'
 }
 
 function chartUiForItem(item) {

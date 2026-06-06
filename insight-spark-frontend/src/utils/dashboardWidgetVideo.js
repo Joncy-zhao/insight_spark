@@ -9,6 +9,18 @@ import {
   DASHBOARD_WIDGET_KIND_TEXT,
   serializeTextWidgetFieldsForApi
 } from './dashboardWidgetText.js'
+import {
+  DASHBOARD_WIDGET_KIND_CAROUSEL,
+  isCarouselWidgetItem,
+  normalizeCarouselWidgetConfig,
+  serializeCarouselWidgetFieldsForApi
+} from './dashboardWidgetCarousel.js'
+import {
+  DASHBOARD_WIDGET_KIND_IMAGE,
+  isImageWidgetItem,
+  normalizeImageWidgetConfig,
+  serializeImageWidgetFieldsForApi
+} from './dashboardWidgetImage.js'
 
 export const DASHBOARD_WIDGET_KIND_VIDEO = 'video'
 
@@ -122,6 +134,18 @@ export function cloneWidgetFieldsFromItem(it) {
   if (kind === DASHBOARD_WIDGET_KIND_TEXT) {
     return cloneTextWidgetFieldsFromItem(it)
   }
+  if (kind === DASHBOARD_WIDGET_KIND_IMAGE) {
+    return {
+      widgetKind: kind,
+      widgetConfig: normalizeImageWidgetConfig(it.widgetConfig)
+    }
+  }
+  if (kind === DASHBOARD_WIDGET_KIND_CAROUSEL) {
+    return {
+      widgetKind: kind,
+      widgetConfig: normalizeCarouselWidgetConfig(it.widgetConfig)
+    }
+  }
   return { widgetKind: kind }
 }
 
@@ -147,6 +171,12 @@ export function serializeWidgetFieldsForApi(it) {
   }
   if (kind === DASHBOARD_WIDGET_KIND_TEXT) {
     return serializeTextWidgetFieldsForApi(it)
+  }
+  if (kind === DASHBOARD_WIDGET_KIND_IMAGE) {
+    return serializeImageWidgetFieldsForApi(it)
+  }
+  if (kind === DASHBOARD_WIDGET_KIND_CAROUSEL) {
+    return serializeCarouselWidgetFieldsForApi(it)
   }
   return { widgetKind: kind }
 }

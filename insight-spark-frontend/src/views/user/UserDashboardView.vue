@@ -1,50 +1,12 @@
 <template>
   <section class="stack-c-user-dashboard">
-    <div v-if="sharePreviewMode" class="share-preview">
-      <h3>{{ sharePreview?.name || '分享看板' }}</h3>
-      <p class="portal-hint">当前为分享预览模式（免登录链接访问）。</p>
-      <el-descriptions :column="1" border>
-        <el-descriptions-item label="名称">{{ sharePreview?.name || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="描述">{{ sharePreview?.description || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="状态">{{ sharePreview?.status || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="到期时间">{{ formatDateTime(sharePreview?.shareExpireAt) || '长期有效' }}</el-descriptions-item>
-      </el-descriptions>
-
-      <el-divider />
-      <div class="preview-section-head">
-        <span>看板图表</span>
-        <el-tag size="small" type="info">{{ shareCards.length }} 张</el-tag>
-      </div>
-      <div
-        v-if="shareCards.length"
-        :class="['dash-chart-grid', dashChartPreviewGridClass(shareCards.length)]"
-      >
-        <article
-          v-for="(card, index) in shareCards"
-          :key="card._renderKey"
-          :class="['chart-card', { 'chart-card--pie': normalizeChartType(card.chartType) === 'pie' }]"
-        >
-          <div class="chart-card-head">
-            <h4>{{ card.title || `图表${index + 1}` }}</h4>
-            <el-tag size="small">{{ chartTypeLabel(card.chartType) }}</el-tag>
-          </div>
-          <div class="chart-sub">{{ card.tableName || '未指定数据表' }}</div>
-          <div v-if="card.sourceMeta" class="chart-source">
-            <el-tag size="small" effect="plain">{{ card.sourceMeta.sourceLabel }}</el-tag>
-            <el-tag v-if="card.sourceMeta.snapshotLabel" size="small" type="info" effect="plain">{{ card.sourceMeta.snapshotLabel }}</el-tag>
-            <span v-if="card.sourceMeta.detail">{{ card.sourceMeta.detail }}</span>
-          </div>
-          <div :ref="setChartRef('share', card._renderKey)" class="chart-box" />
-        </article>
-      </div>
-      <el-empty v-else description="分享看板暂无图表卡片" />
-
-      <el-divider />
-      <el-collapse>
-        <el-collapse-item title="布局 JSON 预览" name="layout-json">
-          <pre class="preview-json">{{ formatLayoutJson(sharePreview?.layoutJson) }}</pre>
-        </el-collapse-item>
-      </el-collapse>
+    <div v-if="sharePreviewMode" class="share-canvas-full">
+      <DashboardBoardViewer
+        embedded
+        :prefetch="sharePrefetch"
+        :api-base="API_BASE"
+        :show-embed-lead="false"
+      />
     </div>
 
     <div v-else-if="shareTokenMode" class="share-preview">
@@ -60,28 +22,37 @@
         ref="workspaceRef"
         :api-base="API_BASE"
         @preview="openPreview"
+        @view-charts="openChartList"
+        @view-widgets="openWidgetList"
         @share="openShareDialog"
-        @copy-share="copyShareLink"
+      />
+
+      <DashboardBoardViewer
+        v-model="boardViewerVisible"
+        :initial-row="boardViewerRow"
+        :api-base="API_BASE"
+        :show-lead="false"
+        :show-header="false"
       />
 
       <el-dialog
-        v-model="previewVisible"
-        :title="previewTitle"
-        :width="previewDialogWidth"
-        :top="previewSqlOpenKey ? '2vh' : '3vh'"
-        :class="['chart-preview-dlg', { 'chart-preview-dlg--sql': Boolean(previewSqlOpenKey) }]"
+        v-model="chartListVisible"
+        :title="chartListTitle"
+        :width="chartListDialogWidth"
+        :top="chartListSqlOpenKey ? '2vh' : '3vh'"
+        :class="['chart-preview-dlg', { 'chart-preview-dlg--sql': Boolean(chartListSqlOpenKey) }]"
         destroy-on-close
       >
         <div class="preview-section-head">
           <span>看板图表</span>
-          <el-tag size="small" type="info">{{ previewCards.length }} 张</el-tag>
+          <el-tag size="small" type="info">{{ chartListCards.length }} 张</el-tag>
         </div>
         <div
-          v-if="previewCards.length"
-          :class="['dash-chart-grid', dashChartPreviewGridClass(previewCards.length)]"
+          v-if="chartListCards.length"
+          :class="['dash-chart-grid', dashChartPreviewGridClass(chartListCards.length)]"
         >
           <article
-            v-for="(card, index) in previewCards"
+            v-for="(card, index) in chartListCards"
             :key="card._renderKey"
             :class="['chart-card', { 'chart-card--pie': normalizeChartType(card.chartType) === 'pie' }]"
           >
@@ -106,11 +77,14 @@
               <el-tag v-if="card.sourceMeta.snapshotLabel" size="small" type="info" effect="plain">{{ card.sourceMeta.snapshotLabel }}</el-tag>
               <span v-if="card.sourceMeta.detail">{{ card.sourceMeta.detail }}</span>
             </div>
-            <div :ref="setChartRef('preview', card._renderKey)" class="chart-box" />
+            <div v-if="card._previewKind === 'unavailable'" class="chart-box chart-box--empty">
+              <el-empty :description="card.unavailableMessage || '图表暂不可用'" :image-size="48" />
+            </div>
+            <div v-else :ref="setChartRef('chart-list', card._renderKey)" class="chart-box" />
             <details
               v-if="card.sql"
               class="sql-wrap"
-              @toggle="onPreviewSqlToggle(card._renderKey, $event)"
+              @toggle="onChartListSqlToggle(card._renderKey, $event)"
             >
               <summary>查看 SQL</summary>
               <pre class="sql-pre">{{ card.sql }}</pre>
@@ -120,7 +94,52 @@
         <el-empty v-else description="当前看板暂无可渲染图表卡片" />
       </el-dialog>
 
-      <el-dialog v-model="shareVisible" title="开启分享链接" width="480px" destroy-on-close>
+      <el-dialog
+        v-model="widgetListVisible"
+        :title="widgetListTitle"
+        :width="widgetListDialogWidth"
+        top="3vh"
+        class="widget-list-dlg"
+        destroy-on-close
+      >
+        <div class="preview-section-head">
+          <span>基础组件</span>
+          <el-tag size="small" type="warning">{{ widgetListCards.length }} 个</el-tag>
+        </div>
+        <div
+          v-if="widgetListCards.length"
+          :class="['dash-widget-grid', dashChartPreviewGridClass(widgetListCards.length)]"
+        >
+          <article
+            v-for="(card, index) in widgetListCards"
+            :key="card._renderKey"
+            class="widget-card"
+          >
+            <div class="widget-card-head">
+              <h4>{{ card.title || `组件${index + 1}` }}</h4>
+              <el-tag size="small" type="warning" effect="plain">{{ card.label }}</el-tag>
+            </div>
+            <div class="widget-card-meta">
+              画布位置：第 {{ card.layout.y + 1 }} 行 · 宽 {{ card.layout.w }} × 高 {{ card.layout.h }}
+            </div>
+            <div class="widget-card-preview">
+              <component
+                :is="basicWidgetComponent(card.widgetKind)"
+                v-if="basicWidgetComponent(card.widgetKind)"
+                :config="card.config"
+                :interactive="false"
+              />
+              <el-empty v-else description="未知组件类型" :image-size="40" />
+            </div>
+          </article>
+        </div>
+        <el-empty v-else description="当前看板暂无基础组件" />
+      </el-dialog>
+
+      <el-dialog v-model="shareVisible" title="分享看板" width="520px" destroy-on-close @closed="onShareDialogClosed">
+        <p class="portal-hint">
+          设置分享有效期后点击「生成链接」；不填过期时间则为永久有效。链接生成后请自行复制分享，重新生成后原链接立即失效。
+        </p>
         <el-form label-position="top">
           <el-form-item label="过期时间（可选）">
             <el-date-picker
@@ -132,10 +151,19 @@
               style="width: 100%;"
             />
           </el-form-item>
+          <el-form-item>
+            <el-button type="primary" :loading="sharing" @click="generateShareLink">生成链接</el-button>
+          </el-form-item>
+          <el-form-item v-if="shareLinkText" label="分享链接">
+            <el-input v-model="shareLinkText" readonly>
+              <template #append>
+                <el-button @click="copyShareLinkText">复制链接</el-button>
+              </template>
+            </el-input>
+          </el-form-item>
         </el-form>
         <template #footer>
           <el-button @click="shareVisible = false">取消</el-button>
-          <el-button type="primary" :loading="sharing" @click="enableShare">确认开启</el-button>
         </template>
       </el-dialog>
     </template>
@@ -149,12 +177,15 @@ import axios from 'axios'
 import { ElLoading, ElMessage, ElMessageBox } from 'element-plus'
 import { restoreSessionHeader } from '../../store/session'
 import UserDashboardWorkspace from '../../components/dashboard/UserDashboardWorkspace.vue'
+import DashboardBoardViewer from '../../components/dashboard/DashboardBoardViewer.vue'
 import {
   buildUnifiedPreviewCards,
+  buildBasicWidgetPreviewCards,
   extractLegacyChartCards,
   dashChartPreviewGridClass,
   previewChartDialogWidth
 } from '../../utils/dashboardGrid.js'
+import { resolveBasicWidgetEntry } from '../../utils/dashboardBasicWidgetRegistry.js'
 import { buildOptionFromHistoryRow } from '../../utils/chartOptionFromSnapshot.js'
 
 const API_BASE = 'http://localhost:8080'
@@ -163,30 +194,42 @@ const diagnosisLoading = computed(() => Boolean(workbench?.diagnosisLoading?.val
 
 const workspaceRef = ref(null)
 const rows = computed(() => workspaceRef.value?.rows?.value || workspaceRef.value?.rows || [])
-const previewVisible = ref(false)
-const previewTitle = ref('看板图表预览')
-const previewCards = ref([])
-const shareCards = ref([])
-const previewDashboardContext = ref(null)
-/** 当前展开「查看 SQL」的卡片 _renderKey，用于放大弹窗与压缩图表区 */
-const previewSqlOpenKey = ref(null)
-
-const previewDialogWidth = computed(() =>
-  previewChartDialogWidth(previewCards.value.length, { openSql: Boolean(previewSqlOpenKey.value) })
+const boardViewerVisible = ref(false)
+const boardViewerRow = ref(null)
+const chartListVisible = ref(false)
+const chartListTitle = ref('看板图表')
+const chartListCards = ref([])
+const chartListContext = ref(null)
+const chartListSqlOpenKey = ref(null)
+const chartListDialogWidth = computed(() =>
+  previewChartDialogWidth(chartListCards.value.length, { openSql: Boolean(chartListSqlOpenKey.value) })
 )
-
+const widgetListVisible = ref(false)
+const widgetListTitle = ref('基础组件')
+const widgetListCards = ref([])
+const widgetListDialogWidth = computed(() =>
+  previewChartDialogWidth(widgetListCards.value.length)
+)
 const shareVisible = ref(false)
 const sharing = ref(false)
 const shareTargetId = ref(null)
 const shareExpireAt = ref('')
+const shareLinkText = ref('')
 const sharePreviewMode = ref(false)
 const sharePreview = ref(null)
+const sharePrefetch = ref(null)
 const sharePreviewError = ref('')
 const shareTokenMode = ref(false)
 
-const previewChartRefs = new Map()
 const shareChartRefs = new Map()
+const chartListChartRefs = new Map()
 const chartInstances = new Map()
+
+function chartRefMapForScope(scope) {
+  if (scope === 'share') return shareChartRefs
+  if (scope === 'chart-list') return chartListChartRefs
+  return null
+}
 
 const parseShareTokenFromUrl = () => {
   try {
@@ -382,19 +425,19 @@ const buildChartOption = (card) => {
   return option
 }
 
-const onPreviewSqlToggle = (renderKey, evt) => {
+const onChartListSqlToggle = (renderKey, evt) => {
   const el = evt?.target
   const opened = el && typeof el.open === 'boolean' ? el.open : false
   if (opened) {
-    previewSqlOpenKey.value = renderKey
-  } else if (previewSqlOpenKey.value === renderKey) {
-    previewSqlOpenKey.value = null
+    chartListSqlOpenKey.value = renderKey
+  } else if (chartListSqlOpenKey.value === renderKey) {
+    chartListSqlOpenKey.value = null
   }
   nextTick(() => {
     requestAnimationFrame(() => {
       window.dispatchEvent(new Event('resize'))
       for (const [key, inst] of chartInstances.entries()) {
-        if (!key.startsWith('preview:') || !inst?.resize) continue
+        if (!key.startsWith('chart-list:') || !inst?.resize) continue
         try {
           inst.resize()
         } catch {
@@ -406,7 +449,8 @@ const onPreviewSqlToggle = (renderKey, evt) => {
 }
 
 const setChartRef = (scope, key) => (el) => {
-  const map = scope === 'share' ? shareChartRefs : previewChartRefs
+  const map = chartRefMapForScope(scope)
+  if (!map) return
   if (el) {
     map.set(key, el)
   } else {
@@ -415,6 +459,8 @@ const setChartRef = (scope, key) => (el) => {
 }
 
 const disposeScopeCharts = (scope) => {
+  const map = chartRefMapForScope(scope)
+  if (!map) return
   const prefix = `${scope}:`
   for (const [key, instance] of chartInstances.entries()) {
     if (!key.startsWith(prefix)) continue
@@ -425,19 +471,17 @@ const disposeScopeCharts = (scope) => {
     }
     chartInstances.delete(key)
   }
-  if (scope === 'share') {
-    shareChartRefs.clear()
-  } else {
-    previewChartRefs.clear()
-  }
+  map.clear()
 }
 
 const renderScopeCharts = async (scope, cards) => {
+  const refs = chartRefMapForScope(scope)
+  if (!refs) return
   await nextTick()
-  const refs = scope === 'share' ? shareChartRefs : previewChartRefs
   const alive = new Set()
 
   cards.forEach((card) => {
+    if (card._previewKind === 'unavailable') return
     const renderKey = String(card._renderKey || card.cardId || '')
     if (!renderKey) return
     const fullKey = `${scope}:${renderKey}`
@@ -493,15 +537,15 @@ const generateDiagnosisFromCard = async (card) => {
     ElMessage.warning('诊断报告模块尚未就绪')
     return
   }
-  const key = `preview:${card?._renderKey || ''}`
+  const key = `chart-list:${card?._renderKey || ''}`
   const instance = chartInstances.get(key)
   const imageDataUrl = instance?.getDataURL
     ? instance.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#ffffff' })
     : ''
   await workbench.diagnoseFromDashboardCard({
     ...card,
-    dashboardId: previewDashboardContext.value?.id || null,
-    dashboardName: previewDashboardContext.value?.name || '',
+    dashboardId: chartListContext.value?.id || null,
+    dashboardName: chartListContext.value?.name || '',
     cardTitle: card?.title || ''
   }, imageDataUrl)
 }
@@ -523,8 +567,8 @@ const restoreDiagnosisDashboardTarget = async (target) => {
     ElMessage.warning('未找到诊断报告绑定的看板，已停留在我的看板列表')
     return
   }
-  await openPreview(row)
-  ElMessage.success(target.cardTitle ? `已回溯到看板图表：${target.cardTitle}` : '已回溯到诊断报告绑定的看板')
+  openPreview(row)
+  ElMessage.success(target.cardTitle ? `已回溯到看板：${target.cardTitle}` : '已回溯到诊断报告绑定的看板')
 }
 
 const handleWindowResize = () => {
@@ -534,14 +578,64 @@ const handleWindowResize = () => {
 }
 
 const openPreview = async (row) => {
-  previewDashboardContext.value = row ? { ...row } : null
-  previewTitle.value = row?.name ? `${row.name} - 图表预览` : '看板图表预览'
+  if (!row?.id) {
+    ElMessage.warning('看板信息不完整，无法预览')
+    return
+  }
+  restoreSessionHeader()
+  try {
+    await axios.post(`${API_BASE}/api/c/dashboards/${row.id}/record-view`)
+    row.viewCount = Number(row.viewCount || 0) + 1
+  } catch {
+    // ignore
+  }
+  boardViewerRow.value = { ...row }
+  boardViewerVisible.value = true
+}
+
+function basicWidgetComponent(widgetKind) {
+  return resolveBasicWidgetEntry(widgetKind)?.widget || null
+}
+
+const openWidgetList = async (row) => {
+  const count = Number(row?.basicWidgetCount || 0)
+  if (!count) {
+    ElMessage.info('当前看板暂无基础组件')
+    return
+  }
+  widgetListTitle.value = row?.name ? `${row.name} - 基础组件` : '基础组件'
   const id = row?.id
-  const scope = `preview-${id || 'temp'}`
+  const scope = `widget-list-${id || 'temp'}`
+  let layoutJson = row?.layoutJson
+  if (id) {
+    restoreSessionHeader()
+    try {
+      const dashRes = await axios.get(`${API_BASE}/api/c/dashboards/${id}`)
+      if (dashRes.data.code !== 200) throw new Error(dashRes.data.message || '加载看板失败')
+      layoutJson = dashRes.data?.data?.layoutJson ?? layoutJson
+    } catch (e) {
+      ElMessage.error(e.message || '加载失败')
+      layoutJson = row?.layoutJson
+    }
+  }
+  widgetListCards.value = buildBasicWidgetPreviewCards(layoutJson, scope)
+  widgetListVisible.value = true
+}
+
+const openChartList = async (row) => {
+  const count = Number(row?.chartCardCount || 0)
+  if (!count) {
+    ElMessage.info('当前看板暂无图表')
+    return
+  }
+  chartListContext.value = row ? { ...row } : null
+  chartListTitle.value = row?.name ? `${row.name} - 图表列表` : '看板图表'
+  const id = row?.id
+  const scope = `chart-list-${id || 'temp'}`
   if (!id) {
-    previewCards.value = extractLegacyChartCards(row?.layoutJson, scope)
-    previewVisible.value = true
-    await renderScopeCharts('preview', previewCards.value)
+    chartListCards.value = extractLegacyChartCards(row?.layoutJson, scope)
+    chartListVisible.value = true
+    await renderScopeCharts('chart-list', chartListCards.value)
     return
   }
   restoreSessionHeader()
@@ -565,22 +659,25 @@ const openPreview = async (row) => {
     ]
     const payloadMap = {}
     if (chartIds.length) {
-      const batchRes = await axios.post(`${API_BASE}/api/chat/history/charts-batch`, { ids: chartIds })
+      const batchRes = await axios.post(`${API_BASE}/api/chat/history/charts-batch`, {
+        ids: chartIds,
+        dashboardId: id
+      })
       if (batchRes.data.code !== 200) throw new Error(batchRes.data.message || '加载图表数据失败')
-      const rows = Array.isArray(batchRes.data.data) ? batchRes.data.data : []
-      for (const r of rows) {
+      const batchRows = Array.isArray(batchRes.data.data) ? batchRes.data.data : []
+      for (const r of batchRows) {
         const hid = r.id != null ? String(r.id) : ''
         if (hid) payloadMap[hid] = r
       }
     }
-    previewCards.value = buildUnifiedPreviewCards(layoutJson, components, payloadMap, scope)
-    previewVisible.value = true
-    await renderScopeCharts('preview', previewCards.value)
+    chartListCards.value = buildUnifiedPreviewCards(layoutJson, components, payloadMap, scope)
+    chartListVisible.value = true
+    await renderScopeCharts('chart-list', chartListCards.value)
   } catch (e) {
-    ElMessage.error(e.message || '加载预览失败')
-    previewCards.value = extractLegacyChartCards(row?.layoutJson, scope)
-    previewVisible.value = true
-    await renderScopeCharts('preview', previewCards.value)
+    ElMessage.error(e.message || '加载图表失败')
+    chartListCards.value = extractLegacyChartCards(row?.layoutJson, scope)
+    chartListVisible.value = true
+    await renderScopeCharts('chart-list', chartListCards.value)
   }
 }
 
@@ -588,13 +685,19 @@ const reloadWorkspace = async () => {
   await workspaceRef.value?.reload?.()
 }
 
+const onShareDialogClosed = () => {
+  shareLinkText.value = ''
+  shareTargetId.value = null
+}
+
 const openShareDialog = (row) => {
   shareTargetId.value = row.id
   shareExpireAt.value = row.shareExpireAt ? String(row.shareExpireAt).replace('T', ' ').slice(0, 19) : ''
+  shareLinkText.value = ''
   shareVisible.value = true
 }
 
-const enableShare = async () => {
+const generateShareLink = async () => {
   if (!shareTargetId.value) return
   sharing.value = true
   restoreSessionHeader()
@@ -602,14 +705,27 @@ const enableShare = async () => {
     const body = shareExpireAt.value ? { expireAt: shareExpireAt.value } : {}
     const res = await axios.post(`${API_BASE}/api/c/dashboards/${shareTargetId.value}/share/enable`, body)
     if (res.data.code !== 200) throw new Error(res.data.message)
-    ElMessage.success('已开启分享')
-    shareVisible.value = false
+    shareLinkText.value = buildShareLink(res.data.data)
+    ElMessage.success('链接已生成，原链接已失效，请复制下方链接')
     await reloadWorkspace()
-    copyShareLink(res.data.data)
   } catch (e) {
-    ElMessage.error(e.message || '开启分享失败')
+    ElMessage.error(e.message || '生成链接失败')
   } finally {
     sharing.value = false
+  }
+}
+
+const copyShareLinkText = async () => {
+  const link = String(shareLinkText.value || '').trim()
+  if (!link) {
+    ElMessage.warning('请先生成分享链接')
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(link)
+    ElMessage.success('分享链接已复制')
+  } catch {
+    ElMessage.error('复制失败，请手动复制')
   }
 }
 
@@ -652,6 +768,19 @@ const copyShareLink = async (row) => {
   }
 }
 
+function buildSharePrefetch(payload) {
+  if (!payload) return null
+  const components = Array.isArray(payload.components) ? payload.components : []
+  const chartPayloadById =
+    payload.chartPayloadById && typeof payload.chartPayloadById === 'object'
+      ? { ...payload.chartPayloadById }
+      : {}
+  const board = { ...payload }
+  delete board.components
+  delete board.chartPayloadById
+  return { board, components, chartPayloadById }
+}
+
 const loadSharePreview = async (token) => {
   shareTokenMode.value = true
   const loading = ElLoading.service({ text: '加载分享看板中...' })
@@ -659,13 +788,9 @@ const loadSharePreview = async (token) => {
     const res = await axios.get(`${API_BASE}/api/c/dashboards/share`, { params: { token } })
     if (res.data.code !== 200) throw new Error(res.data.message)
     sharePreview.value = res.data.data
-    shareCards.value = extractLegacyChartCards(
-      sharePreview.value?.layoutJson,
-      `share-${sharePreview.value?.id || 'board'}`
-    )
+    sharePrefetch.value = buildSharePrefetch(res.data.data)
     sharePreviewMode.value = true
     sharePreviewError.value = ''
-    await renderScopeCharts('share', shareCards.value)
   } catch (e) {
     const message = e.message || '分享链接不可用'
     ElMessage.error(message)
@@ -676,22 +801,17 @@ const loadSharePreview = async (token) => {
   }
 }
 
-watch(previewVisible, async (visible) => {
+watch(chartListVisible, async (visible) => {
   if (visible) {
-    previewSqlOpenKey.value = null
+    chartListSqlOpenKey.value = null
     await nextTick()
     await nextTick()
-    await renderScopeCharts('preview', previewCards.value)
+    await renderScopeCharts('chart-list', chartListCards.value)
   } else {
-    previewSqlOpenKey.value = null
-    disposeScopeCharts('preview')
+    chartListSqlOpenKey.value = null
+    disposeScopeCharts('chart-list')
   }
 })
-
-watch(shareCards, async (cards) => {
-  if (!sharePreviewMode.value) return
-  await renderScopeCharts('share', cards)
-}, { deep: true })
 
 watch(
   () => workbench?.diagnosisRestoreTarget?.value,
@@ -713,14 +833,24 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', handleWindowResize)
-  disposeScopeCharts('preview')
-  disposeScopeCharts('share')
+  disposeScopeCharts('chart-list')
 })
 </script>
 
 <style scoped>
 .stack-c-user-dashboard {
-  padding: 0 4px;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.stack-c-user-dashboard :deep(.adm-dashboard) {
+  flex: 1;
+  min-height: 0;
 }
 
 .portal-hint {
@@ -749,6 +879,15 @@ onBeforeUnmount(() => {
 .share-preview {
   max-width: 1100px;
   margin: 0 auto;
+}
+
+.share-canvas-full {
+  flex: 1;
+  min-height: 0;
+  height: 100vh;
+  width: 100%;
+  overflow: auto;
+  box-sizing: border-box;
 }
 
 .preview-section-head {
@@ -785,6 +924,87 @@ onBeforeUnmount(() => {
 .dash-chart-grid--multi {
   --preview-cols: 3;
   grid-template-columns: repeat(3, auto);
+}
+
+.dash-widget-grid {
+  display: grid;
+  gap: 16px;
+  justify-content: center;
+  align-items: start;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.dash-widget-grid.dash-chart-grid--single {
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: center;
+}
+
+.dash-widget-grid.dash-chart-grid--double {
+  grid-template-columns: repeat(2, minmax(280px, 1fr));
+}
+
+.dash-widget-grid.dash-chart-grid--multi {
+  grid-template-columns: repeat(3, minmax(240px, 1fr));
+}
+
+.widget-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 12px;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  width: 100%;
+  max-width: min(100%, 480px);
+  box-sizing: border-box;
+}
+
+.dash-widget-grid.dash-chart-grid--single .widget-card {
+  max-width: min(100%, 560px);
+}
+
+.widget-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.widget-card-head h4 {
+  margin: 0;
+  font-size: 14px;
+  color: #111827;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.widget-card-meta {
+  color: #6b7280;
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+
+.widget-card-preview {
+  min-height: 200px;
+  height: 240px;
+  border: 1px dashed #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #f9fafb;
+  position: relative;
+}
+
+.widget-card-preview :deep(.dbw-root) {
+  width: 100%;
+  height: 100%;
+}
+
+.widget-card-preview :deep(.dbw-content) {
+  width: 100%;
+  height: 100%;
 }
 
 .chart-card {
@@ -868,6 +1088,15 @@ onBeforeUnmount(() => {
   align-self: center;
 }
 
+.chart-box--empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  aspect-ratio: auto;
+  width: 100%;
+}
+
 .sql-wrap {
   margin-top: 10px;
   flex-shrink: 0;
@@ -931,7 +1160,6 @@ onBeforeUnmount(() => {
 </style>
 
 <style>
-/* 弹窗内给图表足够纵向空间（scoped 无法命中 el-dialog 内部） */
 .chart-preview-dlg .el-dialog__body {
   padding: 12px 16px 20px;
   max-height: calc(94vh - 120px);
@@ -939,7 +1167,6 @@ onBeforeUnmount(() => {
   box-sizing: border-box;
 }
 
-/* 展开「查看 SQL」：加宽弹窗、压缩图表区、放大 SQL 代码块可滚动区域 */
 .chart-preview-dlg.chart-preview-dlg--sql .el-dialog__body {
   max-height: calc(97vh - 88px);
 }
@@ -961,5 +1188,12 @@ onBeforeUnmount(() => {
 .chart-preview-dlg.chart-preview-dlg--sql .sql-pre {
   max-height: min(58vh, 720px) !important;
   min-height: 140px;
+}
+
+.widget-list-dlg .el-dialog__body {
+  padding: 12px 16px 20px;
+  max-height: calc(94vh - 120px);
+  overflow-y: auto;
+  box-sizing: border-box;
 }
 </style>

@@ -12,7 +12,7 @@ export const DASHBOARD_BASIC_WIDGET_DEFAULT_W = 6
 export const DASHBOARD_BASIC_WIDGET_DEFAULT_H = 6
 
 /** 面板中已开放拖入/点击的基础组件 */
-export const DASHBOARD_PALETTE_AVAILABLE_TYPES = Object.freeze(['video', 'text'])
+export const DASHBOARD_PALETTE_AVAILABLE_TYPES = Object.freeze(['text', 'image', 'video', 'carousel'])
 
 export function isPaletteComponentAvailable(type) {
   return DASHBOARD_PALETTE_AVAILABLE_TYPES.includes(String(type || '').trim())
@@ -22,7 +22,5 @@ export const DASHBOARD_BASIC_COMPONENTS = Object.freeze([
   { type: 'text', label: '文本' },
   { type: 'image', label: '图片' },
   { type: 'video', label: '视频' },
-  { type: 'webpage', label: '网页' },
-  { type: 'carousel', label: '轮播图' },
-  { type: 'time', label: '时间' }
+  { type: 'carousel', label: '轮播图' }
 ])

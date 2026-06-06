@@ -4,11 +4,11 @@
     v-model="innerVisible"
     fullscreen
     destroy-on-close
-    class="dbv-dialog"
+    :class="['dbv-dialog', { 'dbv-dialog--canvas-only': !showHeader }]"
     append-to-body
     @closed="onClosed"
   >
-    <template #header>
+    <template v-if="showHeader" #header>
       <div class="dbv-head">
         <div class="dbv-title">
           <span>查看看板 · {{ board?.name || '看板' }}</span>
@@ -71,6 +71,8 @@ const props = defineProps({
   showEmbedLead: { type: Boolean, default: true },
   /** 弹窗模式是否展示说明条（管理员查看看板可关） */
   showLead: { type: Boolean, default: true },
+  /** 弹窗模式是否展示自定义标题栏（预览/分享仅保留右上角关闭） */
+  showHeader: { type: Boolean, default: true },
   /**
    * 预填充数据则跳过接口拉取：{ board, components, chartPayloadById }
    * chartPayloadById: Record<string, historyRow>
@@ -252,5 +254,15 @@ watch(
   flex-direction: column;
   overflow: auto;
   padding-top: 8px;
+}
+.dbv-dialog--canvas-only.is-fullscreen .el-dialog__header {
+  padding: 8px 12px;
+  margin: 0;
+}
+.dbv-dialog--canvas-only.is-fullscreen .el-dialog__title {
+  display: none;
+}
+.dbv-dialog--canvas-only.is-fullscreen .el-dialog__body {
+  padding-top: 0;
 }
 </style>

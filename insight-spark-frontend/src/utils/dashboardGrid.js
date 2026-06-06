@@ -10,8 +10,10 @@ import {
 } from './dashboardGridCanvas.js'
 import {
   cloneWidgetFieldsFromItem,
-  serializeWidgetFieldsForApi
+  serializeWidgetFieldsForApi,
+  isBasicWidgetItem
 } from './dashboardWidgetVideo.js'
+import { basicWidgetLabelForItem, resolveBasicWidgetEntry } from './dashboardBasicWidgetRegistry.js'
 
 export {
   DASHBOARD_GRID_COL_NUM,
@@ -212,13 +214,68 @@ export function extractLegacyChartCards(layoutJson, scope = 'layout') {
     .filter(Boolean)
 }
 
-/** 列表展示用：优先 v2 items 数量，否则旧版 cards 中可渲染图表数 */
+/** 列表展示用：网格中非基础组件（文本/视频等）的图表槽位数，不含 widgetKind 占位 */
 export function countChartSlotsForDashboardRow(layoutJson) {
   const p = parseDashboardLayout(layoutJson)
   if (Array.isArray(p.items) && p.items.length > 0) {
-    return p.items.length
+    return p.items.filter((item) => !isBasicWidgetItem(item)).length
   }
   return extractLegacyChartCards(layoutJson, 'count').length
+}
+
+/** 列表展示用：layout 中带 widgetKind 的基础组件数量（文本、视频等） */
+export function countBasicWidgetSlotsForDashboardRow(layoutJson) {
+  const p = parseDashboardLayout(layoutJson)
+  if (!Array.isArray(p.items) || !p.items.length) return 0
+  return p.items.filter((item) => isBasicWidgetItem(item)).length
+}
+
+/**
+ * 基础组件列表预览：从 layout items 提取 widgetKind 项
+ * @param {string} layoutJson
+ * @param {string} scope 渲染 key 前缀
+ */
+export function buildBasicWidgetPreviewCards(layoutJson, scope = 'widget-list') {
+  const p = parseDashboardLayout(layoutJson)
+  const items = Array.isArray(p.items) ? p.items : []
+  return items
+    .filter((item) => isBasicWidgetItem(item))
+    .map((item, index) => {
+      const entry = resolveBasicWidgetEntry(item)
+      const config = entry ? entry.configForItem(item) : {}
+      const cid = String(item.i ?? index).trim()
+      const label = basicWidgetLabelForItem(item)
+      return {
+        _renderKey: `${scope}-${cid}-${index}`,
+        itemId: cid,
+        widgetKind: String(item.widgetKind || '').trim(),
+        label,
+        title: String(item.title || '').trim() || `${label} ${index + 1}`,
+        config,
+        layout: {
+          x: Number(item.x) || 0,
+          y: Number(item.y) || 0,
+          w: Number(item.w) || 0,
+          h: Number(item.h) || 0
+        }
+      }
+    })
+}
+
+function buildUnavailablePreviewCard(item, index, scope, reason) {
+  const cid = String(item?.i ?? index).trim()
+  const title = String(item?.title || '').trim() || `图表 ${index + 1}`
+  return {
+    _previewKind: 'unavailable',
+    _renderKey: `${scope}-grid-${cid}-${index}-na`,
+    cardId: cid,
+    title,
+    chartType: 'bar',
+    tableName: '',
+    sql: '',
+    data: [],
+    unavailableMessage: String(reason || '图表暂不可用')
+  }
 }
 
 export function cloneLayoutForGrid(items, gridCols = DASHBOARD_GRID_COL_NUM) {
@@ -619,22 +676,33 @@ export function buildUnifiedPreviewCards(layoutJson, components, chartPayloadByI
   const gridCards = []
 
   mergedItems.forEach((item, index) => {
+    if (isBasicWidgetItem(item)) return
+
     const cid = String(item.i || '').trim()
     const comp = (components || []).find((c) => {
       const id = String(c.id ?? c.ID ?? c.componentId ?? c.component_id ?? '').trim()
       return id === cid
     })
-    if (!comp) return
+    if (!comp) {
+      gridCards.push(buildUnavailablePreviewCard(item, index, scope, '画布组件未注册'))
+      return
+    }
     const advancedCard = buildAdvancedAnalysisPreviewCard(comp, item, index, scope)
     if (advancedCard) {
       gridCards.push(advancedCard)
       return
     }
     const rawChartId = comp.chartId ?? comp.chart_id ?? comp.CHART_ID
-    if (rawChartId == null) return
+    if (rawChartId == null) {
+      gridCards.push(buildUnavailablePreviewCard(item, index, scope, '未关联 chart_id'))
+      return
+    }
     const chartIdStr = String(rawChartId).trim()
     const payload = payloadMap[chartIdStr]
-    if (!payload) return
+    if (!payload) {
+      gridCards.push(buildUnavailablePreviewCard(item, index, scope, '图表数据暂不可用'))
+      return
+    }
 
     let snap = payload.chartSnapshot
     if (typeof snap === 'string') {

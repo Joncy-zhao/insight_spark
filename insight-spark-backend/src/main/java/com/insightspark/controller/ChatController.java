@@ -3,6 +3,7 @@ package com.insightspark.controller;
 import com.insightspark.common.ApiResponse;
 import com.insightspark.core.auth.AuthContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.insightspark.c.service.StackCDashboardService;
 import com.insightspark.service.BusinessModelAgentService;
 import com.insightspark.service.ChatBiService;
 import com.insightspark.service.ChatConversationService;
@@ -45,6 +46,9 @@ public class ChatController {
 
     @Autowired
     private BusinessModelAgentService businessModelAgentService;
+
+    @Autowired
+    private StackCDashboardService stackCDashboardService;
 
     @PostMapping("/ask")
     public ApiResponse<Map<String, Object>> askQuestion(@RequestBody Map<String, Object> request) {
@@ -286,6 +290,16 @@ public class ChatController {
         }
         if (ids.isEmpty()) {
             return ApiResponse.badRequest("ids 格式无效");
+        }
+        Long dashboardId = toLong(body == null ? null : body.get("dashboardId"));
+        if (dashboardId != null && dashboardId > 0) {
+            try {
+                stackCDashboardService.getById(dashboardId);
+            } catch (IllegalArgumentException e) {
+                return ApiResponse.badRequest(e.getMessage());
+            }
+            return ApiResponse.success(
+                    chatQueryHistoryService.batchChartSnapshotsForSharedDashboard(ids, dashboardId));
         }
         return ApiResponse.success(chatQueryHistoryService.batchChartSnapshotsForCurrentUser(ids));
     }

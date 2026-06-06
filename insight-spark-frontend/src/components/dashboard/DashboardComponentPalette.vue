@@ -121,29 +121,6 @@ const iconMap = {
         fill: 'currentColor'
       })
     ]),
-  webpage: () =>
-    h('svg', { viewBox: '0 0 48 48', fill: 'none' }, [
-      h('rect', {
-        x: 7,
-        y: 10,
-        width: 34,
-        height: 28,
-        rx: 4,
-        stroke: 'currentColor',
-        'stroke-width': 2
-      }),
-      h('path', {
-        d: 'M7 16h34',
-        stroke: 'currentColor',
-        'stroke-width': 2
-      }),
-      h('path', {
-        d: 'M14 28h8M14 32h12',
-        stroke: 'currentColor',
-        'stroke-width': 2,
-        'stroke-linecap': 'round'
-      })
-    ]),
   carousel: () =>
     h('svg', { viewBox: '0 0 48 48', fill: 'none' }, [
       h('rect', {
@@ -175,28 +152,6 @@ const iconMap = {
         'stroke-width': 2,
         opacity: 0.75
       })
-    ]),
-  time: () =>
-    h('svg', { viewBox: '0 0 48 48', fill: 'none' }, [
-      h('rect', {
-        x: 10,
-        y: 12,
-        width: 28,
-        height: 26,
-        rx: 5,
-        stroke: 'currentColor',
-        'stroke-width': 2
-      }),
-      h('path', {
-        d: 'M10 20h28',
-        stroke: 'currentColor',
-        'stroke-width': 2
-      }),
-      h('circle', { cx: 18, cy: 28, r: 2, fill: 'currentColor' }),
-      h('circle', { cx: 24, cy: 28, r: 2, fill: 'currentColor' }),
-      h('circle', { cx: 30, cy: 28, r: 2, fill: 'currentColor' }),
-      h('circle', { cx: 18, cy: 34, r: 2, fill: 'currentColor' }),
-      h('circle', { cx: 24, cy: 34, r: 2, fill: 'currentColor' })
     ])
 }
 
@@ -290,19 +245,19 @@ onBeforeUnmount(detachOutsideListener)
   gap: 8px;
   padding: 10px 12px;
   border-radius: 8px;
-  background: linear-gradient(90deg, #f5f0ff 0%, #eef4ff 100%);
+  background: linear-gradient(90deg, #eff6ff 0%, #f0f9ff 100%);
   color: #4b5563;
   font-size: 13px;
   line-height: 1.45;
 }
 .dcp-tip-icon {
   flex-shrink: 0;
-  color: #6366f1;
+  color: #2563eb;
 }
 .dcp-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px 14px;
 }
 .dcp-tile {
   display: flex;
@@ -333,12 +288,13 @@ onBeforeUnmount(detachOutsideListener)
   place-items: center;
   width: 100%;
   aspect-ratio: 1;
-  max-width: 96px;
-  border: 1px solid #e5e7eb;
+  max-width: 112px;
+  margin: 0 auto;
+  border: 1px solid #dbeafe;
   border-radius: 10px;
-  background: #fafafa;
-  color: #8b5cf6;
-  transition: border-color 0.15s, background 0.15s, transform 0.15s;
+  background: #f8fafc;
+  color: #2563eb;
+  transition: border-color 0.15s, background 0.15s, transform 0.15s, box-shadow 0.15s;
 }
 .dcp-tile-icon :deep(svg) {
   width: 44%;
@@ -346,8 +302,9 @@ onBeforeUnmount(detachOutsideListener)
 }
 .dcp-tile.is-available:hover .dcp-tile-icon,
 .dcp-tile.is-available:focus-visible .dcp-tile-icon {
-  border-color: #c4b5fd;
-  background: #faf5ff;
+  border-color: #93c5fd;
+  background: #eff6ff;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.12);
   transform: translateY(-1px);
 }
 .dcp-tile-label {

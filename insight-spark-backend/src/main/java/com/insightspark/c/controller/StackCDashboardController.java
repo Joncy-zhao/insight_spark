@@ -44,10 +44,12 @@ public class StackCDashboardController {
     public ApiResponse<Map<String, Object>> listMine(
             @RequestParam(required = false) String keyword,
             @RequestParam(required = false) Long groupId,
+            @RequestParam(required = false) Integer isPublic,
+            @RequestParam(required = false) String status,
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "20") int pageSize) {
         try {
-            return ApiResponse.success(dashboardService.listForCurrentUserPrivate(keyword, groupId, page, pageSize));
+            return ApiResponse.success(dashboardService.listForCurrentUserPrivate(keyword, groupId, isPublic, status, page, pageSize));
         } catch (IllegalArgumentException e) {
             return ApiResponse.badRequest(e.getMessage());
         }
@@ -94,6 +96,27 @@ public class StackCDashboardController {
         try {
             dashboardService.delete(id);
             return ApiResponse.success("已删除", null);
+        } catch (IllegalArgumentException e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    @PostMapping("/{id}/duplicate")
+    public ApiResponse<Map<String, Object>> duplicate(
+            @PathVariable long id,
+            @RequestBody(required = false) Map<String, Object> body) {
+        try {
+            return ApiResponse.success("已另存为看板", dashboardService.duplicateForCurrentUser(id, body));
+        } catch (IllegalArgumentException e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    @PostMapping("/{id}/record-view")
+    public ApiResponse<Void> recordView(@PathVariable long id) {
+        try {
+            dashboardService.recordView(id);
+            return ApiResponse.success("已记录访问", null);
         } catch (IllegalArgumentException e) {
             return ApiResponse.badRequest(e.getMessage());
         }

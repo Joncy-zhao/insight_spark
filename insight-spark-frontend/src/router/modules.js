@@ -15,7 +15,7 @@ export const menuGroups = [
         role: 'USER',
         index: '4',
         title: '我的看板',
-        subtitle: '管理个人与公共看板，维护布局 JSON、图表组件和数据快照。'
+        subtitle: '管理私密与公共看板，维护布局 JSON、图表组件和数据快照。'
       },
       {
         key: 'collaboration',

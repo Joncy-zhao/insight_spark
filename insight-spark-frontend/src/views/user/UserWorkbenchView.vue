@@ -34,7 +34,7 @@
           <el-table-column label="类型" width="100">
             <template #default="{ row }">
               <el-tag :type="row.isPublic ? 'warning' : 'info'" size="small">
-                {{ row.isPublic ? '公共' : '个人' }}
+                {{ row.isPublic ? '公共' : '私密' }}
               </el-tag>
             </template>
           </el-table-column>

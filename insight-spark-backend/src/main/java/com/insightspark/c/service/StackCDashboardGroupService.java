@@ -74,15 +74,24 @@ public class StackCDashboardGroupService {
             throw new IllegalArgumentException("分组不存在");
         }
         String groupOwner = Objects.toString(rows.get(0).get("ownerUserId"), "").trim();
-        if (isPublic) {
-            if (!groupOwner.isBlank()) {
-                throw new IllegalArgumentException("公共看板只能归入平台分组");
+        if (groupOwner.isBlank()) {
+            if (AuthContext.isAdmin()) {
+                return;
             }
-            return;
+            if (isPublic) {
+                return;
+            }
+            throw new IllegalArgumentException("私密看板只能归入本人分组");
         }
         String owner = Objects.toString(dashboardOwnerUserId, "").trim();
-        if (groupOwner.isBlank() || !groupOwner.equals(owner)) {
-            throw new IllegalArgumentException("个人看板只能归入本人分组");
+        if (isPublic) {
+            if (groupOwner.equals(owner)) {
+                return;
+            }
+            throw new IllegalArgumentException("公共看板只能归入本人分组或平台分组");
+        }
+        if (!groupOwner.equals(owner)) {
+            throw new IllegalArgumentException("私密看板只能归入本人分组");
         }
     }
 
@@ -117,6 +126,21 @@ public class StackCDashboardGroupService {
         List<String> names = jdbcTemplate.queryForList(
                 "SELECT name FROM is_dashboard_group WHERE id = ?", String.class, groupId);
         return names.isEmpty() ? null : names.get(0);
+    }
+
+    /** 平台分组：owner_user_id 为空，管理员可见；用户个人分组不可在管理端展示 */
+    public boolean isPlatformGroup(long groupId) {
+        if (groupId <= 0) {
+            return false;
+        }
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT owner_user_id AS ownerUserId
+                FROM is_dashboard_group WHERE id = ?
+                """, groupId);
+        if (rows.isEmpty()) {
+            return false;
+        }
+        return Objects.toString(rows.get(0).get("ownerUserId"), "").trim().isBlank();
     }
 
     private List<Map<String, Object>> listTreeByOwner(String ownerUserId) {

@@ -28,7 +28,7 @@
       </div>
       <p v-if="selected" class="meta-line">
         当前：<strong>{{ selected.name }}</strong>
-        <el-tag size="small" class="ml8">{{ selected.isPublic ? '公共' : '个人' }}</el-tag>
+        <el-tag size="small" class="ml8">{{ selected.isPublic ? '公共' : '私密' }}</el-tag>
         <span class="muted">所有者 {{ selected.ownerUserId }}</span>
       </p>
     </el-card>
