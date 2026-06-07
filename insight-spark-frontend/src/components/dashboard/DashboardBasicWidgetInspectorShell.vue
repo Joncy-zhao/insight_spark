@@ -10,6 +10,13 @@
     @closed="emit('closed')"
   >
     <div class="dbwi-root">
+      <DashboardWidgetRenameField
+        v-if="showRename"
+        :model-value="widgetTitle"
+        @update:model-value="emit('update:widgetTitle', $event)"
+        @commit="emit('commit:widgetTitle', $event)"
+      />
+      <el-divider v-if="showRename" class="dbwi-divider" />
       <div class="dbwi-section-head">
         <span>通用设置</span>
         <el-icon :size="14" class="dbwi-info"><InfoFilled /></el-icon>
@@ -22,12 +29,15 @@
 <script setup>
 import { computed } from 'vue'
 import { InfoFilled } from '@element-plus/icons-vue'
+import DashboardWidgetRenameField from './DashboardWidgetRenameField.vue'
 
 const props = defineProps({
-  modelValue: { type: Boolean, default: false }
+  modelValue: { type: Boolean, default: false },
+  widgetTitle: { type: String, default: '' },
+  showRename: { type: Boolean, default: true }
 })
 
-const emit = defineEmits(['update:modelValue', 'closed'])
+const emit = defineEmits(['update:modelValue', 'update:widgetTitle', 'commit:widgetTitle', 'closed'])
 
 const innerVisible = computed({
   get: () => props.modelValue,
@@ -51,6 +61,9 @@ const innerVisible = computed({
 }
 .dbwi-info {
   color: #9ca3af;
+}
+.dbwi-divider {
+  margin: 4px 0 12px;
 }
 </style>
 

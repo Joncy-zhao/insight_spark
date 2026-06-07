@@ -1,6 +1,7 @@
 package com.insightspark.service;
 
 import com.alibaba.excel.EasyExcel;
+import com.insightspark.c.service.StackCRuntimeConfigProvider;
 import com.insightspark.core.auth.AuthContext;
 import com.insightspark.core.excel.DynamicDataListener;
 import jakarta.annotation.PostConstruct;
@@ -54,6 +55,9 @@ public class DataUploadService {
 
     @Autowired
     private KnowledgeGraphService knowledgeGraphService;
+
+    @Autowired(required = false)
+    private StackCRuntimeConfigProvider runtimeConfig;
 
     private final ExecutorService uploadExecutor = Executors.newCachedThreadPool();
 
@@ -286,6 +290,7 @@ public class DataUploadService {
     }
 
     private Map<String, Object> processFile(MultipartFile file, String displayName, TaskProgressTracker progress) throws IOException {
+        ensureUploadRoleAllowed();
         String originalFilename = Objects.requireNonNullElse(file.getOriginalFilename(), "未命名文件");
         ParsedFile parsedFile = parseFile(file, originalFilename, progress);
 
@@ -2933,13 +2938,19 @@ public class DataUploadService {
         List<String> errors = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
         
-        if (fileSize > 100 * 1024 * 1024) {
-            errors.add("文件大小超过 100MB 限制");
+        if (fileSize > uploadMaxBytes()) {
+            errors.add("文件大小超过 " + (uploadMaxBytes() / 1024 / 1024) + "MB 限制");
         }
-        
+
         String lowerName = originalFilename.toLowerCase();
-        if (!lowerName.endsWith(".xlsx") && !lowerName.endsWith(".xls") && !lowerName.endsWith(".csv")) {
-            errors.add("仅支持 .xlsx、.xls、.csv 格式");
+        List<String> allowedFormats = uploadAllowedFormats();
+        if (!allowedFormats.isEmpty()) {
+            boolean matched = allowedFormats.stream()
+                    .map(ext -> ext.startsWith(".") ? ext.toLowerCase(Locale.ROOT) : "." + ext.toLowerCase(Locale.ROOT))
+                    .anyMatch(lowerName::endsWith);
+            if (!matched) {
+                errors.add("仅支持 " + String.join("、", allowedFormats) + " 格式");
+            }
         }
         
         if (fileSize < 100) {
@@ -2949,7 +2960,8 @@ public class DataUploadService {
         String md5 = calculateMD5(file.getBytes());
         validation.put("md5", md5);
         
-        boolean isDuplicate = checkDuplicateByMD5(md5);
+        boolean dedupEnabled = runtimeConfig == null || runtimeConfig.getBoolean("upload.dedup.enabled", true);
+        boolean isDuplicate = dedupEnabled && checkDuplicateByMD5(md5);
         if (isDuplicate) {
             warnings.add("检测到重复文件（MD5 已存在）");
         }
@@ -3561,6 +3573,33 @@ public class DataUploadService {
         }
     }
     
+    private long uploadMaxBytes() {
+        int maxMb = runtimeConfig != null ? runtimeConfig.getInt("upload.max.fileSizeMb", 100) : 100;
+        return Math.max(1, maxMb) * 1024L * 1024L;
+    }
+
+    private List<String> uploadAllowedFormats() {
+        if (runtimeConfig == null) {
+            return List.of("xlsx", "xls", "csv");
+        }
+        List<String> formats = runtimeConfig.getStringList("upload.allowed.formats");
+        return formats.isEmpty() ? List.of("xlsx", "xls", "csv") : formats;
+    }
+
+    private void ensureUploadRoleAllowed() {
+        if (runtimeConfig == null) {
+            return;
+        }
+        List<String> roles = runtimeConfig.getStringList("upload.permission.roles");
+        if (roles.isEmpty()) {
+            return;
+        }
+        String current = AuthContext.role();
+        if (current == null || roles.stream().noneMatch(role -> role.equalsIgnoreCase(current))) {
+            throw new IllegalArgumentException("当前角色无权上传数据");
+        }
+    }
+
     private boolean checkDuplicateByMD5(String md5) {
         if (md5 == null || md5.isBlank()) {
             return false;

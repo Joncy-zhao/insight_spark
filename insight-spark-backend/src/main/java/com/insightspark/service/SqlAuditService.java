@@ -1,5 +1,6 @@
 package com.insightspark.service;
 
+import com.insightspark.c.service.StackCRuntimeConfigProvider;
 import com.insightspark.core.auth.AuthContext;
 import jakarta.annotation.PostConstruct;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
@@ -33,8 +34,10 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 
 @Service
@@ -45,6 +48,9 @@ public class SqlAuditService {
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
+
+    @Autowired(required = false)
+    private StackCRuntimeConfigProvider runtimeConfig;
 
     @Value("${insight.redis.enabled:true}")
     private boolean redisEnabled;
@@ -64,7 +70,10 @@ public class SqlAuditService {
     @Value("${insight.redis.ttl-seconds:3600}")
     private int redisTtlSeconds;
 
-    private final Semaphore querySemaphore = new Semaphore(4, true);
+    private volatile Semaphore globalQuerySemaphore = new Semaphore(20, true);
+    private volatile int globalQueryPermits = 20;
+    private final ConcurrentHashMap<String, AtomicInteger> userInflightQueries = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, UserRateWindow> userRateWindows = new ConcurrentHashMap<>();
 
     @PostConstruct
     public void initAuditTable() {
@@ -196,8 +205,14 @@ public class SqlAuditService {
         if (!(statement instanceof Select)) {
             return AuditResult.blocked("仅允许 SELECT 查询", List.of("ONLY_SELECT"), List.of());
         }
+
+        List<String> tables = new TablesNamesFinder().getTableList(statement);
+        AuditResult whitelistResult = checkSqlWhitelist(tables);
+        if (whitelistResult != null) {
+            return whitelistResult;
+        }
+
         if (expectedTableName != null && !expectedTableName.isBlank()) {
-            List<String> tables = new TablesNamesFinder().getTableList(statement);
             String expected = normalizeTableName(expectedTableName);
             for (String table : tables) {
                 if (!expected.equals(normalizeTableName(table))) {
@@ -925,16 +940,129 @@ public class SqlAuditService {
     }
 
     public QueryPermit acquireQueryPermit(String guardLabel) {
+        String userId = resolvePressureUserId();
+        int maxConcurrentPerUser = configInt("perf.db.query.maxConcurrent", 4);
+        int maxAccessPerMinute = configInt("perf.db.access.maxPerMinute", 120);
+        int poolMaxSize = Math.max(1, configInt("perf.db.pool.maxSize", 20));
+
+        if (!consumeRateLimit(userId, maxAccessPerMinute)) {
+            String reason = "数据库访问频次超限（上限 " + maxAccessPerMinute + " 次/分钟）";
+            recordDbPressureBlock(guardLabel, reason, "DB_RATE_LIMIT");
+            throw new IllegalStateException(reason + "：" + guardLabel);
+        }
+
+        AtomicInteger inflight = userInflightQueries.computeIfAbsent(userId, ignored -> new AtomicInteger(0));
+        if (inflight.incrementAndGet() > maxConcurrentPerUser) {
+            inflight.decrementAndGet();
+            String reason = "单用户并发查询超限（上限 " + maxConcurrentPerUser + "）";
+            recordDbPressureBlock(guardLabel, reason, "DB_CONCURRENT_LIMIT");
+            throw new IllegalStateException(reason + "：" + guardLabel);
+        }
+
+        Semaphore globalSemaphore = ensureGlobalSemaphore(poolMaxSize);
         long queueTimeoutMs = getRuleThreshold("QUERY_QUEUE_TIMEOUT_MS", 2000L);
         try {
-            boolean acquired = querySemaphore.tryAcquire(Math.max(1, queueTimeoutMs), TimeUnit.MILLISECONDS);
+            boolean acquired = globalSemaphore.tryAcquire(Math.max(1, queueTimeoutMs), TimeUnit.MILLISECONDS);
             if (!acquired) {
-                throw new IllegalStateException("查询队列繁忙，已触发并发熔断：" + guardLabel);
+                inflight.decrementAndGet();
+                String reason = "数据库连接池繁忙（全局上限 " + poolMaxSize + "）";
+                recordDbPressureBlock(guardLabel, reason, "DB_POOL_BUSY");
+                throw new IllegalStateException(reason + "，已触发并发熔断：" + guardLabel);
             }
-            return new QueryPermit(querySemaphore);
+            return new QueryPermit(globalSemaphore, inflight);
         } catch (InterruptedException e) {
+            inflight.decrementAndGet();
             Thread.currentThread().interrupt();
             throw new IllegalStateException("查询队列等待被中断", e);
+        }
+    }
+
+    public Map<String, Object> dbPressureRuntime() {
+        int maxConcurrentPerUser = configInt("perf.db.query.maxConcurrent", 4);
+        int maxAccessPerMinute = configInt("perf.db.access.maxPerMinute", 120);
+        int poolMaxSize = Math.max(1, configInt("perf.db.pool.maxSize", 20));
+        List<Map<String, Object>> liveUsers = new ArrayList<>();
+        userInflightQueries.forEach((userId, counter) -> {
+            int active = counter.get();
+            if (active <= 0) {
+                return;
+            }
+            UserRateWindow window = userRateWindows.get(userId);
+            liveUsers.add(Map.of(
+                    "userId", userId,
+                    "activeQueries", active,
+                    "queriesLastMinute", window == null ? 0 : window.countInWindow(),
+                    "nearLimit", active >= maxConcurrentPerUser || (window != null && window.countInWindow() >= maxAccessPerMinute * 0.7)
+            ));
+        });
+        liveUsers.sort((a, b) -> Integer.compare(
+                ((Number) b.get("activeQueries")).intValue(),
+                ((Number) a.get("activeQueries")).intValue()));
+        Map<String, Object> runtime = new LinkedHashMap<>();
+        runtime.put("maxConcurrentPerUser", maxConcurrentPerUser);
+        runtime.put("maxAccessPerMinute", maxAccessPerMinute);
+        runtime.put("poolMaxSize", poolMaxSize);
+        runtime.put("globalAvailablePermits", globalQuerySemaphore.availablePermits());
+        runtime.put("liveUsers", liveUsers.size() > 20 ? liveUsers.subList(0, 20) : liveUsers);
+        return runtime;
+    }
+
+    private Semaphore ensureGlobalSemaphore(int poolMaxSize) {
+        if (poolMaxSize != globalQueryPermits) {
+            synchronized (this) {
+                if (poolMaxSize != globalQueryPermits) {
+                    globalQueryPermits = poolMaxSize;
+                    globalQuerySemaphore = new Semaphore(poolMaxSize, true);
+                }
+            }
+        }
+        return globalQuerySemaphore;
+    }
+
+    private boolean consumeRateLimit(String userId, int maxAccessPerMinute) {
+        if (maxAccessPerMinute <= 0) {
+            return true;
+        }
+        UserRateWindow window = userRateWindows.computeIfAbsent(userId, ignored -> new UserRateWindow());
+        return window.tryConsume(maxAccessPerMinute);
+    }
+
+    private String resolvePressureUserId() {
+        String userId = AuthContext.userId();
+        return userId == null || userId.isBlank() ? "anonymous" : userId.trim();
+    }
+
+    private int configInt(String key, int defaultValue) {
+        if (runtimeConfig != null) {
+            return runtimeConfig.getInt(key, defaultValue);
+        }
+        return defaultValue;
+    }
+
+    private void recordDbPressureBlock(String guardLabel, String reason, String ruleCode) {
+        recordBlocked("数据库压力限流", guardLabel, "db-pressure-guard",
+                "-- blocked before execution", reason, List.of(ruleCode));
+    }
+
+    private static final class UserRateWindow {
+        private volatile long windowStartMs = System.currentTimeMillis();
+        private final AtomicInteger counter = new AtomicInteger(0);
+
+        synchronized boolean tryConsume(int maxPerMinute) {
+            long now = System.currentTimeMillis();
+            if (now - windowStartMs >= 60_000L) {
+                windowStartMs = now;
+                counter.set(0);
+            }
+            return counter.incrementAndGet() <= maxPerMinute;
+        }
+
+        int countInWindow() {
+            long now = System.currentTimeMillis();
+            if (now - windowStartMs >= 60_000L) {
+                return 0;
+            }
+            return counter.get();
         }
     }
 
@@ -1427,6 +1555,28 @@ public class SqlAuditService {
         return sql.trim().replaceAll(";+$", "") + " LIMIT " + Math.max(1, Math.min(limit, 1000));
     }
 
+    private AuditResult checkSqlWhitelist(List<String> tables) {
+        if (runtimeConfig == null || tables == null || tables.isEmpty()) {
+            return null;
+        }
+        List<String> whitelist = runtimeConfig.getStringList("security.sql.whitelist");
+        if (whitelist.isEmpty()) {
+            return null;
+        }
+        Set<String> allowed = new LinkedHashSet<>();
+        for (String item : whitelist) {
+            if (item != null && !item.isBlank()) {
+                allowed.add(normalizeTableName(item));
+            }
+        }
+        for (String table : tables) {
+            if (!allowed.contains(normalizeTableName(table))) {
+                return AuditResult.blocked("表不在 SQL 白名单：" + table, List.of("SQL_WHITELIST"), List.of());
+            }
+        }
+        return null;
+    }
+
     private String normalizeTableName(String tableName) {
         String normalized = tableName == null ? "" : tableName.trim();
         if (normalized.startsWith("official:")) {
@@ -1677,10 +1827,13 @@ public class SqlAuditService {
     public record QueryGuardResult(String sql, String action, String detail, int timeoutSeconds, int maxRows) {
     }
 
-    public record QueryPermit(Semaphore semaphore) implements AutoCloseable {
+    public record QueryPermit(Semaphore globalSemaphore, AtomicInteger userInflight) implements AutoCloseable {
         @Override
         public void close() {
-            semaphore.release();
+            globalSemaphore.release();
+            if (userInflight != null) {
+                userInflight.decrementAndGet();
+            }
         }
     }
 

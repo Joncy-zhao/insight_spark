@@ -15,14 +15,31 @@ public class StackCAnnotationService {
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
+    @Autowired
+    private StackCDashboardService dashboardService;
+
     public List<Map<String, Object>> listAnnotations(String targetType, long targetId) {
         return jdbcTemplate.queryForList("""
-                SELECT id, user_id AS userId, target_type AS targetType, target_id AS targetId, dashboard_id AS dashboardId,
-                       bind_json AS bindJson, content, tag, created_at AS createdAt
-                FROM is_annotation
-                WHERE target_type = ? AND target_id = ? AND is_deleted = 0
-                ORDER BY created_at ASC
+                SELECT a.id, a.user_id AS userId, u.nickname, a.target_type AS targetType, a.target_id AS targetId,
+                       a.dashboard_id AS dashboardId, a.bind_json AS bindJson, a.content, a.tag, a.created_at AS createdAt
+                FROM is_annotation a
+                LEFT JOIN is_user u ON u.user_id = a.user_id
+                WHERE a.target_type = ? AND a.target_id = ? AND a.is_deleted = 0
+                ORDER BY a.created_at ASC
                 """, targetType, targetId);
+    }
+
+    public List<Map<String, Object>> listAnnotationsForDashboard(long dashboardId) {
+        assertCanCollaborate(dashboardId);
+        return jdbcTemplate.queryForList("""
+                SELECT a.id, a.user_id AS userId, u.nickname, a.target_type AS targetType, a.target_id AS targetId,
+                       a.dashboard_id AS dashboardId, a.bind_json AS bindJson, a.content, a.tag, a.created_at AS createdAt
+                FROM is_annotation a
+                LEFT JOIN is_user u ON u.user_id = a.user_id
+                WHERE a.is_deleted = 0
+                  AND (a.dashboard_id = ? OR (a.target_type = 'DASHBOARD' AND a.target_id = ?))
+                ORDER BY a.created_at ASC
+                """, dashboardId, dashboardId);
     }
 
     public Map<String, Object> createAnnotation(Map<String, Object> body) {
@@ -32,30 +49,49 @@ public class StackCAnnotationService {
         Long dashboardId = body.get("dashboardId") == null ? null : parseLong(body.get("dashboardId"), "dashboardId");
         String tag = body.get("tag") == null ? null : String.valueOf(body.get("tag"));
         String bindJson = body.get("bindJson") == null ? null : String.valueOf(body.get("bindJson"));
+        long dashboardRef = resolveDashboardId(targetType, targetId, dashboardId);
+        assertCanCollaborate(dashboardRef);
         String uid = AuthContext.userId();
         jdbcTemplate.update("""
                 INSERT INTO is_annotation(user_id, target_type, target_id, dashboard_id, bind_json, content, tag)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, uid, targetType, targetId, dashboardId, bindJson, content, tag);
         Long id = jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
-        return Map.of("id", id == null ? 0L : id);
+        return fetchAnnotationRow(id == null ? 0L : id);
     }
 
     public void deleteAnnotation(long id) {
-        Map<String, Object> row = fetchAnnotation(id);
+        Map<String, Object> row = fetchAnnotationRow(id);
+        Long dashId = row.get("dashboardId") == null ? null : parseLongQuiet(row.get("dashboardId"));
+        if (dashId != null && dashId <= 0) {
+            dashId = null;
+        }
+        assertCanCollaborate(resolveDashboardId(
+                Objects.toString(row.get("targetType"), ""),
+                parseLongQuiet(row.get("targetId")),
+                dashId));
         if (!AuthContext.isAdmin() && !AuthContext.userId().equals(Objects.toString(row.get("userId")))) {
             throw new IllegalArgumentException("仅作者或管理员可删除");
         }
         jdbcTemplate.update("UPDATE is_annotation SET is_deleted = 1 WHERE id = ?", id);
     }
 
+    public Map<String, Object> peekAnnotationMeta(long id) {
+        return fetchAnnotationRow(id);
+    }
+
     public List<Map<String, Object>> listComments(String targetType, long targetId) {
+        if ("DASHBOARD".equalsIgnoreCase(targetType)) {
+            assertCanCollaborate(targetId);
+        }
         return jdbcTemplate.queryForList("""
-                SELECT id, parent_id AS parentId, user_id AS userId, target_type AS targetType, target_id AS targetId,
-                       content, mentions_json AS mentionsJson, created_at AS createdAt
-                FROM is_comment
-                WHERE target_type = ? AND target_id = ? AND is_deleted = 0
-                ORDER BY created_at ASC
+                SELECT c.id, c.parent_id AS parentId, c.user_id AS userId, u.nickname, u.username,
+                       c.target_type AS targetType, c.target_id AS targetId,
+                       c.content, c.mentions_json AS mentionsJson, c.created_at AS createdAt
+                FROM is_comment c
+                LEFT JOIN is_user u ON u.user_id = c.user_id
+                WHERE c.target_type = ? AND c.target_id = ? AND c.is_deleted = 0
+                ORDER BY c.created_at ASC
                 """, targetType, targetId);
     }
 
@@ -65,13 +101,16 @@ public class StackCAnnotationService {
         long targetId = parseLong(body.get("targetId"), "targetId");
         String content = requireText(body, "content");
         String mentionsJson = body.get("mentionsJson") == null ? null : String.valueOf(body.get("mentionsJson"));
+        if ("DASHBOARD".equalsIgnoreCase(targetType)) {
+            assertCanCollaborate(targetId);
+        }
         String uid = AuthContext.userId();
         jdbcTemplate.update("""
                 INSERT INTO is_comment(parent_id, user_id, target_type, target_id, content, mentions_json)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """, parentId, uid, targetType, targetId, content, mentionsJson);
         Long id = jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
-        return Map.of("id", id == null ? 0L : id);
+        return fetchCommentRow(id == null ? 0L : id);
     }
 
     public void deleteComment(long id) {
@@ -80,6 +119,35 @@ public class StackCAnnotationService {
             throw new IllegalArgumentException("仅作者或管理员可删除");
         }
         jdbcTemplate.update("UPDATE is_comment SET is_deleted = 1 WHERE id = ?", id);
+    }
+
+    public Map<String, Object> fetchCommentRow(long id) {
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT c.id, c.parent_id AS parentId, c.user_id AS userId, u.nickname, u.username,
+                       c.target_type AS targetType, c.target_id AS targetId,
+                       c.content, c.mentions_json AS mentionsJson, c.created_at AS createdAt
+                FROM is_comment c
+                LEFT JOIN is_user u ON u.user_id = c.user_id
+                WHERE c.id = ? AND c.is_deleted = 0
+                """, id);
+        if (rows.isEmpty()) {
+            throw new IllegalArgumentException("评论不存在");
+        }
+        return rows.get(0);
+    }
+
+    private Map<String, Object> fetchAnnotationRow(long id) {
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT a.id, a.user_id AS userId, u.nickname, a.target_type AS targetType, a.target_id AS targetId,
+                       a.dashboard_id AS dashboardId, a.bind_json AS bindJson, a.content, a.tag, a.created_at AS createdAt
+                FROM is_annotation a
+                LEFT JOIN is_user u ON u.user_id = a.user_id
+                WHERE a.id = ? AND a.is_deleted = 0
+                """, id);
+        if (rows.isEmpty()) {
+            throw new IllegalArgumentException("批注不存在");
+        }
+        return rows.get(0);
     }
 
     private Map<String, Object> fetchAnnotation(long id) {
@@ -93,11 +161,43 @@ public class StackCAnnotationService {
 
     private Map<String, Object> fetchComment(long id) {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(
-                "SELECT id, user_id AS userId FROM is_comment WHERE id = ? AND is_deleted = 0", id);
+                "SELECT id, user_id AS userId, target_type AS targetType, target_id AS targetId FROM is_comment WHERE id = ? AND is_deleted = 0", id);
         if (rows.isEmpty()) {
             throw new IllegalArgumentException("评论不存在");
         }
         return rows.get(0);
+    }
+
+    public Map<String, Object> peekCommentMeta(long id) {
+        return fetchComment(id);
+    }
+
+    private void assertCanCollaborate(long dashboardId) {
+        if (dashboardId <= 0) {
+            throw new IllegalArgumentException("看板不存在");
+        }
+        dashboardService.getById(dashboardId);
+    }
+
+    private long resolveDashboardId(String targetType, long targetId, Long dashboardId) {
+        if (dashboardId != null && dashboardId > 0) {
+            return dashboardId;
+        }
+        if ("DASHBOARD".equalsIgnoreCase(targetType)) {
+            return targetId;
+        }
+        throw new IllegalArgumentException("缺少 dashboardId");
+    }
+
+    private static long parseLongQuiet(Object v) {
+        if (v == null) {
+            return 0L;
+        }
+        try {
+            return Long.parseLong(String.valueOf(v));
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
     }
 
     private static String requireText(Map<String, Object> body, String key) {

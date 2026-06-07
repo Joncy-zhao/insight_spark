@@ -33,6 +33,16 @@ public class StackCAnnouncementService {
                 """, role, role, role);
     }
 
+    public List<Map<String, Object>> listForAdmin() {
+        return jdbcTemplate.queryForList("""
+                SELECT id, title, content, audience, pinned, priority, publish_status AS publishStatus,
+                       published_at AS publishedAt, expire_at AS expireAt, created_by AS createdBy, created_at AS createdAt
+                FROM is_system_announcement
+                ORDER BY pinned DESC, priority DESC, COALESCE(published_at, created_at) DESC
+                LIMIT 100
+                """);
+    }
+
     public Map<String, Object> createAnnouncement(Map<String, Object> body) {
         String title = requireText(body, "title");
         String content = requireText(body, "content");

@@ -1,5 +1,6 @@
 package com.insightspark.service;
 
+import com.insightspark.c.service.StackCRuntimeConfigProvider;
 import jakarta.annotation.PostConstruct;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -31,6 +32,9 @@ public class KnowledgeGraphService {
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
+
+    @Autowired(required = false)
+    private StackCRuntimeConfigProvider runtimeConfig;
 
     @Value("${insight.neo4j.enabled:true}")
     private boolean neo4jEnabled;
@@ -438,7 +442,9 @@ public class KnowledgeGraphService {
     }
 
     public Map<String, Object> retrieveMultiHopContext(String question, String tableName) {
-        Map<String, Object> bundle = multiHopSearch(question, tableName, 3, 16);
+        int depth = graphRagHopDepth();
+        int limit = graphRagTopK();
+        Map<String, Object> bundle = multiHopSearch(question, tableName, depth, limit);
         Map<String, Object> context = new LinkedHashMap<>(bundle);
         context.put("nodes", bundle.getOrDefault("nodes", List.of()));
         context.put("edges", bundle.getOrDefault("edges", List.of()));
@@ -648,6 +654,14 @@ public class KnowledgeGraphService {
                 .filter(item -> !item.isBlank())
                 .findFirst()
                 .orElse("未知 Neo4j 错误");
+    }
+
+    private int graphRagHopDepth() {
+        return runtimeConfig != null ? runtimeConfig.getInt("ai.graphrag.hopDepth", 3) : 3;
+    }
+
+    private int graphRagTopK() {
+        return runtimeConfig != null ? runtimeConfig.getInt("ai.graphrag.topK", 16) : 16;
     }
 
     private String safeErrorMessage(Exception e) {

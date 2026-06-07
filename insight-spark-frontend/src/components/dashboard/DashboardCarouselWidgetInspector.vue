@@ -1,5 +1,11 @@
 <template>
-  <DashboardBasicWidgetInspectorShell v-model="innerVisible" @closed="emit('closed')">
+  <DashboardBasicWidgetInspectorShell
+    v-model="innerVisible"
+    :widget-title="widgetTitle"
+    @update:widget-title="emit('update:widgetTitle', $event)"
+    @commit:widget-title="emit('commit:widgetTitle', $event)"
+    @closed="emit('closed')"
+  >
     <div class="dbwi-upload-row">
       <div class="dbwi-upload" @click="triggerPick">
         <img
@@ -92,10 +98,11 @@ import { IMAGE_WIDGET_MAX_DATA_URL_LEN } from '../../utils/dashboardWidgetImage.
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
-  config: { type: Object, default: () => ({}) }
+  config: { type: Object, default: () => ({}) },
+  widgetTitle: { type: String, default: '' }
 })
 
-const emit = defineEmits(['update:modelValue', 'update:config', 'closed'])
+const emit = defineEmits(['update:modelValue', 'update:config', 'update:widgetTitle', 'commit:widgetTitle', 'closed'])
 
 const innerVisible = computed({
   get: () => props.modelValue,

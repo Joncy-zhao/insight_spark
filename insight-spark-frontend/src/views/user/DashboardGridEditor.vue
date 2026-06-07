@@ -268,9 +268,35 @@
       v-if="activeBasicWidgetInspector"
       v-model="widgetInspectorOpen"
       :config="basicWidgetInspectorConfig"
+      :widget-title="basicWidgetInspectorTitle"
       @update:config="onBasicWidgetInspectorConfigUpdate"
+      @update:widget-title="onBasicWidgetTitleDraft"
+      @commit:widget-title="commitBasicWidgetTitle"
       @closed="onWidgetInspectorClosed"
     />
+
+    <el-dialog
+      v-model="basicWidgetNameDialogVisible"
+      title="命名组件"
+      width="440px"
+      append-to-body
+      :close-on-click-modal="false"
+      :show-close="false"
+    >
+      <p class="dge-name-hint">拖拽或添加基础组件后须先命名，便于在画布与协同批注中识别。</p>
+      <el-input
+        ref="basicWidgetNameInputRef"
+        v-model="basicWidgetNameDraft"
+        maxlength="64"
+        show-word-limit
+        placeholder="例如：销售说明、首页轮播"
+        @keyup.enter="confirmBasicWidgetName"
+      />
+      <template #footer>
+        <el-button @click="cancelBasicWidgetName">取消并移除</el-button>
+        <el-button type="primary" @click="confirmBasicWidgetName">确定并继续</el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="canvasStyleDialogOpen"
@@ -655,6 +681,11 @@ const selectedItemId = ref('')
 const widgetInspectorOpen = ref(false)
 const widgetInspectorItemId = ref('')
 const widgetInspectorKind = ref('')
+const widgetTitleDraft = ref('')
+const basicWidgetNameDialogVisible = ref(false)
+const basicWidgetNameDraft = ref('')
+const basicWidgetNamePending = ref(null)
+const basicWidgetNameInputRef = ref(null)
 
 const paletteDragType = ref('')
 const paletteDropActive = ref(false)
@@ -697,6 +728,17 @@ const basicWidgetInspectorConfig = computed(() => {
   return entry.configForItem(item)
 })
 
+const basicWidgetInspectorTitle = computed(() => {
+  const id = widgetInspectorItemId.value
+  if (!id) return widgetTitleDraft.value
+  const item = gridLayout.value.find((x) => String(x.i) === String(id))
+  const saved = String(item?.title || '').trim()
+  if (saved) return saved
+  if (widgetTitleDraft.value) return widgetTitleDraft.value
+  const entry = resolveBasicWidgetEntry(item)
+  return entry ? `${entry.label}组件` : ''
+})
+
 function basicWidgetViewForItem(item) {
   return resolveBasicWidgetEntry(item)?.widget || null
 }
@@ -721,6 +763,7 @@ function openWidgetInspectorById(id) {
   if (!item || !entry) return
   widgetInspectorKind.value = entry.kind
   widgetInspectorItemId.value = String(item.i)
+  widgetTitleDraft.value = String(item.title || '').trim() || `${entry.label}组件`
   selectedItemId.value = String(item.i)
   widgetInspectorOpen.value = true
 }
@@ -762,9 +805,77 @@ function onBasicWidgetInspectorConfigUpdate(config) {
   gridLayout.value.splice(idx, 1, { ...cur, widgetConfig: normalized })
 }
 
+function defaultBasicWidgetName(type, label = '') {
+  const map = { video: '视频', text: '文本', image: '图片', carousel: '轮播图' }
+  const base = map[type] || label || '基础'
+  return `${base}组件`
+}
+
+function openBasicWidgetNameDialog(item, type, label = '') {
+  basicWidgetNamePending.value = { itemId: item.i, type, label }
+  basicWidgetNameDraft.value = defaultBasicWidgetName(type, label)
+  basicWidgetNameDialogVisible.value = true
+  nextTick(() => {
+    const el = basicWidgetNameInputRef.value
+    const input = el?.input || el?.$el?.querySelector?.('input')
+    input?.focus?.()
+    input?.select?.()
+  })
+}
+
+function confirmBasicWidgetName() {
+  const name = basicWidgetNameDraft.value.trim()
+  if (!name) {
+    ElMessage.warning('请输入组件名称')
+    return
+  }
+  const pending = basicWidgetNamePending.value
+  if (!pending) return
+  const idx = gridLayout.value.findIndex((x) => String(x.i) === String(pending.itemId))
+  if (idx >= 0) {
+    gridLayout.value.splice(idx, 1, { ...gridLayout.value[idx], title: name })
+    onLayoutUpdated()
+  }
+  basicWidgetNameDialogVisible.value = false
+  basicWidgetNamePending.value = null
+  ElMessage.success(`「${name}」已添加到画布`)
+  openWidgetInspectorById(String(pending.itemId))
+}
+
+function cancelBasicWidgetName() {
+  const pending = basicWidgetNamePending.value
+  if (pending) {
+    gridLayout.value = gridLayout.value.filter((x) => String(x.i) !== String(pending.itemId))
+    onLayoutUpdated()
+  }
+  basicWidgetNameDialogVisible.value = false
+  basicWidgetNamePending.value = null
+  basicWidgetNameDraft.value = ''
+}
+
+function onBasicWidgetTitleDraft(title) {
+  widgetTitleDraft.value = title
+}
+
+function commitBasicWidgetTitle(title) {
+  if (!requireSaveAsBeforeMutate()) return
+  const id = widgetInspectorItemId.value
+  const name = String(title ?? widgetTitleDraft.value ?? '').trim()
+  if (!name) {
+    ElMessage.warning('组件名称不能为空')
+    return
+  }
+  const idx = gridLayout.value.findIndex((x) => String(x.i) === String(id))
+  if (idx < 0) return
+  gridLayout.value.splice(idx, 1, { ...gridLayout.value[idx], title: name })
+  widgetTitleDraft.value = name
+  onLayoutUpdated()
+}
+
 function onWidgetInspectorClosed() {
   widgetInspectorItemId.value = ''
   widgetInspectorKind.value = ''
+  widgetTitleDraft.value = ''
 }
 
 function isPointerOverCanvas(clientX, clientY) {
@@ -916,8 +1027,8 @@ function addBasicWidgetAtDrop(clientX, clientY, type, label = '') {
     attachGridCanvas()
     selectGridItem(item)
     onLayoutUpdated()
+    openBasicWidgetNameDialog(item, type, label)
   })
-  ElMessage.success(basicWidgetSuccessLabel(type))
   return item
 }
 
@@ -937,8 +1048,8 @@ function addBasicWidgetToCanvas(type, label = '') {
     attachGridCanvas()
     selectGridItem(item)
     onLayoutUpdated()
+    openBasicWidgetNameDialog(item, type, label)
   })
-  ElMessage.success(basicWidgetSuccessLabel(type))
 }
 
 function onPickBasicComponent(item) {
@@ -2021,7 +2132,10 @@ async function confirmSaveAs() {
       isPublic: Boolean(saveAsForm.isPublic)
     }
     body.groupId = groupId
-    const res = await axios.post(`${props.apiBase}/api/c/dashboards/${board.value.id}/duplicate`, body)
+    const duplicateUrl = props.promptVisibilityOnSave
+      ? `${props.apiBase}/api/c/admin/dashboards/${board.value.id}/duplicate`
+      : `${props.apiBase}/api/c/dashboards/${board.value.id}/duplicate`
+    const res = await axios.post(duplicateUrl, body)
     if (res.data.code !== 200) throw new Error(res.data.message || '另存失败')
     ElMessage.success(`已另存为${saveAsForm.isPublic ? '公共' : '私密'}看板`)
     saveAsVisible.value = false
@@ -2192,6 +2306,12 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 10px;
   font-weight: 600;
+}
+.dge-name-hint {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: #909399;
+  line-height: 1.5;
 }
 .dge-actions {
   display: flex;

@@ -10,6 +10,12 @@
     @closed="emit('closed')"
   >
     <div v-if="localConfig" class="dvwi-root">
+      <DashboardWidgetRenameField
+        :model-value="widgetTitle"
+        @update:model-value="emit('update:widgetTitle', $event)"
+        @commit="emit('commit:widgetTitle', $event)"
+      />
+      <el-divider class="dvwi-divider" />
       <div class="dvwi-section-head">
         <span>通用设置</span>
         <el-icon :size="14" class="dvwi-info"><InfoFilled /></el-icon>
@@ -86,6 +92,7 @@
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { InfoFilled } from '@element-plus/icons-vue'
+import DashboardWidgetRenameField from './DashboardWidgetRenameField.vue'
 import {
   normalizeVideoWidgetConfig,
   videoWidgetConfigEqual,
@@ -96,10 +103,11 @@ import {
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
-  config: { type: Object, default: () => ({}) }
+  config: { type: Object, default: () => ({}) },
+  widgetTitle: { type: String, default: '' }
 })
 
-const emit = defineEmits(['update:modelValue', 'update:config', 'closed'])
+const emit = defineEmits(['update:modelValue', 'update:config', 'update:widgetTitle', 'commit:widgetTitle', 'closed'])
 
 const innerVisible = computed({
   get: () => props.modelValue,
@@ -187,6 +195,9 @@ function onFileChange(event) {
 }
 .dvwi-info {
   color: #9ca3af;
+}
+.dvwi-divider {
+  margin: 4px 0 12px;
 }
 .dvwi-upload {
   position: relative;

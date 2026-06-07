@@ -116,10 +116,16 @@ public class StackCDashboardService {
                         AND p.permission_type IN ('READ', 'EDIT')
                         AND (p.expire_at IS NULL OR p.expire_at > NOW())
                     )
+                    OR EXISTS (
+                      SELECT 1 FROM is_dashboard_team_permission dp
+                      INNER JOIN is_team_member tm ON tm.team_id = dp.team_id AND tm.user_id = ?
+                      WHERE dp.dashboard_id = is_dashboard.id
+                        AND dp.permission_type IN ('READ', 'EDIT')
+                    )
                   )
                 ORDER BY updated_at DESC
                 LIMIT 100
-                """, uid, uid);
+                """, uid, uid, uid);
     }
 
     public List<Map<String, Object>> listEditableForCurrentUser() {
@@ -482,6 +488,19 @@ public class StackCDashboardService {
         return getById(newId == null ? 0L : newId);
     }
 
+    /** 管理员在看板管理页新建看板：默认私密、待发布，开放类型在保存布局时决定。 */
+    public Map<String, Object> createForAdmin(Map<String, Object> body) {
+        assertAdmin();
+        Map<String, Object> payload = body == null ? new LinkedHashMap<>() : new LinkedHashMap<>(body);
+        if (!payload.containsKey("isPublic")) {
+            payload.put("isPublic", false);
+        }
+        if (!payload.containsKey("status")) {
+            payload.put("status", "DISABLED");
+        }
+        return create(payload);
+    }
+
     public Map<String, Object> update(long id, Map<String, Object> body) {
         Map<String, Object> existing = getById(id);
         assertCanMutateDashboard(existing);
@@ -631,7 +650,7 @@ public class StackCDashboardService {
     }
 
     /**
-     * 管理员将已发布公共看板另存为新的公共看板，可归入平台分组（可携带编辑后的 layout_json）。
+     * 管理员将已发布公共看板另存为副本，可归入平台分组（可携带编辑后的 layout_json）。
      */
     public Map<String, Object> duplicateForAdmin(long sourceId, Map<String, Object> body) {
         assertAdmin();
@@ -663,8 +682,9 @@ public class StackCDashboardService {
         String status = publish ? "ACTIVE" : "DISABLED";
         String authorUserId = resolveAuthorUserId(source);
         String publisherUserId = publish ? uid : null;
+        boolean isPublic = body != null && Boolean.parseBoolean(String.valueOf(body.getOrDefault("isPublic", "true")));
 
-        dashboardGroupService.assertGroupAllowedForDashboard(groupId, uid, true);
+        dashboardGroupService.assertGroupAllowedForDashboard(groupId, uid, isPublic);
         String groupName = resolveGroupNameForWrite(groupId, body == null ? null : body.get("groupName"));
 
         Map<String, Object> layout = parseLayoutJson(layoutJson);
@@ -679,8 +699,8 @@ public class StackCDashboardService {
 
         jdbcTemplate.update("""
                 INSERT INTO is_dashboard(owner_user_id, author_user_id, source_dashboard_id, save_as_user_id, publisher_user_id, name, description, group_id, group_name, layout_json, is_public, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', 1, ?)
-                """, uid, authorUserId, sourceId, uid, publisherUserId, name, description, groupId, groupName, status);
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)
+                """, uid, authorUserId, sourceId, uid, publisherUserId, name, description, groupId, groupName, isPublic ? 1 : 0, status);
         Long newId = jdbcTemplate.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
         if (newId == null || newId <= 0) {
             throw new IllegalStateException("\u53e6\u5b58\u5931\u8d25");
@@ -1075,7 +1095,9 @@ public class StackCDashboardService {
         if (!isOwner
                 && isPublic != 1
                 && !hasDashboardPermission(dashboardId, "READ")
-                && !hasDashboardPermission(dashboardId, "EDIT")) {
+                && !hasDashboardPermission(dashboardId, "EDIT")
+                && !hasTeamDashboardAccess(dashboardId, "READ")
+                && !hasTeamDashboardAccess(dashboardId, "EDIT")) {
             throw new IllegalArgumentException("\u65e0\u6743\u8bbf\u95ee\u8be5\u770b\u677f");
         }
     }
@@ -1144,23 +1166,58 @@ public class StackCDashboardService {
         if (AuthContext.isAdmin()) {
             return false;
         }
-        return hasDashboardPermission(dashboardId(row), "EDIT");
+        long id = dashboardId(row);
+        return hasDashboardPermission(id, "EDIT") || hasTeamDashboardAccess(id, "EDIT");
     }
 
     private boolean isOwnerOrAdmin(Map<String, Object> row) {
         return canManageDashboard(row);
     }
 
+    private boolean hasTeamDashboardAccess(long dashboardId, String permissionType) {
+        String uid = AuthContext.userId();
+        if ("EDIT".equals(permissionType)) {
+            Integer count = jdbcTemplate.queryForObject("""
+                    SELECT COUNT(*) FROM is_dashboard_team_permission dp
+                    INNER JOIN is_team_member tm ON tm.team_id = dp.team_id AND tm.user_id = ?
+                    WHERE dp.dashboard_id = ? AND dp.permission_type = 'EDIT'
+                    """, Integer.class, uid, dashboardId);
+            return count != null && count > 0;
+        }
+        Integer count = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM is_dashboard_team_permission dp
+                INNER JOIN is_team_member tm ON tm.team_id = dp.team_id AND tm.user_id = ?
+                WHERE dp.dashboard_id = ? AND dp.permission_type IN ('READ', 'EDIT')
+                """, Integer.class, uid, dashboardId);
+        return count != null && count > 0;
+    }
+
     private boolean hasDashboardPermission(long dashboardId, String permissionType) {
         if (dashboardId <= 0) {
             return false;
+        }
+        String uid = AuthContext.userId();
+        if ("READ".equals(permissionType)) {
+            Integer count = jdbcTemplate.queryForObject("""
+                    SELECT COUNT(*) FROM is_dashboard_permission
+                    WHERE dashboard_id = ? AND user_id = ?
+                      AND permission_type IN ('READ', 'EDIT')
+                      AND (expire_at IS NULL OR expire_at > NOW())
+                    """, Integer.class, dashboardId, uid);
+            if (count != null && count > 0) {
+                return true;
+            }
+            return hasTeamDashboardAccess(dashboardId, "READ");
         }
         Integer count = jdbcTemplate.queryForObject("""
                 SELECT COUNT(*) FROM is_dashboard_permission
                 WHERE dashboard_id = ? AND user_id = ? AND permission_type = ?
                   AND (expire_at IS NULL OR expire_at > NOW())
-                """, Integer.class, dashboardId, AuthContext.userId(), permissionType);
-        return count != null && count > 0;
+                """, Integer.class, dashboardId, uid, permissionType);
+        if (count != null && count > 0) {
+            return true;
+        }
+        return hasTeamDashboardAccess(dashboardId, permissionType);
     }
 
     private long dashboardId(Map<String, Object> row) {

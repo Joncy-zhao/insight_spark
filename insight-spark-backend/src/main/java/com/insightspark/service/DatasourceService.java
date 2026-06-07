@@ -700,11 +700,16 @@ public class DatasourceService {
     }
 
     public List<Map<String, Object>> executeQuery(String sourceKey, String sql) {
-        return executeQueryInternal(sourceKey, sql, true);
+        return executeQueryInternal(sourceKey, sql, true, true);
     }
 
     public List<Map<String, Object>> executeQueryWithoutAudit(String sourceKey, String sql) {
-        return executeQueryInternal(sourceKey, sql, false);
+        return executeQueryInternal(sourceKey, sql, false, true);
+    }
+
+    /** 调用方已通过 {@link SqlAuditService#acquireQueryPermit} 持有限流许可时使用，避免重复占用并发槽。 */
+    public List<Map<String, Object>> executeQueryWithinPermit(String sourceKey, String sql) {
+        return executeQueryInternal(sourceKey, sql, false, false);
     }
 
     public List<Map<String, Object>> listRowPolicies(Long datasourceId) {
@@ -806,7 +811,8 @@ public class DatasourceService {
         );
     }
 
-    private List<Map<String, Object>> executeQueryInternal(String sourceKey, String sql, boolean needAudit) {
+    private List<Map<String, Object>> executeQueryInternal(String sourceKey, String sql, boolean needAudit,
+                                                           boolean acquirePermit) {
         OfficialSource source = parseSourceKey(sourceKey);
         assertCanAccessOfficialSource(sourceKey);
 
@@ -822,13 +828,26 @@ public class DatasourceService {
 
         String guardedSql = applyRowPolicies(source, dialectSql);
         String safeSql = sqlAuditService.ensureLimit(guardedSql, MAX_QUERY_ROWS);
-        String executionGuard = "queryTimeoutSeconds=" + QUERY_TIMEOUT_SECONDS
-                + ";maxRows=" + MAX_QUERY_ROWS
-                + ";rowPolicyApplied=" + !Objects.equals(guardedSql, dialectSql);
         long startedAt = System.currentTimeMillis();
 
-        try (SqlAuditService.QueryPermit ignored = sqlAuditService.acquireQueryPermit("official-datasource");
-             Connection connection = openConnection(source.datasourceId());
+        if (acquirePermit) {
+            try (SqlAuditService.QueryPermit ignored = sqlAuditService.acquireQueryPermit("official-datasource")) {
+                return runOfficialQuery(source, sourceKey, safeSql, auditResult, needAudit, startedAt);
+            } catch (IllegalStateException pressure) {
+                if (needAudit) {
+                    sqlAuditService.recordBlocked("官方数据源查询", sourceKey, "official-datasource",
+                            safeSql, pressure.getMessage(), List.of("DB_PRESSURE"));
+                }
+                throw pressure;
+            }
+        }
+        return runOfficialQuery(source, sourceKey, safeSql, auditResult, needAudit, startedAt);
+    }
+
+    private List<Map<String, Object>> runOfficialQuery(OfficialSource source, String sourceKey, String safeSql,
+                                                       SqlAuditService.AuditResult auditResult, boolean needAudit,
+                                                       long startedAt) {
+        try (Connection connection = openConnection(source.datasourceId());
              Statement statement = connection.createStatement();
              ResultSet resultSet = executeWithTimeout(statement, safeSql)) {
 
@@ -849,7 +868,6 @@ public class DatasourceService {
                 sqlAuditService.record("官方数据源查询", sourceKey, "official-datasource", safeSql,
                         auditResult, "SUCCESS", durationMs, null);
             }
-
             return rows;
         } catch (Exception e) {
             long durationMs = System.currentTimeMillis() - startedAt;

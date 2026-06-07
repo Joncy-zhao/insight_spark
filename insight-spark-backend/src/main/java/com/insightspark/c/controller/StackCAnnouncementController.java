@@ -26,6 +26,11 @@ public class StackCAnnouncementController {
         return ApiResponse.success(announcementService.listForCurrentUser());
     }
 
+    @GetMapping("/admin/announcements")
+    public ApiResponse<List<Map<String, Object>>> listAdmin() {
+        return ApiResponse.success(announcementService.listForAdmin());
+    }
+
     @PostMapping("/admin/announcements")
     public ApiResponse<Map<String, Object>> createAdmin(@RequestBody Map<String, Object> body) {
         try {

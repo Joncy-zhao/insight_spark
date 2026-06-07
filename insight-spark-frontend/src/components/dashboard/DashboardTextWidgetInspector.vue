@@ -10,6 +10,12 @@
     @closed="onDrawerClosed"
   >
     <div v-if="localConfig" class="dtwi-root">
+      <DashboardWidgetRenameField
+        :model-value="widgetTitle"
+        @update:model-value="emit('update:widgetTitle', $event)"
+        @commit="emit('commit:widgetTitle', $event)"
+      />
+      <el-divider class="dtwi-divider" />
       <div class="dtwi-section-head">
         <span>通用设置</span>
         <el-icon :size="14" class="dtwi-info"><InfoFilled /></el-icon>
@@ -169,6 +175,7 @@ import { Editor, Toolbar } from '@wangeditor/editor-for-vue'
 import { computed, h, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { InfoFilled } from '@element-plus/icons-vue'
+import DashboardWidgetRenameField from './DashboardWidgetRenameField.vue'
 import {
   normalizeTextWidgetConfig,
   plainTextFromHtml,
@@ -182,10 +189,11 @@ import {
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
-  config: { type: Object, default: () => ({}) }
+  config: { type: Object, default: () => ({}) },
+  widgetTitle: { type: String, default: '' }
 })
 
-const emit = defineEmits(['update:modelValue', 'update:config', 'closed'])
+const emit = defineEmits(['update:modelValue', 'update:config', 'update:widgetTitle', 'commit:widgetTitle', 'closed'])
 
 const innerVisible = computed({
   get: () => props.modelValue,
@@ -456,6 +464,9 @@ onBeforeUnmount(() => {
 }
 .dtwi-info {
   color: #9ca3af;
+}
+.dtwi-divider {
+  margin: 4px 0 12px;
 }
 .dtwi-editor-wrap {
   border: 1px solid #e5e7eb;

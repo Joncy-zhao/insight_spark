@@ -863,7 +863,9 @@ async function createBoard() {
       name,
       description: String(boardForm.description || '').trim() || null,
       groupId: boardFormGroupIdOrNull(boardForm.groupId),
-      layoutJson: '{}'
+      layoutJson: '{}',
+      isPublic: false,
+      status: 'DISABLED'
     }
     const res = await axios.post(`${API_BASE}/api/c/admin/dashboards`, body)
     if (res.data.code !== 200) throw new Error(res.data.message)

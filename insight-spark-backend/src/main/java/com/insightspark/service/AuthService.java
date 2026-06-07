@@ -1,6 +1,7 @@
 package com.insightspark.service;
 
 import com.insightspark.core.auth.AuthContext.UserPrincipal;
+import com.insightspark.c.service.StackCRuntimeConfigProvider;
 import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -26,6 +27,9 @@ public class AuthService {
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
+
+    @Autowired(required = false)
+    private StackCRuntimeConfigProvider runtimeConfig;
 
     private final Map<String, CaptchaChallenge> captchas = new ConcurrentHashMap<>();
     private final Map<String, UserPrincipal> sessions = new ConcurrentHashMap<>();
@@ -77,9 +81,7 @@ public class AuthService {
         validateCaptcha(request);
         String username = requireText(request, "username", "用户名不能为空");
         String password = requireText(request, "password", "密码不能为空");
-        if (password.length() < 8) {
-            throw new IllegalArgumentException("密码至少需要 8 位");
-        }
+        validatePassword(password);
         String phone = blankToNull(Objects.toString(request.get("phone"), ""));
         String email = blankToNull(Objects.toString(request.get("email"), ""));
         if (phone == null && email == null) {
@@ -220,6 +222,18 @@ public class AuthService {
     private String blankToNull(String value) {
         String text = value == null ? "" : value.trim();
         return text.isEmpty() ? null : text;
+    }
+
+    private void validatePassword(String password) {
+        int minLen = runtimeConfig != null ? runtimeConfig.getInt("security.password.minLength", 8) : 8;
+        if (password.length() < minLen) {
+            throw new IllegalArgumentException("密码至少需要 " + minLen + " 位");
+        }
+        if (runtimeConfig != null && runtimeConfig.getBoolean("security.password.requireSpecial", false)) {
+            if (!password.matches(".*[!@#$%^&*(),.?\":{}|<>\\[\\]\\\\/_+=\\-].*")) {
+                throw new IllegalArgumentException("密码需包含特殊字符");
+            }
+        }
     }
 
     private record CaptchaChallenge(String answer, Instant expiresAt) {

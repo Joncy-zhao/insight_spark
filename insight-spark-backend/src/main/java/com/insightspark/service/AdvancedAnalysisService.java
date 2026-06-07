@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.insightspark.core.auth.AuthContext;
+import com.insightspark.c.service.StackCRuntimeConfigProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
@@ -133,6 +134,9 @@ public class AdvancedAnalysisService {
     @Autowired
     private AiChartRuleConfigService aiChartRuleConfigService;
 
+    @Autowired(required = false)
+    private StackCRuntimeConfigProvider runtimeConfig;
+
     public AdvancedAnalysisService() {
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
         requestFactory.setConnectTimeout(5000);
@@ -142,6 +146,9 @@ public class AdvancedAnalysisService {
 
     @Scheduled(cron = "${insight.advanced-alert.agent-cron:0 */15 * * * *}")
     public void scheduledAlertRuleDetection() {
+        if (runtimeConfig != null && !runtimeConfig.getBoolean("notify.anomaly.enabled", true)) {
+            return;
+        }
         if (alertAgentRunning) {
             return;
         }
@@ -2543,7 +2550,23 @@ public class AdvancedAnalysisService {
         sql.append(" ORDER BY COALESCE(last_checked_at, created_at) ASC, updated_at ASC LIMIT 200");
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql.toString(), args.toArray());
         rows.forEach(this::parseAlertRuleJsonFields);
+        if (scheduledOnly) {
+            rows = filterByAnomalyRecipients(rows);
+        }
         return rows;
+    }
+
+    private List<Map<String, Object>> filterByAnomalyRecipients(List<Map<String, Object>> rules) {
+        if (runtimeConfig == null) {
+            return rules;
+        }
+        List<String> recipients = runtimeConfig.getStringList("notify.anomaly.recipients");
+        if (recipients.isEmpty()) {
+            return rules;
+        }
+        return rules.stream()
+                .filter(rule -> recipients.contains(text(rule.get("userId"))))
+                .toList();
     }
 
     private List<Map<String, Object>> detectAlertRule(Map<String, Object> rule) {
@@ -2771,7 +2794,10 @@ public class AdvancedAnalysisService {
     }
 
     private void createAlertPushLogs(Map<String, Object> rule, Map<String, Object> event) {
-        for (String channel : normalizeChannels(rule.get("channels"))) {
+        if (runtimeConfig != null && !runtimeConfig.getBoolean("notify.alert.push.enabled", true)) {
+            return;
+        }
+        for (String channel : channelsForPush(rule)) {
             Map<String, Object> log = insertAlertPushLog(rule, event, channel);
             try {
                 attemptAlertPush(log, event);
@@ -4127,6 +4153,16 @@ public class AdvancedAnalysisService {
             return "OPEN";
         }
         return "ACK";
+    }
+
+    private List<String> channelsForPush(Map<String, Object> rule) {
+        if (runtimeConfig != null) {
+            List<String> configured = runtimeConfig.getStringList("notify.alert.channels");
+            if (!configured.isEmpty()) {
+                return normalizeChannels(configured);
+            }
+        }
+        return normalizeChannels(rule.get("channels"));
     }
 
     private List<String> normalizeChannels(Object value) {

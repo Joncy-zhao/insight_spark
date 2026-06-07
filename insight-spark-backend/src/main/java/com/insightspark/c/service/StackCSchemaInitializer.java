@@ -197,6 +197,72 @@ public class StackCSchemaInitializer {
                     """);
 
             jdbcTemplate.execute("""
+                    CREATE TABLE IF NOT EXISTS `is_dashboard_follow` (
+                      `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键',
+                      `dashboard_id` BIGINT NOT NULL COMMENT '看板 id',
+                      `user_id` VARCHAR(64) NOT NULL COMMENT '关注者 user_id',
+                      `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '关注时间',
+                      PRIMARY KEY (`id`),
+                      UNIQUE KEY `uk_dashboard_follow_user` (`dashboard_id`, `user_id`),
+                      INDEX `idx_dashboard_follow_user` (`user_id`),
+                      CONSTRAINT `fk_dashboard_follow_board` FOREIGN KEY (`dashboard_id`) REFERENCES `is_dashboard` (`id`)
+                        ON DELETE CASCADE ON UPDATE CASCADE,
+                      CONSTRAINT `fk_dashboard_follow_user` FOREIGN KEY (`user_id`) REFERENCES `is_user` (`user_id`)
+                        ON DELETE CASCADE ON UPDATE CASCADE
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='看板关注';
+                    """);
+
+            jdbcTemplate.execute("""
+                    CREATE TABLE IF NOT EXISTS `is_team` (
+                      `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键',
+                      `name` VARCHAR(128) NOT NULL COMMENT '团队名称',
+                      `description` VARCHAR(500) NULL COMMENT '团队说明',
+                      `owner_user_id` VARCHAR(64) NOT NULL COMMENT '创建者 user_id',
+                      `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                      `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                      PRIMARY KEY (`id`),
+                      INDEX `idx_team_owner` (`owner_user_id`),
+                      CONSTRAINT `fk_team_owner` FOREIGN KEY (`owner_user_id`) REFERENCES `is_user` (`user_id`)
+                        ON DELETE RESTRICT ON UPDATE CASCADE
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='协作团队';
+                    """);
+
+            jdbcTemplate.execute("""
+                    CREATE TABLE IF NOT EXISTS `is_team_member` (
+                      `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键',
+                      `team_id` BIGINT NOT NULL COMMENT '团队 id',
+                      `user_id` VARCHAR(64) NOT NULL COMMENT '成员 user_id',
+                      `member_role` VARCHAR(32) NOT NULL DEFAULT 'MEMBER' COMMENT 'OWNER/ADMIN/MEMBER',
+                      `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '加入时间',
+                      PRIMARY KEY (`id`),
+                      UNIQUE KEY `uk_team_member` (`team_id`, `user_id`),
+                      INDEX `idx_team_member_user` (`user_id`),
+                      CONSTRAINT `fk_team_member_team` FOREIGN KEY (`team_id`) REFERENCES `is_team` (`id`)
+                        ON DELETE CASCADE ON UPDATE CASCADE,
+                      CONSTRAINT `fk_team_member_user` FOREIGN KEY (`user_id`) REFERENCES `is_user` (`user_id`)
+                        ON DELETE CASCADE ON UPDATE CASCADE
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='团队成员';
+                    """);
+
+            jdbcTemplate.execute("""
+                    CREATE TABLE IF NOT EXISTS `is_dashboard_team_permission` (
+                      `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键',
+                      `dashboard_id` BIGINT NOT NULL COMMENT '看板 id',
+                      `team_id` BIGINT NOT NULL COMMENT '团队 id',
+                      `permission_type` VARCHAR(32) NOT NULL DEFAULT 'READ' COMMENT 'READ/EDIT',
+                      `granted_by` VARCHAR(64) NULL COMMENT '授权人 user_id',
+                      `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '授权时间',
+                      PRIMARY KEY (`id`),
+                      UNIQUE KEY `uk_dashboard_team_perm` (`dashboard_id`, `team_id`, `permission_type`),
+                      INDEX `idx_dashboard_team_perm_team` (`team_id`),
+                      CONSTRAINT `fk_dashboard_team_perm_board` FOREIGN KEY (`dashboard_id`) REFERENCES `is_dashboard` (`id`)
+                        ON DELETE CASCADE ON UPDATE CASCADE,
+                      CONSTRAINT `fk_dashboard_team_perm_team` FOREIGN KEY (`team_id`) REFERENCES `is_team` (`id`)
+                        ON DELETE CASCADE ON UPDATE CASCADE
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='看板团队授权';
+                    """);
+
+            jdbcTemplate.execute("""
                     CREATE TABLE IF NOT EXISTS `is_perf_intervention` (
                       `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键',
                       `audit_log_id` BIGINT NOT NULL COMMENT '关联 is_sql_audit_log.id',

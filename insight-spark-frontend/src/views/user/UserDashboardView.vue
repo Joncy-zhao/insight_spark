@@ -161,6 +161,14 @@
               </template>
             </el-input>
           </el-form-item>
+          <el-divider />
+          <el-form-item label="团队协同">
+            <p class="share-team-hint">将看板授权给团队，成员可在「业务批注与协同 → 我收到的看板」中阅览与批注。</p>
+            <div class="share-team-actions">
+              <el-button type="success" plain @click="goShareToTeam">选择团队并分发</el-button>
+              <el-button type="primary" plain @click="goCollabWorkbench">进入协同批注</el-button>
+            </div>
+          </el-form-item>
         </el-form>
         <template #footer>
           <el-button @click="shareVisible = false">取消</el-button>
@@ -187,6 +195,7 @@ import {
 } from '../../utils/dashboardGrid.js'
 import { resolveBasicWidgetEntry } from '../../utils/dashboardBasicWidgetRegistry.js'
 import { buildOptionFromHistoryRow } from '../../utils/chartOptionFromSnapshot.js'
+import { setCollabNav } from '../../utils/collabNav.js'
 
 const API_BASE = 'http://localhost:8080'
 const workbench = inject('workbench', null)
@@ -697,6 +706,26 @@ const openShareDialog = (row) => {
   shareVisible.value = true
 }
 
+const goShareToTeam = () => {
+  const id = shareTargetId.value
+  if (!id) return
+  shareVisible.value = false
+  setCollabNav({ tab: 'distribute', dashboardId: id })
+  if (workbench?.activeModule) {
+    workbench.activeModule.value = 'collaboration'
+  }
+}
+
+const goCollabWorkbench = () => {
+  const id = shareTargetId.value
+  if (!id) return
+  shareVisible.value = false
+  setCollabNav({ tab: 'workbench', dashboardId: id })
+  if (workbench?.activeModule) {
+    workbench.activeModule.value = 'collaboration'
+  }
+}
+
 const generateShareLink = async () => {
   if (!shareTargetId.value) return
   sharing.value = true
@@ -857,6 +886,19 @@ onBeforeUnmount(() => {
   color: #909399;
   font-size: 13px;
   margin: 0 0 12px;
+}
+
+.share-team-hint {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: #909399;
+  line-height: 1.5;
+}
+
+.share-team-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .toolbar {

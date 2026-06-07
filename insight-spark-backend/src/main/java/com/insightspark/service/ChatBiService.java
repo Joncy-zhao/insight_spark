@@ -311,7 +311,7 @@ public class ChatBiService {
             try {
                 ensureNotCancelled("执行查询前");
                 queryResult = officialSource
-                        ? datasourceService.executeQueryWithoutAudit(activeTable, generatedSql)
+                        ? datasourceService.executeQueryWithinPermit(activeTable, generatedSql)
                         : queryUploadTable(activeTable, generatedSql, guard.maxRows());
                 ensureNotCancelled("执行查询后");
             } catch (RuntimeException executionError) {
@@ -336,7 +336,7 @@ public class ChatBiService {
                 fallbackExecuted = true;
                 ensureNotCancelled("兜底重试执行前");
                 queryResult = officialSource
-                        ? datasourceService.executeQueryWithoutAudit(activeTable, generatedSql)
+                        ? datasourceService.executeQueryWithinPermit(activeTable, generatedSql)
                         : queryUploadTable(activeTable, generatedSql, guard.maxRows());
                 ensureNotCancelled("兜底重试执行后");
             }
@@ -367,7 +367,7 @@ public class ChatBiService {
                     generatedSql = detailSql;
                     fieldMapping = fallbackFieldMapping(detailChoice);
                     queryResult = officialSource
-                            ? datasourceService.executeQueryWithoutAudit(activeTable, generatedSql)
+                            ? datasourceService.executeQueryWithinPermit(activeTable, generatedSql)
                             : queryUploadTable(activeTable, generatedSql, guard.maxRows());
                     queryResult = sqlAuditService.maskRowsWithReport(activeTable, queryResult).rows();
                     generationTrace.add("detailTableRequery=APPLIED");

@@ -57,6 +57,15 @@ public class StackCAdminDashboardController {
         }
     }
 
+    @PostMapping
+    public ApiResponse<Map<String, Object>> create(@RequestBody Map<String, Object> body) {
+        try {
+            return ApiResponse.success("看板已创建", dashboardService.createForAdmin(body));
+        } catch (IllegalArgumentException e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
     @PostMapping("/{id}/duplicate")
     public ApiResponse<Map<String, Object>> duplicate(
             @PathVariable long id,

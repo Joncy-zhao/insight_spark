@@ -28,6 +28,11 @@
       :components="components"
       :loading="loading"
       :show-lead="showLead"
+      :selectable="selectable"
+      :active-item-id="activeItemId"
+      :item-badges="itemBadges"
+      :board-annotation-count="boardAnnotationCount"
+      @select-item="(payload) => emit('select-item', payload)"
     />
   </el-dialog>
 
@@ -42,6 +47,11 @@
       :components="components"
       :loading="loading"
       :show-lead="showEmbedLead"
+      :selectable="selectable"
+      :active-item-id="activeItemId"
+      :item-badges="itemBadges"
+      :board-annotation-count="boardAnnotationCount"
+      @select-item="(payload) => emit('select-item', payload)"
     />
   </div>
 </template>
@@ -73,6 +83,11 @@ const props = defineProps({
   showLead: { type: Boolean, default: true },
   /** 弹窗模式是否展示自定义标题栏（预览/分享仅保留右上角关闭） */
   showHeader: { type: Boolean, default: true },
+  /** 协作模式：点击画布组件选中 */
+  selectable: { type: Boolean, default: false },
+  activeItemId: { type: [String, Number], default: null },
+  itemBadges: { type: Object, default: () => ({}) },
+  boardAnnotationCount: { type: Number, default: 0 },
   /**
    * 预填充数据则跳过接口拉取：{ board, components, chartPayloadById }
    * chartPayloadById: Record<string, historyRow>
@@ -80,7 +95,7 @@ const props = defineProps({
   prefetch: { type: Object, default: null }
 })
 
-const emit = defineEmits(['update:modelValue'])
+const emit = defineEmits(['update:modelValue', 'select-item'])
 
 const innerVisible = computed({
   get: () => props.modelValue,
@@ -218,6 +233,33 @@ watch(
       loading.value = false
     }
   }
+)
+
+watch(
+  () => [props.embedded, props.initialRow?.id],
+  async ([embedded, id]) => {
+    if (!embedded) return
+    if (!id) {
+      resetState()
+      return
+    }
+    if (props.prefetch?.board && props.prefetch.board.id === id) {
+      applyPrefetch(props.prefetch)
+      await nextTick()
+      window.dispatchEvent(new Event('resize'))
+      return
+    }
+    loading.value = true
+    try {
+      await loadBoard()
+    } catch (e) {
+      ElMessage.error(e.message || '加载看板失败')
+      resetState()
+    } finally {
+      loading.value = false
+    }
+  },
+  { immediate: true }
 )
 </script>
 

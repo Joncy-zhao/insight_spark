@@ -83,5 +83,7 @@ export function resolveBasicWidgetEntry(itemOrKind) {
 }
 
 export function basicWidgetLabelForItem(item) {
+  const custom = String(item?.title || '').trim()
+  if (custom) return custom
   return resolveBasicWidgetEntry(item)?.label || '基础'
 }

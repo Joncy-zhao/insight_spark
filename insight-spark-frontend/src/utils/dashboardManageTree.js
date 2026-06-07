@@ -332,3 +332,10 @@ export function boardStatusTagType(data) {
 export function isBoardPublished(data) {
   return String(data?.status || data?.raw?.status || 'ACTIVE').toUpperCase() === 'ACTIVE'
 }
+
+/** 可分发给团队：已发布公共看板，或已发布且本人创建/另存的私密看板 */
+export function canDistributeBoard(row, userId) {
+  if (!isBoardPublished(row)) return false
+  if (boardIsPublic(row)) return true
+  return isBoardOwner(row, userId) || isBoardSaveAsUser(row, userId)
+}

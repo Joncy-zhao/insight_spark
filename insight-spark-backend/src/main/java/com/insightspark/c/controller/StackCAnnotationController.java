@@ -2,6 +2,7 @@ package com.insightspark.c.controller;
 
 import com.insightspark.common.ApiResponse;
 import com.insightspark.c.service.StackCAnnotationService;
+import com.insightspark.c.websocket.CollabWebSocketBroadcaster;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -15,6 +16,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 @RestController
 @RequestMapping("/api/c")
@@ -24,6 +26,9 @@ public class StackCAnnotationController {
     @Autowired
     private StackCAnnotationService annotationService;
 
+    @Autowired
+    private CollabWebSocketBroadcaster collabWebSocketBroadcaster;
+
     @GetMapping("/annotations")
     public ApiResponse<List<Map<String, Object>>> listAnnotations(
             @RequestParam String targetType,
@@ -31,10 +36,20 @@ public class StackCAnnotationController {
         return ApiResponse.success(annotationService.listAnnotations(targetType, targetId));
     }
 
+    @GetMapping("/annotations/by-dashboard/{dashboardId}")
+    public ApiResponse<List<Map<String, Object>>> listAnnotationsByDashboard(@PathVariable long dashboardId) {
+        return ApiResponse.success(annotationService.listAnnotationsForDashboard(dashboardId));
+    }
+
     @PostMapping("/annotations")
     public ApiResponse<Map<String, Object>> createAnnotation(@RequestBody Map<String, Object> body) {
         try {
-            return ApiResponse.success("批注已保存", annotationService.createAnnotation(body));
+            Map<String, Object> created = annotationService.createAnnotation(body);
+            long dashboardId = resolveDashboardBroadcastId(created);
+            if (dashboardId > 0) {
+                collabWebSocketBroadcaster.broadcastAnnotationCreated(dashboardId, created);
+            }
+            return ApiResponse.success("批注已保存", created);
         } catch (IllegalArgumentException e) {
             return ApiResponse.badRequest(e.getMessage());
         }
@@ -43,7 +58,12 @@ public class StackCAnnotationController {
     @DeleteMapping("/annotations/{id}")
     public ApiResponse<Void> deleteAnnotation(@PathVariable long id) {
         try {
+            Map<String, Object> meta = annotationService.peekAnnotationMeta(id);
+            long dashboardId = resolveDashboardBroadcastId(meta);
             annotationService.deleteAnnotation(id);
+            if (dashboardId > 0) {
+                collabWebSocketBroadcaster.broadcastAnnotationDeleted(dashboardId, id);
+            }
             return ApiResponse.success("已删除", null);
         } catch (IllegalArgumentException e) {
             return ApiResponse.badRequest(e.getMessage());
@@ -60,7 +80,11 @@ public class StackCAnnotationController {
     @PostMapping("/comments")
     public ApiResponse<Map<String, Object>> createComment(@RequestBody Map<String, Object> body) {
         try {
-            return ApiResponse.success("评论已发布", annotationService.createComment(body));
+            Map<String, Object> created = annotationService.createComment(body);
+            String targetType = Objects.toString(body.get("targetType"), "");
+            long targetId = Long.parseLong(String.valueOf(body.get("targetId")));
+            collabWebSocketBroadcaster.broadcastCommentCreated(targetType, targetId, created);
+            return ApiResponse.success("评论已发布", created);
         } catch (IllegalArgumentException e) {
             return ApiResponse.badRequest(e.getMessage());
         }
@@ -69,10 +93,40 @@ public class StackCAnnotationController {
     @DeleteMapping("/comments/{id}")
     public ApiResponse<Void> deleteComment(@PathVariable long id) {
         try {
+            Map<String, Object> meta = annotationService.peekCommentMeta(id);
             annotationService.deleteComment(id);
+            collabWebSocketBroadcaster.broadcastCommentDeleted(
+                    Objects.toString(meta.get("targetType")),
+                    Long.parseLong(String.valueOf(meta.get("targetId"))),
+                    id);
             return ApiResponse.success("已删除", null);
         } catch (IllegalArgumentException e) {
             return ApiResponse.badRequest(e.getMessage());
         }
+    }
+
+    private long resolveDashboardBroadcastId(Map<String, Object> row) {
+        if (row == null || row.isEmpty()) {
+            return 0L;
+        }
+        Object dash = row.get("dashboardId");
+        if (dash != null) {
+            try {
+                long id = Long.parseLong(String.valueOf(dash));
+                if (id > 0) {
+                    return id;
+                }
+            } catch (NumberFormatException ignored) {
+                // fall through
+            }
+        }
+        if ("DASHBOARD".equalsIgnoreCase(Objects.toString(row.get("targetType"), ""))) {
+            try {
+                return Long.parseLong(String.valueOf(row.get("targetId")));
+            } catch (NumberFormatException e) {
+                return 0L;
+            }
+        }
+        return 0L;
     }
 }

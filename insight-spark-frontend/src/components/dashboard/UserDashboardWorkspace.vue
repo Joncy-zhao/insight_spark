@@ -242,9 +242,6 @@
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column v-if="!isPublicListView" label="分组" min-width="64" show-overflow-tooltip>
-            <template #default="{ row }">{{ boardGroupDisplay(row) }}</template>
-          </el-table-column>
           <el-table-column v-if="!isPublicListView" label="图表数" width="60" align="center">
             <template #default="{ row }">
               <button
@@ -548,7 +545,6 @@ import { restoreSessionHeader } from '../../store/session'
 import DashboardGridEditor from '../../views/user/DashboardGridEditor.vue'
 import { countChartSlotsForDashboardRow, countBasicWidgetSlotsForDashboardRow } from '../../utils/dashboardGrid.js'
 import {
-  boardGroupDisplay,
   boardStatusTag,
   boardStatusTagType,
   boardVisibilityLabel,
