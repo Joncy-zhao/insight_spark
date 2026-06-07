@@ -247,13 +247,54 @@
                         <div class="field-binding-card__label">{{ item.label || item.name }}</div>
                         <div class="field-binding-card__arrow">→</div>
                         <div class="field-binding-card__field">
-                          {{
-                            item.targetType === 'metricDefinition'
-                              ? (item.formula || item.fieldDisplayName || fieldLabel(item.field) || item.field || '已更新')
-                              : (item.fieldDisplayName || fieldLabel(item.field) || item.field || '未绑定成功')
-                          }}
+                          {{ formatFieldBindingResultValue(item) }}
                         </div>
                       </div>
+                    </div>
+                    <div v-if="msg.alertRuleDraft" class="alert-draft-card">
+                      <div class="alert-draft-card__header">
+                        <div>
+                          <div class="alert-draft-card__eyebrow">预警规则草稿</div>
+                          <div class="alert-draft-card__title">{{ formatChatAlertDraftTitle(msg.alertRuleDraft) }}</div>
+                        </div>
+                        <el-tag size="small" type="warning" effect="light">待确认</el-tag>
+                      </div>
+                      <div class="alert-draft-card__grid">
+                        <div>
+                          <span>指标</span>
+                          <strong>{{ fieldLabel(msg.alertRuleDraft.metricField) || msg.alertRuleDraft.metricField || '待确认' }}</strong>
+                        </div>
+                        <div>
+                          <span>条件</span>
+                          <strong>{{ alertOperatorLabel(msg.alertRuleDraft.operator) }} {{ formatAdvancedNumber(msg.alertRuleDraft.threshold) }}</strong>
+                        </div>
+                        <div>
+                          <span>时间字段</span>
+                          <strong>{{ fieldLabel(msg.alertRuleDraft.timeField) || msg.alertRuleDraft.timeField || '待确认' }}</strong>
+                        </div>
+                        <div>
+                          <span>通知渠道</span>
+                          <strong>{{ formatAlertChannel(msg.alertRuleDraft.channels) }}</strong>
+                        </div>
+                      </div>
+                      <div class="alert-draft-card__footer">
+                        <div class="alert-draft-card__hint">该规则尚未正式创建，需要确认后再保存到预警规则。</div>
+                        <el-button
+                          class="alert-draft-card__confirm"
+                          size="small"
+                          :loading="savingAlertDraftKey === alertDraftKey(msg.alertRuleDraft)"
+                          @click="confirmChatAlertDraft(msg.alertRuleDraft, msg)"
+                        >
+                          确认创建
+                        </el-button>
+                      </div>
+                    </div>
+                    <div v-else-if="msg.alertRuleCreated" class="alert-created-card">
+                      <div>
+                        <div class="alert-created-card__eyebrow">预警规则已创建</div>
+                        <div class="alert-created-card__title">{{ msg.alertRuleCreated.title || '预警规则' }}</div>
+                      </div>
+                      <el-tag size="small" type="success" effect="light">已保存</el-tag>
                     </div>
                     <details v-if="msg.thinkingLogs?.length" class="thinking-details" :open="msg.thinkingCollapsed === false">
                       <summary>查看思考过程（{{ msg.thinkingLogs.length }}步）</summary>
@@ -272,7 +313,7 @@
                     </div>
                     <div v-if="msg.role === 'system' || (speechSupported && msg.content)" class="bubble-voice-action">
                       <button
-                          v-if="msg.clickableChart"
+                          v-if="isMessageChartRestorable(msg)"
                           type="button"
                           class="bubble-voice-btn"
                           title="查看本轮对话图表"
@@ -507,7 +548,7 @@
               </div>
             </div>
           </div>
-          <el-dialog v-model="pinDialogVisible" title="钉入我的看板" width="520px">
+          <el-dialog v-model="pinDialogVisible" title="钉入我的看板" width="520px" append-to-body>
             <el-form label-position="top">
               <el-form-item label="目标看板">
                 <el-select v-model="pinDashboardId" class="full-width" placeholder="请选择看板">
@@ -530,6 +571,7 @@
               title="业务字典 + 业务公式维护"
               size="74%"
               destroy-on-close
+              @open="refreshBusinessDictionaryPanel"
           >
             <BusinessDictionaryView
               :focus-model-id="businessDictionaryFocusModelId"
@@ -1595,6 +1637,7 @@
 
 <script setup>
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import axios from 'axios'
 import { ArrowLeftBold, ArrowRightBold, Close, Edit, Management, Microphone, Refresh, Search, Setting, Share, View } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 import { ElMessage } from 'element-plus'
@@ -1624,6 +1667,8 @@ const localVoiceGenderOptions = [
   { label: '男声', value: 'male' },
   { label: '女声', value: 'female' }
 ]
+
+const ADVANCED_THINKING_LOG_LIMIT = 100
 
 const {
   API_BASE,
@@ -1676,6 +1721,7 @@ const {
   loadDatasources,
   loadDiagnosisReportDetail,
   loadDiagnosisReports,
+  loadBusinessModels,
   loadFields,
   loadPermissionCenter,
   loadPreview,
@@ -1756,6 +1802,7 @@ const {
   sendQuestion,
   regenerateLastAnalysis,
   openPinDialog,
+  openPinDialogForAnalysis,
   pinChartToDashboard,
   openHistoricalAnalysis,
   openHistoricalAnalysisFromHistory,
@@ -1863,6 +1910,33 @@ const currentChatSession = computed(() =>
   (chatSessions?.value || []).find(item => String(item?.id || '') === String(activeChatSessionId?.value || '')) || null
 )
 
+const refreshBusinessDictionaryPanel = async () => {
+  try {
+    await loadBusinessModels?.()
+  } catch (error) {
+    console.warn('refresh business models on drawer open failed:', error)
+  }
+}
+
+const formatBoundFieldValue = (item = {}) => {
+  const fieldName = String(item?.field || '').trim()
+  const displayName = String(item?.fieldDisplayName || '').trim() || fieldLabel(fieldName)
+  if (displayName && fieldName && displayName !== fieldName) {
+    return `${displayName}（${fieldName}）`
+  }
+  return fieldName || displayName
+}
+
+const formatFieldBindingResultValue = (item = {}) => {
+  const semanticAction = String(item?.semanticAction || '').trim().toUpperCase()
+  const formula = String(item?.formula || '').trim()
+  const boundField = formatBoundFieldValue(item)
+  if (semanticAction === 'METRIC_FORMULA_UPDATE' || semanticAction === 'METRIC_SCOPE_UPDATE') {
+    return formula || boundField || '已更新'
+  }
+  return boundField || formula || '未绑定成功'
+}
+
 const chatContentMode = ref('messages')
 const advancedHistoryVisible = ref(false)
 const advancedAnalysisHistory = ref([])
@@ -1925,6 +1999,7 @@ const alertConfirmForm = ref({
   channels: ['email', 'dingtalk']
 })
 let alertConfirmResolver = null
+const savingAlertDraftKey = ref('')
 
 const advancedAnalysisTypeLabel = (type) => {
   if (type === 'forecast') return '时序预测'
@@ -2064,10 +2139,33 @@ const formatAnalysisMetricLabel = (fieldName, fallback = '指标', fields = []) 
 const inferAdvancedIntent = (text) => {
   const content = String(text || '').trim().toLowerCase()
   if (!content) return ''
-  if (/预测|预估|未来|走势|forecast|prophet|holt/.test(content)) return 'forecast'
+  if (hasCompositeForecastSemantic(content) || /prophet|holt/.test(content)) return 'forecast'
   if (/what-?if|如果|若|假设|提升|下降|降低|增长|推演|模拟|利润变化/.test(content)) return 'whatIf'
   if (/预警|提醒|告警|低于|高于|超过|异常|阈值|通知|钉钉|邮件|z-?score/.test(content)) return 'alert'
   return ''
+}
+
+const hasCompositeQuerySemantic = (text = '') => {
+  const content = String(text || '').trim()
+  return /查|看|查看|查询|统计|分析|展示|给我看|画/.test(content) ||
+    /趋势|走势|排名|排行|对比|分布|明细|各省|各市|各区域/.test(content)
+}
+
+const hasCompositeForecastSemantic = (text = '') => /预测|预估|推算|未来|后面|往后|下个月|下季度|下一季度|后续|大概会|会到多少|继续涨|继续跌|趋势延伸|forecast|prediction/i.test(String(text || ''))
+
+const hasCompositeAlertSemantic = (text = '') => /预警|提醒|告警|警报|通知|低于|高于|超过|跌破|阈值|异常|邮件|钉钉|alert|warning/i.test(String(text || ''))
+
+const hasCompositeConnectorSemantic = (text = '') => /并|然后|再|同时|顺便|接着|之后|并且|如果|若|假设/.test(String(text || ''))
+
+const shouldUseSmartMultiStepOrchestration = (text = '') => {
+  const content = String(text || '').trim()
+  if (!content) return false
+  if (!hasCompositeForecastSemantic(content)) return false
+  const hasQuery = hasCompositeQuerySemantic(content)
+  const hasAlert = hasCompositeAlertSemantic(content)
+  if (hasAlert && /如果|低于|高于|超过|跌破|提醒|预警|告警|通知/.test(content)) return true
+  if (hasQuery && hasCompositeConnectorSemantic(content)) return true
+  return hasQuery && /查|看|查看|查询|统计|分析|展示/.test(content)
 }
 
 const inferMetricFromQuestion = (text) => {
@@ -2076,13 +2174,132 @@ const inferMetricFromQuestion = (text) => {
   return candidates.find(item => content.includes(item)) || String(lastAnalysis?.value?.fieldMapping?.metric || '').trim() || '核心指标'
 }
 
-const inferForecastHorizon = (text) => {
+const normalizeForecastGranularity = (value = '') => {
+  const text = String(value || '').trim().toLowerCase()
+  if (['day', 'daily', '按日', '日'].includes(text)) return 'day'
+  if (['week', 'weekly', '按周', '周'].includes(text)) return 'week'
+  if (['quarter', 'quarterly', '按季度', '季度'].includes(text)) return 'quarter'
+  if (['year', 'yearly', '按年', '年'].includes(text)) return 'year'
+  return 'month'
+}
+
+const inferForecastGranularity = (text) => {
   const content = String(text || '')
-  if (/6\s*个?月|半年/.test(content)) return '6m'
-  if (/3\s*个?月|季度/.test(content)) return '3m'
-  if (/30\s*天|一个月|1\s*个?月/.test(content)) return '30d'
-  if (/7\s*天|一周|1\s*周/.test(content)) return '7d'
-  return '3m'
+  if (/每(日|天)|按日|日度|逐日/.test(content)) return 'day'
+  if (/每周|按周|周度|逐周/.test(content)) return 'week'
+  if (/每月|按月|月度|逐月/.test(content)) return 'month'
+  if (/每季度|按季度|季度粒度|逐季/.test(content)) return 'quarter'
+  if (/每年|按年|年度|逐年/.test(content)) return 'year'
+  const range = explicitForecastRange(content)
+  if (range && ['day', 'week', 'quarter', 'year'].includes(range.unit)) return range.unit
+  return 'month'
+}
+
+const forecastChineseNumber = (value) => {
+  const text = String(value || '').trim()
+  if (!text) return 0
+  const numeric = Number(text)
+  if (Number.isFinite(numeric)) return numeric
+  const digits = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 }
+  if (text === '十') return 10
+  if (digits[text]) return digits[text]
+  if (text.startsWith('十')) return 10 + forecastChineseNumber(text.slice(1))
+  if (text.endsWith('十')) return forecastChineseNumber(text.slice(0, -1)) * 10
+  if (text.includes('十')) {
+    const [left, right] = text.split('十')
+    return forecastChineseNumber(left) * 10 + forecastChineseNumber(right)
+  }
+  return 0
+}
+
+const normalizeForecastRangeUnit = (unit = '') => {
+  const text = String(unit || '')
+  if (text.includes('年')) return 'year'
+  if (text.includes('季')) return 'quarter'
+  if (text.includes('周')) return 'week'
+  if (text.includes('天') || text.includes('日')) return 'day'
+  return 'month'
+}
+
+const explicitForecastRange = (text = '') => {
+  const content = String(text || '').trim()
+  if (!content) return null
+  if (/下个月|未来一个月|后面一个月|往后一个月/.test(content)) return { value: 1, unit: 'month' }
+  if (/下季度|下一季度|未来一个季度|后面一个季度/.test(content)) return { value: 1, unit: 'quarter' }
+  if (/半年|六个月/.test(content)) return { value: 6, unit: 'month' }
+  const match = content.match(/(?:未来|后面|往后|之后|接下来|下|后续)?\s*([一二两三四五六七八九十百\d]+)\s*(个)?\s*(月|个月|季度|季|年|天|日|周)/)
+  if (!match) return null
+  const value = forecastChineseNumber(match[1])
+  return value > 0 ? { value, unit: normalizeForecastRangeUnit(match[3]) } : null
+}
+
+const forecastRangeDays = (range) => {
+  if (!range) return 0
+  if (range.unit === 'day') return range.value
+  if (range.unit === 'week') return range.value * 7
+  if (range.unit === 'quarter') return range.value * 91
+  if (range.unit === 'year') return range.value * 365
+  return range.value * 30
+}
+
+const horizonByGranularity = (range, granularity = 'month') => {
+  const normalized = normalizeForecastGranularity(granularity)
+  if (!range) return defaultForecastHorizon(normalized)
+  if (range.unit === normalized) return Math.max(1, range.value)
+  if (normalized === 'month') {
+    if (range.unit === 'quarter') return range.value * 3
+    if (range.unit === 'year') return range.value * 12
+    if (range.unit === 'week') return Math.max(1, Math.ceil(range.value * 7 / 30))
+    if (range.unit === 'day') return Math.max(1, Math.ceil(range.value / 30))
+    return Math.max(1, range.value)
+  }
+  if (normalized === 'quarter') {
+    if (range.unit === 'month') return Math.max(1, Math.ceil(range.value / 3))
+    if (range.unit === 'year') return range.value * 4
+    if (range.unit === 'week') return Math.max(1, Math.ceil(range.value * 7 / 91))
+    if (range.unit === 'day') return Math.max(1, Math.ceil(range.value / 91))
+    return Math.max(1, range.value)
+  }
+  if (normalized === 'year') {
+    if (range.unit === 'month') return Math.max(1, Math.ceil(range.value / 12))
+    if (range.unit === 'quarter') return Math.max(1, Math.ceil(range.value / 4))
+    if (range.unit === 'week') return Math.max(1, Math.ceil(range.value * 7 / 365))
+    if (range.unit === 'day') return Math.max(1, Math.ceil(range.value / 365))
+    return Math.max(1, range.value)
+  }
+  const days = forecastRangeDays(range)
+  if (normalized === 'day') return Math.max(1, days)
+  if (normalized === 'week') return Math.max(1, Math.ceil(days / 7))
+  return Math.max(1, range.value)
+}
+
+const defaultForecastHorizon = (granularity = 'month') => {
+  const normalized = normalizeForecastGranularity(granularity)
+  if (normalized === 'day') return 30
+  if (normalized === 'week') return 12
+  if (normalized === 'quarter') return 4
+  if (normalized === 'year') return 3
+  return 3
+}
+
+const forecastGranularityUnitLabel = (granularity = 'month') => {
+  const normalized = normalizeForecastGranularity(granularity)
+  if (normalized === 'day') return '天'
+  if (normalized === 'week') return '周'
+  if (normalized === 'quarter') return '个季度'
+  if (normalized === 'year') return '年'
+  return '个月'
+}
+
+const forecastTimeRangeLabel = (horizon, granularity = 'month') =>
+  `未来 ${normalizeHorizonCount(horizon, granularity)} ${forecastGranularityUnitLabel(granularity)}`
+
+const inferForecastHorizon = (text, granularity = inferForecastGranularity(text)) => {
+  const range = explicitForecastRange(text)
+  const count = range
+    ? horizonByGranularity(range, granularity)
+    : defaultForecastHorizon(granularity)
+  return Math.max(1, Math.min(count, 60))
 }
 
 const inferAlertThreshold = (text) => {
@@ -2125,6 +2342,24 @@ const formatAlertRuleTitle = (rule = {}) => {
   const threshold = rule.operator === 'zscore' ? 'Z-Score' : formatAdvancedNumber(rule.threshold)
   return `${metric} ${operator} ${threshold}`
 }
+
+const formatChatAlertDraftTitle = (rule = {}) => {
+  const metric = fieldLabel(rule.metricField) || String(rule.metricField || '指标').trim()
+  const operatorMap = { lt: '低于', gt: '高于', zscore: '异常波动' }
+  const operator = operatorMap[String(rule.operator || 'lt').toLowerCase()] || '触发'
+  const threshold = String(rule.operator || '').toLowerCase() === 'zscore'
+    ? 'Z-Score'
+    : formatAdvancedNumber(rule.threshold)
+  return `${metric || '指标'} ${operator} ${threshold}`
+}
+
+const alertDraftKey = (rule = {}) => [
+  rule.tableName,
+  rule.metricField,
+  rule.timeField,
+  rule.operator,
+  rule.threshold
+].map(item => String(item ?? '').trim()).join('|')
 
 const formatAlertRuleMeta = (rule = {}) => {
   const parts = [
@@ -2238,8 +2473,7 @@ const inferWhatIfFormula = (text, llmIntent = {}) => {
 }
 
 const buildForecastSeries = (params = {}) => {
-  const horizon = String(params.horizon || '3m')
-  const futureCount = horizon === '7d' ? 7 : horizon === '30d' ? 8 : horizon === '6m' ? 6 : 3
+  const futureCount = normalizeHorizonCount(params.horizon, params.granularity || 'month', params.sourceQuestion || '')
   const historyCount = 10
   const base = 86000
   const rows = []
@@ -2319,12 +2553,28 @@ const normalizeLlmVariables = (items) => {
   })).filter(item => item.name && Number.isFinite(item.change))
 }
 
-const normalizeHorizonCount = (horizon) => {
-  const value = String(horizon || '').trim()
-  if (value === '7d') return 7
-  if (value === '30d') return 8
-  if (value === '6m') return 6
-  return 3
+const normalizeHorizonCount = (horizon, granularity = 'month', sourceText = '') => {
+  const normalizedGranularity = normalizeForecastGranularity(granularity)
+  if (typeof horizon === 'number' && Number.isFinite(horizon) && horizon > 0) {
+    return Math.max(1, Math.min(Math.round(horizon), 60))
+  }
+  const value = String(horizon ?? '').trim()
+  if (/^\d+$/.test(value)) {
+    return Math.max(1, Math.min(Number(value), 60))
+  }
+  const legacy = value.match(/^(\d+)\s*([dwmyq])$/i)
+  if (legacy) {
+    const unitMap = { d: 'day', w: 'week', m: 'month', q: 'quarter', y: 'year' }
+    return Math.max(1, Math.min(horizonByGranularity({
+      value: Number(legacy[1]),
+      unit: unitMap[legacy[2].toLowerCase()] || 'month'
+    }, normalizedGranularity), 60))
+  }
+  const range = explicitForecastRange(value) || explicitForecastRange(sourceText)
+  if (range) {
+    return Math.max(1, Math.min(horizonByGranularity(range, normalizedGranularity), 60))
+  }
+  return Math.max(1, Math.min(defaultForecastHorizon(normalizedGranularity), 60))
 }
 
 const parseChartNumber = (value) => {
@@ -2428,7 +2678,7 @@ const nextSeriesName = (lastName, offset) => {
 const buildForecastSeriesFromChartData = (params = {}) => {
   const historyRows = resolveLastAnalysisTimeSeries()
   if (historyRows.length < 3) return []
-  const futureCount = normalizeHorizonCount(params.horizon)
+  const futureCount = normalizeHorizonCount(params.horizon, params.granularity || 'month', params.sourceQuestion || '')
   const first = historyRows[0].value
   const last = historyRows[historyRows.length - 1].value
   const trend = historyRows.length > 1 ? (last - first) / (historyRows.length - 1) : 0
@@ -2909,6 +3159,67 @@ const cancelAlertConfirm = () => {
   }
 }
 
+const confirmChatAlertDraft = async (draft = {}, msg = {}) => {
+  const tableName = String(draft.tableName || msg.sourceTableName || selectedTableName?.value || '').trim()
+  if (!tableName) {
+    ElMessage.warning('缺少预警规则所属数据源，无法创建规则')
+    return
+  }
+  const draftKey = alertDraftKey(draft)
+  savingAlertDraftKey.value = draftKey
+  try {
+    const fieldMeta = await fetchAdvancedAnalysisFieldMeta({ tableName })
+    const confirmedAlert = await confirmAlertParams(fieldMeta, {
+      tableName,
+      timeField: pickFieldName(fieldMeta?.timeFields || [], draft.timeField, ''),
+      metricField: pickFieldName(fieldMeta?.numericFields || [], draft.metricField, ''),
+      filterExpression: draft.filterExpression || '',
+      granularity: draft.granularity || 'month',
+      operator: draft.operator || 'lt',
+      threshold: draft.threshold,
+      detectionCycle: draft.detectionCycle || 'daily',
+      channels: Array.isArray(draft.channels) ? draft.channels : [],
+      channel: Array.isArray(draft.channels) ? '' : draft.channel || 'both'
+    })
+    if (!confirmedAlert) {
+      return
+    }
+    const savedRule = await saveAdvancedAlertRule({
+      ...confirmedAlert,
+      sourceQuestion: draft.sourceQuestion || msg.sourceQuestion || ''
+    })
+    const analysis = buildAnalysisFromSavedAlertRule(
+      savedRule,
+      draft.sourceQuestion || msg.sourceQuestion || '预警规则',
+      confirmedAlert,
+      { metricField: confirmedAlert.metricField },
+      fieldMeta
+    )
+    const record = withAdvancedChartRecommendation(analysis)
+    advancedAnalysisHistory.value = [record, ...advancedAnalysisHistory.value.filter(item => item.id !== record.id)].slice(0, 20)
+    activeAdvancedAnalysis.value = record
+    replaceAlertDraftMessageWithCreatedRule(msg, record, savedRule)
+    try {
+      const persisted = await persistAlertDraftCreatedState(msg, record, savedRule)
+      if (persisted?.artifactId && msg) {
+        msg.artifactId = String(persisted.artifactId)
+      }
+    } catch (persistError) {
+      console.warn('persist alert draft created state failed:', persistError)
+      ElMessage.warning('预警规则已创建，但会话卡片状态保存失败，刷新后可能需要重新进入预警规则管理查看')
+    }
+    advancedAnalysisDialogVisible.value = true
+    await loadAdvancedAlertRules()
+    ElMessage.success('预警规则已创建')
+  } catch (error) {
+    ElMessage.error(`创建预警规则失败：${error.message || '未知原因'}`)
+  } finally {
+    if (savingAlertDraftKey.value === draftKey) {
+      savingAlertDraftKey.value = ''
+    }
+  }
+}
+
 const buildAnalysisFromRealForecast = (result, text, params, llmIntent, fieldMeta = {}) => {
   const metric = String(llmIntent?.metric || result?.metricField || '').trim() || inferMetricFromQuestion(text)
   const forecastRows = Array.isArray(result?.series) ? result.series.filter(item => item?.forecast != null) : []
@@ -2920,7 +3231,7 @@ const buildAnalysisFromRealForecast = (result, text, params, llmIntent, fieldMet
     summary: '已基于真实历史数据生成预测结果，预测值与置信区间由后端算法计算。',
     tableName: result?.tableName || selectedTableName?.value || '',
     metric: formatAnalysisMetricLabel(result?.metricField || llmIntent?.metricField || metric, metric, fieldMeta?.numericFields),
-    timeRange: result?.granularity || params.horizon || '自定义周期',
+    timeRange: forecastTimeRangeLabel(params.horizon, result?.granularity || params.granularity || 'month'),
     status: '真实计算',
     chartRecommendation: result?.chartRecommendation,
     chartRuleCode: result?.chartRuleCode,
@@ -3055,8 +3366,10 @@ const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = 
   try {
       const fieldMeta = await fetchAdvancedAnalysisFieldMeta({ tableName }, signal ? { signal } : undefined)
     if (type === 'forecast') {
+      const granularity = normalizeForecastGranularity(llmIntent.granularity || params.granularity || inferForecastGranularity(text))
       const mergedParams = {
-        horizon: params.horizon || llmIntent.horizon || inferForecastHorizon(text),
+        granularity,
+        horizon: normalizeHorizonCount(params.horizon || llmIntent.horizon || null, granularity, text),
         algorithm: params.algorithm || llmIntent.algorithm || 'Holt-Winters',
         confidence: params.confidence || llmIntent.confidence || '95%',
         alpha: params.alpha ?? 0.55,
@@ -3072,8 +3385,8 @@ const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = 
         timeField: pickFieldName(fieldMeta?.timeFields || [], timeField, ''),
         metricField: pickFieldName(fieldMeta?.numericFields || [], metricField, ''),
         filterExpression: params.filterExpression || llmIntent.filterExpression || '',
-        granularity: llmIntent.granularity || 'month',
-        horizon: normalizeHorizonCount(mergedParams.horizon),
+        granularity: mergedParams.granularity,
+        horizon: mergedParams.horizon,
         algorithm: mergedParams.algorithm,
         alpha: mergedParams.alpha,
         beta: mergedParams.beta,
@@ -3105,7 +3418,7 @@ const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = 
           tableName,
           metric,
           series: chartSeries,
-          horizon: normalizeHorizonCount(mergedParams.horizon),
+          horizon: mergedParams.horizon,
           algorithm: mergedParams.algorithm,
           alpha: mergedParams.alpha,
           beta: mergedParams.beta,
@@ -3216,8 +3529,10 @@ const createAdvancedAnalysis = (type, text, params = {}, llmIntent = {}) => {
   const tableName = String(selectedTableName?.value || lastAnalysis?.value?.tableName || '').trim()
   const id = `advanced-${Date.now()}-${Math.random().toString(16).slice(2)}`
   if (type === 'forecast') {
+    const granularity = normalizeForecastGranularity(llmIntent.granularity || params.granularity || inferForecastGranularity(text))
     const mergedParams = {
-      horizon: params.horizon || llmIntent.horizon || inferForecastHorizon(text),
+      granularity,
+      horizon: normalizeHorizonCount(params.horizon || llmIntent.horizon || null, granularity, text),
       algorithm: params.algorithm || llmIntent.algorithm || 'Prophet',
       confidence: params.confidence || llmIntent.confidence || '95%'
     }
@@ -3233,7 +3548,7 @@ const createAdvancedAnalysis = (type, text, params = {}, llmIntent = {}) => {
         : `基于当前对话上下文生成${mergedParams.confidence}置信区间预测曲线，可调整周期和算法后重新计算。`,
       tableName,
       metric,
-      timeRange: mergedParams.horizon === '6m' ? '未来 6 个月' : mergedParams.horizon === '30d' ? '未来 30 天' : mergedParams.horizon === '7d' ? '未来 7 天' : '未来 3 个月',
+      timeRange: forecastTimeRangeLabel(mergedParams.horizon, mergedParams.granularity),
       status: llmIntent.simulated ? '模拟生成' : '已生成',
       params: mergedParams,
       explanation: buildForecastCardExplanation({
@@ -3382,7 +3697,7 @@ const buildAdvancedAnalysisMessage = (analysis, userText = '', thinkingLogs = []
     advancedAnalysis: normalized,
     sourceQuestion: userText,
     sourceTableName: normalized.tableName || selectedTableName?.value || '',
-    thinkingLogs: Array.isArray(thinkingLogs) ? thinkingLogs.slice(0, 12) : [],
+    thinkingLogs: Array.isArray(thinkingLogs) ? thinkingLogs.slice(0, ADVANCED_THINKING_LOG_LIMIT) : [],
     thinkingCollapsed: true
   }
 }
@@ -3435,7 +3750,7 @@ const persistAdvancedAnalysisMessage = async (message, analysis, userText = '', 
     analysis: withAdvancedChartRecommendation(analysis),
     message: message.content,
     llmIntent: llmIntent || {},
-    thinkingLogs: Array.isArray(thinkingLogs) ? thinkingLogs.slice(0, 12) : [],
+    thinkingLogs: Array.isArray(thinkingLogs) ? thinkingLogs.slice(0, ADVANCED_THINKING_LOG_LIMIT) : [],
     clientMessageId
   }
   try {
@@ -3467,6 +3782,59 @@ const persistAdvancedAnalysisMessage = async (message, analysis, userText = '', 
 const pushAdvancedAnalysisMessage = (analysis, userText = '') => {
   messages.value.push(buildAdvancedAnalysisMessage(analysis, userText))
   scrollChatToBottom()
+}
+
+const replaceAlertDraftMessageWithCreatedRule = (message, analysis, savedRule) => {
+  if (!message || !analysis) return
+  const index = (messages.value || []).indexOf(message)
+  const nextMessage = {
+    ...message,
+    content: '预警规则已创建，可在预警规则管理中查看和维护。',
+    alertRuleDraft: null,
+    alertRuleCreated: {
+      id: savedRule?.id,
+      title: analysis.title,
+      metricField: analysis.params?.metricField || savedRule?.metricField || '',
+      timeField: analysis.params?.timeField || savedRule?.timeField || '',
+      operator: analysis.params?.operator || savedRule?.operator || '',
+      threshold: analysis.params?.threshold ?? savedRule?.threshold,
+      channels: analysis.params?.channels || savedRule?.channels || []
+    },
+    advancedAnalysis: withAdvancedChartRecommendation(analysis),
+    analysisSnapshot: null,
+    clickableChart: false,
+    chatRecordStatus: 'saved'
+  }
+  if (index >= 0) {
+    messages.value.splice(index, 1, nextMessage)
+  } else {
+    Object.assign(message, nextMessage)
+  }
+}
+
+const persistAlertDraftCreatedState = async (message, analysis, savedRule) => {
+  const conversationId = message?.conversationId || activeChatSessionId?.value
+  const assistantTurnId = message?.turnId || message?.assistantTurnId
+  if (!conversationId || !assistantTurnId) {
+    return null
+  }
+  const alertRuleCreated = {
+    id: savedRule?.id,
+    title: analysis.title,
+    metricField: analysis.params?.metricField || savedRule?.metricField || '',
+    timeField: analysis.params?.timeField || savedRule?.timeField || '',
+    operator: analysis.params?.operator || savedRule?.operator || '',
+    threshold: analysis.params?.threshold ?? savedRule?.threshold,
+    channels: analysis.params?.channels || savedRule?.channels || []
+  }
+  return axios.post(`${API_BASE}/api/chat/alert-rule-created`, {
+    conversationId,
+    assistantTurnId,
+    artifactId: message?.artifactId || null,
+    message: '预警规则已创建，可在预警规则管理中查看和维护。',
+    alertRuleCreated,
+    advancedAnalysis: withAdvancedChartRecommendation(analysis)
+  }).then(unwrap)
 }
 
 const alertEventStatusLabel = (status) => {
@@ -3643,6 +4011,10 @@ const openAdvancedAnalysisDialog = (analysis) => {
 
 const sendChatQuestion = async () => {
   const text = String(question?.value || '').trim()
+  if (shouldUseSmartMultiStepOrchestration(text)) {
+    await sendQuestion()
+    return
+  }
   const localIntent = inferAdvancedIntent(text)
   if (!localIntent) {
     await sendQuestion()
@@ -3686,7 +4058,7 @@ const sendChatQuestion = async () => {
     messages.value.splice(placeholderIndex, 1, {
       ...current,
       content: `高级分析处理中（${thinkingLogs.length}步）· 当前：${line}`,
-      thinkingLogs: thinkingLogs.slice(0, 12),
+      thinkingLogs: thinkingLogs.slice(0, ADVANCED_THINKING_LOG_LIMIT),
       thinkingCollapsed: false,
       sourceTableName: selectedTableName?.value || lastAnalysis?.value?.tableName || ''
     })
@@ -3729,7 +4101,7 @@ const sendChatQuestion = async () => {
       messages.value.splice(placeholderIndex, 1, {
         role: 'system',
         content: '已手动停止本次生成。',
-        thinkingLogs: thinkingLogs.slice(0, 12),
+        thinkingLogs: thinkingLogs.slice(0, ADVANCED_THINKING_LOG_LIMIT),
         thinkingCollapsed: true,
         sourceTableName: selectedTableName?.value || lastAnalysis?.value?.tableName || ''
       })
@@ -3745,7 +4117,7 @@ const sendChatQuestion = async () => {
       messages.value.splice(placeholderIndex, 1, {
         role: 'system',
         content: '已手动停止本次生成。',
-        thinkingLogs: thinkingLogs.slice(0, 12),
+        thinkingLogs: thinkingLogs.slice(0, ADVANCED_THINKING_LOG_LIMIT),
         thinkingCollapsed: true,
         sourceTableName: selectedTableName?.value || lastAnalysis?.value?.tableName || ''
       })
@@ -3756,7 +4128,7 @@ const sendChatQuestion = async () => {
     messages.value.splice(placeholderIndex, 1, {
       role: 'system',
       content: `生成预测与情景模拟卡片失败：${message}`,
-      thinkingLogs: thinkingLogs.slice(0, 12),
+      thinkingLogs: thinkingLogs.slice(0, ADVANCED_THINKING_LOG_LIMIT),
       thinkingCollapsed: true,
       sourceTableName: selectedTableName?.value || lastAnalysis?.value?.tableName || ''
     })
@@ -4131,9 +4503,97 @@ const runAdvancedAlertRuleDetection = async (rule) => {
   }
 }
 
-const pinAdvancedAnalysis = (analysis) => {
-  saveAdvancedAnalysis(analysis)
-  ElMessage.success('已生成可钉入看板的预测图表记录')
+const hasPinnableAnalysisSource = (analysis = {}) => Boolean(
+  analysis?.artifactId
+  || analysis?.assistantTurnId
+  || analysis?.turnId
+  || analysis?.queryHistoryId
+  || analysis?.chartId
+  || analysis?.historyId
+)
+
+const mergeAdvancedRecordIntoPinSource = (source = {}, record = {}) => ({
+  ...source,
+  conversationId: record.conversationId == null ? source.conversationId : String(record.conversationId),
+  userTurnId: record.userTurnId == null ? source.userTurnId : String(record.userTurnId),
+  assistantTurnId: record.assistantTurnId == null ? source.assistantTurnId : String(record.assistantTurnId),
+  turnId: record.assistantTurnId == null ? source.turnId : String(record.assistantTurnId),
+  artifactId: record.artifactId == null ? source.artifactId : String(record.artifactId)
+})
+
+const findAdvancedAnalysisMessage = (analysisId) =>
+  (messages.value || []).find(item => item?.advancedAnalysis?.id === analysisId)
+
+const mergeMessageContextIntoPinSource = (source = {}, message = {}) => ({
+  ...source,
+  ...(message.advancedAnalysis || {}),
+  sourceQuestion: message.sourceQuestion || source.sourceQuestion || source.title || '',
+  sourceTableName: message.sourceTableName || source.sourceTableName || source.tableName || '',
+  conversationId: message.conversationId || source.conversationId,
+  userTurnId: message.userTurnId || source.userTurnId,
+  assistantTurnId: message.assistantTurnId || message.turnId || source.assistantTurnId,
+  turnId: message.turnId || message.assistantTurnId || source.turnId,
+  artifactId: message.artifactId || source.artifactId
+})
+
+const ensureAdvancedAnalysisPinnableSource = async (analysis) => {
+  let source = withAdvancedChartRecommendation(analysis)
+  const targetMessage = findAdvancedAnalysisMessage(analysis.id)
+  if (targetMessage?.advancedAnalysis) {
+    source = mergeMessageContextIntoPinSource(source, targetMessage)
+  }
+  if (hasPinnableAnalysisSource(source)) {
+    return { source, targetMessage }
+  }
+
+  const userText = targetMessage?.sourceQuestion || source.sourceQuestion || source.title || '高级分析图表'
+  const thinkingLogs = Array.isArray(targetMessage?.thinkingLogs) ? targetMessage.thinkingLogs : []
+  const messageForPersist = targetMessage && !['saved', 'saving'].includes(targetMessage.chatRecordStatus)
+    ? targetMessage
+    : buildAdvancedAnalysisMessage(source, userText, thinkingLogs)
+  const record = await persistAdvancedAnalysisMessage(
+    messageForPersist,
+    source,
+    userText,
+    thinkingLogs,
+    source.llmIntent || {}
+  )
+  if (record) {
+    source = mergeAdvancedRecordIntoPinSource(source, record)
+  }
+  if (targetMessage?.advancedAnalysis) {
+    targetMessage.advancedAnalysis = {
+      ...targetMessage.advancedAnalysis,
+      ...source
+    }
+    targetMessage.conversationId = source.conversationId || targetMessage.conversationId
+    targetMessage.userTurnId = source.userTurnId || targetMessage.userTurnId
+    targetMessage.assistantTurnId = source.assistantTurnId || targetMessage.assistantTurnId
+    targetMessage.turnId = source.turnId || targetMessage.turnId
+    targetMessage.artifactId = source.artifactId || targetMessage.artifactId
+  }
+  if (!hasPinnableAnalysisSource(source)) {
+    throw new Error('当前预测卡片还没有生成可钉入的会话产物，请重新生成预测后再试')
+  }
+  return { source, targetMessage }
+}
+
+const pinAdvancedAnalysis = async (analysis) => {
+  if (!analysis?.id) return
+  try {
+    const { source, targetMessage } = await ensureAdvancedAnalysisPinnableSource(analysis)
+    const opened = await openPinDialogForAnalysis?.(source)
+    if (!opened) return
+    advancedAnalysisDialogVisible.value = false
+    if (targetMessage?.advancedAnalysis) {
+      targetMessage.advancedAnalysis = source
+    }
+    if (activeAdvancedAnalysis.value?.id === analysis.id) {
+      activeAdvancedAnalysis.value = source
+    }
+  } catch (error) {
+    ElMessage.error(error.message || '打开钉入看板失败')
+  }
 }
 
 const restoreAdvancedAnalysis = (analysis) => {
@@ -4167,6 +4627,21 @@ const currentChatSessionSubtitle = computed(() => {
   }
   return parts.join(' · ')
 })
+
+const isMessageChartRestorable = (msg) => {
+  if (!msg || msg.role !== 'system') return false
+  const snapshot = msg.analysisSnapshot
+  if (msg.clickableChart) return true
+  if (snapshot && Array.isArray(snapshot.data) && snapshot.data.length) return true
+  return Boolean(
+    msg.queryHistoryId
+    || msg.chartId
+    || msg.historyId
+    || snapshot?.queryHistoryId
+    || snapshot?.chartId
+    || snapshot?.historyId
+  )
+}
 
 const historyDrawerVisible = ref(false)
 const selectedHistoryId = ref('')
@@ -6017,6 +6492,124 @@ onBeforeUnmount(() => {
   font-family: Consolas, 'Courier New', monospace;
   word-break: break-word;
 }
+.alert-draft-card {
+  width: min(620px, 100%);
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  background: #fffaf3;
+}
+.alert-draft-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.alert-draft-card__eyebrow {
+  color: #b45309;
+  font-size: 12px;
+  font-weight: 700;
+}
+.alert-draft-card__title {
+  margin-top: 2px;
+  color: #111827;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.45;
+  word-break: break-word;
+}
+.alert-draft-card__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 8px;
+}
+.alert-draft-card__grid div {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  background: #ffffff;
+}
+.alert-draft-card__grid span {
+  display: block;
+  color: #78716c;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.alert-draft-card__grid strong {
+  display: block;
+  margin-top: 3px;
+  color: #1f2937;
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+.alert-draft-card__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #fde68a;
+}
+.alert-draft-card__hint {
+  min-width: 0;
+  margin: 0;
+  color: #92400e;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.alert-draft-card__confirm {
+  flex: 0 0 auto;
+  height: 28px;
+  padding: 0 12px;
+  border-color: #f59e0b;
+  background: #fffbeb;
+  color: #92400e;
+  font-weight: 700;
+}
+.alert-draft-card__confirm:hover,
+.alert-draft-card__confirm:focus {
+  border-color: #d97706;
+  background: #fef3c7;
+  color: #78350f;
+}
+.alert-draft-card__confirm:active {
+  border-color: #b45309;
+  background: #fde68a;
+  color: #78350f;
+}
+.alert-draft-card__confirm.is-loading {
+  color: #92400e;
+}
+.alert-created-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  width: min(620px, 100%);
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  background: #f0fdf4;
+}
+.alert-created-card__eyebrow {
+  color: #15803d;
+  font-size: 12px;
+  font-weight: 700;
+}
+.alert-created-card__title {
+  margin-top: 2px;
+  color: #14532d;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.45;
+  word-break: break-word;
+}
 .advanced-dialog-entry {
   display: flex;
   flex-direction: column;
@@ -6367,6 +6960,13 @@ onBeforeUnmount(() => {
   .advanced-dialog-entry {
     align-items: stretch;
     grid-template-columns: 1fr;
+  }
+  .alert-draft-card__footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .alert-draft-card__confirm {
+    width: 100%;
   }
   .advanced-dialog-entry__rule {
     grid-template-columns: 1fr;

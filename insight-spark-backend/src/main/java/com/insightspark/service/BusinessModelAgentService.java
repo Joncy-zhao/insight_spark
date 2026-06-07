@@ -981,19 +981,26 @@ public class BusinessModelAgentService {
                 default -> {
                     Map<String, Object> existing = findByName(existingMetricDefinitions, "name", name);
                     Map<String, Object> materialized = new LinkedHashMap<>();
-                    materialized.put("semanticAction", semanticAction.isBlank() ? "FIELD_BINDING" : semanticAction);
+                    String resolvedSemanticAction = semanticAction.isBlank() ? "FIELD_BINDING" : semanticAction.toUpperCase(Locale.ROOT);
+                    String resolvedField = field.isBlank() && existing != null
+                            ? trim(Objects.toString(existing.get("field"), ""))
+                            : field;
+                    boolean fieldBindingAction = "FIELD_BINDING".equals(resolvedSemanticAction);
                     materialized.put("targetType", "metricDefinition");
+                    materialized.put("semanticAction", resolvedSemanticAction);
                     materialized.put("action", action);
                     materialized.put("name", name);
-                    materialized.put("field", field.isBlank() && existing != null
-                            ? trim(Objects.toString(existing.get("field"), ""))
-                            : field);
-                    materialized.put("aggregation", existing == null
+                    materialized.put("field", resolvedField);
+                    materialized.put("aggregation", fieldBindingAction
+                            ? inferAggregation(name, resolvedField)
+                            : (existing == null
                             ? "SUM"
-                            : trim(Objects.toString(existing.get("aggregation"), "SUM")).toUpperCase(Locale.ROOT));
-                    materialized.put("formula", existing == null
-                            ? field
-                            : trim(Objects.toString(existing.get("formula"), field)));
+                            : trim(Objects.toString(existing.get("aggregation"), "SUM")).toUpperCase(Locale.ROOT)));
+                    materialized.put("formula", fieldBindingAction
+                            ? resolvedField
+                            : (existing == null
+                            ? resolvedField
+                            : trim(Objects.toString(existing.get("formula"), resolvedField))));
                     result.add(materialized);
                 }
             }
@@ -1063,7 +1070,7 @@ public class BusinessModelAgentService {
                 if (metricName.isBlank()) {
                     metricName = extractPrimaryMetricTarget(question, existingMetricDefinitions);
                 }
-                String formula = resolveMetricFormulaFromQuestion(question, copy, fields, metricName);
+                String formula = resolveMetricFormulaFromQuestion(question, copy, fields, existingMetricDefinitions, metricName);
                 copy.put("targetType", "metricDefinition");
                 copy.put("name", metricName);
                 copy.put("formula", formula);
@@ -1104,7 +1111,7 @@ public class BusinessModelAgentService {
         }
         if (!hasMetricUpdate && (isMetricScopeExpression(question) || looksLikeMetricFormulaExpression(question))) {
             String metricName = extractPrimaryMetricTarget(question, existingMetricDefinitions);
-            String formula = resolveMetricFormulaFromQuestion(question, Map.of(), fields, metricName);
+            String formula = resolveMetricFormulaFromQuestion(question, Map.of(), fields, existingMetricDefinitions, metricName);
             if (!metricName.isBlank() && !formula.isBlank()) {
                 Map<String, Object> operation = new LinkedHashMap<>();
                 operation.put("targetType", "metricDefinition");
@@ -1200,10 +1207,15 @@ public class BusinessModelAgentService {
                                                                  List<Map<String, Object>> existingDimensionDefinitions) {
         boolean scopeOrFormulaIntent = isMetricScopeExpression(question) || looksLikeMetricFormulaExpression(question);
         List<String> mentionedMetricNames = extractMentionedNames(question, existingMetricDefinitions, "name");
-        if (mentionedMetricNames.isEmpty() && scopeOrFormulaIntent) {
-            String metricTarget = extractPrimaryMetricTarget(question, existingMetricDefinitions);
+        if (scopeOrFormulaIntent) {
+            String metricTarget = extractMetricTargetBySyntax(question);
             if (!metricTarget.isBlank()) {
                 mentionedMetricNames = List.of(metricTarget);
+            } else if (mentionedMetricNames.isEmpty()) {
+                metricTarget = extractPrimaryMetricTarget(question, existingMetricDefinitions);
+                if (!metricTarget.isBlank()) {
+                    mentionedMetricNames = List.of(metricTarget);
+                }
             }
         }
         List<String> mentionedDictionaryTerms = extractMentionedNames(question, existingDictionaryEntries, "term");
@@ -1257,7 +1269,7 @@ public class BusinessModelAgentService {
         }
         String formula = trim(Objects.toString(operation.get("formula"), ""));
         if (formula.isBlank() || formula.equals(metricName)) {
-            formula = resolveMetricFormulaFromQuestion(question, operation, fields, metricName);
+            formula = resolveMetricFormulaFromQuestion(question, operation, fields, existingMetricDefinitions, metricName);
             operation.put("formula", formula);
         }
         String scopeExpression = extractScopeOrFormulaExpression(question, metricName);
@@ -1372,11 +1384,25 @@ public class BusinessModelAgentService {
     }
 
     private String extractPrimaryMetricTarget(String question, List<Map<String, Object>> existingMetricDefinitions) {
+        String syntacticTarget = extractMetricTargetBySyntax(question);
+        if (!syntacticTarget.isBlank()) {
+            return syntacticTarget;
+        }
         List<String> mentioned = extractMentionedNames(question, existingMetricDefinitions, "name");
         if (!mentioned.isEmpty()) {
-            return mentioned.get(0);
+            return mentioned.stream()
+                    .max(Comparator.comparingInt(String::length))
+                    .orElse(mentioned.get(0));
         }
-        java.util.regex.Matcher matcher = Pattern.compile("(?:以后|后续|之后)?(?:报表里(?:的)?|模型里(?:的)?|指标)?\\s*([\\u4e00-\\u9fa5A-Za-z0-9_]{2,20}?)(?:统一用|统一按|按|按照|口径|改成|改为|算作|当作|就按|来算)").matcher(question);
+        return "";
+    }
+
+    private String extractMetricTargetBySyntax(String question) {
+        java.util.regex.Matcher matcher = Pattern.compile("(?:新增|增加|添加|补充)?(?:指标公式|业务公式|公式)?\\s*[：:]?\\s*([\\u4e00-\\u9fa5A-Za-z0-9_]{1,20})\\s*[=＝]").matcher(question);
+        if (matcher.find()) {
+            return cleanBusinessItemName(matcher.group(1));
+        }
+        matcher = Pattern.compile("(?:以后|后续|之后)?(?:报表里(?:的)?|模型里(?:的)?|指标)?\\s*([\\u4e00-\\u9fa5A-Za-z0-9_]{2,20}?)(?:统一用|统一按|按|按照|口径|改成|改为|算作|当作|就按|来算)").matcher(question);
         if (matcher.find()) {
             return cleanBusinessItemName(matcher.group(1));
         }
@@ -1384,7 +1410,7 @@ public class BusinessModelAgentService {
         if (matcher.find()) {
             return cleanBusinessItemName(matcher.group(1));
         }
-        matcher = Pattern.compile("(?:新增|增加|添加|补充)?(?:指标公式|业务公式|公式)?\\s*[：:]?\\s*([\\u4e00-\\u9fa5A-Za-z0-9_]{1,20})\\s*[=＝]").matcher(question);
+        matcher = Pattern.compile("(?:将|把)?\\s*([\\u4e00-\\u9fa5A-Za-z0-9_]{2,20}?)(?:的)?(?:公式|口径)(?:改成|改为|设为|设置为|更新为)").matcher(question);
         if (matcher.find()) {
             return cleanBusinessItemName(matcher.group(1));
         }
@@ -1394,10 +1420,11 @@ public class BusinessModelAgentService {
     private String resolveMetricFormulaFromQuestion(String question,
                                                     Map<String, Object> operation,
                                                     List<Map<String, Object>> fields,
+                                                    List<Map<String, Object>> existingMetricDefinitions,
                                                     String metricName) {
         String formula = trim(Objects.toString(operation.get("formula"), ""));
         if (!formula.isBlank() && !formula.equals(metricName)) {
-            return rewriteFormulaToFieldNames(formula, fields);
+            return rewriteFormulaToFieldNames(formula, fields, existingMetricDefinitions, metricName);
         }
         String expression = extractScopeOrFormulaExpression(question, metricName);
         if (expression.isBlank()) {
@@ -1406,7 +1433,7 @@ public class BusinessModelAgentService {
         if (expression.isBlank()) {
             return "";
         }
-        return rewriteFormulaToFieldNames(normalizeFormulaPhrase(expression), fields);
+        return rewriteFormulaToFieldNames(normalizeFormulaPhrase(expression), fields, existingMetricDefinitions, metricName);
     }
 
     private String extractScopeOrFormulaExpression(String question, String metricName) {
@@ -1476,6 +1503,13 @@ public class BusinessModelAgentService {
     }
 
     private String rewriteFormulaToFieldNames(String formula, List<Map<String, Object>> fields) {
+        return rewriteFormulaToFieldNames(formula, fields, List.of(), "");
+    }
+
+    private String rewriteFormulaToFieldNames(String formula,
+                                              List<Map<String, Object>> fields,
+                                              List<Map<String, Object>> existingMetricDefinitions,
+                                              String currentMetricName) {
         String rewritten = trim(formula);
         if (rewritten.isBlank()) {
             return "";
@@ -1492,14 +1526,41 @@ public class BusinessModelAgentService {
         for (String token : tokens) {
             Map<String, Object> field = resolveUniqueField(token, fields);
             if (field == null) {
+                String metricReference = resolveMetricReferenceFormula(token, existingMetricDefinitions, currentMetricName);
+                if (metricReference.isBlank()) {
+                    continue;
+                }
+                rewritten = rewritten.replaceAll("(?<![A-Za-z0-9_\\u4e00-\\u9fa5])" + Pattern.quote(token) + "(?![A-Za-z0-9_\\u4e00-\\u9fa5])", java.util.regex.Matcher.quoteReplacement(metricReference));
                 continue;
             }
             String columnName = trim(Objects.toString(field.get("columnName"), ""));
             if (!columnName.isBlank()) {
-                rewritten = rewritten.replaceAll("(?<![A-Za-z0-9_\\u4e00-\\u9fa5])" + Pattern.quote(token) + "(?![A-Za-z0-9_\\u4e00-\\u9fa5])", columnName);
+                rewritten = rewritten.replaceAll("(?<![A-Za-z0-9_\\u4e00-\\u9fa5])" + Pattern.quote(token) + "(?![A-Za-z0-9_\\u4e00-\\u9fa5])", java.util.regex.Matcher.quoteReplacement(columnName));
             }
         }
         return rewritten.trim();
+    }
+
+    private String resolveMetricReferenceFormula(String token,
+                                                 List<Map<String, Object>> existingMetricDefinitions,
+                                                 String currentMetricName) {
+        if (normalize(token).equals(normalize(currentMetricName))) {
+            return "";
+        }
+        Map<String, Object> metric = findByName(existingMetricDefinitions, "name", token);
+        if (metric == null) {
+            return "";
+        }
+        String field = trim(Objects.toString(metric.get("field"), ""));
+        if (!field.isBlank()) {
+            return field;
+        }
+        String formula = trim(Objects.toString(metric.get("formula"), ""));
+        if (formula.isBlank()) {
+            return "";
+        }
+        String value = normalizeFormulaPhrase(formula);
+        return value.matches(".*[+\\-*/].*") ? "(" + value + ")" : value;
     }
 
     private String resolvePrimaryFormulaField(String formula, List<Map<String, Object>> fields) {
@@ -1679,6 +1740,8 @@ public class BusinessModelAgentService {
             String name = resolveBindingName(operation);
             String field = extractBusinessModelFieldRef(operation);
             String resolvedType = resolveBindingResultType(targetType, bindingType, operation);
+            String semanticAction = resolveBindingResultSemanticAction(targetType, bindingType, resolvedType, operation);
+            String formula = trim(Objects.toString(operation.get("formula"), ""));
             if (name.isBlank()) {
                 continue;
             }
@@ -1691,6 +1754,9 @@ public class BusinessModelAgentService {
                 Map<String, Object> row = findByName(metricDefinitions, "name", name);
                 if (row != null) {
                     field = trim(Objects.toString(row.get("field"), field));
+                    if (formula.isBlank()) {
+                        formula = trim(Objects.toString(row.get("formula"), ""));
+                    }
                 }
             } else if ("dimensionDefinition".equals(resolvedType)) {
                 Map<String, Object> row = findByName(dimensionDefinitions, "name", name);
@@ -1701,15 +1767,46 @@ public class BusinessModelAgentService {
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("name", name);
             result.put("field", field);
-            result.put("formula", trim(Objects.toString(operation.get("formula"), "")));
+            result.put("formula", shouldExposeFormulaInBindingResult(semanticAction) ? formula : "");
             result.put("fieldDisplayName", resolveFieldDisplayName(field, fields));
             result.put("targetType", resolvedType);
-            result.put("semanticAction", trim(Objects.toString(operation.get("semanticAction"), "")));
+            result.put("semanticAction", semanticAction);
             result.put("action", action);
-            result.put("label", buildBindingTargetLabel(resolvedType, name));
+            result.put("label", buildBindingTargetLabel(resolvedType, name, semanticAction));
             results.add(result);
         }
         return deduplicateBindingResults(results);
+    }
+
+    private String resolveBindingResultSemanticAction(String targetType,
+                                                      String bindingType,
+                                                      String resolvedType,
+                                                      Map<String, Object> operation) {
+        String explicit = trim(Objects.toString(operation.get("semanticAction"), "")).toUpperCase(Locale.ROOT);
+        if (!explicit.isBlank()) {
+            return explicit;
+        }
+        if ("fieldBinding".equals(targetType)) {
+            if ("dimensionDefinition".equals(bindingType) || "dimensionDefinition".equals(resolvedType)) {
+                return "DIMENSION_BINDING";
+            }
+            return "FIELD_BINDING";
+        }
+        if ("dimensionDefinition".equals(resolvedType)) {
+            return "DIMENSION_BINDING";
+        }
+        if ("dictionaryEntry".equals(resolvedType)) {
+            return "DICTIONARY_UPSERT";
+        }
+        if ("metricDefinition".equals(resolvedType)) {
+            return "METRIC_FORMULA_UPDATE";
+        }
+        return "FIELD_BINDING";
+    }
+
+    private boolean shouldExposeFormulaInBindingResult(String semanticAction) {
+        String action = trim(semanticAction).toUpperCase(Locale.ROOT);
+        return "METRIC_FORMULA_UPDATE".equals(action) || "METRIC_SCOPE_UPDATE".equals(action);
     }
 
     private String resolveFieldDisplayName(String field, List<Map<String, Object>> fields) {
@@ -1795,7 +1892,23 @@ public class BusinessModelAgentService {
         return trim(Objects.toString(operation.get("term"), ""));
     }
 
-    private String buildBindingTargetLabel(String targetType, String name) {
+    private String buildBindingTargetLabel(String targetType, String name, String semanticAction) {
+        String action = trim(semanticAction).toUpperCase(Locale.ROOT);
+        if ("FIELD_BINDING".equals(action)) {
+            return "字段绑定：" + name;
+        }
+        if ("METRIC_SCOPE_UPDATE".equals(action)) {
+            return "指标口径：" + name;
+        }
+        if ("METRIC_FORMULA_UPDATE".equals(action)) {
+            return "指标公式：" + name;
+        }
+        if ("DIMENSION_BINDING".equals(action)) {
+            return "业务维度：" + name;
+        }
+        if ("DICTIONARY_UPSERT".equals(action)) {
+            return "业务字典：" + name;
+        }
         return switch (targetType) {
             case "dictionaryEntry" -> "业务字典：" + name;
             case "dimensionDefinition" -> "业务维度：" + name;

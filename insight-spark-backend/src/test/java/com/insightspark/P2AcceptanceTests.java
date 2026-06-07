@@ -155,6 +155,32 @@ class P2AcceptanceTests {
     }
 
     @Test
+    void topNIntentSupportsArbitraryRankCountAndDimensionCorrection() {
+        ChatBiService service = new ChatBiService();
+        List<Map<String, Object>> fields = List.of(
+                field("col_003", "订单日期", "order_date", "DATE"),
+                field("col_007", "城市", "city", "TEXT"),
+                field("col_010", "省份", "province", "TEXT"),
+                field("col_017", "销售额", "sales_amt", "NUMBER")
+        );
+        String badSql = "SELECT `col_010` AS dim_name, SUM(CAST(NULLIF(`col_017`, '') AS DECIMAL(18,2))) AS metric_value "
+                + "FROM `biz_data_1778420417028500` WHERE `col_010` IS NOT NULL AND `col_010` <> '' "
+                + "GROUP BY `col_010` ORDER BY metric_value DESC LIMIT 30";
+
+        Object correction = ReflectionTestUtils.invokeMethod(service, "applySemanticSqlGuard",
+                "销售额最高的前13个城市是哪些", "biz_data_1778420417028500", fields, badSql, "bar",
+                Map.of("dimensionKey", "col_010", "metricKey", "col_017"), new ArrayList<String>());
+
+        String sql = ReflectionTestUtils.invokeMethod(correction, "sql");
+        Map<?, ?> fieldMapping = ReflectionTestUtils.invokeMethod(correction, "fieldMapping");
+        assertNotNull(sql);
+        assertTrue(sql.contains("`col_007` AS dim_name"));
+        assertTrue(sql.contains("GROUP BY `col_007`"));
+        assertTrue(sql.contains("ORDER BY metric_value DESC LIMIT 13"));
+        assertEquals("col_007", fieldMapping.get("dimensionKey"));
+    }
+
+    @Test
     void mixedGeoValuesUseDataProfileBindingsForComparableObjects() {
         ChatBiService service = new ChatBiService();
         org.springframework.jdbc.core.JdbcTemplate jdbcTemplate = org.mockito.Mockito.mock(org.springframework.jdbc.core.JdbcTemplate.class);
@@ -555,6 +581,355 @@ class P2AcceptanceTests {
     }
 
     @Test
+    void smartChatOrchestratesQueryThenForecastForCompositeTrendRequest() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        ChatBiService chatBiService = org.mockito.Mockito.mock(ChatBiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "chatBiService", chatBiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(chatBiService.executeChat(org.mockito.Mockito.any(ChatBiService.ChatQueryRequest.class))).thenReturn(new java.util.HashMap<>(Map.of(
+                "message", "趋势查询完成",
+                "sql", "SELECT DATE_FORMAT(order_date, '%Y-%m'), SUM(sales_amt) FROM sales_order GROUP BY 1",
+                "chartType", "line",
+                "data", List.of(Map.of("name", "2026-01", "value", 100))
+        )));
+        org.mockito.Mockito.when(advancedAnalysisService.forecast(org.mockito.Mockito.anyMap())).thenReturn(Map.of(
+                "type", "forecast",
+                "tableName", "sales_order",
+                "metricField", "sales_amt",
+                "timeField", "order_date",
+                "series", List.of(
+                        Map.of("name", "2026-01", "history", 100),
+                        Map.of("name", "2026-02", "history", 120),
+                        Map.of("name", "2026-03", "forecast", 140)
+                )
+        ));
+
+        Map<String, Object> result = service.executeSmart(chatRequest("查最近半年销售额走势，并预测下个月", "sales_order"));
+
+        assertEquals("MULTI_STEP", result.get("smartIntent"));
+        assertEquals("MULTI_STEP", result.get("responseType"));
+        assertTrue(Boolean.TRUE.equals(result.get("multiStep")));
+        List<Map<String, Object>> steps = (List<Map<String, Object>>) result.get("stepResults");
+        assertEquals(2, steps.size());
+        assertEquals("QUERY_SQL", steps.get(0).get("type"));
+        assertEquals("COMPLETED", steps.get(0).get("status"));
+        assertEquals("FORECAST", steps.get(1).get("type"));
+        assertEquals("COMPLETED", steps.get(1).get("status"));
+        Map<String, Object> actionPlan = (Map<String, Object>) result.get("actionPlan");
+        List<Map<String, Object>> actions = (List<Map<String, Object>>) actionPlan.get("actions");
+        assertEquals(List.of("query_1"), actions.get(1).get("dependsOn"));
+        org.mockito.Mockito.verify(chatBiService).executeChat(org.mockito.Mockito.any(ChatBiService.ChatQueryRequest.class));
+        org.mockito.Mockito.verify(advancedAnalysisService).forecast(org.mockito.Mockito.anyMap());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void smartChatMultiStepCarriesConfiguredChartPreferenceIntoFinalVisualResult() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        ChatBiService chatBiService = org.mockito.Mockito.mock(ChatBiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "chatBiService", chatBiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+
+        Map<String, Object> queryResult = new java.util.HashMap<>();
+        queryResult.put("message", "趋势查询完成");
+        queryResult.put("sql", "SELECT DATE_FORMAT(order_date, '%Y-%m'), SUM(sales_amt) FROM sales_order GROUP BY 1");
+        queryResult.put("chartType", "line");
+        queryResult.put("data", List.of(Map.of("name", "2026-01", "value", 100)));
+        queryResult.put("chartRuleCode", "sales_trend_line");
+        queryResult.put("chartRuleName", "销售趋势折线偏好");
+        queryResult.put("chartScenarioType", "TIME_SERIES");
+        queryResult.put("chartRecommendationStatus", "CONFIGURED");
+        queryResult.put("chartRecommendationExplain", "命中企业图表偏好");
+        queryResult.put("voiceSummary", Map.of("title", "销售趋势"));
+        queryResult.put("chartRecommendation", Map.of(
+                "ruleCode", "sales_trend_line",
+                "ruleName", "销售趋势折线偏好",
+                "status", "CONFIGURED"
+        ));
+        queryResult.put("optionTemplate", Map.of(
+                "grid", Map.of("left", 88),
+                "prediction", Map.of("legendConfig", Map.of("top", 12)),
+                "series", List.of(Map.of("itemStyle", Map.of("color", "#1677ff")))
+        ));
+        org.mockito.Mockito.when(chatBiService.executeChat(org.mockito.Mockito.any(ChatBiService.ChatQueryRequest.class)))
+                .thenReturn(queryResult);
+        org.mockito.Mockito.when(advancedAnalysisService.forecast(org.mockito.Mockito.anyMap())).thenReturn(Map.of(
+                "type", "forecast",
+                "tableName", "sales_order",
+                "metricField", "sales_amt",
+                "timeField", "order_date",
+                "optionTemplate", Map.of("prediction", Map.of("confidenceLabel", "90%")),
+                "series", List.of(
+                        Map.of("name", "2026-01", "history", 100),
+                        Map.of("name", "2026-02", "forecast", 120)
+                )
+        ));
+
+        Map<String, Object> result = service.executeSmart(chatRequest("查销售额趋势，预测下个月", "sales_order"));
+
+        assertEquals("MULTI_STEP", result.get("responseType"));
+        assertEquals("sales_trend_line", result.get("chartRuleCode"));
+        assertEquals("销售趋势折线偏好", result.get("chartRuleName"));
+        assertEquals("TIME_SERIES", result.get("chartScenarioType"));
+        Map<String, Object> optionTemplate = (Map<String, Object>) result.get("optionTemplate");
+        assertEquals(88, ((Map<String, Object>) optionTemplate.get("grid")).get("left"));
+        Map<String, Object> prediction = (Map<String, Object>) optionTemplate.get("prediction");
+        assertEquals("90%", prediction.get("confidenceLabel"));
+        assertEquals(12, ((Map<String, Object>) prediction.get("legendConfig")).get("top"));
+        Map<String, Object> firstSeries = ((List<Map<String, Object>>) optionTemplate.get("series")).get(0);
+        assertEquals("#1677ff", ((Map<String, Object>) firstSeries.get("itemStyle")).get("color"));
+        Map<String, Object> queryStepResult = (Map<String, Object>) result.get("queryStepResult");
+        assertEquals("sales_trend_line", queryStepResult.get("chartRuleCode"));
+        assertTrue(queryStepResult.containsKey("optionTemplate"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void smartChatDefersDashboardPinUntilCompositeAnalysisResultIsPersisted() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        ChatBiService chatBiService = org.mockito.Mockito.mock(ChatBiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "chatBiService", chatBiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(chatBiService.executeChat(org.mockito.Mockito.any(ChatBiService.ChatQueryRequest.class))).thenReturn(new java.util.HashMap<>(Map.of(
+                "message", "趋势查询完成",
+                "sql", "SELECT DATE_FORMAT(order_date, '%Y-%m'), SUM(sales_amt) FROM sales_order GROUP BY 1",
+                "chartType", "line",
+                "data", List.of(Map.of("name", "2026-01", "value", 100))
+        )));
+        org.mockito.Mockito.when(advancedAnalysisService.forecast(org.mockito.Mockito.anyMap())).thenReturn(Map.of(
+                "type", "forecast",
+                "tableName", "sales_order",
+                "metricField", "sales_amt",
+                "timeField", "order_date",
+                "series", List.of(
+                        Map.of("name", "2026-01", "history", 100),
+                        Map.of("name", "2026-02", "history", 120),
+                        Map.of("name", "2026-03", "forecast", 140)
+                )
+        ));
+
+        Map<String, Object> result = service.executeSmart(chatRequest("帮我看销售额走势，并估一下未来三个月，再帮我把图表钉入销售看板", "sales_order"));
+
+        assertEquals("MULTI_STEP", result.get("responseType"));
+        assertEquals("MULTI_STEP", result.get("smartIntent"));
+        assertTrue(Boolean.TRUE.equals(result.get("multiStep")));
+        assertTrue(result.get("data") instanceof List<?> rows && !rows.isEmpty());
+        Map<String, Object> deferred = (Map<String, Object>) result.get("deferredDashboardPin");
+        assertNotNull(deferred);
+        assertEquals("DASHBOARD_PIN", deferred.get("type"));
+        assertEquals(Boolean.TRUE, deferred.get("requiresPersistedChart"));
+        assertTrue(String.valueOf(deferred.get("question")).contains("销售看板"));
+        List<Map<String, Object>> steps = (List<Map<String, Object>>) result.get("stepResults");
+        assertEquals("QUERY_SQL", steps.get(0).get("type"));
+        assertEquals("FORECAST", steps.get(1).get("type"));
+    }
+
+    @Test
+    void smartChatOrchestratesQueryForecastAndAlertDraftWithoutSavingRule() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        ChatBiService chatBiService = org.mockito.Mockito.mock(ChatBiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "chatBiService", chatBiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(chatBiService.executeChat(org.mockito.Mockito.any(ChatBiService.ChatQueryRequest.class))).thenReturn(new java.util.HashMap<>(Map.of(
+                "message", "趋势查询完成",
+                "sql", "SELECT 1",
+                "chartType", "line",
+                "data", List.of(Map.of("name", "2026-01", "value", 100))
+        )));
+        org.mockito.Mockito.when(advancedAnalysisService.forecast(org.mockito.Mockito.anyMap())).thenReturn(Map.of(
+                "type", "forecast",
+                "tableName", "sales_order",
+                "metricField", "sales_amt",
+                "timeField", "order_date",
+                "series", List.of(
+                        Map.of("name", "2026-01", "history", 100),
+                        Map.of("name", "2026-02", "history", 120),
+                        Map.of("name", "2026-03", "forecast", 140)
+                )
+        ));
+
+        Map<String, Object> result = service.executeSmart(chatRequest("查销售额走势，预测下个月，如果低于80万提醒我", "sales_order"));
+
+        assertEquals("MULTI_STEP", result.get("smartIntent"));
+        assertEquals("DRAFT_ONLY", result.get("sideEffectMode"));
+        assertTrue(Boolean.TRUE.equals(result.get("requiresConfirmation")));
+        List<Map<String, Object>> steps = (List<Map<String, Object>>) result.get("stepResults");
+        assertEquals(3, steps.size());
+        assertEquals("ALERT_RULE_CREATE_DRAFT", steps.get(2).get("type"));
+        assertEquals("NEEDS_CONFIRMATION", steps.get(2).get("status"));
+        Map<String, Object> draft = (Map<String, Object>) result.get("alertRuleDraft");
+        assertEquals("sales_amt", draft.get("metricField"));
+        assertEquals("order_date", draft.get("timeField"));
+        assertEquals(800000D, draft.get("threshold"));
+        assertEquals("lt", draft.get("operator"));
+        org.mockito.ArgumentCaptor<Map<String, Object>> forecastCaptor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(advancedAnalysisService).forecast(forecastCaptor.capture());
+        assertEquals(1, forecastCaptor.getValue().get("horizon"));
+        org.mockito.ArgumentCaptor<ChatBiService.ChatQueryRequest> queryCaptor = org.mockito.ArgumentCaptor.forClass(ChatBiService.ChatQueryRequest.class);
+        org.mockito.Mockito.verify(chatBiService).executeChat(queryCaptor.capture());
+        assertEquals("查销售额走势", queryCaptor.getValue().getQuestion());
+        org.mockito.Mockito.verify(advancedAnalysisService, org.mockito.Mockito.never()).saveAlertRule(org.mockito.Mockito.anyMap());
+    }
+
+    @Test
+    void smartChatCompletesAiMultiStepPlanWhenAlertSemanticIsMissing() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        ChatBiService chatBiService = org.mockito.Mockito.mock(ChatBiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "chatBiService", chatBiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.of(Map.of(
+                        "primaryIntent", "MULTI_STEP",
+                        "confidence", 0.88,
+                        "actions", List.of(
+                                Map.of("id", "query_1", "type", "QUERY_SQL"),
+                                Map.of("id", "forecast_1", "type", "FORECAST")
+                        ),
+                        "slots", Map.of("metricField", "sales_amt", "timeField", "order_date"),
+                        "reasoning", "AI 返回查询和预测动作"
+                )));
+        org.mockito.Mockito.when(chatBiService.executeChat(org.mockito.Mockito.any(ChatBiService.ChatQueryRequest.class))).thenReturn(new java.util.HashMap<>(Map.of(
+                "message", "趋势查询完成",
+                "sql", "SELECT 1",
+                "chartType", "line",
+                "data", List.of(Map.of("name", "2026-01", "value", 100))
+        )));
+        org.mockito.Mockito.when(advancedAnalysisService.forecast(org.mockito.Mockito.anyMap())).thenReturn(Map.of(
+                "type", "forecast",
+                "tableName", "sales_order",
+                "metricField", "sales_amt",
+                "timeField", "order_date",
+                "series", List.of(
+                        Map.of("name", "2026-01", "history", 100),
+                        Map.of("name", "2026-02", "forecast", 120)
+                )
+        ));
+
+        Map<String, Object> result = service.executeSmart(chatRequest("查销售额趋势，预测下个月，如果低于80万提醒我", "sales_order"));
+
+        assertEquals("MULTI_STEP", result.get("responseType"));
+        List<Map<String, Object>> steps = (List<Map<String, Object>>) result.get("stepResults");
+        assertEquals(3, steps.size());
+        assertEquals("ALERT_RULE_CREATE_DRAFT", steps.get(2).get("type"));
+        assertEquals("NEEDS_CONFIRMATION", steps.get(2).get("status"));
+        Map<String, Object> draft = (Map<String, Object>) result.get("alertRuleDraft");
+        assertEquals(800000D, draft.get("threshold"));
+        assertEquals("sales_amt", draft.get("metricField"));
+        org.mockito.ArgumentCaptor<Map<String, Object>> forecastCaptor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(advancedAnalysisService).forecast(forecastCaptor.capture());
+        assertEquals(1, forecastCaptor.getValue().get("horizon"));
+        org.mockito.ArgumentCaptor<ChatBiService.ChatQueryRequest> queryCaptor = org.mockito.ArgumentCaptor.forClass(ChatBiService.ChatQueryRequest.class);
+        org.mockito.Mockito.verify(chatBiService).executeChat(queryCaptor.capture());
+        assertEquals("查销售额趋势", queryCaptor.getValue().getQuestion());
+        org.mockito.Mockito.verify(advancedAnalysisService, org.mockito.Mockito.never()).saveAlertRule(org.mockito.Mockito.anyMap());
+    }
+
+    @Test
+    void smartChatAlertDraftPrefersBusinessMetricOverNumericIdentifier() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        ChatBiService chatBiService = org.mockito.Mockito.mock(ChatBiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "chatBiService", chatBiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(List.of(
+                field("rows_id", "行号", "rows_id", "NUMBER"),
+                field("order_date", "订单日期", "order_date", "DATE"),
+                field("sales_amt", "销售额", "sales_amt", "NUMBER")
+        ));
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(chatBiService.executeChat(org.mockito.Mockito.any(ChatBiService.ChatQueryRequest.class))).thenReturn(new java.util.HashMap<>(Map.of(
+                "message", "趋势查询完成",
+                "sql", "SELECT 1",
+                "chartType", "line",
+                "data", List.of(Map.of("name", "2026-01", "value", 100))
+        )));
+        org.mockito.Mockito.when(advancedAnalysisService.forecast(org.mockito.Mockito.anyMap())).thenReturn(Map.of(
+                "type", "forecast",
+                "tableName", "sales_order",
+                "metricField", "sales_amt",
+                "timeField", "order_date",
+                "series", List.of(Map.of("name", "2026-02", "forecast", 120))
+        ));
+
+        Map<String, Object> result = service.executeSmart(chatRequest("查销售额趋势，预测下个月，如果低于80万提醒我", "sales_order"));
+
+        Map<String, Object> draft = (Map<String, Object>) result.get("alertRuleDraft");
+        assertEquals("sales_amt", draft.get("metricField"));
+        org.mockito.ArgumentCaptor<Map<String, Object>> forecastCaptor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(advancedAnalysisService).forecast(forecastCaptor.capture());
+        assertEquals("sales_amt", forecastCaptor.getValue().get("metricField"));
+    }
+
+    @Test
+    void smartChatStopsDependentStepsWhenQueryFails() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        ChatBiService chatBiService = org.mockito.Mockito.mock(ChatBiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "chatBiService", chatBiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(chatBiService.executeChat(org.mockito.Mockito.any(ChatBiService.ChatQueryRequest.class)))
+                .thenThrow(new IllegalStateException("SQL 执行失败"));
+
+        Map<String, Object> result = service.executeSmart(chatRequest("查最近半年销售额走势，并预测下个月", "sales_order"));
+
+        assertEquals("MULTI_STEP", result.get("smartIntent"));
+        List<Map<String, Object>> steps = (List<Map<String, Object>>) result.get("stepResults");
+        assertEquals("FAILED", steps.get(0).get("status"));
+        assertEquals("SKIPPED", steps.get(1).get("status"));
+        org.mockito.Mockito.verify(advancedAnalysisService, org.mockito.Mockito.never()).forecast(org.mockito.Mockito.anyMap());
+    }
+
+    @Test
     void chatBiDoesNotAutoForecastOrdinaryTrendQueryResult() {
         ChatBiService service = new ChatBiService();
         Map<String, Object> response = new java.util.HashMap<>(Map.of(
@@ -651,6 +1026,8 @@ class P2AcceptanceTests {
 
         assertEquals("DASHBOARD_PIN", result.get("smartIntent"));
         assertEquals("CLARIFICATION", result.get("responseType"));
+        assertFalse(Boolean.TRUE.equals(result.get("multiStep")));
+        assertFalse(result.containsKey("deferredDashboardPin"));
         org.mockito.Mockito.verify(pythonAiService, org.mockito.Mockito.never())
                 .parseAdvancedAnalysisIntent(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap());
     }
@@ -812,6 +1189,8 @@ class P2AcceptanceTests {
         List<Map<String, Object>> incomeMetrics = (List<Map<String, Object>>) captor.getAllValues().get(3).get("metricDefinitions");
         assertEquals(1, profitMetrics.size());
         assertTrue(profitMetrics.stream().anyMatch(item -> "利润".equals(item.get("name")) && "profit".equals(item.get("field"))));
+        assertTrue(profitMetrics.stream().anyMatch(item -> "利润".equals(item.get("name")) && "profit".equals(item.get("formula"))));
+        assertTrue(profitMetrics.stream().anyMatch(item -> "利润".equals(item.get("name")) && "SUM".equals(item.get("aggregation"))));
         assertEquals(1, dimensionSystem.size());
         assertEquals("城市", dimensionSystem.get(0).get("name"));
         assertEquals("city", dimensionSystem.get(0).get("field"));
@@ -820,6 +1199,77 @@ class P2AcceptanceTests {
         assertFalse(formulaMetrics.stream().anyMatch(item -> "销售额".equals(item.get("name"))));
         assertEquals(1, incomeMetrics.size());
         assertTrue(incomeMetrics.stream().anyMatch(item -> "收入".equals(item.get("name")) && "sales_amt".equals(item.get("formula"))));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void businessModelCardResultsFollowSemanticActionInsteadOfStaleMetricFormula() {
+        BusinessModelAgentService service = new BusinessModelAgentService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        org.mockito.Mockito.when(dataUploadService.listBusinessModels(false)).thenReturn(List.of(
+                Map.of("id", 5L, "modelName", "经营指标模型", "tableName", "loss_order", "updatedAt", "2026-06-06")
+        ));
+        org.mockito.Mockito.when(dataUploadService.listBusinessModels(true)).thenReturn(List.of());
+        org.mockito.Mockito.when(dataUploadService.getBusinessModelDetail(5L)).thenReturn(Map.of(
+                "id", 5L,
+                "modelName", "经营指标模型",
+                "modelRequirement", "经营指标分析",
+                "tableName", "loss_order",
+                "modelJson", "{\"metricDefinitions\":[{\"name\":\"利润\",\"field\":\"profit\",\"aggregation\":\"SUM\",\"formula\":\"利润 / 收入\"},{\"name\":\"收入\",\"field\":\"sales_amt\",\"aggregation\":\"SUM\",\"formula\":\"sales_amt\"}],\"dictionaryEntries\":[],\"dimensionSystem\":[]}"
+        ));
+        org.mockito.Mockito.when(dataUploadService.listFields("loss_order")).thenReturn(lossOrderFields());
+        org.mockito.Mockito.when(dataUploadService.preview("loss_order", 1, 5)).thenReturn(List.of());
+        org.mockito.Mockito.when(pythonAiService.businessModelPatch(
+                org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(),
+                org.mockito.Mockito.anyString(), org.mockito.Mockito.anyList(), org.mockito.Mockito.anyList(),
+                org.mockito.Mockito.anyList(), org.mockito.Mockito.anyList(), org.mockito.Mockito.anyList()
+        )).thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(dataUploadService.updateBusinessModel(org.mockito.Mockito.eq(5L), org.mockito.Mockito.anyMap()))
+                .thenAnswer(invocation -> Map.of("id", 5L, "modelName", "经营指标模型", "modelJson", "{}"));
+
+        Map<String, Object> formulaResult = service.handleQuestion(Map.of(
+                "question", "毛利率按利润除以收入来算",
+                "tableName", "loss_order",
+                "activeBusinessModelId", 5L
+        ));
+        Map<String, Object> bindingResult = service.handleQuestion(Map.of(
+                "question", "把利润这个指标绑定到 profit",
+                "tableName", "loss_order",
+                "activeBusinessModelId", 5L
+        ));
+
+        org.mockito.ArgumentCaptor<Map<String, Object>> captor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(dataUploadService, org.mockito.Mockito.times(2))
+                .updateBusinessModel(org.mockito.Mockito.eq(5L), captor.capture());
+        List<Map<String, Object>> formulaMetrics = (List<Map<String, Object>>) captor.getAllValues().get(0).get("metricDefinitions");
+        assertTrue(formulaMetrics.stream().anyMatch(item ->
+                "毛利率".equals(item.get("name")) && "profit / sales_amt".equals(item.get("formula"))));
+        assertFalse(formulaMetrics.stream().anyMatch(item ->
+                "利润".equals(item.get("name")) && "profit / sales_amt".equals(item.get("formula"))));
+        List<Map<String, Object>> bindingMetrics = (List<Map<String, Object>>) captor.getAllValues().get(1).get("metricDefinitions");
+        Map<String, Object> boundProfit = bindingMetrics.stream()
+                .filter(item -> "利润".equals(item.get("name")))
+                .findFirst()
+                .orElseThrow();
+        assertEquals("profit", boundProfit.get("field"));
+        assertEquals("profit", boundProfit.get("formula"));
+        assertEquals("SUM", boundProfit.get("aggregation"));
+
+        List<Map<String, Object>> formulaCards = (List<Map<String, Object>>) formulaResult.get("fieldBindingResults");
+        assertEquals(1, formulaCards.size());
+        assertEquals("毛利率", formulaCards.get(0).get("name"));
+        assertEquals("METRIC_SCOPE_UPDATE", formulaCards.get(0).get("semanticAction"));
+        assertEquals("profit / sales_amt", formulaCards.get(0).get("formula"));
+
+        List<Map<String, Object>> bindingCards = (List<Map<String, Object>>) bindingResult.get("fieldBindingResults");
+        assertEquals(1, bindingCards.size());
+        assertEquals("利润", bindingCards.get(0).get("name"));
+        assertEquals("FIELD_BINDING", bindingCards.get(0).get("semanticAction"));
+        assertEquals("profit", bindingCards.get(0).get("field"));
+        assertEquals("", bindingCards.get(0).get("formula"));
     }
 
     @Test

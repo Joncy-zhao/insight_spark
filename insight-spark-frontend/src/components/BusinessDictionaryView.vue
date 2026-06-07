@@ -1277,9 +1277,7 @@ onMounted(async () => {
   if (!Array.isArray(tables.value) || tables.value.length === 0) {
     await loadTables({ keepCurrentSelection: true })
   }
-  if (!Array.isArray(businessModels.value) || businessModels.value.length === 0) {
-    await loadBusinessModels()
-  }
+  await loadBusinessModels()
   cacheFieldOptions(selectedTableName.value, fields?.value)
   selectedSourceTable.value = String(selectedTableName.value || sourceOptions.value[0]?.tableName || '').trim()
   if (selectedSourceTable.value) {

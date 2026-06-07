@@ -18,9 +18,21 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Service
 public class ChatBiService {
+
+    @FunctionalInterface
+    public interface ProgressListener {
+        void onProgress(String eventType, String title, String detail, Map<String, Object> metadata);
+
+        static ProgressListener noop() {
+            return (eventType, title, detail, metadata) -> {
+            };
+        }
+    }
 
     public static class ChatQueryRequest {
         private Long conversationId;
@@ -117,7 +129,7 @@ public class ChatBiService {
         response.put("conversationId", safeRequest.getConversationId());
         response.put("parentTurnId", safeRequest.getParentTurnId());
         response.put("tableNames", safeRequest.getTableNames() == null ? List.of() : safeRequest.getTableNames());
-        response.put("filters", safeRequest.getFilters() == null ? Map.of() : safeRequest.getFilters());
+        response.put("filters", publicFilters(safeRequest.getFilters()));
         response.put("mode", Objects.toString(safeRequest.getMode(), ""));
         return response;
     }
@@ -130,11 +142,14 @@ public class ChatBiService {
         log.info("Received chat question: {}", question);
         ensureNotCancelled("请求初始化");
         Map<String, Object> safeOptions = executionOptions == null ? Map.of() : executionOptions;
+        ProgressListener progress = progressListener(safeOptions.get("progressListener"));
         String selectedModelId = Objects.toString(safeOptions.getOrDefault("modelId", "gpt-4"), "gpt-4").trim();
         String selectedModelName = Objects.toString(safeOptions.getOrDefault("modelName", selectedModelId), selectedModelId).trim();
 
         String activeTable = (tableName == null || tableName.isBlank()) ? dataUploadService.latestTableName()
                 : tableName;
+        emitProgress(progress, "DATA_SOURCE_READY", "确认数据源",
+                "将基于 " + activeTable + " 执行本次查询", Map.of("tableName", activeTable));
         List<String> generationTrace = new ArrayList<>();
         generationTrace.add("activeTable=" + activeTable);
         generationTrace.add("selectedModel=" + selectedModelId);
@@ -186,6 +201,8 @@ public class ChatBiService {
         if (fields == null || fields.isEmpty()) {
             throw new IllegalArgumentException("当前数据表没有字段元信息，请在“数据上传”页面重新上传文件，或选择字段数大于 0 的数据表。");
         }
+        emitProgress(progress, "FIELD_META_READY", "读取字段元数据",
+                "已加载 " + fields.size() + " 个字段，正在匹配指标、维度和时间口径", Map.of("fieldCount", fields.size()));
         ensureNotCancelled("字段元信息加载");
         Map<String, Object> graphPath = knowledgeGraphService.retrieveMultiHopContextSafely(question, activeTable);
         List<Map<String, Object>> graphContext = asMapList(graphPath.get("ragContext"));
@@ -216,10 +233,18 @@ public class ChatBiService {
                 graphFallbackReason = "Graph context is empty, fallback to local field context";
             }
         }
+        emitProgress(progress, "GRAPH_CONTEXT_READY", "匹配语义上下文",
+                graphFallbackUsed
+                        ? "图谱上下文不足，已回退到本地字段语义，共 " + graphContext.size() + " 个候选"
+                        : "已匹配 " + graphContext.size() + " 个图谱语义候选",
+                Map.of("candidateCount", graphContext.size(), "fallbackUsed", graphFallbackUsed));
         ensureNotCancelled("图谱上下文准备");
         List<Map<String, Object>> previewRows = dataUploadService.preview(activeTable, 1, 8);
         ensureNotCancelled("样例数据预览");
         Map<String, Object> graphSqlHints = knowledgeGraphService.buildSqlMappingHints(question, activeTable, graphContext);
+        emitProgress(progress, "NL2SQL_START", "生成查询语义",
+                cacheHit ? "命中语义缓存，正在复用已审计 SQL" : "正在结合字段、样例数据和图谱提示生成 SQL",
+                Map.of("cacheHit", cacheHit));
         Optional<Map<String, Object>> aiResult = cacheHit ? Optional.empty() : pythonAiService.textToSql(question, queryTableName, fields,
                 previewRows, graphPath, graphSqlHints, safeOptions);
         ensureNotCancelled("SQL 生成");
@@ -276,8 +301,14 @@ public class ChatBiService {
         generatedSql = semanticCorrection.sql();
         chartType = semanticCorrection.chartType();
         fieldMapping = semanticCorrection.fieldMapping();
+        fieldMapping = alignFieldMappingWithSql(question, fields, generatedSql, fieldMapping, generationTrace);
 
         log.info("Generated SQL: {}", generatedSql);
+        emitProgress(progress, "SQL_GENERATED", "生成查询语句",
+                "已生成 " + chartName(chartType) + " 所需 SQL，维度 "
+                        + Objects.toString(fieldMapping.getOrDefault("dimension", "未知维度"), "未知维度")
+                        + "，指标 " + Objects.toString(fieldMapping.getOrDefault("metric", "记录数"), "记录数"),
+                Map.of("chartType", chartType, "engine", engine));
         ensureNotCancelled("SQL 审计前");
 
         SqlAuditService.AuditResult auditResult = sqlAuditService.inspect(generatedSql, activeTable);
@@ -301,6 +332,9 @@ public class ChatBiService {
                             guard.detail(), guard.action()));
             throw new IllegalArgumentException("SQL 执行前熔断：" + guard.detail());
         }
+        emitProgress(progress, "SQL_AUDITED", "完成安全审计",
+                "SQL 审计 " + auditResult.riskLevel() + "，执行保护策略 " + guard.action(),
+                Map.of("riskLevel", auditResult.riskLevel(), "guardAction", guard.action()));
         long startedAt = System.currentTimeMillis();
         List<Map<String, Object>> queryResult;
         boolean fallbackExecuted = false;
@@ -310,6 +344,9 @@ public class ChatBiService {
             jdbcTemplate.setQueryTimeout(guard.timeoutSeconds());
             try {
                 ensureNotCancelled("执行查询前");
+                emitProgress(progress, "QUERY_EXECUTING", "执行查询",
+                        "正在数据库中执行只读查询，最大返回 " + guard.maxRows() + " 行",
+                        Map.of("maxRows", guard.maxRows(), "timeoutSeconds", guard.timeoutSeconds()));
                 queryResult = officialSource
                         ? datasourceService.executeQueryWithinPermit(activeTable, generatedSql)
                         : queryUploadTable(activeTable, generatedSql, guard.maxRows());
@@ -341,6 +378,8 @@ public class ChatBiService {
                 ensureNotCancelled("兜底重试执行后");
             }
             ensureNotCancelled("结果加工前");
+            fieldMapping = alignFieldMappingWithSqlAndRows(question, fields, generatedSql, queryResult, fieldMapping,
+                    generationTrace);
             queryResult = attachDimensionKey(queryResult, fieldMapping);
             SqlAuditService.MaskReport maskReport = sqlAuditService.maskRowsWithReport(activeTable, queryResult);
             queryResult = maskReport.rows();
@@ -357,6 +396,12 @@ public class ChatBiService {
             }
             chartRecommendation = recommendConfiguredChart(question, fields, queryResult, chartType);
             chartType = Objects.toString(chartRecommendation.getOrDefault("chartType", chartType), chartType);
+            Map<String, Object> chartPolicyMeta = new LinkedHashMap<>();
+            chartPolicyMeta.put("chartType", chartType);
+            chartPolicyMeta.put("recommendationStatus", Objects.toString(chartRecommendation.get("status"), ""));
+            emitProgress(progress, "CHART_POLICY_READY", "匹配图表偏好",
+                    "已根据管理员图表偏好选择 " + chartName(chartType),
+                    chartPolicyMeta);
             if ("table".equalsIgnoreCase(chartType) && shouldRequeryDetailTable(queryResult)) {
                 RuleBasedNl2SqlStrategy.FieldChoice detailChoice = ruleBasedNl2SqlStrategy.chooseFields(question, fields);
                 String detailSql = sqlAuditService.ensureLimit(
@@ -379,6 +424,9 @@ public class ChatBiService {
             ensureNotCancelled("结果归一化后");
             long durationMs = System.currentTimeMillis() - startedAt;
             generationTrace.add("executeStatus=SUCCESS;durationMs=" + durationMs);
+            emitProgress(progress, "QUERY_RESULT_READY", "查询结果就绪",
+                    "已返回 " + queryResult.size() + " 行结果，用时 " + durationMs + "ms",
+                    Map.of("rowCount", queryResult.size(), "durationMs", durationMs));
             sqlAuditService.recordDetailed(question, activeTable, engine, generatedSql, auditResult,
                     "SUCCESS", durationMs, null, auditDetails(generationTrace, graphContext, graphSqlHints, cacheKey,
                             cacheHit, cachedSqlAudit, generatedSql, maskReport.detail(),
@@ -1054,22 +1102,24 @@ public class ChatBiService {
         SemanticSqlCorrection dataProfileCorrection = applyGeoValueDataProfileGuard(question, queryTableName,
                 fields, generatedSql, chartType, fieldMapping, generationTrace);
         if (!Objects.equals(dataProfileCorrection.sql(), generatedSql)) {
-            return dataProfileCorrection;
+            return applyTopNAfterSemanticGuard(question, queryTableName, fields, dataProfileCorrection, generationTrace);
         }
 
         SemanticSqlCorrection valueFilterCorrection = applyValueFilterDimensionConsistencyGuard(question, queryTableName,
                 fields, generatedSql, chartType, fieldMapping, generationTrace);
         if (!Objects.equals(valueFilterCorrection.sql(), generatedSql)) {
-            return valueFilterCorrection;
+            return applyTopNAfterSemanticGuard(question, queryTableName, fields, valueFilterCorrection, generationTrace);
         }
 
         Set<String> macroRegionValues = extractMacroRegionValues(question);
         if (macroRegionValues.isEmpty() || fields == null || fields.isEmpty()) {
-            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+            return applyTopNIntentGuard(question, queryTableName, fields, generatedSql, chartType, fieldMapping,
+                    generationTrace);
         }
         Map<String, Object> regionField = findMacroRegionField(fields);
         if (regionField == null) {
-            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+            return applyTopNIntentGuard(question, queryTableName, fields, generatedSql, chartType, fieldMapping,
+                    generationTrace);
         }
         String regionColumn = fieldColumn(regionField);
         boolean provinceBreakdown = asksProvinceBreakdown(question);
@@ -1078,18 +1128,22 @@ public class ChatBiService {
         String dimensionColumn = fieldColumn(dimensionField);
         String currentDimension = Objects.toString(fieldMapping == null ? "" : fieldMapping.get("dimensionKey"), "").trim();
         if (regionColumn.isBlank() || dimensionColumn.isBlank()) {
-            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+            return applyTopNIntentGuard(question, queryTableName, fields, generatedSql, chartType, fieldMapping,
+                    generationTrace);
         }
         if (!provinceBreakdown && regionColumn.equals(currentDimension)) {
-            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+            return applyTopNIntentGuard(question, queryTableName, fields, generatedSql, chartType, fieldMapping,
+                    generationTrace);
         }
         Map<String, Object> metricField = findMetricField(fields, fieldMapping, question);
         if (metricField == null) {
-            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+            return applyTopNIntentGuard(question, queryTableName, fields, generatedSql, chartType, fieldMapping,
+                    generationTrace);
         }
         String metricColumn = fieldColumn(metricField);
         if (metricColumn.isBlank()) {
-            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+            return applyTopNIntentGuard(question, queryTableName, fields, generatedSql, chartType, fieldMapping,
+                    generationTrace);
         }
 
         StringBuilder sql = new StringBuilder();
@@ -1126,7 +1180,274 @@ public class ChatBiService {
         generationTrace.add("semanticSqlGuard=APPLIED;reason=" + reason + ";from="
                 + currentDimension + ";to=" + dimensionColumn + ";filter=" + regionColumn
                 + ";values=" + String.join(",", macroRegionValues));
-        return new SemanticSqlCorrection(sql.toString(), "bar", correctedMapping);
+        return applyTopNAfterSemanticGuard(question, queryTableName, fields,
+                new SemanticSqlCorrection(sql.toString(), "bar", correctedMapping), generationTrace);
+    }
+
+    private record SqlSelectMapping(String dimensionExpression,
+                                    String dimensionAlias,
+                                    String dimensionColumn,
+                                    String metricExpression,
+                                    String metricAlias,
+                                    String metricColumn) {
+    }
+
+    private SemanticSqlCorrection applyTopNAfterSemanticGuard(String question, String queryTableName,
+            List<Map<String, Object>> fields, SemanticSqlCorrection correction, List<String> generationTrace) {
+        if (correction == null) {
+            return new SemanticSqlCorrection("", "bar", Map.of());
+        }
+        return applyTopNIntentGuard(question, queryTableName, fields, correction.sql(), correction.chartType(),
+                correction.fieldMapping(), generationTrace);
+    }
+
+    private SemanticSqlCorrection applyTopNIntentGuard(String question, String queryTableName,
+            List<Map<String, Object>> fields, String generatedSql, String chartType,
+            Map<String, Object> fieldMapping, List<String> generationTrace) {
+        TopNIntent intent = extractTopNIntent(question);
+        if (intent == null || fields == null || fields.isEmpty()) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        if ("line".equalsIgnoreCase(chartType) || isTimeSeriesLikeQuestion(question)) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        String sql = Objects.toString(generatedSql, "").trim();
+        if (sql.isBlank() || !sql.toLowerCase(Locale.ROOT).startsWith("select")) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        Map<String, Object> dimensionField = findDimensionField(fields, fieldMapping, question);
+        Map<String, Object> metricField = findMetricField(fields, fieldMapping, question);
+        String expectedDimension = dimensionField == null ? "" : fieldColumn(dimensionField);
+        String currentDimension = parseSelectedDimensionColumn(sql);
+        boolean dimensionMatches = expectedDimension.isBlank() || currentDimension.isBlank()
+                || expectedDimension.equals(currentDimension);
+        String correctedSql = enforceOrderAndLimit(sql, intent);
+        if (dimensionMatches && !correctedSql.equals(sql)) {
+            generationTrace.add("semanticSqlGuard=APPLIED;reason=TOP_N_INTENT;limit="
+                    + intent.limit() + ";direction=" + (intent.ascending() ? "ASC" : "DESC")
+                    + ";mode=ORDER_LIMIT_REWRITE");
+            return new SemanticSqlCorrection(correctedSql, chartType, fieldMapping);
+        }
+
+        if (dimensionField == null || fieldColumn(dimensionField).isBlank() || metricField == null
+                || fieldColumn(metricField).isBlank()) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        String dimensionColumn = fieldColumn(dimensionField);
+        String metricColumn = fieldColumn(metricField);
+        String rebuiltSql = "SELECT `" + dimensionColumn + "` AS dim_name, "
+                + "SUM(CAST(NULLIF(`" + metricColumn + "`, '') AS DECIMAL(18,2))) AS metric_value "
+                + "FROM `" + queryTableName + "` WHERE `" + dimensionColumn + "` IS NOT NULL AND `"
+                + dimensionColumn + "` <> '' " + reusableTopNWhereClause(sql, currentDimension, dimensionColumn)
+                + "GROUP BY `" + dimensionColumn + "` ORDER BY metric_value "
+                + (intent.ascending() ? "ASC" : "DESC") + " LIMIT " + intent.limit();
+
+        Map<String, Object> correctedMapping = new LinkedHashMap<>(fieldMapping == null ? Map.of() : fieldMapping);
+        correctedMapping.put("dimension", fieldDisplayName(dimensionField));
+        correctedMapping.put("dimensionKey", dimensionColumn);
+        correctedMapping.put("dimensionExpr", "`" + dimensionColumn + "`");
+        correctedMapping.put("metric", fieldDisplayName(metricField));
+        correctedMapping.put("metricKey", metricColumn);
+        correctedMapping.put("metricExpr",
+                "SUM(CAST(NULLIF(`" + metricColumn + "`, '') AS DECIMAL(18,2)))");
+        generationTrace.add("semanticSqlGuard=APPLIED;reason=TOP_N_INTENT;limit="
+                + intent.limit() + ";direction=" + (intent.ascending() ? "ASC" : "DESC")
+                + ";mode=REBUILD_AGGREGATION");
+        return new SemanticSqlCorrection(rebuiltSql, "bar", correctedMapping);
+    }
+
+    private String reusableTopNWhereClause(String sql, String oldDimensionColumn, String newDimensionColumn) {
+        Matcher matcher = Pattern.compile("(?is)\\bwhere\\b(.+?)(?:\\bgroup\\s+by\\b|\\border\\s+by\\b|\\blimit\\b|$)")
+                .matcher(Objects.toString(sql, ""));
+        if (!matcher.find()) {
+            return "";
+        }
+        String where = matcher.group(1).trim();
+        if (where.isBlank()) {
+            return "";
+        }
+        String oldDim = Objects.toString(oldDimensionColumn, "").trim();
+        String newDim = Objects.toString(newDimensionColumn, "").trim();
+        List<String> conditions = new ArrayList<>();
+        for (String part : where.split("(?i)\\s+and\\s+")) {
+            String condition = part.trim();
+            if (condition.isBlank()) {
+                continue;
+            }
+            if (isDimensionBlankCheck(condition, oldDim) || isDimensionBlankCheck(condition, newDim)) {
+                continue;
+            }
+            conditions.add(condition);
+        }
+        if (conditions.isEmpty()) {
+            return "";
+        }
+        return "AND " + String.join(" AND ", conditions) + " ";
+    }
+
+    private boolean isDimensionBlankCheck(String condition, String dimensionColumn) {
+        String column = Objects.toString(dimensionColumn, "").trim();
+        if (column.isBlank()) {
+            return false;
+        }
+        String normalized = Objects.toString(condition, "").replaceAll("\\s+", " ").trim().toLowerCase(Locale.ROOT);
+        String quoted = ("`" + column + "`").toLowerCase(Locale.ROOT);
+        return normalized.equals(quoted + " is not null")
+                || normalized.equals(quoted + " <> ''")
+                || normalized.equals(quoted + " != ''")
+                || normalized.equals("trim(" + quoted + ") <> ''")
+                || normalized.equals("trim(" + quoted + ") != ''");
+    }
+
+    private String enforceOrderAndLimit(String sql, TopNIntent intent) {
+        String normalized = sql.replaceAll(";+$", "").trim();
+        String lower = normalized.toLowerCase(Locale.ROOT);
+        if (!lower.contains(" group by ") && !lower.contains(" order by ")) {
+            return normalized;
+        }
+        String withoutLimit = normalized.replaceAll("(?is)\\s+limit\\s+\\d+\\s*$", "").trim();
+        String orderExpr = chooseTopNOrderExpression(withoutLimit);
+        String withoutOrder = withoutLimit.replaceAll("(?is)\\s+order\\s+by\\s+.+$", "").trim();
+        return withoutOrder + " ORDER BY " + orderExpr + " " + (intent.ascending() ? "ASC" : "DESC")
+                + " LIMIT " + intent.limit();
+    }
+
+    private String chooseTopNOrderExpression(String sql) {
+        String lower = Objects.toString(sql, "").toLowerCase(Locale.ROOT);
+        if (lower.contains(" as metric_value")) {
+            return "metric_value";
+        }
+        if (lower.contains(" as value")) {
+            return "value";
+        }
+        Matcher alias = Pattern.compile("(?is)\\b(sum|count|avg|min|max)\\s*\\([^)]*\\)\\s+as\\s+`?([a-zA-Z_][\\w]*)`?")
+                .matcher(sql);
+        if (alias.find()) {
+            return alias.group(2);
+        }
+        return "metric_value";
+    }
+
+    private TopNIntent extractTopNIntent(String question) {
+        String text = Objects.toString(question, "").trim();
+        if (text.isBlank()) {
+            return null;
+        }
+        String lower = text.toLowerCase(Locale.ROOT);
+        boolean ascending = containsAny(text, "最低", "最少", "倒数", "末尾", "后几", "后十", "least", "bottom");
+        Integer limit = null;
+        Matcher topMatcher = Pattern.compile("(?i)(?:top|前|排名前|排行前|最高的前|最大的前|最低的前|最少的前)\\s*([0-9]{1,4})")
+                .matcher(text);
+        if (topMatcher.find()) {
+            limit = parseBoundedTopN(topMatcher.group(1));
+        }
+        if (limit == null) {
+            Matcher suffixMatcher = Pattern.compile("(?i)([0-9]{1,4})\\s*(?:个|名|条|项|位)?\\s*(?:最高|最大|最多|最低|最少|top|排名|排行)")
+                    .matcher(text);
+            if (suffixMatcher.find()) {
+                limit = parseBoundedTopN(suffixMatcher.group(1));
+            }
+        }
+        if (limit == null) {
+            Matcher cnMatcher = Pattern.compile("(?:前|排名前|排行前|最高的前|最大的前|最低的前|最少的前)([零一二两三四五六七八九十百千万〇]{1,8})")
+                    .matcher(text);
+            if (cnMatcher.find()) {
+                limit = parseBoundedTopN(cnMatcher.group(1));
+            }
+        }
+        if (limit == null) {
+            Matcher cnSuffixMatcher = Pattern.compile("([零一二两三四五六七八九十百千万〇]{1,8})(?:个|名|条|项|位)?(?:最高|最大|最多|最低|最少|排名|排行)")
+                    .matcher(text);
+            if (cnSuffixMatcher.find()) {
+                limit = parseBoundedTopN(cnSuffixMatcher.group(1));
+            }
+        }
+        if (limit == null && (lower.contains("top") || containsAny(text, "前几", "排名", "排行", "最高", "最多", "最低", "最少"))) {
+            limit = 10;
+        }
+        if (limit == null) {
+            return null;
+        }
+        return new TopNIntent(limit, ascending);
+    }
+
+    private Integer parseBoundedTopN(String raw) {
+        int value = parseFlexiblePositiveInteger(raw);
+        if (value <= 0) {
+            return null;
+        }
+        return Math.min(value, 200);
+    }
+
+    private int parseFlexiblePositiveInteger(String raw) {
+        String text = Objects.toString(raw, "").trim();
+        if (text.isBlank()) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(text);
+        } catch (NumberFormatException ignored) {
+            return parseChinesePositiveInteger(text);
+        }
+    }
+
+    private int parseChinesePositiveInteger(String raw) {
+        String text = Objects.toString(raw, "").trim();
+        if (text.isBlank()) {
+            return 0;
+        }
+        int total = 0;
+        int section = 0;
+        int number = 0;
+        for (int i = 0; i < text.length(); i++) {
+            int digit = chineseDigitValue(text.charAt(i));
+            if (digit >= 0) {
+                number = digit;
+                continue;
+            }
+            int unit = chineseUnitValue(text.charAt(i));
+            if (unit <= 0) {
+                return 0;
+            }
+            if (unit == 10000) {
+                section = (section + (number == 0 ? 1 : number)) * unit;
+                total += section;
+                section = 0;
+            } else {
+                section += (number == 0 ? 1 : number) * unit;
+            }
+            number = 0;
+        }
+        return total + section + number;
+    }
+
+    private int chineseDigitValue(char ch) {
+        return switch (ch) {
+            case '零', '〇' -> 0;
+            case '一' -> 1;
+            case '二', '两' -> 2;
+            case '三' -> 3;
+            case '四' -> 4;
+            case '五' -> 5;
+            case '六' -> 6;
+            case '七' -> 7;
+            case '八' -> 8;
+            case '九' -> 9;
+            default -> -1;
+        };
+    }
+
+    private int chineseUnitValue(char ch) {
+        return switch (ch) {
+            case '十' -> 10;
+            case '百' -> 100;
+            case '千' -> 1000;
+            case '万' -> 10000;
+            default -> 0;
+        };
+    }
+
+    private record TopNIntent(int limit, boolean ascending) {
     }
 
     private SemanticSqlCorrection applyGeoValueDataProfileGuard(String question, String queryTableName,
@@ -1385,6 +1706,237 @@ public class ChatBiService {
         return matcher.find() ? matcher.group(1).trim() : "";
     }
 
+    private Map<String, Object> alignFieldMappingWithSql(String question, List<Map<String, Object>> fields,
+            String sql, Map<String, Object> fieldMapping, List<String> generationTrace) {
+        SqlSelectMapping selectMapping = parseSqlSelectMapping(sql);
+        if (selectMapping == null || (selectMapping.dimensionExpression().isBlank()
+                && selectMapping.metricExpression().isBlank())) {
+            return fieldMapping == null ? Map.of() : fieldMapping;
+        }
+        Map<String, Object> aligned = new LinkedHashMap<>(fieldMapping == null ? Map.of() : fieldMapping);
+        boolean changed = applySqlSelectMapping(question, fields, selectMapping, aligned);
+        if (changed && generationTrace != null) {
+            generationTrace.add("fieldMappingAligned=APPLIED;dimensionExpr="
+                    + safeTraceValue(selectMapping.dimensionExpression()) + ";metricExpr="
+                    + safeTraceValue(selectMapping.metricExpression()));
+        }
+        return aligned;
+    }
+
+    private Map<String, Object> alignFieldMappingWithSqlAndRows(String question, List<Map<String, Object>> fields,
+            String sql, List<Map<String, Object>> rows, Map<String, Object> fieldMapping,
+            List<String> generationTrace) {
+        Map<String, Object> aligned = new LinkedHashMap<>(alignFieldMappingWithSql(question, fields, sql, fieldMapping,
+                generationTrace));
+        if (rows == null || rows.isEmpty()) {
+            return aligned;
+        }
+        Map<String, Object> firstRow = rows.get(0);
+        String dimensionKey = Objects.toString(aligned.get("dimensionKey"), "").trim();
+        if (!dimensionKey.isBlank() && !firstRow.containsKey(dimensionKey)
+                && firstRow.keySet().stream().anyMatch(key -> isDimensionAlias(key))) {
+            aligned.put("dimensionKey", firstRow.keySet().stream().filter(this::isDimensionAlias).findFirst()
+                    .orElse(dimensionKey));
+        }
+        String metricKey = Objects.toString(aligned.get("metricKey"), "").trim();
+        if (!metricKey.isBlank() && !firstRow.containsKey(metricKey)
+                && firstRow.keySet().stream().anyMatch(key -> isMetricAlias(key))) {
+            aligned.put("metricKey", firstRow.keySet().stream().filter(this::isMetricAlias).findFirst()
+                    .orElse(metricKey));
+        }
+        return aligned;
+    }
+
+    private boolean applySqlSelectMapping(String question, List<Map<String, Object>> fields,
+            SqlSelectMapping selectMapping, Map<String, Object> aligned) {
+        boolean changed = false;
+        String dimensionExpression = selectMapping.dimensionExpression();
+        if (!dimensionExpression.isBlank()) {
+            String previousKey = Objects.toString(aligned.get("dimensionKey"), "").trim();
+            String dimensionKey = firstTextValue(selectMapping.dimensionAlias(), selectMapping.dimensionColumn(), previousKey);
+            String dimensionLabel = sqlDimensionLabel(question, fields, selectMapping, previousKey);
+            if (!dimensionKey.equals(previousKey)) {
+                aligned.put("dimensionKey", dimensionKey);
+                changed = true;
+            }
+            if (!dimensionLabel.isBlank() && !dimensionLabel.equals(Objects.toString(aligned.get("dimension"), ""))) {
+                aligned.put("dimension", dimensionLabel);
+                changed = true;
+            }
+            aligned.put("dimensionExpr", dimensionExpression);
+        }
+        String metricExpression = selectMapping.metricExpression();
+        if (!metricExpression.isBlank()) {
+            String previousKey = Objects.toString(aligned.get("metricKey"), "").trim();
+            String metricKey = firstTextValue(selectMapping.metricAlias(), selectMapping.metricColumn(), previousKey);
+            String metricLabel = sqlMetricLabel(fields, selectMapping, previousKey);
+            if (!metricKey.equals(previousKey)) {
+                aligned.put("metricKey", metricKey);
+                changed = true;
+            }
+            if (!metricLabel.isBlank() && !metricLabel.equals(Objects.toString(aligned.get("metric"), ""))) {
+                aligned.put("metric", metricLabel);
+                changed = true;
+            }
+            aligned.put("metricExpr", metricExpression);
+        }
+        return changed;
+    }
+
+    private SqlSelectMapping parseSqlSelectMapping(String sql) {
+        String source = Objects.toString(sql, "");
+        String selectClause = extractSelectClause(source);
+        if (selectClause.isBlank()) {
+            return new SqlSelectMapping("", "", "", "", "", "");
+        }
+        String dimensionExpression = "";
+        String dimensionAlias = "";
+        String metricExpression = "";
+        String metricAlias = "";
+        for (String item : splitSelectItems(selectClause)) {
+            Matcher aliasMatcher = Pattern.compile("(?is)^(.+?)\\s+as\\s+`?([A-Za-z_][A-Za-z0-9_]*)`?\\s*$")
+                    .matcher(item);
+            if (!aliasMatcher.find()) {
+                continue;
+            }
+            String expression = cleanSqlExpression(aliasMatcher.group(1));
+            String alias = cleanSqlIdentifier(aliasMatcher.group(2));
+            if (isDimensionAlias(alias) && dimensionExpression.isBlank()) {
+                dimensionExpression = expression;
+                dimensionAlias = alias;
+            } else if (isMetricAlias(alias) && metricExpression.isBlank()) {
+                metricExpression = expression;
+                metricAlias = alias;
+            }
+        }
+        return new SqlSelectMapping(
+                dimensionExpression,
+                dimensionAlias,
+                firstBacktickColumn(dimensionExpression),
+                metricExpression,
+                metricAlias,
+                lastBacktickColumn(metricExpression));
+    }
+
+    private String extractSelectClause(String sql) {
+        Matcher matcher = Pattern.compile("(?is)^\\s*select\\s+(.+?)\\s+from\\b").matcher(Objects.toString(sql, ""));
+        return matcher.find() ? matcher.group(1).trim() : "";
+    }
+
+    private List<String> splitSelectItems(String selectClause) {
+        List<String> items = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        int depth = 0;
+        char quote = 0;
+        String source = Objects.toString(selectClause, "");
+        for (int i = 0; i < source.length(); i += 1) {
+            char ch = source.charAt(i);
+            if (quote != 0) {
+                current.append(ch);
+                if (ch == quote) {
+                    quote = 0;
+                }
+                continue;
+            }
+            if (ch == '\'' || ch == '"' || ch == '`') {
+                quote = ch;
+                current.append(ch);
+                continue;
+            }
+            if (ch == '(') {
+                depth += 1;
+                current.append(ch);
+                continue;
+            }
+            if (ch == ')' && depth > 0) {
+                depth -= 1;
+                current.append(ch);
+                continue;
+            }
+            if (ch == ',' && depth == 0) {
+                String item = current.toString().trim();
+                if (!item.isBlank()) {
+                    items.add(item);
+                }
+                current.setLength(0);
+                continue;
+            }
+            current.append(ch);
+        }
+        String item = current.toString().trim();
+        if (!item.isBlank()) {
+            items.add(item);
+        }
+        return items;
+    }
+
+    private String sqlDimensionLabel(String question, List<Map<String, Object>> fields,
+            SqlSelectMapping selectMapping, String fallbackColumn) {
+        String expr = selectMapping.dimensionExpression().toLowerCase(Locale.ROOT);
+        String sourceColumn = firstTextValue(selectMapping.dimensionColumn(), fallbackColumn);
+        Map<String, Object> sourceField = findFieldByColumn(fields, sourceColumn);
+        String sourceLabel = sourceField == null ? sourceColumn : fieldDisplayName(sourceField);
+        if (expr.contains("date_format") || expr.contains("year(") || expr.contains("quarter(")) {
+            String q = Objects.toString(question, "");
+            if (containsAny(q, "每个月", "每月", "按月", "月度", "月份")) {
+                return firstTextValue(sourceLabel, "时间") + "（按月）";
+            }
+            if (containsAny(q, "每天", "每日", "按日", "日度")) {
+                return firstTextValue(sourceLabel, "时间") + "（按日）";
+            }
+            if (containsAny(q, "每周", "按周", "周度")) {
+                return firstTextValue(sourceLabel, "时间") + "（按周）";
+            }
+            if (containsAny(q, "季度", "按季度")) {
+                return firstTextValue(sourceLabel, "时间") + "（按季度）";
+            }
+            if (containsAny(q, "每年", "按年", "年度")) {
+                return firstTextValue(sourceLabel, "时间") + "（按年）";
+            }
+            return firstTextValue(sourceLabel, "时间维度");
+        }
+        return firstTextValue(sourceLabel, selectMapping.dimensionAlias(), fallbackColumn);
+    }
+
+    private String sqlMetricLabel(List<Map<String, Object>> fields, SqlSelectMapping selectMapping, String fallbackColumn) {
+        String sourceColumn = firstTextValue(selectMapping.metricColumn(), fallbackColumn);
+        Map<String, Object> sourceField = findFieldByColumn(fields, sourceColumn);
+        return firstTextValue(sourceField == null ? "" : fieldDisplayName(sourceField), sourceColumn,
+                selectMapping.metricAlias(), fallbackColumn);
+    }
+
+    private String cleanSqlExpression(String expression) {
+        return Objects.toString(expression, "").replaceAll("\\s+", " ").trim();
+    }
+
+    private String cleanSqlIdentifier(String identifier) {
+        return Objects.toString(identifier, "").replace("`", "").trim();
+    }
+
+    private String firstBacktickColumn(String expression) {
+        Matcher matcher = Pattern.compile("`([^`]+)`").matcher(Objects.toString(expression, ""));
+        return matcher.find() ? matcher.group(1).trim() : "";
+    }
+
+    private String lastBacktickColumn(String expression) {
+        Matcher matcher = Pattern.compile("`([^`]+)`").matcher(Objects.toString(expression, ""));
+        String result = "";
+        while (matcher.find()) {
+            result = matcher.group(1).trim();
+        }
+        return result;
+    }
+
+    private boolean isDimensionAlias(String key) {
+        String normalized = Objects.toString(key, "").trim().toLowerCase(Locale.ROOT);
+        return "dim_name".equals(normalized) || "name".equals(normalized) || "dimension".equals(normalized);
+    }
+
+    private boolean isMetricAlias(String key) {
+        String normalized = Objects.toString(key, "").trim().toLowerCase(Locale.ROOT);
+        return "metric_value".equals(normalized) || "value".equals(normalized) || "metric".equals(normalized);
+    }
+
     private FilterValueMatch findMismatchedGeoValueFilter(String sql, List<Map<String, Object>> fields,
             String dimensionColumn) {
         Map<String, Set<String>> valuesByColumn = new LinkedHashMap<>();
@@ -1523,6 +2075,68 @@ public class ChatBiService {
                 .orElseGet(() -> fields.stream().filter(this::isNumericField).findFirst().orElse(null));
     }
 
+    private Map<String, Object> findDimensionField(List<Map<String, Object>> fields, Map<String, Object> fieldMapping,
+            String question) {
+        List<Map<String, Object>> candidates = fields.stream()
+                .filter(field -> !isNumericField(field))
+                .toList();
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        Optional<Map<String, Object>> semantic = candidates.stream()
+                .map(field -> Map.entry(field, dimensionFieldScore(field, question)))
+                .filter(entry -> entry.getValue() > 0)
+                .max(Map.Entry.comparingByValue())
+                .map(Map.Entry::getKey);
+        if (semantic.isPresent()) {
+            return semantic.get();
+        }
+        String mappedDimension = Objects.toString(fieldMapping == null ? "" : fieldMapping.get("dimensionKey"), "").trim();
+        if (!mappedDimension.isBlank()) {
+            Optional<Map<String, Object>> mapped = candidates.stream()
+                    .filter(field -> mappedDimension.equals(fieldColumn(field)))
+                    .findFirst();
+            if (mapped.isPresent()) {
+                return mapped.get();
+            }
+        }
+        return candidates.get(0);
+    }
+
+    private int dimensionFieldScore(Map<String, Object> field, String question) {
+        String haystack = fieldSemanticText(field);
+        String text = Objects.toString(question, "");
+        int score = 0;
+        if (containsAny(haystack, "city", "城市", "市") && containsAny(text, "城市", "市", "city")) {
+            score += 140;
+        }
+        if (containsAny(haystack, "province", "prov", "state", "省份", "省市", "省")
+                && containsAny(text, "省份", "各省", "省", "province")) {
+            score += 135;
+        }
+        if (containsAny(haystack, "region", "area", "zone", "区域", "大区")
+                && containsAny(text, "区域", "大区", "region", "area")) {
+            score += 130;
+        }
+        if (containsAny(haystack, "product", "sku", "item", "产品", "商品", "品类", "类别")
+                && containsAny(text, "产品", "商品", "品类", "类别", "product", "sku")) {
+            score += 125;
+        }
+        if (containsAny(haystack, "customer", "client", "客户", "顾客")
+                && containsAny(text, "客户", "顾客", "customer", "client")) {
+            score += 120;
+        }
+        String displayName = fieldDisplayName(field);
+        String column = fieldColumn(field);
+        if (!displayName.isBlank() && text.contains(displayName)) {
+            score += 100;
+        }
+        if (!column.isBlank() && text.toLowerCase(Locale.ROOT).contains(column.toLowerCase(Locale.ROOT))) {
+            score += 80;
+        }
+        return score;
+    }
+
     private int metricFieldScore(Map<String, Object> field, String question) {
         String haystack = fieldSemanticText(field);
         String text = Objects.toString(question, "");
@@ -1560,6 +2174,12 @@ public class ChatBiService {
     private boolean hasRecentTimeSemantics(String question) {
         String text = Objects.toString(question, "");
         return text.contains("最近") || text.contains("近") || text.contains("近期") || text.contains("这段时间");
+    }
+
+    private boolean isTimeSeriesLikeQuestion(String question) {
+        String text = Objects.toString(question, "");
+        return containsAny(text, "趋势", "走势", "变化", "按月", "每月", "月份", "月度", "按日", "每日",
+                "日期", "时间", "按周", "每周", "季度", "年度");
     }
 
     private boolean isNumericField(Map<String, Object> field) {
@@ -1892,6 +2512,11 @@ public class ChatBiService {
         return "";
     }
 
+    private String firstTextValue(Object... values) {
+        Object value = firstNonBlank(values);
+        return Objects.toString(value, "").trim();
+    }
+
     private void putIfPresent(Map<String, Object> target, String key, Object value) {
         if (value != null && !(value instanceof String text && text.trim().isEmpty())) {
             target.put(key, value);
@@ -1976,6 +2601,39 @@ public class ChatBiService {
     private String safeTraceValue(Object value) {
         String text = Objects.toString(value, "").replaceAll("[\\r\\n;]+", " ").trim();
         return text.isBlank() ? "UNKNOWN" : text.substring(0, Math.min(text.length(), 120));
+    }
+
+    private ProgressListener progressListener(Object value) {
+        return value instanceof ProgressListener listener ? listener : ProgressListener.noop();
+    }
+
+    private void emitProgress(ProgressListener listener,
+                              String eventType,
+                              String title,
+                              String detail,
+                              Map<String, Object> metadata) {
+        if (listener == null) {
+            return;
+        }
+        listener.onProgress(
+                Objects.toString(eventType, "STEP"),
+                Objects.toString(title, "处理中"),
+                Objects.toString(detail, ""),
+                metadata == null ? Map.of() : metadata
+        );
+    }
+
+    private Map<String, Object> publicFilters(Map<String, Object> filters) {
+        if (filters == null || filters.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        filters.forEach((key, value) -> {
+            if (!"progressListener".equals(Objects.toString(key, ""))) {
+                result.put(key, value);
+            }
+        });
+        return result;
     }
 
     private void ensureNotCancelled(String stage) {
