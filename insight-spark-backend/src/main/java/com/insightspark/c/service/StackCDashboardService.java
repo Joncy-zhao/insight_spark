@@ -142,33 +142,105 @@ public class StackCDashboardService {
         return editable;
     }
 
+    private List<Map<String, Object>> listSmartPinEditableDashboards() {
+        String uid = AuthContext.userId();
+        boolean admin = AuthContext.isAdmin();
+        List<Map<String, Object>> rows;
+        if (admin) {
+            rows = jdbcTemplate.queryForList("""
+                    SELECT %s
+                    FROM is_dashboard
+                    WHERE status != 'ARCHIVED'
+                    ORDER BY updated_at DESC
+                    LIMIT 200
+                    """.formatted(DASHBOARD_BASE_COLUMNS));
+        } else {
+            rows = jdbcTemplate.queryForList("""
+                    SELECT %s
+                    FROM is_dashboard
+                    """.formatted(DASHBOARD_BASE_COLUMNS) + """
+                    WHERE status != 'ARCHIVED'
+                      AND (
+                        owner_user_id = ?
+                        OR EXISTS (
+                          SELECT 1 FROM is_dashboard_permission p
+                          WHERE p.dashboard_id = is_dashboard.id
+                            AND p.user_id = ?
+                            AND p.permission_type = 'EDIT'
+                            AND (p.expire_at IS NULL OR p.expire_at > NOW())
+                        )
+                        OR EXISTS (
+                          SELECT 1 FROM is_dashboard_team_permission dp
+                          INNER JOIN is_team_member tm ON tm.team_id = dp.team_id AND tm.user_id = ?
+                          WHERE dp.dashboard_id = is_dashboard.id
+                            AND dp.permission_type = 'EDIT'
+                        )
+                      )
+                    ORDER BY updated_at DESC
+                    LIMIT 200
+                    """, uid, uid, uid);
+        }
+        List<Map<String, Object>> editable = new ArrayList<>();
+        for (Map<String, Object> row : rows) {
+            Map<String, Object> item = new LinkedHashMap<>(row);
+            boolean canManage = canManageDashboard(item);
+            item.put("canManage", canManage);
+            if (canManage) {
+                editable.add(item);
+            }
+        }
+        return editable;
+    }
+
     public Map<String, Object> smartPinChart(String question, Map<String, Object> source) {
         Map<String, Object> target = source == null ? Map.of() : source;
         Long artifactId = toLong(target.get("artifactId"));
         Long turnId = toLong(target.get("turnId"));
-        Long chartId = toLong(target.get("historyId"));
+        Long chartId = toLong(firstPresent(target.get("historyId"), target.get("chartId")));
         if ((chartId == null || chartId <= 0) && (artifactId == null || artifactId <= 0) && (turnId == null || turnId <= 0)) {
             throw new IllegalArgumentException("当前会话暂无可钉入的图表结果，请先完成一次图表查询");
         }
 
-        List<Map<String, Object>> dashboards = listEditableForCurrentUser();
-        if (dashboards.isEmpty()) {
+        List<Map<String, Object>> editableDashboards = listSmartPinEditableDashboards();
+        List<Map<String, Object>> dashboards = editableDashboards.stream()
+                .filter(this::isPublishedDashboard)
+                .toList();
+        if (editableDashboards.isEmpty()) {
             Map<String, Object> result = dashboardPinDraft(
                     "暂无可编辑看板，请先到“我的看板”创建或申请编辑权限",
                     "NO_EDITABLE_DASHBOARD",
                     null,
-                    dashboards,
+                    editableDashboards,
+                    true
+            );
+            result.put("source", target);
+            return result;
+        }
+        if (dashboards.isEmpty()) {
+            Map<String, Object> result = dashboardPinDraft(
+                    "暂无已发布且可编辑的看板，请先发布目标看板后再钉入",
+                    "NO_PUBLISHED_DASHBOARD",
+                    null,
+                    editableDashboards,
                     true
             );
             result.put("source", target);
             return result;
         }
 
-        DashboardMatch match = resolveDashboardMatch(question, dashboards);
+        DashboardMatch unpublishedMatch = resolveDashboardMatch(question, editableDashboards.stream()
+                .filter(dashboard -> !isPublishedDashboard(dashboard))
+                .toList());
+        DashboardMatch match = unpublishedMatch.status() == DashboardMatchStatus.UNPUBLISHED_TARGET
+                ? unpublishedMatch
+                : resolveDashboardMatch(question, dashboards);
         if (match.status() != DashboardMatchStatus.UNIQUE || match.dashboard() == null) {
-            String message = match.status() == DashboardMatchStatus.AMBIGUOUS
-                    ? "已识别为钉入看板，但目标看板不唯一，请选择后确认"
-                    : "已识别为钉入看板，请选择目标看板后确认";
+            String message = switch (match.status()) {
+                case AMBIGUOUS -> "已识别为钉入看板，但目标看板不唯一，请选择后确认";
+                case UNPUBLISHED_TARGET -> "已识别到目标看板「" + Objects.toString(match.keyword(), "")
+                        + "」，但该看板尚未发布，请先发布后再钉入";
+                default -> "已识别为钉入看板，请选择目标看板后确认";
+            };
             Map<String, Object> result = dashboardPinDraft(
                     message,
                     match.status().name(),
@@ -209,6 +281,10 @@ public class StackCDashboardService {
         result.put("pinnedDashboard", pinnedDashboard);
         result.put("pinPayload", payload);
         return result;
+    }
+
+    private boolean isPublishedDashboard(Map<String, Object> dashboard) {
+        return "ACTIVE".equalsIgnoreCase(Objects.toString(dashboard == null ? null : dashboard.get("status"), ""));
     }
 
     public Map<String, Object> listForAdmin(
@@ -1396,6 +1472,13 @@ public class StackCDashboardService {
         if (isWeakDashboardKeyword(keyword, normalizedKeyword)) {
             return new DashboardMatch(DashboardMatchStatus.MISSING_TARGET, keyword, null, dashboards);
         }
+        List<Map<String, Object>> unpublishedExact = dashboards.stream()
+                .filter(dashboard -> !isPublishedDashboard(dashboard))
+                .filter(dashboard -> isExactDashboardKeywordMatch(normalizedKeyword, dashboard))
+                .toList();
+        if (!unpublishedExact.isEmpty()) {
+            return new DashboardMatch(DashboardMatchStatus.UNPUBLISHED_TARGET, keyword, null, unpublishedExact);
+        }
         List<Map<String, Object>> scored = new ArrayList<>();
         int bestScore = 0;
         for (Map<String, Object> dashboard : dashboards) {
@@ -1418,7 +1501,7 @@ public class StackCDashboardService {
                 .filter(item -> layoutInt(item.get("matchScore"), 0) >= threshold)
                 .sorted(Comparator.comparingInt((Map<String, Object> item) -> layoutInt(item.get("matchScore"), 0)).reversed())
                 .toList();
-        if (candidates.size() == 1) {
+        if (candidates.size() == 1 && isConfidentDashboardMatch(normalizedKeyword, candidates.get(0))) {
             return new DashboardMatch(DashboardMatchStatus.UNIQUE, keyword, candidates.get(0), candidates);
         }
         List<Map<String, Object>> exact = candidates.stream()
@@ -1428,6 +1511,31 @@ public class StackCDashboardService {
             return new DashboardMatch(DashboardMatchStatus.UNIQUE, keyword, exact.get(0), exact);
         }
         return new DashboardMatch(DashboardMatchStatus.AMBIGUOUS, keyword, null, candidates);
+    }
+
+    private boolean isConfidentDashboardMatch(String normalizedKeyword, Map<String, Object> dashboard) {
+        String keyword = Objects.toString(normalizedKeyword, "").trim();
+        String name = normalizeDashboardName(dashboard == null ? null : dashboard.get("name"));
+        String group = normalizeDashboardName(dashboard == null ? null : firstPresent(dashboard.get("groupPath"), dashboard.get("groupName")));
+        if (keyword.isBlank()) {
+            return false;
+        }
+        if (name.equals(keyword) || group.equals(keyword)) {
+            return true;
+        }
+        // For short target names such as "销售看板", avoid auto-pinning to broader names like "销售经营看板".
+        return keyword.length() >= 4 && (name.contains(keyword) || keyword.contains(name)
+                || group.contains(keyword) || keyword.contains(group));
+    }
+
+    private boolean isExactDashboardKeywordMatch(String normalizedKeyword, Map<String, Object> dashboard) {
+        String keyword = Objects.toString(normalizedKeyword, "").trim();
+        if (keyword.isBlank() || dashboard == null) {
+            return false;
+        }
+        String name = normalizeDashboardName(dashboard.get("name"));
+        String group = normalizeDashboardName(firstPresent(dashboard.get("groupPath"), dashboard.get("groupName")));
+        return keyword.equals(name) || keyword.equals(group);
     }
 
     private int dashboardMatchScore(String question, String normalizedKeyword, Map<String, Object> dashboard) {
@@ -1701,13 +1809,18 @@ public class StackCDashboardService {
             return new PinnedTarget(resolvedHistoryId, artifactId, toLong(artifact.get("turnId")));
         }
         if (turnId != null) {
-            Map<String, Object> artifact = chatConversationService.latestChartArtifactForTurn(turnId);
+            boolean preferAdvanced = isAdvancedPinPayload(body);
+            Map<String, Object> artifact = chatConversationService.latestPinnableArtifactForTurn(turnId, preferAdvanced);
             if (artifact.isEmpty()) {
                 throw new IllegalArgumentException("\u6307\u5b9a\u8f6e\u6b21\u6682\u65e0\u53ef\u9489\u5165\u7684\u56fe\u8868\u4ea7\u7269");
             }
             Long resolvedArtifactId = toLong(artifact.get("id"));
             Long resolvedHistoryId = toLong(artifact.get("historyId"));
             if (resolvedHistoryId == null || resolvedHistoryId <= 0) {
+                String artifactType = Objects.toString(artifact.get("artifactType"), "").trim().toUpperCase();
+                if (artifactType.startsWith("ADVANCED_")) {
+                    return new PinnedTarget(0L, resolvedArtifactId, turnId);
+                }
                 throw new IllegalArgumentException("\u8be5\u8f6e\u6b21\u56fe\u8868\u5c1a\u672a\u5173\u8054\u5386\u53f2\u56fe\u8868\uff0c\u6682\u65f6\u65e0\u6cd5\u9489\u5165\u770b\u677f");
             }
             chatQueryHistoryService.assertHistoryChartOwnedByCurrentUser(resolvedHistoryId);
@@ -1718,6 +1831,18 @@ public class StackCDashboardService {
         }
         chatQueryHistoryService.assertHistoryChartOwnedByCurrentUser(chartId);
         return new PinnedTarget(chartId, null, null);
+    }
+
+    private boolean isAdvancedPinPayload(Map<String, Object> body) {
+        if (body == null || body.isEmpty()) {
+            return false;
+        }
+        String advancedType = Objects.toString(body.get("advancedAnalysisType"), "").trim();
+        if (!advancedType.isBlank()) {
+            return true;
+        }
+        String sourceType = Objects.toString(firstPresent(body.get("artifactType"), body.get("sourceType")), "").trim().toUpperCase();
+        return sourceType.startsWith("ADVANCED_") || "ADVANCED_ANALYSIS".equals(sourceType);
     }
 
     private String resolvePinnedTitle(Map<String, Object> body, PinnedTarget target) {
@@ -1843,6 +1968,7 @@ public class StackCDashboardService {
         NONE,
         MISSING_TARGET,
         NOT_FOUND,
-        AMBIGUOUS
+        AMBIGUOUS,
+        UNPUBLISHED_TARGET
     }
 }

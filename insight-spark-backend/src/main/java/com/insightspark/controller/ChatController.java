@@ -32,6 +32,7 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -40,6 +41,11 @@ import java.util.concurrent.TimeoutException;
 @RequestMapping("/api/chat")
 @CrossOrigin
 public class ChatController {
+
+    private static final long STREAM_THINKING_MIN_INTERVAL_MS = 320L;
+    private static final long STREAM_POLL_TIMEOUT_MS = 120L;
+    private static final long STREAM_KEEP_ALIVE_MS = 3500L;
+    private static final int STREAM_THINKING_HISTORY_LIMIT = 100;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -138,6 +144,11 @@ public class ChatController {
         boolean enhanced = !"false".equalsIgnoreCase(text(request.get("enhanced")));
         return executeQuestion(text(request.get("question")), text(request.get("tableName")), enhanced,
                 sessionId, toLong(request.get("parentTurnId")));
+    }
+
+    @PostMapping("/alert-rule-created")
+    public ApiResponse<Map<String, Object>> markAlertRuleCreated(@RequestBody(required = false) Map<String, Object> request) {
+        return ApiResponse.success(chatConversationService.markAlertRuleCreated(request == null ? Map.of() : request));
     }
 
     @PostMapping("/sessions/{sessionId}/summary")
@@ -331,9 +342,17 @@ public class ChatController {
                                    @RequestParam(required = false) String activeBusinessModelId,
                                    @RequestParam(required = false) String lastCreatedBusinessModelId,
                                    @RequestParam(required = false) String lastAppliedBusinessModelId,
+                                   @RequestParam(required = false) Long pinChartId,
+                                   @RequestParam(required = false) Long pinArtifactId,
+                                   @RequestParam(required = false) Long pinTurnId,
+                                   @RequestParam(required = false) String pinTitle,
+                                   @RequestParam(required = false) String pinSourceQuestion,
+                                   @RequestParam(required = false) String pinTableName,
                                    HttpServletResponse response) throws IOException {
         streamQuestion(question, tableName, conversationId, parentTurnId,
-                businessModelContext(selectedTableName, activeBusinessModelId, lastCreatedBusinessModelId, lastAppliedBusinessModelId),
+                streamRequestContext(selectedTableName, activeBusinessModelId, lastCreatedBusinessModelId,
+                        lastAppliedBusinessModelId, pinChartId, pinArtifactId, pinTurnId, pinTitle,
+                        pinSourceQuestion, pinTableName),
                 response);
     }
 
@@ -346,9 +365,17 @@ public class ChatController {
                                           @RequestParam(required = false) String activeBusinessModelId,
                                           @RequestParam(required = false) String lastCreatedBusinessModelId,
                                           @RequestParam(required = false) String lastAppliedBusinessModelId,
+                                          @RequestParam(required = false) Long pinChartId,
+                                          @RequestParam(required = false) Long pinArtifactId,
+                                          @RequestParam(required = false) Long pinTurnId,
+                                          @RequestParam(required = false) String pinTitle,
+                                          @RequestParam(required = false) String pinSourceQuestion,
+                                          @RequestParam(required = false) String pinTableName,
                                           HttpServletResponse response) throws IOException {
         streamQuestion(question, tableName, sessionId, parentTurnId,
-                businessModelContext(selectedTableName, activeBusinessModelId, lastCreatedBusinessModelId, lastAppliedBusinessModelId),
+                streamRequestContext(selectedTableName, activeBusinessModelId, lastCreatedBusinessModelId,
+                        lastAppliedBusinessModelId, pinChartId, pinArtifactId, pinTurnId, pinTitle,
+                        pinSourceQuestion, pinTableName),
                 response);
     }
 
@@ -385,12 +412,23 @@ public class ChatController {
         long startedAt = System.currentTimeMillis();
         CompletableFuture<Map<String, Object>> queryFuture = new CompletableFuture<>();
         AtomicBoolean clientDisconnected = new AtomicBoolean(false);
+        LinkedBlockingQueue<Map<String, Object>> thinkingQueue = new LinkedBlockingQueue<>();
+        List<Map<String, Object>> streamedSteps = Collections.synchronizedList(new ArrayList<>());
+        SmartChatService.ThinkingEmitter emitter = (eventType, title, detail, metadata) -> {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("eventType", Objects.toString(eventType, "STEP"));
+            payload.put("title", Objects.toString(title, "处理中"));
+            payload.put("detail", Objects.toString(detail, ""));
+            payload.put("metadata", metadata == null ? Map.of() : metadata);
+            payload.put("ts", System.currentTimeMillis());
+            thinkingQueue.offer(payload);
+        };
         Thread queryThread = new Thread(() -> {
             try {
                 AuthContext.set(principal);
                 queryFuture.complete(smartChatService.executeSmart(buildChatQueryRequest(
                         executionQuestion, tableName, activeConversationId, parentTurnId, executionContext
-                )));
+                ), emitter));
             } catch (Exception e) {
                 queryFuture.completeExceptionally(e);
             } finally {
@@ -399,30 +437,25 @@ public class ChatController {
         });
         queryThread.setName("chat-stream-query");
         queryThread.start();
-        String[] titles = {"收到问题", "图谱导航", "语义改写", "SQL生成", "安全检测", "执行查询"};
-        String[] details = {
-                "已接收业务问题，正在识别时间、指标、维度等关键词",
-                "结合知识图谱匹配候选数据表、字段别名与业务同义词",
-                "将自然语言问题改写为结构化分析意图，准备生成 SQL",
-                "基于字段映射与图表意图生成只读 SQL，并补充排序/聚合条件",
-                "执行 SQL 风险审计、限制返回条数并评估敏感字段脱敏策略",
-                "查询执行中，正在等待结果返回并生成图表配置"
-        };
 
         try {
-            // Always emit the first thinking step so the frontend can show live progress immediately.
-            int stepIndex = 1;
-            writeStep(writer, titles[0], details[0]);
+            long lastKeepAliveAt = 0L;
+            long lastThinkingSentAt = 0L;
             while (true) {
-                try {
-                    Map<String, Object> result = queryFuture.get(stepIndex < titles.length ? 450 : 1000, TimeUnit.MILLISECONDS);
-                    while (stepIndex < titles.length) {
-                        writeStep(writer, titles[stepIndex], details[stepIndex]);
-                        stepIndex++;
-                        pauseForSseProgress();
-                    }
+                Map<String, Object> nextThinking = thinkingQueue.poll(STREAM_POLL_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+                if (nextThinking != null) {
+                    lastThinkingSentAt = throttleAndWriteThinking(writer, nextThinking, streamedSteps, lastThinkingSentAt);
+                    continue;
+                }
+                if (queryFuture.isDone()) {
+                    lastThinkingSentAt = flushThinkingQueueWithPace(writer, thinkingQueue, streamedSteps, lastThinkingSentAt);
+                    Map<String, Object> result = queryFuture.get();
+                    lastThinkingSentAt = flushThinkingQueueWithPace(writer, thinkingQueue, streamedSteps, lastThinkingSentAt);
+                    attachStreamedThinking(result, streamedSteps);
                     enrichEnhancedResponse(result, question, tableName);
-                    attachHistoryReplaySteps(result, question, tableName);
+                    if (streamedSteps.isEmpty()) {
+                        attachHistoryReplaySteps(result, question, tableName);
+                    }
                     Long historyId = chatQueryHistoryService.recordSuccess(question, tableName, result,
                             System.currentTimeMillis() - startedAt);
                     if (historyId != null) {
@@ -435,13 +468,12 @@ public class ChatController {
                             question, tableName, result);
                     writeSse(writer, "result", result);
                     return;
-                } catch (TimeoutException timeout) {
-                    if (stepIndex < titles.length) {
-                        writeStep(writer, titles[stepIndex], details[stepIndex]);
-                        stepIndex++;
-                    } else {
-                        writeStep(writer, "结果整理", "已完成查询，正在整理图表数据与返回内容");
-                    }
+                }
+                long now = System.currentTimeMillis();
+                if (now - lastKeepAliveAt > STREAM_KEEP_ALIVE_MS) {
+                    writer.write(": keep-alive\n\n");
+                    writer.flush();
+                    lastKeepAliveAt = now;
                 }
             }
         } catch (CancellationException e) {
@@ -572,6 +604,12 @@ public class ChatController {
         putIfPresent(filters, "lastCreatedBusinessModelId", requestContext == null ? null : requestContext.get("lastCreatedBusinessModelId"));
         putIfPresent(filters, "lastAppliedBusinessModelId", requestContext == null ? null : requestContext.get("lastAppliedBusinessModelId"));
         putIfPresent(filters, "rawQuestion", requestContext == null ? null : requestContext.get("rawQuestion"));
+        putIfPresent(filters, "pinChartId", requestContext == null ? null : requestContext.get("pinChartId"));
+        putIfPresent(filters, "pinArtifactId", requestContext == null ? null : requestContext.get("pinArtifactId"));
+        putIfPresent(filters, "pinTurnId", requestContext == null ? null : requestContext.get("pinTurnId"));
+        putIfPresent(filters, "pinTitle", requestContext == null ? null : requestContext.get("pinTitle"));
+        putIfPresent(filters, "pinSourceQuestion", requestContext == null ? null : requestContext.get("pinSourceQuestion"));
+        putIfPresent(filters, "pinTableName", requestContext == null ? null : requestContext.get("pinTableName"));
         request.setFilters(filters);
         request.setMode("CHAT");
         return request;
@@ -740,11 +778,31 @@ public class ChatController {
                                                      String activeBusinessModelId,
                                                      String lastCreatedBusinessModelId,
                                                      String lastAppliedBusinessModelId) {
+        return streamRequestContext(selectedTableName, activeBusinessModelId, lastCreatedBusinessModelId,
+                lastAppliedBusinessModelId, null, null, null, null, null, null);
+    }
+
+    private Map<String, Object> streamRequestContext(String selectedTableName,
+                                                     String activeBusinessModelId,
+                                                     String lastCreatedBusinessModelId,
+                                                     String lastAppliedBusinessModelId,
+                                                     Long pinChartId,
+                                                     Long pinArtifactId,
+                                                     Long pinTurnId,
+                                                     String pinTitle,
+                                                     String pinSourceQuestion,
+                                                     String pinTableName) {
         Map<String, Object> context = new LinkedHashMap<>();
         putIfPresent(context, "selectedTableName", selectedTableName);
         putIfPresent(context, "activeBusinessModelId", activeBusinessModelId);
         putIfPresent(context, "lastCreatedBusinessModelId", lastCreatedBusinessModelId);
         putIfPresent(context, "lastAppliedBusinessModelId", lastAppliedBusinessModelId);
+        putIfPresent(context, "pinChartId", pinChartId);
+        putIfPresent(context, "pinArtifactId", pinArtifactId);
+        putIfPresent(context, "pinTurnId", pinTurnId);
+        putIfPresent(context, "pinTitle", pinTitle);
+        putIfPresent(context, "pinSourceQuestion", pinSourceQuestion);
+        putIfPresent(context, "pinTableName", pinTableName);
         return context;
     }
 
@@ -802,6 +860,94 @@ public class ChatController {
         payload.put("detail", detail);
         payload.put("ts", System.currentTimeMillis());
         writeSse(writer, "thinking", payload);
+    }
+
+    private long throttleAndWriteThinking(PrintWriter writer,
+                                          Map<String, Object> payload,
+                                          List<Map<String, Object>> streamedSteps,
+                                          long lastSentAt) throws IOException, InterruptedException {
+        long now = System.currentTimeMillis();
+        long waitMs = lastSentAt <= 0L ? 0L : STREAM_THINKING_MIN_INTERVAL_MS - (now - lastSentAt);
+        if (waitMs > 0L) {
+            Thread.sleep(waitMs);
+        }
+        boolean wrote = writeThinkingPayload(writer, payload, streamedSteps);
+        return wrote ? System.currentTimeMillis() : lastSentAt;
+    }
+
+    private long flushThinkingQueueWithPace(PrintWriter writer,
+                                            LinkedBlockingQueue<Map<String, Object>> queue,
+                                            List<Map<String, Object>> streamedSteps,
+                                            long lastSentAt) throws IOException, InterruptedException {
+        long currentLastSentAt = lastSentAt;
+        Map<String, Object> payload;
+        while ((payload = queue.poll()) != null) {
+            currentLastSentAt = throttleAndWriteThinking(writer, payload, streamedSteps, currentLastSentAt);
+        }
+        return currentLastSentAt;
+    }
+
+    private boolean writeThinkingPayload(PrintWriter writer,
+                                         Map<String, Object> payload,
+                                         List<Map<String, Object>> streamedSteps) throws IOException {
+        if (payload == null || payload.isEmpty()) {
+            return false;
+        }
+        String title = Objects.toString(payload.get("title"), "").trim();
+        String detail = Objects.toString(payload.get("detail"), "").trim();
+        if (title.isBlank() && detail.isBlank()) {
+            return false;
+        }
+        String signature = title + "：" + detail;
+        synchronized (streamedSteps) {
+            boolean duplicate = streamedSteps.stream()
+                    .anyMatch(step -> signature.equals(Objects.toString(step.get("title"), "").trim()
+                            + "：" + Objects.toString(step.get("detail"), "").trim()));
+            if (duplicate) {
+                return false;
+            }
+            streamedSteps.add(new LinkedHashMap<>(payload));
+        }
+        writeSse(writer, "thinking", payload);
+        writer.write(": flush\n\n");
+        writer.flush();
+        return true;
+    }
+
+    private Map<String, Object> thinkingPayload(String title,
+                                                String detail,
+                                                String eventType,
+                                                Map<String, Object> metadata) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("eventType", eventType);
+        payload.put("title", title);
+        payload.put("detail", detail);
+        payload.put("metadata", metadata == null ? Map.of() : metadata);
+        payload.put("ts", System.currentTimeMillis());
+        return payload;
+    }
+
+    private void attachStreamedThinking(Map<String, Object> result, List<Map<String, Object>> streamedSteps) {
+        if (result == null || streamedSteps == null || streamedSteps.isEmpty()) {
+            return;
+        }
+        List<Map<String, Object>> steps;
+        synchronized (streamedSteps) {
+            steps = new ArrayList<>();
+            for (Map<String, Object> step : streamedSteps) {
+                if (steps.size() >= STREAM_THINKING_HISTORY_LIMIT) {
+                    break;
+                }
+                steps.add(new LinkedHashMap<>(step));
+            }
+        }
+        result.put("reasoningReplaySteps", steps);
+        result.put("thinkingLogs", steps.stream()
+                .map(step -> Objects.toString(step.get("title"), "").trim()
+                        + "：" + Objects.toString(step.get("detail"), "").trim())
+                .map(String::trim)
+                .filter(text -> !text.isBlank())
+                .toList());
     }
 
     private void pauseForSseProgress() throws InterruptedException {

@@ -507,6 +507,66 @@ public class ChatConversationService {
         return payload;
     }
 
+    public Map<String, Object> markAlertRuleCreated(Map<String, Object> request) {
+        String userId = resolveUserId();
+        Long conversationId = toLong(request == null ? null : request.get("conversationId"));
+        Long assistantTurnId = toLong(request == null ? null : request.get("assistantTurnId"));
+        Long artifactId = toLong(request == null ? null : request.get("artifactId"));
+        Map<String, Object> alertRuleCreated = asMap(request == null ? null : request.get("alertRuleCreated"));
+        Map<String, Object> advancedAnalysis = asMap(request == null ? null : request.get("advancedAnalysis"));
+        if (userId == null || conversationId == null || assistantTurnId == null || alertRuleCreated.isEmpty()
+                || !isConversationOwnedByUser(conversationId, userId)) {
+            return Map.of("updated", false);
+        }
+
+        List<Map<String, Object>> rows = artifactId == null
+                ? jdbcTemplate.queryForList("""
+                        SELECT id, artifact_json AS artifactJson
+                          FROM is_chat_conversation_artifact
+                         WHERE conversation_id = ? AND turn_id = ? AND artifact_type = 'CHART'
+                         ORDER BY id DESC LIMIT 1
+                        """, conversationId, assistantTurnId)
+                : jdbcTemplate.queryForList("""
+                        SELECT id, artifact_json AS artifactJson
+                          FROM is_chat_conversation_artifact
+                         WHERE conversation_id = ? AND turn_id = ? AND id = ?
+                         LIMIT 1
+                        """, conversationId, assistantTurnId, artifactId);
+        if (rows.isEmpty()) {
+            return Map.of("updated", false);
+        }
+
+        Map<String, Object> row = rows.get(0);
+        Long resolvedArtifactId = toLong(row.get("id"));
+        Map<String, Object> artifact = parseJsonMap(row.get("artifactJson"));
+        artifact.put("alertRuleDraft", null);
+        artifact.put("alertRuleCreated", compactAdvancedValue(alertRuleCreated, MAX_ADVANCED_NESTED_LIST_ITEMS, 4));
+        if (!advancedAnalysis.isEmpty()) {
+            artifact.put("advancedAnalysis", compactAdvancedAnalysis(advancedAnalysis));
+        }
+        jdbcTemplate.update("""
+                UPDATE is_chat_conversation_artifact
+                   SET artifact_json = ?
+                 WHERE id = ? AND conversation_id = ? AND turn_id = ?
+                """, toJson(artifact), resolvedArtifactId, conversationId, assistantTurnId);
+        jdbcTemplate.update("""
+                UPDATE is_chat_conversation_turn
+                   SET message_text = ?, context_json = JSON_SET(COALESCE(context_json, JSON_OBJECT()), '$.alertRuleCreated', CAST(? AS JSON))
+                 WHERE id = ? AND conversation_id = ?
+                """,
+                safeText(Objects.toString(request == null ? null : request.get("message"),
+                        "预警规则已创建，可在预警规则管理中查看和维护。"), MAX_MESSAGE_LENGTH),
+                toJson(alertRuleCreated),
+                assistantTurnId,
+                conversationId);
+        return Map.of(
+                "updated", true,
+                "conversationId", conversationId,
+                "assistantTurnId", assistantTurnId,
+                "artifactId", resolvedArtifactId
+        );
+    }
+
     private Map<String, Object> findExistingAdvancedRecord(Long conversationId, String clientMessageId) {
         if (conversationId == null || clientMessageId == null || clientMessageId.isBlank()) {
             return Map.of();
@@ -1170,6 +1230,55 @@ public class ChatConversationService {
         return row;
     }
 
+    public Map<String, Object> latestPinnableArtifactForTurn(Long turnId) {
+        return latestPinnableArtifactForTurn(turnId, false);
+    }
+
+    public Map<String, Object> latestPinnableArtifactForTurn(Long turnId, boolean preferAdvanced) {
+        String userId = resolveUserId();
+        if (turnId == null || userId == null) {
+            return Map.of();
+        }
+        String orderSql = preferAdvanced
+                ? """
+                          ORDER BY CASE
+                                     WHEN a.artifact_type LIKE 'ADVANCED\\_%' THEN 0
+                                     WHEN a.artifact_type = 'CHART' AND a.history_id IS NOT NULL THEN 1
+                                     WHEN a.artifact_type = 'CHART' THEN 2
+                                     ELSE 3
+                                   END,
+                                   a.id DESC
+                        """
+                : """
+                          ORDER BY CASE
+                                     WHEN a.artifact_type = 'CHART' AND a.history_id IS NOT NULL THEN 0
+                                     WHEN a.artifact_type LIKE 'ADVANCED\\_%' THEN 1
+                                     WHEN a.artifact_type = 'CHART' THEN 2
+                                     ELSE 3
+                                   END,
+                                   a.id DESC
+                        """;
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT a.id, a.conversation_id AS conversationId, a.turn_id AS turnId, a.history_id AS historyId,
+                       a.artifact_type AS artifactType, a.artifact_json AS artifactJson,
+                       a.sql_text AS sqlText, a.chart_type AS chartType, a.risk_level AS riskLevel,
+                       a.created_at AS createdAt
+                  FROM is_chat_conversation_artifact a
+                  INNER JOIN is_chat_conversation c ON c.id = a.conversation_id
+                 WHERE a.turn_id = ?
+                   AND (a.artifact_type = 'CHART' OR a.artifact_type LIKE 'ADVANCED\\_%')
+                   AND c.user_id = ? AND c.is_deleted = 0
+                """ + orderSql + """
+                 LIMIT 1
+                """, turnId, userId);
+        if (rows.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Object> row = new LinkedHashMap<>(rows.get(0));
+        row.put("artifact", parseJsonMap(row.get("artifactJson")));
+        return row;
+    }
+
     public Map<String, Object> latestChartArtifactForConversation(Long conversationId) {
         String userId = resolveUserId();
         if (conversationId == null || userId == null) {
@@ -1217,6 +1326,10 @@ public class ChatConversationService {
         artifact.put("optionTemplate", result.get("optionTemplate"));
         artifact.put("reasoningReplaySteps", result.getOrDefault("reasoningReplaySteps",
                 result.getOrDefault("reasoningLogs", List.of())));
+        artifact.put("actionPlan", result.get("actionPlan"));
+        artifact.put("stepResults", result.get("stepResults"));
+        artifact.put("multiStepSummary", result.get("multiStepSummary"));
+        artifact.put("alertRuleDraft", result.get("alertRuleDraft"));
         return artifact;
     }
 

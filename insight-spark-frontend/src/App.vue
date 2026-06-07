@@ -181,6 +181,7 @@ import {
 
 const API_BASE = 'http://localhost:8080'
 const LAST_SELECTED_TABLE_KEY = 'insight:lastSelectedTableName'
+const CHAT_THINKING_LOG_LIMIT = 100
 const moduleIconMap = {
   workbench: House,
   adminWorkbench: House,
@@ -476,13 +477,20 @@ const placeholderStep = computed(() => activeModule.value === 'audit' ? 1 : 0)
 const previewColumns = computed(() => previewRows.value.length ? Object.keys(previewRows.value[0]) : [])
 const uploadTables = computed(() => tables.value.filter(item => String(item?.sourceType || '').toUpperCase() !== 'OFFICIAL'))
 const officialQueryTables = computed(() => tables.value.filter(item => String(item?.sourceType || '').toUpperCase() === 'OFFICIAL'))
+const chartTypeText = (value) => {
+  const type = String(value || '').toLowerCase()
+  if (type === 'bar') return '柱状图'
+  if (type === 'pie') return '饼图'
+  if (type === 'doughnut') return '环形图'
+  if (type === 'line') return '折线图'
+  if (type === 'table') return '表格'
+  if (type === 'forecast') return '预测'
+  if (type === 'whatif' || type === 'what_if') return '情景推演'
+  if (type === 'alert') return '预警'
+  return String(value || '图表')
+}
 const chartTypeLabel = computed(() => {
-  if (currentChartType.value === 'bar') return '柱状图'
-  if (currentChartType.value === 'pie') return '饼图'
-  if (currentChartType.value === 'doughnut') return '环形图'
-  if (currentChartType.value === 'line') return '折线图'
-  if (currentChartType.value === 'table') return '表格'
-  return currentChartType.value
+  return chartTypeText(currentChartType.value)
 })
 const numericFields = computed(() => fields.value.filter(field => field.fieldType === 'NUMBER'))
 const dateFields = computed(() => fields.value.filter(field => field.fieldType === 'DATE'))
@@ -1181,6 +1189,32 @@ const buildAnalysisFromTurn = (turn, chartArtifact, sqlArtifact, fallbackMessage
   }
 }
 
+const buildAlertRuleDraftFromTurn = (chartArtifact) => {
+  const snapshot = normalizeChartArtifactSnapshot(chartArtifact)
+  const draft = snapshot?.alertRuleDraft
+  return draft && typeof draft === 'object' && Object.keys(draft).length ? draft : null
+}
+
+const buildAlertRuleCreatedFromTurn = (turn, chartArtifact, advancedAnalysis) => {
+  const snapshot = normalizeChartArtifactSnapshot(chartArtifact)
+  const created = snapshot?.alertRuleCreated
+  if (created && typeof created === 'object' && Object.keys(created).length) {
+    return created
+  }
+  if (advancedAnalysis?.type === 'alert') {
+    return {
+      id: advancedAnalysis.ruleId || advancedAnalysis.params?.ruleId || null,
+      title: advancedAnalysis.title || String(turn?.messageText || '预警规则'),
+      metricField: advancedAnalysis.params?.metricField || '',
+      timeField: advancedAnalysis.params?.timeField || '',
+      operator: advancedAnalysis.params?.operator || '',
+      threshold: advancedAnalysis.params?.threshold,
+      channels: advancedAnalysis.params?.channels || []
+    }
+  }
+  return null
+}
+
 const isAdvancedAnalysisArtifact = (artifact) =>
   String(artifact?.artifactType || '').toUpperCase().startsWith('ADVANCED_')
 
@@ -1189,19 +1223,38 @@ const normalizeAdvancedAnalysisHistoryType = (type) => {
   const lower = value.toLowerCase()
   if (lower.includes('what')) return 'whatIf'
   if (lower.includes('alert')) return 'alert'
-  return 'forecast'
+  if (lower.includes('forecast') || lower.includes('predict')) return 'forecast'
+  return ''
 }
 
-const buildAdvancedAnalysisFromTurn = (turn, advancedArtifact) => {
-  const snapshot = normalizeChartArtifactSnapshot(advancedArtifact)
+const hasExplicitAdvancedAnalysisSnapshot = (snapshot, artifact = null) => {
+  if (!snapshot || typeof snapshot !== 'object') return false
+  if (artifact && isAdvancedAnalysisArtifact(artifact)) return true
+  if (snapshot.advancedAnalysis && typeof snapshot.advancedAnalysis === 'object') return true
+  if (snapshot.advancedAnalysisResult && typeof snapshot.advancedAnalysisResult === 'object') return true
+  if (snapshot.autoForecast === true) return true
+  if (normalizeAdvancedAnalysisHistoryType(snapshot.advancedAnalysisType)) return true
+  if (normalizeAdvancedAnalysisHistoryType(snapshot.responseType)) return true
+  if (normalizeAdvancedAnalysisHistoryType(snapshot.type)) return true
+  const chartType = String(snapshot.chartType || '').trim().toLowerCase()
+  return ['forecast', 'whatif', 'what_if', 'alert'].includes(chartType)
+}
+
+const buildAdvancedAnalysisFromTurn = (turn, advancedArtifact, fallbackArtifact = null) => {
+  const snapshot = normalizeChartArtifactSnapshot(advancedArtifact) || normalizeChartArtifactSnapshot(fallbackArtifact)
   if (!snapshot || typeof snapshot !== 'object') return null
+  const sourceArtifact = advancedArtifact || fallbackArtifact
+  if (!hasExplicitAdvancedAnalysisSnapshot(snapshot, sourceArtifact)) return null
   const rawAnalysis = snapshot.advancedAnalysis && typeof snapshot.advancedAnalysis === 'object'
     ? snapshot.advancedAnalysis
     : snapshot
-  const type = normalizeAdvancedAnalysisHistoryType(rawAnalysis.type || snapshot.type || advancedArtifact?.artifactType)
+  const type = normalizeAdvancedAnalysisHistoryType(
+    rawAnalysis.type || snapshot.advancedAnalysisType || snapshot.responseType || snapshot.type || sourceArtifact?.artifactType
+  )
+  if (!type) return null
   return {
     ...rawAnalysis,
-    id: rawAnalysis.id || `advanced-history-${advancedArtifact?.id || turn?.id || Date.now()}`,
+    id: rawAnalysis.id || `advanced-history-${sourceArtifact?.id || turn?.id || Date.now()}`,
     type,
     title: rawAnalysis.title || snapshot.title || String(turn?.messageText || '高级分析记录'),
     summary: rawAnalysis.summary || snapshot.summary || String(turn?.messageText || ''),
@@ -1209,21 +1262,21 @@ const buildAdvancedAnalysisFromTurn = (turn, advancedArtifact) => {
     sourceQuestion: rawAnalysis.sourceQuestion || snapshot.sourceQuestion || '',
     snapshotTruncated: Boolean(rawAnalysis.snapshotTruncated || snapshot.snapshotTruncated),
     storagePolicy: rawAnalysis.storagePolicy || snapshot.storagePolicy || {},
-    conversationId: advancedArtifact?.conversationId == null ? null : String(advancedArtifact.conversationId),
+    conversationId: sourceArtifact?.conversationId == null ? null : String(sourceArtifact.conversationId),
     assistantTurnId: turn?.id == null ? null : String(turn.id),
-    artifactId: advancedArtifact?.id == null ? null : String(advancedArtifact.id),
+    artifactId: sourceArtifact?.id == null ? null : String(sourceArtifact.id),
     chatRecord: {
-      conversationId: advancedArtifact?.conversationId,
+      conversationId: sourceArtifact?.conversationId,
       assistantTurnId: turn?.id,
-      artifactId: advancedArtifact?.id,
-      artifactType: advancedArtifact?.artifactType,
+      artifactId: sourceArtifact?.id,
+      artifactType: sourceArtifact?.artifactType,
       recorded: true
     }
   }
 }
 
-const restoreAdvancedThinkingLogsFromTurn = (turn, advancedArtifact, advancedAnalysis) => {
-  const snapshot = normalizeChartArtifactSnapshot(advancedArtifact)
+const restoreAdvancedThinkingLogsFromTurn = (turn, advancedArtifact, advancedAnalysis, fallbackArtifact = null) => {
+  const snapshot = normalizeChartArtifactSnapshot(advancedArtifact) || normalizeChartArtifactSnapshot(fallbackArtifact)
   const candidates = [
     advancedArtifact?.artifact?.thinkingLogs,
     snapshot?.thinkingLogs,
@@ -1233,7 +1286,7 @@ const restoreAdvancedThinkingLogsFromTurn = (turn, advancedArtifact, advancedAna
   ]
   const logs = candidates.find(item => Array.isArray(item) && item.length)
   return Array.isArray(logs)
-    ? logs.map(item => String(item || '').trim()).filter(Boolean).slice(0, 12)
+    ? logs.map(item => String(item || '').trim()).filter(Boolean).slice(0, CHAT_THINKING_LOG_LIMIT)
     : []
 }
 
@@ -1246,12 +1299,12 @@ const normalizeThinkingLogs = (logs = []) => {
       return `${title || `步骤 ${index + 1}`}：${detail}`.trim()
     }
     return String(item || '').trim()
-  }).filter(Boolean).slice(0, 12)
+  }).filter(Boolean).slice(0, CHAT_THINKING_LOG_LIMIT)
 }
 
 const restoreThinkingLogsFromTurn = (turn, chartArtifact, advancedArtifact, advancedAnalysis) => {
   if (advancedAnalysis) {
-    return restoreAdvancedThinkingLogsFromTurn(turn, advancedArtifact, advancedAnalysis)
+    return restoreAdvancedThinkingLogsFromTurn(turn, advancedArtifact, advancedAnalysis, chartArtifact)
   }
   const snapshot = normalizeChartArtifactSnapshot(chartArtifact)
   const candidates = [
@@ -1435,10 +1488,26 @@ const setActiveBranchParent = (message) => {
   }
 }
 
-const openHistoricalAnalysis = (message) => {
-  if (!restoreAnalysisFromMessage(message)) return
+const openHistoricalAnalysis = async (message) => {
+  if (!restoreAnalysisFromMessage(message)) {
+    const historyId = message?.queryHistoryId
+      ?? message?.chartId
+      ?? message?.historyId
+      ?? message?.analysisSnapshot?.queryHistoryId
+    if (historyId) {
+      const entry = await fetchHistoryChartSnapshot(historyId)
+      if (entry && await restoreAnalysisFromHistory(entry)) {
+        const preview = String(entry?.question || entry?.tableName || '历史图表').trim()
+        ElMessage.success(`已切换到历史图表：${preview.slice(0, 24)}`)
+        return true
+      }
+    }
+    ElMessage.warning('该消息暂未保存可回放图表')
+    return false
+  }
   const preview = String(message?.sourceQuestion || message?.content || '历史图表').trim()
   ElMessage.success(`已切换到历史图表：${preview.slice(0, 24)}`)
+  return true
 }
 
 const openHistoricalAnalysisFromHistory = async (entry) => {
@@ -1576,10 +1645,16 @@ const selectChatSession = async (sessionId) => {
       const sqlArtifact = artifacts.find(item => String(item?.artifactType || '').toUpperCase() === 'SQL')
       const advancedArtifact = artifacts.find(isAdvancedAnalysisArtifact)
       const advancedAnalysis = role === 'system'
-        ? buildAdvancedAnalysisFromTurn(turn, advancedArtifact)
+        ? buildAdvancedAnalysisFromTurn(turn, advancedArtifact, chartArtifact)
         : null
       const analysisSnapshot = role === 'system'
         ? buildAnalysisFromTurn(turn, chartArtifact, sqlArtifact, String(turn?.messageText || ''))
+        : null
+      const alertRuleCreated = role === 'system'
+        ? buildAlertRuleCreatedFromTurn(turn, chartArtifact, advancedAnalysis)
+        : null
+      const alertRuleDraft = role === 'system' && !alertRuleCreated
+        ? buildAlertRuleDraftFromTurn(chartArtifact)
         : null
       if (analysisSnapshot) {
         restoredAnalysis = analysisSnapshot
@@ -1595,6 +1670,8 @@ const selectChatSession = async (sessionId) => {
         artifactIds: artifacts.map(item => String(item?.id || '')).filter(Boolean),
         analysisSnapshot,
         advancedAnalysis,
+        alertRuleDraft,
+        alertRuleCreated,
         clickableChart: Boolean(analysisSnapshot),
         sourceQuestion: analysisSnapshot?.sourceQuestion || advancedAnalysis?.sourceQuestion || '',
         thinkingLogs: restoreThinkingLogsFromTurn(turn, chartArtifact, advancedArtifact, advancedAnalysis),
@@ -3864,7 +3941,9 @@ const normalizeFieldBindingResults = (entries) => {
         action,
         targetType,
         semanticAction,
-        label: label || resolveFieldBindingItemLabel(name, targetType, semanticAction)
+        label: semanticAction
+          ? resolveFieldBindingItemLabel(name, targetType, semanticAction)
+          : (label || resolveFieldBindingItemLabel(name, targetType, semanticAction))
       }
     })
     .filter(Boolean)
@@ -4125,16 +4204,25 @@ const buildPinChartPayload = (analysis = lastAnalysis.value) => {
   if ((chartIdRaw == null || chartIdRaw === '') && (artifactIdRaw == null || artifactIdRaw === '') && (turnIdRaw == null || turnIdRaw === '')) {
     return null
   }
+  const resolvedTitle = String(
+    analysis?.sourceQuestion
+    || analysis?.title
+    || analysis?.message
+    || (analysis?.type ? `${chartTypeText(analysis.type)}卡片` : '图表卡片')
+  ).slice(0, 80)
   return {
     chartId: chartIdRaw == null || chartIdRaw === '' ? undefined : Number(chartIdRaw),
     artifactId: artifactIdRaw == null || artifactIdRaw === '' ? undefined : Number(artifactIdRaw),
     turnId: turnIdRaw == null || turnIdRaw === '' ? undefined : Number(turnIdRaw),
-    title: String(analysis?.sourceQuestion || '图表卡片').slice(0, 80),
-    chartType: analysis?.chartType || currentChartType.value || 'bar',
-    tableName: analysis?.tableName || '',
+    title: resolvedTitle,
+    chartType: analysis?.chartType || (analysis?.type === 'forecast' ? 'line' : currentChartType.value) || 'bar',
+    advancedAnalysisType: ['forecast', 'whatIf', 'alert'].includes(String(analysis?.type || '')) ? analysis.type : undefined,
+    tableName: analysis?.tableName || analysis?.sourceTableName || analysis?.params?.tableName || '',
     sql: analysis?.sql || '',
     fieldMapping: analysis?.fieldMapping || {},
-    data: Array.isArray(analysis?.data) ? analysis.data : []
+    data: Array.isArray(analysis?.data)
+      ? analysis.data
+      : (Array.isArray(analysis?.series) ? analysis.series : [])
   }
 }
 
@@ -4166,6 +4254,28 @@ const openPinDialog = async () => {
     pinDialogVisible.value = true
   } catch (error) {
     ElMessage.error(error.message || '加载看板列表失败')
+  }
+}
+
+const openPinDialogForAnalysis = async (analysis) => {
+  if (!buildPinChartPayload(analysis)) {
+    ElMessage.warning('当前分析卡片还没有可钉入记录，请稍后重试或先保存到会话')
+    return false
+  }
+  pendingDashboardPinSource.value = analysis
+  try {
+    await loadDashboardOptions()
+    if (!dashboardOptions.value.length) {
+      ElMessage.warning('暂无可用看板，请先到“我的看板”创建')
+      pendingDashboardPinSource.value = null
+      return false
+    }
+    pinDialogVisible.value = true
+    return true
+  } catch (error) {
+    pendingDashboardPinSource.value = null
+    ElMessage.error(error.message || '加载看板列表失败')
+    return false
   }
 }
 
@@ -4209,6 +4319,15 @@ const isDashboardPinQuestion = (text) => {
   if (!hasPinAction) return false
   if (/看板|仪表盘|大屏|驾驶舱/.test(q)) return true
   return /(?:当前|刚才|上一轮|这个|这张).*(?:图|图表|卡片|结果)|(?:图|图表|卡片|结果).*(?:当前|刚才|上一轮|这个|这张)/.test(q)
+}
+
+const isCompositeDashboardPinQuestion = (text) => {
+  const q = String(text || '').trim()
+  if (!isDashboardPinQuestion(q)) return false
+  const hasAnalysisIntent = /查|查看|查询|统计|分析|展示|画|走势|趋势|排名|排行|对比|分布/.test(q)
+    || /看.*(销售|收入|利润|订单|数据|图表|表现|情况|趋势|走势)/.test(q)
+  const hasForecastIntent = /预测|预估|估一下|推算|未来|后面|往后|下个月|后续|大概会|继续涨|继续跌/.test(q)
+  return hasAnalysisIntent || hasForecastIntent
 }
 
 const applyDashboardPinResult = async (data, sourceQuestion, updateStreamMessage, thinkingLogs = []) => {
@@ -4272,6 +4391,55 @@ const applyDashboardPinResult = async (data, sourceQuestion, updateStreamMessage
     }
   }
   return true
+}
+
+const autoPinDeferredDashboard = async (analysis, sourceQuestion, updateStreamMessage, thinkingLogs = []) => {
+  const deferred = analysis?.deferredDashboardPin
+  if (!deferred || typeof deferred !== 'object') return false
+  const source = buildPinChartPayload(analysis)
+  if (!source) {
+    ElMessage.warning('图表已生成，但当前结果尚未拿到可钉入记录，请稍后从历史图表中钉入')
+    return false
+  }
+  pendingDashboardPinSource.value = {
+    ...analysis,
+    sourceQuestion: String(analysis?.sourceQuestion || sourceQuestion || '').trim()
+  }
+  try {
+    await loadDashboardOptions()
+    if (!dashboardOptions.value.length) {
+      ElMessage.warning('图表已生成，但暂无可用看板，请先到“我的看板”创建')
+      return false
+    }
+    const pinQuestion = String(deferred.question || sourceQuestion || '').trim()
+    const matched = dashboardOptions.value.filter(item => {
+      const name = String(item?.name || '').trim()
+      return name && pinQuestion.includes(name)
+    })
+    if (matched.length === 1) {
+      await pinLastAnalysisToDashboard(matched[0].id, pendingDashboardPinSource.value)
+      ElMessage.success(`图表已钉入${matched[0].name}`)
+      await loadPinnedHistoryIds()
+      pendingDashboardPinSource.value = null
+      return true
+    }
+    if (matched.length > 1) {
+      dashboardOptions.value = matched
+    }
+    pinDashboardId.value = matched[0]?.id || dashboardOptions.value[0]?.id || ''
+    pinDialogVisible.value = true
+    updateStreamMessage({
+      thinkingLogs: [
+        ...thinkingLogs,
+        '后置看板钉入：图表已生成，请选择目标看板后确认'
+      ].filter(Boolean).slice(0, 10),
+      thinkingCollapsed: true
+    })
+    return true
+  } catch (error) {
+    ElMessage.error(error.message || '自动钉入看板失败')
+    return false
+  }
 }
 
 const isAbortLikeError = (error) => {
@@ -4563,6 +4731,7 @@ const sendQuestion = async (options = {}) => {
   const semanticDraft = null
   const businessModelIntent = false && shouldUseBusinessModelAgent(userQuestion) && !isRegenerate
   const dashboardPinIntent = isDashboardPinQuestion(userQuestion) && !isRegenerate
+  const compositeDashboardPinIntent = isCompositeDashboardPinQuestion(userQuestion) && !isRegenerate
   stopRequested.value = false
   messages.value.push({
     role: 'user',
@@ -4611,7 +4780,7 @@ const sendQuestion = async (options = {}) => {
         updateStreamMessage({
           content: `业务模型处理中（${thinkingLogs.length}步）· 当前：${line}`,
           sql: '',
-          thinkingLogs: thinkingLogs.slice(0, 8),
+          thinkingLogs: thinkingLogs.slice(0, CHAT_THINKING_LOG_LIMIT),
           thinkingCollapsed: true
         })
         nextTick(() => {
@@ -4633,7 +4802,7 @@ const sendQuestion = async (options = {}) => {
         updateStreamMessage({
           content: fallbackLine,
           sql: '',
-          thinkingLogs: thinkingLogs.slice(0, 8),
+          thinkingLogs: thinkingLogs.slice(0, CHAT_THINKING_LOG_LIMIT),
           thinkingCollapsed: true
         })
         agentResult = await handleBusinessModelAgentQuestion({
@@ -4697,15 +4866,17 @@ const sendQuestion = async (options = {}) => {
     if (stopRequested.value || !isCurrentRequest()) return
     const sourceTableName = String(data?.tableName || queryTableName || '').trim()
     const fallbackTag = data.fallbackUsed ? '（规则兜底）' : ''
-    const compactLogs = thinkingLogs.slice(0, 8)
+    const resultThinkingLogs = normalizeThinkingLogs(data?.thinkingLogs || data?.reasoningReplaySteps || [])
+    const compactLogs = (resultThinkingLogs.length ? resultThinkingLogs : thinkingLogs).slice(0, CHAT_THINKING_LOG_LIMIT)
     const fieldBindingResults = normalizeFieldBindingResults(data?.fieldBindingResults)
-    lastAnalysis.value = {
+    const analysisSnapshot = {
       ...data,
       sourceQuestion: userQuestion,
       sourceSql: data.sql,
       sourceTableName,
       parentTurnId: branchParentTurnId || null
     }
+    lastAnalysis.value = analysisSnapshot
     currentChartType.value = data.chartType
     updateStreamMessage({
       content: `${data.message}${fallbackTag}`,
@@ -4720,10 +4891,17 @@ const sendQuestion = async (options = {}) => {
       ),
       sourceQuestion: userQuestion,
       sourceTableName,
+      queryHistoryId: data?.queryHistoryId == null ? null : String(data.queryHistoryId),
       turnId: data?.assistantTurnId == null ? null : String(data.assistantTurnId),
       parentTurnId: branchParentTurnId || null,
       artifactId: data?.artifactId == null ? null : String(data.artifactId),
-      artifactIds: Array.isArray(data?.artifactIds) ? data.artifactIds.map(item => String(item || '')).filter(Boolean) : []
+      artifactIds: Array.isArray(data?.artifactIds) ? data.artifactIds.map(item => String(item || '')).filter(Boolean) : [],
+      actionPlan: data?.actionPlan || null,
+      stepResults: Array.isArray(data?.stepResults) ? data.stepResults : [],
+      multiStepSummary: data?.multiStepSummary || null,
+      alertRuleDraft: data?.alertRuleDraft || null,
+      analysisSnapshot: Array.isArray(data?.data) && data.data.length ? analysisSnapshot : null,
+      clickableChart: Array.isArray(data?.data) && data.data.length
     })
 
     nextTick(() => {
@@ -4786,6 +4964,17 @@ const sendQuestion = async (options = {}) => {
       if (activeBusinessModelId.value != null) params.set('activeBusinessModelId', String(activeBusinessModelId.value))
       if (lastCreatedBusinessModelId.value != null) params.set('lastCreatedBusinessModelId', String(lastCreatedBusinessModelId.value))
       if (lastAppliedBusinessModelId.value != null) params.set('lastAppliedBusinessModelId', String(lastAppliedBusinessModelId.value))
+      if (dashboardPinIntent && !compositeDashboardPinIntent) {
+        const pinSource = buildPinChartPayload(lastAnalysis.value)
+        if (pinSource?.chartId) params.set('pinChartId', String(pinSource.chartId))
+        if (pinSource?.artifactId) params.set('pinArtifactId', String(pinSource.artifactId))
+        if (pinSource?.turnId) params.set('pinTurnId', String(pinSource.turnId))
+        if (pinSource?.title) params.set('pinTitle', String(pinSource.title).slice(0, 80))
+        const pinSourceQuestion = String(lastAnalysis.value?.sourceQuestion || pinSource?.title || '').trim()
+        if (pinSourceQuestion) params.set('pinSourceQuestion', pinSourceQuestion.slice(0, 160))
+        const pinTableName = String(pinSource?.tableName || lastAnalysis.value?.sourceTableName || lastAnalysis.value?.tableName || '').trim()
+        if (pinTableName) params.set('pinTableName', pinTableName)
+      }
       const response = await fetch(`${API_BASE}/api/chat/ask-stream?${params.toString()}`, {
         method: 'GET',
         headers: {
@@ -4818,7 +5007,7 @@ const sendQuestion = async (options = {}) => {
           const latestLine = thinkingLogs[thinkingLogs.length - 1] || '处理中'
           updateStreamMessage({
             content: `分析中（${thinkingLogs.length}步）· 当前：${latestLine}`,
-            thinkingLogs: thinkingLogs.slice(0, 8),
+            thinkingLogs: thinkingLogs.slice(0, CHAT_THINKING_LOG_LIMIT),
             thinkingCollapsed: true
           })
           nextTick(() => {
@@ -4916,7 +5105,7 @@ const sendQuestion = async (options = {}) => {
         updateStreamMessage({ content: '已手动停止本次生成。' })
         return
       }
-      if (dashboardPinIntent) {
+      if (dashboardPinIntent && !compositeDashboardPinIntent) {
         const guardLine = '副作用保护：看板写入类指令已停止普通接口重放，避免重复钉入'
         if (!seenThinkingSet.has(guardLine)) {
           seenThinkingSet.add(guardLine)
@@ -4925,7 +5114,7 @@ const sendQuestion = async (options = {}) => {
         updateStreamMessage({
           content: `看板钉入的流式结果未完整返回（${streamError.message || '未知错误'}），已停止自动重试以避免重复钉入。请刷新看板确认结果；重复提交也会自动去重。`,
           sql: '',
-          thinkingLogs: thinkingLogs.slice(0, 8),
+          thinkingLogs: thinkingLogs.slice(0, CHAT_THINKING_LOG_LIMIT),
           thinkingCollapsed: true
         })
         return
@@ -4981,7 +5170,7 @@ const sendQuestion = async (options = {}) => {
     if (!isCurrentRequest()) {
       return
     }
-    if (isDashboardPinResult(data, userQuestion)) {
+    if (!compositeDashboardPinIntent && isDashboardPinResult(data, userQuestion)) {
       await applyDashboardPinResult(data, userQuestion, updateStreamMessage, thinkingLogs)
       if (data?.conversationId) {
         activeChatSessionId.value = String(data.conversationId)
@@ -4996,6 +5185,7 @@ const sendQuestion = async (options = {}) => {
       return
     }
     applyAnalysisResult(data)
+    await autoPinDeferredDashboard(data, userQuestion, updateStreamMessage, thinkingLogs)
     if (data?.conversationId) {
       activeChatSessionId.value = String(data.conversationId)
     }
@@ -5811,6 +6001,7 @@ provide('workbench', {
   sendQuestion,
   regenerateLastAnalysis,
   openPinDialog,
+  openPinDialogForAnalysis,
   pinChartToDashboard,
   pinDialogVisible,
   pinning,
