@@ -1320,6 +1320,10 @@ public class ChatConversationService {
         artifact.put("message", result.get("message"));
         artifact.put("sql", result.get("sql"));
         artifact.put("data", result.get("data"));
+        artifact.put("riskLevel", result.getOrDefault("riskLevel", "SAFE"));
+        artifact.put("riskReason", result.getOrDefault("riskReason", ""));
+        artifact.put("sensitiveFields", result.getOrDefault("sensitiveFields", List.of()));
+        artifact.put("matchedRules", result.getOrDefault("matchedRules", List.of()));
         artifact.put("chartEngine", result.get("chartEngine"));
         artifact.put("dimensions", result.get("dimensions"));
         artifact.put("encode", result.get("encode"));

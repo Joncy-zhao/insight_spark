@@ -89,9 +89,6 @@
                 </div>
               </div>
               <div class="chat-thread-actions">
-                <el-button size="small" plain type="primary" class="chat-thread-history-btn" @click="openAdvancedAnalysisManagePage">
-                  预测与情景模拟
-                </el-button>
                 <el-button size="small" plain class="chat-thread-history-btn" @click="openHistoryDrawer">
                   历史产物
                 </el-button>
@@ -432,9 +429,9 @@
                   重新生成
                 </el-button>
                 <el-select v-if="!isLastAnalysisTable" v-model="chartSortMode" size="small" style="width: 150px;" @change="() => lastAnalysis?.data?.length && renderChart(lastAnalysis.data, currentChartType)">
+                  <el-option label="按名称排序" value="name" />
                   <el-option label="按数值降序" value="desc" />
                   <el-option label="按数值升序" value="asc" />
-                  <el-option label="按名称排序" value="name" />
                 </el-select>
                 <el-button v-if="lastAnalysis?.data?.length && !isLastAnalysisTable" size="small" @click="exportChartAsImage">导出图片</el-button>
                 <el-button
@@ -446,14 +443,6 @@
                     @click="openPinDialog"
                 >
                   钉入看板
-                </el-button>
-                <el-button
-                    v-if="canDiagnoseLastAnalysis"
-                    type="warning"
-                    :loading="diagnosisLoading"
-                    @click="diagnoseFromLastAnalysis"
-                >
-                  一键生成诊断报告
                 </el-button>
               </div>
             </div>
@@ -490,6 +479,19 @@
                 </el-tag>
               </el-descriptions-item>
               <el-descriptions-item label="审计说明">{{ lastAnalysis.riskReason }}</el-descriptions-item>
+              <el-descriptions-item v-if="analysisSensitiveFields.length" label="敏感字段" :span="2">
+                <div class="audit-sensitive-list">
+                  <el-tag
+                      v-for="field in analysisSensitiveFields"
+                      :key="field"
+                      size="small"
+                      type="warning"
+                      effect="light"
+                  >
+                    {{ field }}
+                  </el-tag>
+                </div>
+              </el-descriptions-item>
               <el-descriptions-item v-if="lastAnalysis.chartRuleName || lastAnalysis.chartRuleCode" label="命中规则">
                 <el-tag type="primary" size="small">{{ lastAnalysis.chartRuleName || lastAnalysis.chartRuleCode }}</el-tag>
               </el-descriptions-item>
@@ -505,48 +507,138 @@
                 </el-tag>
               </el-descriptions-item>
               <el-descriptions-item v-if="lastAnalysis.chartRecommendationExplain" label="推荐说明" :span="2">
-                {{ lastAnalysis.chartRecommendationExplain }}
+                <span class="analysis-meta-long-text" :title="lastAnalysis.chartRecommendationExplain">
+                  {{ lastAnalysis.chartRecommendationExplain }}
+                </span>
               </el-descriptions-item>
             </el-descriptions>
 
-            <el-card v-if="currentDiagnosis" class="diagnosis-preview-card" shadow="hover" style="margin: 18px 0 0 0;">
-              <template #header>
-                <div style="display: flex; align-items: center; gap: 8px;">
-                  <el-icon><i class="el-icon-document"></i></el-icon>
-                  <span>最新诊断报告预览</span>
+            <section
+                v-if="lastAnalysis || currentDiagnosis"
+                class="diagnosis-preview-card"
+                :class="{ 'is-pending': !diagnosisPreviewHasReport }"
+                aria-label="最新诊断报告预览"
+            >
+              <div class="diagnosis-preview-head">
+                <div class="diagnosis-preview-title-wrap">
+                  <span class="diagnosis-preview-icon">
+                    <el-icon><Document /></el-icon>
+                  </span>
+                  <div class="diagnosis-preview-title-main">
+                    <div class="diagnosis-preview-kicker">{{ diagnosisPreviewKicker }}</div>
+                    <h3>{{ diagnosisPreviewTitle }}</h3>
+                  </div>
                 </div>
-              </template>
-              <div>
-                <div style="font-weight: bold; font-size: 16px; margin-bottom: 4px;">{{ currentDiagnosis.title || '智能诊断报告' }}</div>
-                <div style="color: #888; font-size: 13px; margin-bottom: 8px;">生成时间：{{ currentDiagnosis.createdAt ? currentDiagnosis.createdAt.slice(0, 19).replace('T', ' ') : '' }}</div>
-                <div style="margin-bottom: 8px;">摘要：{{ currentDiagnosis.summary || '暂无摘要' }}</div>
-                <el-button size="small" type="primary" @click="activeModule = 'diagnosis'">查看完整报告</el-button>
+                <el-button
+                    size="small"
+                    type="primary"
+                    plain
+                    :icon="diagnosisPreviewHasReport ? View : Document"
+                    :loading="!diagnosisPreviewHasReport && diagnosisLoading"
+                    :disabled="!diagnosisPreviewHasReport && !diagnosisPreviewCanGenerate"
+                    class="diagnosis-preview-action"
+                    @click="handleDiagnosisPreviewAction"
+                >
+                  {{ diagnosisPreviewActionText }}
+                </el-button>
               </div>
-            </el-card>
+              <div class="diagnosis-preview-body">
+                <div class="diagnosis-preview-meta">
+                  <span v-if="diagnosisPreviewTable" class="diagnosis-preview-meta-item">
+                    <el-icon><DataAnalysis /></el-icon>
+                    {{ diagnosisPreviewTable }}
+                  </span>
+                  <span v-if="diagnosisPreviewMetric" class="diagnosis-preview-meta-item">
+                    指标：{{ diagnosisPreviewMetric }}
+                  </span>
+                  <span class="diagnosis-preview-meta-item">
+                    <el-icon><Calendar /></el-icon>
+                    {{ diagnosisPreviewCreatedAt }}
+                  </span>
+                </div>
+                <div class="diagnosis-preview-summary">
+                  <span>摘要</span>
+                  <p>{{ diagnosisPreviewSummary }}</p>
+                </div>
+                <div class="diagnosis-preview-stats">
+                  <div v-for="item in diagnosisPreviewStats" :key="item.label" class="diagnosis-preview-stat">
+                    <el-icon>
+                      <component :is="item.icon" />
+                    </el-icon>
+                    <div>
+                      <span>{{ item.label }}</span>
+                      <strong>{{ item.value }}</strong>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
 
           </div>
-          <div v-if="lastAnalysis?.graphContext?.length" class="panel graph-context-panel">
+          <div v-if="lastAnalysis" class="panel graph-context-panel">
             <div class="panel-header">
               <div>
-                <h2>GraphRAG 上下文</h2>
-                <p>展示本次问答召回的数据表、字段、公式和知识片段。</p>
+                <h2 class="semantic-evidence-title">
+                  <span>{{ semanticEvidencePanelTitle }}</span>
+                  <el-tooltip
+                      content="当本次查询命中业务模型、GraphRAG、字段映射或 SQL 引用依据时展示精确语义依据；未形成精确命中但有图谱候选时展示 GraphRAG 候选上下文；两者都没有时显示未命中提示。"
+                      placement="top"
+                      :show-after="200"
+                  >
+                    <el-icon class="semantic-evidence-help" aria-label="语义依据说明">
+                      <QuestionFilled />
+                    </el-icon>
+                  </el-tooltip>
+                </h2>
+                <p>{{ semanticEvidencePanelDescription }}</p>
               </div>
             </div>
-            <div class="graph-context-list">
+            <div v-if="semanticEvidenceItems.length" class="graph-context-list">
               <div
-                  v-for="(item, index) in lastAnalysis.graphContext"
-                  :key="item.nodeKey || item.sourceId || index"
+                  v-for="(item, index) in semanticEvidenceItems"
+                  :key="item.field || item.label || index"
                   class="graph-context-item"
               >
                 <div class="graph-context-meta">
-                  <div class="graph-context-name">{{ formatGraphContextTitle(item) }}</div>
-                  <div v-if="formatGraphContextSource(item)" class="graph-context-sub">
-                    {{ formatGraphContextSource(item) }}
+                  <div class="graph-context-name">{{ formatSemanticEvidenceTitle(item) }}</div>
+                  <div v-if="formatSemanticEvidenceSource(item)" class="graph-context-sub">
+                    {{ formatSemanticEvidenceSource(item) }}
                   </div>
                 </div>
-                <div class="graph-context-content">{{ formatGraphContextContent(item) }}</div>
+                <div class="graph-context-content">{{ formatSemanticEvidenceContent(item) }}</div>
               </div>
             </div>
+            <el-collapse v-else-if="graphContextFallbackItems.length" class="graph-context-collapse">
+              <el-collapse-item name="graph-context">
+                <template #title>
+                  <span class="graph-context-collapse-title">
+                    GraphRAG 候选上下文
+                    <small>已保留原始候选，默认折叠展示</small>
+                  </span>
+                </template>
+                <div class="graph-context-list">
+                  <div
+                      v-for="(item, index) in graphContextFallbackItems"
+                      :key="item.nodeKey || item.sourceId || item.label || index"
+                      class="graph-context-item graph-context-item--muted"
+                  >
+                    <div class="graph-context-meta">
+                      <div class="graph-context-name">{{ formatGraphContextTitle(item) }}</div>
+                      <div v-if="formatGraphContextSource(item)" class="graph-context-sub">
+                        {{ formatGraphContextSource(item) }}
+                      </div>
+                    </div>
+                    <div class="graph-context-content">{{ formatGraphContextContent(item) }}</div>
+                  </div>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
+            <el-empty
+                v-else
+                class="semantic-evidence-empty"
+                description="本次未命中可解释语义依据"
+                :image-size="72"
+            />
           </div>
           <el-dialog v-model="pinDialogVisible" title="钉入我的看板" width="520px" append-to-body>
             <p class="pin-dialog-hint">仅显示您创建或另存且未发布的看板；已发布看板不可钉入，请先另存为副本。</p>
@@ -923,6 +1015,17 @@
                       <div class="history-detail__section-title">风险说明</div>
                       <div class="history-detail__text">
                         {{ selectedHistoryEntry.riskReason || '暂无风险说明' }}
+                      </div>
+                      <div v-if="historySensitiveFields(selectedHistoryEntry).length" class="history-detail__tag-list">
+                        <el-tag
+                            v-for="field in historySensitiveFields(selectedHistoryEntry)"
+                            :key="`${selectedHistoryEntry.id}-sensitive-${field}`"
+                            size="small"
+                            type="warning"
+                            effect="light"
+                        >
+                          {{ field }}
+                        </el-tag>
                       </div>
                     </div>
 
@@ -1639,7 +1742,7 @@
 <script setup>
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import axios from 'axios'
-import { ArrowLeftBold, ArrowRightBold, Close, Edit, Management, Microphone, Refresh, Search, Setting, Share, View } from '@element-plus/icons-vue'
+import { ArrowLeftBold, ArrowRightBold, Calendar, Close, DataAnalysis, Document, Edit, Files, Management, Microphone, QuestionFilled, Refresh, Search, Setting, Share, TrendCharts, View } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 import { ElMessage } from 'element-plus'
 import BusinessDictionaryView from '../../components/BusinessDictionaryView.vue'
@@ -1797,7 +1900,10 @@ const {
   selectTable,
   selectedDatasourceId,
   selectedTableName,
+  activeBusinessModelId,
   selectedChatBusinessModelId,
+  lastCreatedBusinessModelId,
+  lastAppliedBusinessModelId,
   chatBusinessModelOptions,
   businessModels,
   sendQuestion,
@@ -1912,6 +2018,127 @@ const businessModelEmptyHint = computed(() => {
     return '当前数据源下暂无业务模型'
   }
   return '请选择要修改的业务模型'
+})
+
+const semanticEvidenceItems = computed(() =>
+  Array.isArray(lastAnalysis?.value?.semanticEvidence) ? lastAnalysis.value.semanticEvidence : []
+)
+
+const normalizeAuditList = (value) => {
+  if (Array.isArray(value)) {
+    return value.map(item => String(item || '').trim()).filter(Boolean)
+  }
+  const text = String(value || '').trim()
+  if (!text) return []
+  return text.split(/[,，、;；|]/).map(item => item.trim()).filter(Boolean)
+}
+
+const analysisSensitiveFields = computed(() => normalizeAuditList(lastAnalysis?.value?.sensitiveFields))
+
+const diagnosisPreviewReport = computed(() => currentDiagnosis?.value || null)
+
+const diagnosisPreviewHasReport = computed(() => Boolean(diagnosisPreviewReport.value))
+
+const diagnosisPreviewKicker = computed(() =>
+  diagnosisPreviewHasReport.value ? '最新诊断报告预览' : '智能诊断报告预览'
+)
+
+const diagnosisPreviewTitle = computed(() => {
+  if (diagnosisPreviewHasReport.value) {
+    return String(diagnosisPreviewReport.value?.title || '').trim() || '智能诊断报告'
+  }
+  if (lastAnalysis?.value) {
+    return '当前查询可生成诊断报告'
+  }
+  return '暂无可诊断查询'
+})
+
+const diagnosisPreviewCreatedAt = computed(() => {
+  const raw = String(diagnosisPreviewReport.value?.createdAt || '').trim()
+  if (!raw) return diagnosisPreviewHasReport.value ? '生成时间待记录' : '等待生成'
+  return raw.slice(0, 19).replace('T', ' ')
+})
+
+const diagnosisPreviewSummary = computed(() =>
+  String(diagnosisPreviewReport.value?.summary || '').trim()
+  || (lastAnalysis?.value
+    ? '完成查询后可基于当前图表、字段映射、SQL 审计和 GraphRAG 证据生成智能诊断报告。'
+    : '请先完成一次对话查询，系统会在这里展示可诊断内容。')
+)
+
+const diagnosisPreviewTable = computed(() =>
+  String(diagnosisPreviewReport.value?.tableName || lastAnalysis?.value?.tableName || '').trim()
+)
+
+const diagnosisPreviewMetric = computed(() =>
+  String(
+    diagnosisPreviewReport.value?.metricFieldLabel
+    || diagnosisPreviewReport.value?.metricLabel
+    || diagnosisPreviewReport.value?.metricField
+    || lastAnalysis?.value?.fieldMapping?.metric
+    || lastAnalysis?.value?.fieldMapping?.metricKey
+    || ''
+  ).trim()
+)
+
+const diagnosisPreviewCount = (value) => Array.isArray(value) ? value.length : 0
+
+const diagnosisPreviewCanGenerate = computed(() =>
+  Boolean(lastAnalysis?.value && canDiagnoseLastAnalysis?.value !== false)
+)
+
+const diagnosisPreviewActionText = computed(() =>
+  diagnosisPreviewHasReport.value ? '查看完整报告' : '一键生成诊断报告'
+)
+
+const diagnosisPreviewStats = computed(() => {
+  const report = diagnosisPreviewReport.value || {}
+  if (!diagnosisPreviewHasReport.value) {
+    const rowCount = Array.isArray(lastAnalysis?.value?.data) ? lastAnalysis.value.data.length : 0
+    return [
+      { label: '查询结果', value: rowCount, icon: TrendCharts },
+      { label: '敏感字段', value: analysisSensitiveFields.value.length, icon: Files },
+      { label: '语义依据', value: semanticEvidenceItems.value.length, icon: DataAnalysis }
+    ]
+  }
+  const evidenceCount = diagnosisPreviewCount(report.graphRagEvidenceChain)
+    + diagnosisPreviewCount(report.docEvidence)
+    + diagnosisPreviewCount(report.relatedKnowledge)
+  return [
+    { label: '异常节点', value: diagnosisPreviewCount(report.anomalyMarkers), icon: TrendCharts },
+    { label: '证据命中', value: evidenceCount, icon: Files },
+    { label: '推理步骤', value: diagnosisPreviewCount(report.reasoningLogs), icon: DataAnalysis }
+  ]
+})
+
+const handleDiagnosisPreviewAction = () => {
+  if (diagnosisPreviewHasReport.value) {
+    activeModule.value = 'diagnosis'
+    return
+  }
+  if (diagnosisPreviewCanGenerate.value) {
+    diagnoseFromLastAnalysis()
+  }
+}
+
+const graphContextFallbackItems = computed(() =>
+  semanticEvidenceItems.value.length
+    ? []
+    : (Array.isArray(lastAnalysis?.value?.graphContext) ? lastAnalysis.value.graphContext : [])
+)
+
+const semanticEvidencePanelTitle = computed(() =>
+  semanticEvidenceItems.value.length ? '本次语义依据' : '语义依据'
+)
+
+const semanticEvidencePanelDescription = computed(() => {
+  if (semanticEvidenceItems.value.length) {
+    return '仅展示本次查询真正命中的字段、指标、维度和时间口径。'
+  }
+  if (graphContextFallbackItems.value.length) {
+    return '本次未形成精确语义依据，已保留 GraphRAG 候选上下文供核验。'
+  }
+  return '本次查询没有可解释的业务模型、GraphRAG 或字段映射依据。'
 })
 
 const currentChatSession = computed(() =>
@@ -2797,6 +3024,20 @@ const pickFieldNameStrict = (fields = [], preferred = '', fallback = '') => {
   return String(scored[0]?.field?.columnName || fallback || '').trim()
 }
 
+const businessSemanticMetricField = (intent = {}) => {
+  const trace = intent?.businessSemanticTrace && typeof intent.businessSemanticTrace === 'object'
+    ? intent.businessSemanticTrace
+    : {}
+  return String(
+    intent?.metricField ||
+    intent?.targetMetricField ||
+    trace.analysisMetricField ||
+    trace.metricColumn ||
+    trace.resolvedMetricField ||
+    ''
+  ).trim()
+}
+
 const whatIfFormulaStopWords = [
   '推演',
   '预测',
@@ -3387,7 +3628,7 @@ const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = 
       }
       const questionMetric = inferMetricFromQuestion(text)
       const timeField = String(llmIntent.timeField || lastAnalysis?.value?.fieldMapping?.dimensionKey || text || '').trim()
-      const metricField = String(llmIntent.metricField || llmIntent.targetMetricField || lastAnalysis?.value?.fieldMapping?.metricKey || llmIntent.metric || questionMetric || text || '').trim()
+      const metricField = String(businessSemanticMetricField(llmIntent) || lastAnalysis?.value?.fieldMapping?.metricKey || llmIntent.metric || questionMetric || text || '').trim()
       const inferredPayload = {
         tableName,
         timeField: pickFieldName(fieldMeta?.timeFields || [], timeField, ''),
@@ -3496,7 +3737,7 @@ const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = 
     if (type === 'alert') {
       const questionMetric = inferMetricFromQuestion(text)
       const timeField = String(llmIntent.timeField || lastAnalysis?.value?.fieldMapping?.dimensionKey || text || '').trim()
-      const metricField = String(llmIntent.metricField || llmIntent.targetMetricField || lastAnalysis?.value?.fieldMapping?.metricKey || llmIntent.metric || questionMetric || text || '').trim()
+      const metricField = String(businessSemanticMetricField(llmIntent) || lastAnalysis?.value?.fieldMapping?.metricKey || llmIntent.metric || questionMetric || text || '').trim()
       const operator = params.operator || llmIntent.operator || (/高于|超过|大于/.test(text) ? 'gt' : /异常|z-?score/i.test(text) ? 'zscore' : 'lt')
       const confirmedAlert = await confirmAlertParams(fieldMeta, {
         tableName,
@@ -3667,6 +3908,10 @@ const buildAdvancedIntentPayload = async (text, signal) => {
       lastDimensionKey: lastAnalysis?.value?.fieldMapping?.dimensionKey || '',
       chartType: lastAnalysis?.value?.chartType || '',
       sourceQuestion: lastAnalysis?.value?.sourceQuestion || '',
+      selectedTableName: tableName,
+      activeBusinessModelId: activeBusinessModelId?.value ?? selectedChatBusinessModelId?.value ?? '',
+      lastCreatedBusinessModelId: lastCreatedBusinessModelId?.value ?? '',
+      lastAppliedBusinessModelId: lastAppliedBusinessModelId?.value ?? '',
       fields: fieldMeta?.fields || [],
       timeFields: fieldMeta?.timeFields || [],
       numericFields: fieldMeta?.numericFields || []
@@ -4793,6 +5038,8 @@ const summarizeGraphContext = (entry) => {
   }).filter(Boolean)
 }
 
+const historySensitiveFields = (entry) => normalizeAuditList(entry?.sensitiveFields || entry?.chartSnapshot?.sensitiveFields)
+
 const historySnapshotStatusLabel = (entry) => {
   const status = String(entry?.snapshotStatus || '').trim()
   if (status === 'ready') return '可恢复'
@@ -5294,6 +5541,28 @@ const formatGraphContextContent = (item) => {
   return pairs.join('；') || '暂无详细内容'
 }
 
+const formatSemanticEvidenceTitle = (item) => {
+  const role = String(item?.role || '依据').trim()
+  const label = String(item?.label || item?.field || '').trim()
+  const field = String(item?.field || '').trim()
+  if (label && field && label !== field) return `${role}：${label}（${field}）`
+  return `${role}：${label || field || '已命中'}`
+}
+
+const formatSemanticEvidenceSource = (item) => {
+  const parts = [
+    item?.source,
+    item?.fieldType
+  ].map(value => String(value || '').trim()).filter(Boolean)
+  return parts.join(' · ')
+}
+
+const formatSemanticEvidenceContent = (item) => {
+  const reason = String(item?.reason || '').trim()
+  const expression = String(item?.formula || item?.expression || '').trim()
+  return [reason, expression ? `表达式：${expression}` : ''].filter(Boolean).join('；') || '本次查询命中该语义项'
+}
+
 onBeforeUnmount(() => {
   clearHistoryReplayTimer()
   disposeHistoryPreviewChart()
@@ -5793,8 +6062,197 @@ onBeforeUnmount(() => {
   color: #9ca3af;
   font-size: 12px;
 }
+.diagnosis-preview-card {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid #dbe7f6;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
+}
+.diagnosis-preview-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+.diagnosis-preview-title-wrap {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+.diagnosis-preview-icon {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+.diagnosis-preview-card.is-pending .diagnosis-preview-icon {
+  border-color: #d8e1ee;
+  background: #f8fafc;
+  color: #475467;
+}
+.diagnosis-preview-title-main {
+  min-width: 0;
+}
+.diagnosis-preview-kicker {
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+.diagnosis-preview-title-main h3 {
+  margin: 3px 0 0;
+  color: #0f172a;
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.diagnosis-preview-action {
+  flex: 0 0 auto;
+  border-radius: 8px;
+}
+.diagnosis-preview-body {
+  display: grid;
+  gap: 10px;
+}
+.diagnosis-preview-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.diagnosis-preview-meta-item {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #475467;
+  font-size: 12px;
+  line-height: 1.3;
+}
+.diagnosis-preview-summary {
+  display: grid;
+  gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+.diagnosis-preview-card.is-pending .diagnosis-preview-summary {
+  border-style: dashed;
+  background: #ffffff;
+}
+.diagnosis-preview-summary span {
+  color: #1f2a44;
+  font-size: 12px;
+  font-weight: 700;
+}
+.diagnosis-preview-summary p {
+  max-height: 72px;
+  margin: 0;
+  overflow: auto;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: normal;
+  word-break: break-word;
+}
+.diagnosis-preview-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.diagnosis-preview-stat {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+}
+.diagnosis-preview-stat :deep(.el-icon) {
+  flex: 0 0 auto;
+  color: #2563eb;
+}
+.diagnosis-preview-stat div {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+.diagnosis-preview-stat span {
+  color: #64748b;
+  font-size: 11px;
+}
+.diagnosis-preview-stat strong {
+  color: #0f172a;
+  font-size: 15px;
+  line-height: 1.2;
+}
 .graph-context-panel {
   grid-column: 1 / -1;
+}
+.semantic-evidence-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.semantic-evidence-help {
+  color: #64748b;
+  cursor: help;
+  font-size: 16px;
+  line-height: 1;
+}
+.semantic-evidence-help:hover {
+  color: #1f2a44;
+}
+.graph-context-collapse {
+  border: none;
+}
+.graph-context-collapse :deep(.el-collapse-item__header) {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 0 12px;
+  background: #f8fafc;
+  color: #1f2a44;
+  font-weight: 700;
+}
+.graph-context-collapse :deep(.el-collapse-item__wrap) {
+  border-bottom: none;
+}
+.graph-context-collapse :deep(.el-collapse-item__content) {
+  padding: 12px 0 0;
+}
+.graph-context-collapse-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.graph-context-collapse-title small {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 500;
 }
 .graph-context-list {
   display: grid;
@@ -5807,6 +6265,10 @@ onBeforeUnmount(() => {
   border: 1px solid #e5e7eb;
   border-radius: 8px;
   background: #f8fafc;
+}
+.graph-context-item--muted {
+  background: #ffffff;
+  border-style: dashed;
 }
 .graph-context-meta {
   display: flex;
@@ -5835,6 +6297,9 @@ onBeforeUnmount(() => {
   line-height: 1.6;
   white-space: normal;
   word-break: break-word;
+}
+.semantic-evidence-empty {
+  padding: 8px 0 2px;
 }
 .history-drawer {
   height: 100%;
@@ -6137,6 +6602,66 @@ onBeforeUnmount(() => {
   font-size: 13px;
   line-height: 1.7;
   word-break: break-word;
+}
+.audit-sensitive-list,
+.history-detail__tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.analysis-meta {
+  margin-top: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+}
+.analysis-meta :deep(.el-descriptions__body) {
+  background: #fff;
+}
+.analysis-meta :deep(.el-descriptions__table) {
+  table-layout: fixed;
+}
+.analysis-meta :deep(.el-descriptions__cell) {
+  padding: 8px 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  vertical-align: middle;
+}
+.analysis-meta :deep(.el-descriptions__label) {
+  width: 88px;
+  min-width: 88px;
+  color: #475569;
+  font-weight: 700;
+  background: #f8fafc;
+  white-space: nowrap;
+}
+.analysis-meta :deep(.el-descriptions__content) {
+  min-width: 0;
+  color: #0f172a;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.analysis-meta :deep(.el-tag) {
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 20px;
+}
+.analysis-meta .audit-sensitive-list {
+  gap: 6px;
+}
+.analysis-meta-long-text {
+  display: -webkit-box;
+  max-width: 100%;
+  overflow: hidden;
+  line-height: 1.5;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+}
+.history-detail__tag-list {
+  margin-top: 10px;
 }
 .history-detail__context-list {
   display: flex;
@@ -6968,6 +7493,23 @@ onBeforeUnmount(() => {
     width: 100%;
     justify-content: flex-end;
   }
+  .analysis-meta {
+    border-radius: 8px;
+  }
+  .analysis-meta :deep(.el-descriptions__table) {
+    display: block;
+  }
+  .analysis-meta :deep(.el-descriptions__table tbody),
+  .analysis-meta :deep(.el-descriptions__table tr),
+  .analysis-meta :deep(.el-descriptions__table th),
+  .analysis-meta :deep(.el-descriptions__table td) {
+    display: block;
+    width: 100% !important;
+  }
+  .analysis-meta :deep(.el-descriptions__label) {
+    border-right: 0;
+    border-bottom: 1px solid #edf2f7;
+  }
 }
 
 @media (max-width: 720px) {
@@ -6998,6 +7540,18 @@ onBeforeUnmount(() => {
   .chat-followup-banner {
     flex-direction: column;
     align-items: stretch;
+  }
+  .diagnosis-preview-head {
+    flex-direction: column;
+  }
+  .diagnosis-preview-action {
+    width: 100%;
+  }
+  .diagnosis-preview-title-main h3 {
+    white-space: normal;
+  }
+  .diagnosis-preview-stats {
+    grid-template-columns: 1fr;
   }
   .history-toolbar {
     padding: 10px;

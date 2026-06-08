@@ -414,7 +414,7 @@ const messages = ref([
   { role: 'system', content: '👋 你好！我是你的析数灵犀 AI 数据助手。请在左侧选择数据表，然后用自然语言向我提问吧！' }
 ])
 const currentChartType = ref('')
-const chartSortMode = ref('desc')
+const chartSortMode = ref('name')
 const lastAnalysis = ref(null)
 const chartAnimationMeta = ref(null)
 const {
@@ -907,6 +907,15 @@ const closeTab = (moduleName) => {
   activeModule.value = fallbackTab?.key || homeModuleKey.value
 }
 
+const normalizeSensitiveFields = (value) => {
+  if (Array.isArray(value)) {
+    return value.map(item => String(item || '').trim()).filter(Boolean)
+  }
+  const text = String(value || '').trim()
+  if (!text) return []
+  return text.split(/[,，、;；|]/).map(item => item.trim()).filter(Boolean)
+}
+
 const normalizeChatHistoryItem = (item) => {
   const rawSnapshot = parseMaybeJson(item?.chartSnapshot)
   const snapshot = rawSnapshot && typeof rawSnapshot === 'object' ? rawSnapshot : {}
@@ -957,6 +966,9 @@ const normalizeChatHistoryItem = (item) => {
   ).trim()
   const chartData = Array.isArray(snapshot?.data) ? snapshot.data : []
   const graphContext = Array.isArray(snapshot?.graphContext) ? snapshot.graphContext : []
+  const semanticEvidence = Array.isArray(snapshot?.semanticEvidence) ? snapshot.semanticEvidence : []
+  const sensitiveFields = normalizeSensitiveFields(item?.sensitiveFields || snapshot?.sensitiveFields)
+  const matchedRules = normalizeSensitiveFields(item?.matchedRules || snapshot?.matchedRules)
   const rawExecutionStatus = Number(item?.executionStatus ?? snapshot?.executionStatus)
   const rawExecutionTimeMs = Number(item?.executionTimeMs ?? snapshot?.executionTimeMs)
   const rawCacheFlag = item?.isHitCache ?? snapshot?.isHitCache
@@ -967,6 +979,8 @@ const normalizeChatHistoryItem = (item) => {
     chartType,
     riskLevel: String(item?.riskLevel || snapshot?.riskLevel || 'SAFE').trim().toUpperCase(),
     riskReason: String(item?.riskReason || item?.auditInfo || snapshot?.riskReason || '').trim(),
+    sensitiveFields,
+    matchedRules,
     sql: String(item?.sql || item?.generatedSql || snapshot?.sql || snapshot?.generatedSql || '').trim(),
     sourceType: String(item?.sourceType || '').trim().toUpperCase(),
     conversationId: item?.conversationId == null ? null : String(item?.conversationId),
@@ -976,7 +990,11 @@ const normalizeChatHistoryItem = (item) => {
     turnNo: item?.turnNo == null ? null : Number(item?.turnNo) || null,
     artifactType: String(item?.artifactType || '').trim().toUpperCase(),
     fieldMapping: snapshot?.fieldMapping && typeof snapshot.fieldMapping === 'object' ? snapshot.fieldMapping : {},
+    ...buildChartStyleSnapshot(snapshot),
+    chartSortMode: readSnapshotSortMode(snapshot),
+    sortIntent: readSnapshotSortIntent(snapshot),
     chartSnapshot: snapshot,
+    semanticEvidence,
     graphContext,
     graphPath: snapshot?.graphPath || null,
     graphSqlHints: snapshot?.graphSqlHints || null,
@@ -1170,17 +1188,23 @@ const buildAnalysisFromTurn = (turn, chartArtifact, sqlArtifact, fallbackMessage
     chartType: String(snapshot.chartType || chartArtifact?.chartType || 'bar').trim() || 'bar',
     data: Array.isArray(snapshot.data) ? snapshot.data : [],
     fieldMapping: snapshot.fieldMapping || {},
+    ...buildChartStyleSnapshot(snapshot),
+    chartSortMode: readSnapshotSortMode(snapshot),
+    sortIntent: readSnapshotSortIntent(snapshot),
     sql: String(snapshot.sql || chartArtifact?.sqlText || sqlArtifact?.sqlText || '').trim(),
     sourceSql: String(snapshot.sql || chartArtifact?.sqlText || sqlArtifact?.sqlText || '').trim(),
     sourceQuestion: String(context.question || '').trim(),
     sourceTableName: String(snapshot.tableName || context.tableName || '').trim(),
     message: String(snapshot.message || fallbackMessage || turn?.messageText || '').trim(),
     chartSnapshot: snapshot,
+    semanticEvidence: Array.isArray(snapshot.semanticEvidence) ? snapshot.semanticEvidence : [],
     graphContext: Array.isArray(snapshot.graphContext) ? snapshot.graphContext : [],
     graphPath: snapshot.graphPath || null,
     graphSqlHints: snapshot.graphSqlHints || null,
-    riskLevel: chartArtifact?.riskLevel || 'SAFE',
-    riskReason: String(context.riskReason || '').trim(),
+    riskLevel: chartArtifact?.riskLevel || snapshot.riskLevel || 'SAFE',
+    riskReason: String(context.riskReason || snapshot.riskReason || '').trim(),
+    sensitiveFields: normalizeSensitiveFields(snapshot.sensitiveFields || context.sensitiveFields),
+    matchedRules: normalizeSensitiveFields(snapshot.matchedRules || context.matchedRules),
     queryHistoryId: chartArtifact?.historyId == null ? null : String(chartArtifact.historyId),
     artifactId: chartArtifact?.id == null ? null : String(chartArtifact.id),
     artifactIds: [chartArtifact?.id, sqlArtifact?.id].filter(Boolean).map(item => String(item)),
@@ -1333,6 +1357,7 @@ const restoreAnalysisFromMessage = (message, options = {}) => {
     sourceTableName: String(analysis.sourceTableName || analysis.tableName || '').trim()
   }
   currentChartType.value = lastAnalysis.value.chartType || 'bar'
+  applyAnalysisSortMode(lastAnalysis.value, 'name')
   if (restoreModule) {
     activeModule.value = 'chat'
   }
@@ -1358,12 +1383,16 @@ const buildAnalysisFromHistoryItem = (entry) => {
     chartType,
     data: chartData,
     fieldMapping: snapshot.fieldMapping || {},
+    ...buildChartStyleSnapshot(snapshot),
+    chartSortMode: readSnapshotSortMode(snapshot),
+    sortIntent: readSnapshotSortIntent(snapshot),
     sql,
     sourceSql: sql,
     sourceQuestion: question,
     sourceTableName: tableName,
     message: String(snapshot.message || entry?.riskReason || '').trim() || `历史查询：${question || tableName || '图表'}`,
     chartSnapshot: snapshot,
+    semanticEvidence: Array.isArray(snapshot.semanticEvidence) ? snapshot.semanticEvidence : [],
     graphContext: Array.isArray(snapshot.graphContext) ? snapshot.graphContext : [],
     graphPath: snapshot.graphPath || null,
     graphSqlHints: snapshot.graphSqlHints || null,
@@ -1375,6 +1404,8 @@ const buildAnalysisFromHistoryItem = (entry) => {
       : [],
     riskLevel: String(entry?.riskLevel || snapshot.riskLevel || 'SAFE').trim().toUpperCase() || 'SAFE',
     riskReason: String(entry?.riskReason || snapshot.riskReason || '').trim(),
+    sensitiveFields: normalizeSensitiveFields(entry?.sensitiveFields || snapshot.sensitiveFields),
+    matchedRules: normalizeSensitiveFields(entry?.matchedRules || snapshot.matchedRules),
     queryHistoryId: entry?.id == null ? null : String(entry.id),
     artifactId: entry?.artifactId == null ? null : String(entry.artifactId),
     artifactIds: Array.isArray(snapshot.artifactIds)
@@ -1462,6 +1493,7 @@ const restoreAnalysisFromHistory = async (entry) => {
   if (!analysis) return false
   lastAnalysis.value = analysis
   currentChartType.value = analysis.chartType || 'bar'
+  applyAnalysisSortMode(analysis, 'name')
   if (resolvedEntry?.tableName && isAccessibleTable(resolvedEntry.tableName)) {
     selectedTableName.value = resolvedEntry.tableName
   }
@@ -2822,6 +2854,7 @@ const captureChartSnapshot = (analysis) => {
   return {
   chartType: analysis?.chartType || currentChartType.value,
   fieldMapping: analysis?.fieldMapping || {},
+  ...buildChartStyleSnapshot(analysis),
   data: analysis?.data || [],
   generatedSql: analysis?.sql || analysis?.sourceSql || '',
   sourceQuestion: analysis?.sourceQuestion || '',
@@ -4881,6 +4914,7 @@ const sendQuestion = async (options = {}) => {
     }
     lastAnalysis.value = analysisSnapshot
     currentChartType.value = data.chartType
+    applyAnalysisSortMode(analysisSnapshot, 'name')
     updateStreamMessage({
       content: `${data.message}${fallbackTag}`,
       sql: data.sql,
@@ -5537,6 +5571,68 @@ const compareByValue = (a, b, mode) => {
   return mode === 'asc' ? aNum - bNum : bNum - aNum
 }
 
+const normalizeChartSortMode = (value, fallback = 'name') => {
+  const mode = String(value || '').trim().toLowerCase()
+  return ['name', 'asc', 'desc'].includes(mode) ? mode : fallback
+}
+
+const buildChartStyleSnapshot = (source = {}) => {
+  const recommendation = source?.chartRecommendation && typeof source.chartRecommendation === 'object'
+    ? source.chartRecommendation
+    : null
+  const optionTemplate = source?.optionTemplate && typeof source.optionTemplate === 'object'
+    ? source.optionTemplate
+    : null
+  const encode = source?.encode && typeof source.encode === 'object'
+    ? source.encode
+    : null
+  const dimensions = Array.isArray(source?.dimensions) ? source.dimensions : null
+  const snapshot = {}
+  if (optionTemplate) snapshot.optionTemplate = optionTemplate
+  if (encode) snapshot.encode = encode
+  if (dimensions) snapshot.dimensions = dimensions
+  if (recommendation) snapshot.chartRecommendation = recommendation
+  for (const key of [
+    'chartEngine',
+    'chartRuleCode',
+    'chartRuleName',
+    'chartScenarioType',
+    'chartRecommendationStatus',
+    'chartRecommendationExplain'
+  ]) {
+    const value = source?.[key]
+    if (value !== undefined && value !== null && String(value).trim() !== '') {
+      snapshot[key] = value
+    }
+  }
+  return snapshot
+}
+
+const readSnapshotSortMode = (snapshot, fallback = 'name') => {
+  const mapping = snapshot?.fieldMapping && typeof snapshot.fieldMapping === 'object' ? snapshot.fieldMapping : {}
+  return normalizeChartSortMode(snapshot?.chartSortMode || snapshot?.sortMode || mapping.chartSortMode || mapping.sortMode, fallback)
+}
+
+const readSnapshotSortIntent = (snapshot) => {
+  const mapping = snapshot?.fieldMapping && typeof snapshot.fieldMapping === 'object' ? snapshot.fieldMapping : {}
+  return String(snapshot?.sortIntent || mapping.sortIntent || '').trim()
+}
+
+const resolveAnalysisSortMode = (analysis, fallback = chartSortMode.value || 'name') => {
+  const mapping = analysis?.fieldMapping && typeof analysis.fieldMapping === 'object' ? analysis.fieldMapping : {}
+  return normalizeChartSortMode(
+    analysis?.chartSortMode
+      || analysis?.sortMode
+      || mapping.chartSortMode
+      || mapping.sortMode,
+    fallback
+  )
+}
+
+const applyAnalysisSortMode = (analysis, fallback = 'name') => {
+  chartSortMode.value = resolveAnalysisSortMode(analysis, fallback)
+}
+
 const normalizeChartItem = (item) => {
   if (!item || typeof item !== 'object') {
     return { name: String(item ?? ''), value: 0 }
@@ -5875,7 +5971,10 @@ provide('workbench', {
   stopRequested,
   businessDictionaryPanelVisible,
   businessDictionaryFocusModelId,
+  activeBusinessModelId,
   selectedChatBusinessModelId,
+  lastCreatedBusinessModelId,
+  lastAppliedBusinessModelId,
   chatBusinessModelOptions,
   recentChatQueries,
   messages,

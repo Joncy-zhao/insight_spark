@@ -230,6 +230,7 @@ public class AdvancedAnalysisService {
         String tableName = required(request, "tableName");
         String timeField = required(request, "timeField");
         String metricField = required(request, "metricField");
+        String metricExpression = sanitizeMetricExpression(request.get("metricExpression"));
         String granularity = normalizeGranularity(text(request.getOrDefault("granularity", "month")));
         int horizon = parsePositiveInt(request.get("horizon"), 3);
         String algorithm = text(request.getOrDefault("algorithm", "Holt-Winters"));
@@ -238,12 +239,17 @@ public class AdvancedAnalysisService {
         ForecastParams params = forecastParams(request);
 
         validateField(tableName, timeField, true);
-        validateField(tableName, metricField, false);
+        if (metricExpression.isBlank()) {
+            validateField(tableName, metricField, false);
+        } else {
+            validateMetricExpression(tableName, metricExpression);
+        }
 
         String cacheKey = forecastCacheKey("table", Map.of(
                 "tableName", tableName,
                 "timeField", timeField,
                 "metricField", metricField,
+                "metricExpression", metricExpression,
                 "granularity", granularity,
                 "horizon", horizon,
                 "algorithm", algorithm,
@@ -260,7 +266,7 @@ public class AdvancedAnalysisService {
         }
 
         SeriesPreprocessResult preprocess = preprocessSeries(
-                loadSeries(tableName, timeField, metricField, granularity, 240, resolvedFilterExpression),
+                loadSeries(tableName, timeField, metricField, metricExpression, granularity, 240, resolvedFilterExpression),
                 granularity
         );
         List<Point> history = preprocess.points();
@@ -281,6 +287,9 @@ public class AdvancedAnalysisService {
         result.put("type", "forecast");
         result.put("tableName", tableName);
         result.put("metricField", metricField);
+        if (!metricExpression.isBlank()) {
+            result.put("metricExpression", metricExpression);
+        }
         result.put("timeField", timeField);
         result.put("filterExpression", filterExpression);
         result.put("resolvedFilterExpression", resolvedFilterExpression);
@@ -1191,9 +1200,24 @@ public class AdvancedAnalysisService {
     }
 
     private List<Point> loadSeries(String tableName, String timeField, String metricField, String granularity, int limit, String filterExpression) {
+        return loadSeries(tableName, timeField, metricField, "", granularity, limit, filterExpression);
+    }
+
+    private List<Point> loadSeries(String tableName, String timeField, String metricField, String metricExpression,
+                                   String granularity, int limit, String filterExpression) {
         String physicalTable = physicalTable(tableName);
         String timeExpr = dateBucketExpr(timeField, granularity);
-        String sql = "SELECT " + timeExpr + " AS bucket_name, `" + metricField + "` AS metric_value "
+        if (!metricExpression.isBlank()) {
+            String sql = "SELECT " + timeExpr + " AS bucket_name, " + metricExpression + " AS metric_value "
+                    + "FROM `" + physicalTable + "` "
+                    + "WHERE `" + timeField + "` IS NOT NULL AND `" + timeField + "` <> '' "
+                    + (filterExpression.isBlank() ? "" : "AND (" + filterExpression + ") ")
+                    + "GROUP BY " + timeExpr + " ORDER BY bucket_name ASC LIMIT " + Math.max(500, Math.min(limit, 10000));
+            List<Map<String, Object>> rows = query(tableName, sql);
+            return aggregateSeriesRows(rows);
+        }
+        String metricExpr = metricExpression.isBlank() ? "`" + metricField + "`" : metricExpression;
+        String sql = "SELECT " + timeExpr + " AS bucket_name, " + metricExpr + " AS metric_value "
                 + "FROM `" + physicalTable + "` "
                 + "WHERE `" + timeField + "` IS NOT NULL AND `" + timeField + "` <> '' "
                 + (filterExpression.isBlank() ? "" : "AND (" + filterExpression + ") ")
@@ -4448,6 +4472,46 @@ public class AdvancedAnalysisService {
 
     private String numericExpr(String field) {
         return "CAST(NULLIF(TRIM(`" + field + "`), '') AS DECIMAL(20,4))";
+    }
+
+    private String sanitizeMetricExpression(Object value) {
+        String expression = text(value);
+        if (expression.isBlank()) {
+            return "";
+        }
+        String lower = expression.toLowerCase(Locale.ROOT);
+        if (containsAny(lower, ";", "--", "/*", "*/", " insert ", " update ", " delete ", " drop ",
+                " alter ", " truncate ", " union ", " join ", " from ", " where ")) {
+            throw new IllegalArgumentException("指标表达式包含不安全内容");
+        }
+        if (!expression.matches("[A-Za-z0-9_`'(),.\\s+\\-*/]+")) {
+            throw new IllegalArgumentException("指标表达式包含不支持的字符");
+        }
+        return expression;
+    }
+
+    private void validateMetricExpression(String tableName, String expression) {
+        List<Map<String, Object>> fields = dataUploadService.listFields(tableName);
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("`([^`]+)`").matcher(expression);
+        List<String> columns = new ArrayList<>();
+        while (matcher.find()) {
+            String column = text(matcher.group(1));
+            if (!column.isBlank() && !columns.contains(column)) {
+                columns.add(column);
+            }
+        }
+        if (columns.isEmpty()) {
+            throw new IllegalArgumentException("指标表达式未包含有效字段");
+        }
+        for (String column : columns) {
+            Map<String, Object> matched = fields.stream()
+                    .filter(item -> column.equals(Objects.toString(item.get("columnName"), "")))
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalArgumentException("指标表达式字段不存在或无权限访问: " + column));
+            if (!isNumericField(matched)) {
+                throw new IllegalArgumentException("指标表达式字段不是数值型: " + column);
+            }
+        }
     }
 
     private String normalizeGranularity(String value) {

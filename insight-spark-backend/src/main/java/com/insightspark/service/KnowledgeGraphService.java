@@ -20,9 +20,11 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
 @Service
@@ -285,6 +287,18 @@ public class KnowledgeGraphService {
         return Map.of("nodeUpsertCount", nodeCount, "edgeUpsertCount", edgeCount);
     }
 
+    public Map<String, Object> rebuildGraph() {
+        int clearedEdgeCount = safeUpdate("DELETE FROM is_kg_edge");
+        int clearedNodeCount = safeUpdate("DELETE FROM is_kg_node");
+        boolean neo4jCleared = clearNeo4jGraph();
+        Map<String, Object> sync = syncGraph();
+        Map<String, Object> result = new LinkedHashMap<>(sync);
+        result.put("clearedNodeCount", clearedNodeCount);
+        result.put("clearedEdgeCount", clearedEdgeCount);
+        result.put("neo4jCleared", neo4jCleared);
+        return result;
+    }
+
     public Map<String, Object> graph(int limit) {
         int safeLimit = Math.max(10, Math.min(limit, 300));
         List<Map<String, Object>> nodes = jdbcTemplate.queryForList("""
@@ -445,13 +459,29 @@ public class KnowledgeGraphService {
         int depth = graphRagHopDepth();
         int limit = graphRagTopK();
         Map<String, Object> bundle = multiHopSearch(question, tableName, depth, limit);
+        List<Map<String, Object>> rawNodes = castMapList(bundle.getOrDefault("nodes", List.of()));
+        List<Map<String, Object>> rawContext = castMapList(bundle.getOrDefault("ragContext", rawNodes));
+        List<Map<String, Object>> filteredContext = filterRelevantContext(question, tableName, rawContext, limit);
+        Set<String> allowedKeys = new LinkedHashSet<>();
+        for (Map<String, Object> node : filteredContext) {
+            String key = Objects.toString(node.get("nodeKey"), "").trim();
+            if (!key.isBlank()) {
+                allowedKeys.add(key);
+            }
+        }
+        List<Map<String, Object>> filteredEdges = castMapList(bundle.getOrDefault("edges", List.of())).stream()
+                .filter(edge -> allowedKeys.contains(Objects.toString(edge.get("fromKey"), ""))
+                        && allowedKeys.contains(Objects.toString(edge.get("toKey"), "")))
+                .toList();
         Map<String, Object> context = new LinkedHashMap<>(bundle);
-        context.put("nodes", bundle.getOrDefault("nodes", List.of()));
-        context.put("edges", bundle.getOrDefault("edges", List.of()));
-        context.put("pathText", bundle.getOrDefault("pathText", ""));
-        context.put("ragContext", bundle.getOrDefault("ragContext", List.of()));
+        context.put("nodes", filteredContext);
+        context.put("edges", filteredEdges);
+        context.put("pathText", buildPathText(filteredContext, filteredEdges));
+        context.put("ragContext", filteredContext);
         context.put("depth", bundle.getOrDefault("depth", 3));
         context.put("neo4jEnabled", bundle.getOrDefault("neo4jEnabled", neo4jEnabled));
+        context.put("rawNodeCount", rawContext.size());
+        context.put("filteredNodeCount", filteredContext.size());
         return context;
     }
 
@@ -593,6 +623,56 @@ public class KnowledgeGraphService {
                 "depth", safeDepth, "neo4jEnabled", true,
                 "neo4jFallback", false, "neo4jStrict", true,
                 "graphSource", "NEO4J");
+    }
+
+    private List<Map<String, Object>> filterRelevantContext(String question, String tableName,
+                                                            List<Map<String, Object>> nodes, int limit) {
+        if (nodes == null || nodes.isEmpty()) {
+            return List.of();
+        }
+        String table = Objects.toString(tableName, "").trim();
+        List<String> tokens = splitQuestionTokens(question);
+        int safeLimit = Math.max(4, Math.min(limit, 40));
+        return nodes.stream()
+                .map(node -> Map.entry(node, contextRelevanceScore(node, table, tokens)))
+                .filter(entry -> entry.getValue() > 0)
+                .sorted((a, b) -> Integer.compare(b.getValue(), a.getValue()))
+                .limit(safeLimit)
+                .map(Map.Entry::getKey)
+                .toList();
+    }
+
+    private int contextRelevanceScore(Map<String, Object> node, String tableName, List<String> tokens) {
+        String nodeKey = Objects.toString(node.get("nodeKey"), "");
+        String sourceId = Objects.toString(node.get("sourceId"), "");
+        String label = Objects.toString(node.get("label"), "");
+        String content = Objects.toString(node.get("content"), "");
+        String type = Objects.toString(node.get("nodeType"), "").toUpperCase();
+        String bag = normalizeText(nodeKey + " " + sourceId + " " + label + " " + content);
+        int score = 0;
+        if (!tableName.isBlank() && (nodeKey.contains(tableName) || sourceId.contains(tableName))) {
+            score += 100;
+        } else if ("TAG".equals(type)) {
+            score += 20;
+        } else if (!tableName.isBlank() && "OFFICIAL".equalsIgnoreCase(Objects.toString(node.get("sourceType"), ""))) {
+            score -= 80;
+        }
+        for (String token : tokens) {
+            String normalized = normalizeText(token);
+            if (!normalized.isBlank() && bag.contains(normalized)) {
+                score += 35;
+            }
+        }
+        boolean sensitiveTerm = tokens.stream().map(this::normalizeText).anyMatch(token ->
+                containsAny(token, "phone", "mobile", "email", "\u624b\u673a", "\u7535\u8bdd", "\u5ba2\u6237"));
+        if (sensitiveTerm && containsAny(bag, "sensitive", "phone", "mobile", "email", "idcard",
+                "\u624b\u673a", "\u7535\u8bdd", "\u654f\u611f")) {
+            score += 45;
+        }
+        if (looksLikeMojibake(label) || looksLikeMojibake(content)) {
+            score -= 120;
+        }
+        return score;
     }
 
     private List<Map<String, Object>> neo4jQueryRows(String cypher, Map<String, Object> params) throws Exception {
@@ -1179,6 +1259,29 @@ public class KnowledgeGraphService {
         }
     }
 
+    private boolean clearNeo4jGraph() {
+        Neo4jRuntimeConfig config = loadNeo4jRuntimeConfig();
+        if (!config.enabled()) {
+            return false;
+        }
+        try {
+            neo4jQueryRows("MATCH (n:InsightNode) DETACH DELETE n RETURN {cleared: 1} AS row", Map.of());
+            return true;
+        } catch (Exception e) {
+            log.warn("Neo4j graph clean failed before rebuild: {}", safeErrorMessage(e));
+            return false;
+        }
+    }
+
+    private int safeUpdate(String sql) {
+        try {
+            return jdbcTemplate.update(sql);
+        } catch (Exception e) {
+            log.warn("Knowledge graph cleanup skipped for SQL [{}]: {}", sql, safeErrorMessage(e));
+            return 0;
+        }
+    }
+
     private Neo4jRuntimeConfig loadNeo4jRuntimeConfig() {
         try {
             List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
@@ -1320,6 +1423,15 @@ public class KnowledgeGraphService {
 
     private String normalizeText(String text) {
         return Objects.toString(text, "").toLowerCase().replaceAll("[^a-z0-9\u4e00-\u9fa5]+", " ").trim();
+    }
+
+    private boolean looksLikeMojibake(String value) {
+        String text = Objects.toString(value, "");
+        if (text.isBlank()) {
+            return false;
+        }
+        return text.contains("锛") || text.contains("鏁") || text.contains("瀹") || text.contains("绋")
+                || text.contains("ç") || text.contains("æ") || text.contains("�");
     }
 
     private boolean containsAny(String text, String... keywords) {

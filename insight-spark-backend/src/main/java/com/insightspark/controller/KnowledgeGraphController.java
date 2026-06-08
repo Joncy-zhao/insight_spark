@@ -28,10 +28,13 @@ public class KnowledgeGraphController {
 
     @PostMapping("/rebuild")
     public ApiResponse<Map<String, Object>> rebuildGraph() {
-        Map<String, Object> result = knowledgeGraphService.syncGraph();
+        Map<String, Object> result = knowledgeGraphService.rebuildGraph();
         return ApiResponse.success(Map.of(
                 "nodeCount", result.get("nodeUpsertCount"),
-                "edgeCount", result.get("edgeUpsertCount")
+                "edgeCount", result.get("edgeUpsertCount"),
+                "clearedNodeCount", result.getOrDefault("clearedNodeCount", 0),
+                "clearedEdgeCount", result.getOrDefault("clearedEdgeCount", 0),
+                "neo4jCleared", result.getOrDefault("neo4jCleared", false)
         ));
     }
 

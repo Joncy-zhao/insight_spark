@@ -457,6 +457,23 @@ public class AiChartRuleConfigService {
     }
 
     public Map<String, Object> latestInteractiveOptionTemplate(String ruleCode, String fallbackChartType) {
+        Map<String, Object> fullTemplate = latestOptionTemplate(ruleCode, fallbackChartType);
+        if (fullTemplate.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Object> interactive = new LinkedHashMap<>();
+        for (String key : List.of("animation", "tooltip", "dataZoom", "dynamic")) {
+            if (fullTemplate.containsKey(key)) {
+                interactive.put(key, fullTemplate.get(key));
+            }
+        }
+        if (!interactive.containsKey("dataZoom")) {
+            interactive.put("dataZoom", Map.of("enabled", false));
+        }
+        return interactive;
+    }
+
+    public Map<String, Object> latestOptionTemplate(String ruleCode, String fallbackChartType) {
         String code = Objects.toString(ruleCode, "").trim();
         if (code.isBlank()) {
             return Map.of();
@@ -468,20 +485,10 @@ public class AiChartRuleConfigService {
                     "dataZoom", Map.of("enabled", false)
             );
         }
-        Map<String, Object> fullTemplate = buildOptionTemplate(
+        return buildOptionTemplate(
                 Objects.toString(rule.getOrDefault("chartType", fallbackChartType), fallbackChartType),
                 mapValue(rule.get("renderConfig")),
                 getPreferences());
-        Map<String, Object> interactive = new LinkedHashMap<>();
-        for (String key : List.of("animation", "tooltip", "dataZoom", "dynamic")) {
-            if (fullTemplate.containsKey(key)) {
-                interactive.put(key, fullTemplate.get(key));
-            }
-        }
-        if (!interactive.containsKey("dataZoom")) {
-            interactive.put("dataZoom", Map.of("enabled", false));
-        }
-        return interactive;
     }
 
     private Map<String, Object> stripRuleRuntimeFields(Map<String, Object> rule) {

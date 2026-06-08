@@ -397,11 +397,10 @@ public class SqlAuditService {
         if (tableName.startsWith("official:")) {
             String[] parts = tableName.split(":", 3);
             sensitiveColumns = parts.length == 3
-                    ? sensitiveColumnMaskTypes(buildFieldMetaSql("is_official_schema_field", true, false),
-                            Long.parseLong(parts[1]), parts[2])
+                    ? sensitiveColumnMaskTypesByMetaTable("is_official_schema_field", true, Long.parseLong(parts[1]), parts[2])
                     : Map.of();
         } else {
-            sensitiveColumns = sensitiveColumnMaskTypes(buildFieldMetaSql("is_data_field", false, false), tableName);
+            sensitiveColumns = sensitiveColumnMaskTypesByMetaTable("is_data_field", false, tableName);
         }
         if (sensitiveColumns.isEmpty()) {
             return new MaskReport(rows, "");
@@ -850,7 +849,13 @@ public class SqlAuditService {
     }
 
     public String semanticCacheKey(String question, String tableName) {
-        String raw = Objects.toString(tableName, "") + "\n" + Objects.toString(question, "").trim().toLowerCase(Locale.ROOT);
+        return semanticCacheKey(question, tableName, "");
+    }
+
+    public String semanticCacheKey(String question, String tableName, String semanticContext) {
+        String raw = Objects.toString(tableName, "") + "\n"
+                + Objects.toString(semanticContext, "").trim().toLowerCase(Locale.ROOT) + "\n"
+                + Objects.toString(question, "").trim().toLowerCase(Locale.ROOT);
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             return "semantic:" + HexFormat.of().formatHex(digest.digest(raw.getBytes(StandardCharsets.UTF_8))).substring(0, 32);
@@ -1193,6 +1198,16 @@ public class SqlAuditService {
         return sensitiveColumnMaskTypes(fields);
     }
 
+    private Map<String, String> sensitiveColumnMaskTypesByMetaTable(String tableName, boolean official, Object... args) {
+        Map<String, String> out = new LinkedHashMap<>();
+        try {
+            return sensitiveColumnMaskTypes(loadFieldMetaRows(tableName, official, args));
+        } catch (Exception e) {
+            log.warn("加载敏感字段元数据失败，metaTable={}, args={}, error={}", tableName, List.of(args), e.getMessage());
+            return out;
+        }
+    }
+
     private Map<String, String> sensitiveColumnMaskTypes(List<Map<String, Object>> fields) {
         Map<String, String> out = new LinkedHashMap<>();
         for (Map<String, Object> field : fields) {
@@ -1390,6 +1405,9 @@ public class SqlAuditService {
 
     private String buildFieldMetaSql(String tableName, boolean official, boolean onlySensitive) {
         Map<String, Boolean> columns = tableColumnMap(tableName);
+        if (columns.isEmpty()) {
+            columns.putAll(minimalFieldMetaColumns(official));
+        }
         String columnNameExpr = columnExpr(columns, "column_name", "''");
         String sourceFieldNameExpr = columnExpr(columns, "source_field_name", columnNameExpr);
         String tableNameExpr = columnExpr(columns, "table_name", "''");
@@ -1404,6 +1422,9 @@ public class SqlAuditService {
                 : columnCommentExpr;
         String synonymsExpr = columnExpr(columns, "synonyms", "''");
         String sensitiveExpr = columnExpr(columns, "sensitive", "0");
+        String sortOrderExpr = official
+                ? columnExpr(columns, "ordinal_position", "0")
+                : columnExpr(columns, "sort_order", "0");
         String where = official
                 ? " WHERE " + datasourceIdExpr + " = ? AND " + tableNameExpr + " = ?"
                 : " WHERE " + tableNameExpr + " = ?";
@@ -1413,7 +1434,50 @@ public class SqlAuditService {
         return "SELECT " + columnNameExpr + " AS columnName, " + sourceFieldNameExpr + " AS sourceFieldName, "
                 + displayExpr + " AS displayName, "
                 + commentExpr + " AS commentText, " + synonymsExpr + " AS synonyms, "
-                + sensitiveExpr + " AS sensitive FROM `" + tableName + "`" + where;
+                + sensitiveExpr + " AS `sensitive`, " + sortOrderExpr + " AS sortOrder FROM `" + tableName + "`"
+                + where + " ORDER BY sortOrder ASC";
+    }
+
+    private Map<String, Boolean> minimalFieldMetaColumns(boolean official) {
+        Map<String, Boolean> columns = new java.util.HashMap<>();
+        columns.put("column_name", true);
+        columns.put("table_name", true);
+        if (official) {
+            columns.put("datasource_id", true);
+        } else {
+            columns.put("source_field_name", true);
+            columns.put("display_name", true);
+        }
+        return columns;
+    }
+
+    private List<Map<String, Object>> loadFieldMetaRows(String tableName, boolean official, Object... args) {
+        try {
+            return jdbcTemplate.queryForList(buildFieldMetaSql(tableName, official, false), args);
+        } catch (Exception first) {
+            log.debug("扩展字段元数据读取失败，尝试最小字段集，metaTable={}, args={}, reason={}",
+                    tableName, List.of(args), first.getMessage());
+            return jdbcTemplate.queryForList(buildMinimalFieldMetaSql(tableName, official), args);
+        }
+    }
+
+    private String buildMinimalFieldMetaSql(String tableName, boolean official) {
+        if (official) {
+            return """
+                    SELECT `column_name` AS columnName, `column_name` AS sourceFieldName,
+                           `column_name` AS displayName, '' AS commentText, '' AS synonyms,
+                           0 AS `sensitive`, 0 AS sortOrder
+                    FROM `""" + tableName + """
+                    ` WHERE `datasource_id` = ? AND `table_name` = ?
+                    """;
+        }
+        return """
+                SELECT `column_name` AS columnName, `source_field_name` AS sourceFieldName,
+                       COALESCE(NULLIF(`display_name`, ''), `source_field_name`, `column_name`) AS displayName,
+                       '' AS commentText, '' AS synonyms, 0 AS `sensitive`, 0 AS sortOrder
+                FROM `""" + tableName + """
+                ` WHERE `table_name` = ?
+                """;
     }
 
     private String columnExpr(Map<String, Boolean> columns, String columnName, String fallback) {
@@ -1463,15 +1527,15 @@ public class SqlAuditService {
             return List.of();
         }
         List<Map<String, Object>> fields;
+        boolean officialSource = tableName.startsWith("official:");
         try {
-            if (tableName.startsWith("official:")) {
+            if (officialSource) {
                 String[] parts = tableName.split(":", 3);
                 fields = parts.length == 3
-                        ? jdbcTemplate.queryForList(buildFieldMetaSql("is_official_schema_field", true, false),
-                                Long.parseLong(parts[1]), parts[2])
+                        ? loadFieldMetaRows("is_official_schema_field", true, Long.parseLong(parts[1]), parts[2])
                         : List.of();
             } else {
-                fields = jdbcTemplate.queryForList(buildFieldMetaSql("is_data_field", false, false), tableName);
+                fields = loadFieldMetaRows("is_data_field", false, tableName);
             }
         } catch (Exception ignored) {
             return List.of();
@@ -1483,68 +1547,128 @@ public class SqlAuditService {
         
         // 如果是 SELECT *，返回所有敏感字段
         if (normalizedSql.contains("select *") || normalizedSql.matches("(?s).*select\\s+\\*.*")) {
-            List<String> allSensitive = new ArrayList<>();
+            Set<String> allSensitive = new LinkedHashSet<>();
             for (Map<String, Object> field : fields) {
-                String columnName = Objects.toString(field.get("columnName"), "");
-                String displayName = Objects.toString(field.get("displayName"), columnName);
-                if (!columnName.isBlank() && fieldSensitiveByMetaOrRule(field)) {
-                    allSensitive.add(displayName + "(" + columnName + ")");
+                if (fieldSensitiveByMetaOrRule(field)) {
+                    allSensitive.add(sensitiveFieldLabel(field));
                 }
             }
-            return allSensitive;
+            return new ArrayList<>(allSensitive);
         }
         
-        List<String> matched = new ArrayList<>();
-        for (Map<String, Object> field : fields) {
-            String columnName = Objects.toString(field.get("columnName"), "");
-            String displayName = Objects.toString(field.get("displayName"), columnName);
-            
-            if (columnName.isBlank()) {
-                continue;
-            }
+        Set<String> matched = new LinkedHashSet<>();
+        for (int i = 0; i < fields.size(); i++) {
+            Map<String, Object> field = fields.get(i);
             if (!fieldSensitiveByMetaOrRule(field)) {
                 continue;
             }
-            
-            String lowerColumnName = columnName.toLowerCase(Locale.ROOT);
-            boolean found = false;
-            
-            // 检查方式1：带反引号的字段名 `columnName`
-            if (normalizedSql.contains("`" + lowerColumnName + "`")) {
-                found = true;
-            }
-            
-            // 检查方式2：不带反引号的字段名（单词边界匹配）
-            if (!found && normalizedSql.matches("(?s).*\\b" + java.util.regex.Pattern.quote(lowerColumnName) + "\\b.*")) {
-                found = true;
-            }
-            
-            // 检查方式3：在聚合函数中的字段，如 SUM(columnName), AVG(columnName) 等
-            if (!found) {
-                String[] aggFunctions = {"sum", "avg", "count", "max", "min"};
-                for (String func : aggFunctions) {
-                    if (normalizedSql.contains(func + "(" + lowerColumnName + ")") ||
-                        normalizedSql.contains(func + "(`" + lowerColumnName + "`)")) {
-                        found = true;
-                        break;
-                    }
-                }
-            }
-            
-            // 检查方式4：字段名作为别名或在中文字段名下
-            if (!found && !displayName.equals(columnName)) {
-                String lowerDisplayName = displayName.toLowerCase(Locale.ROOT);
-                if (normalizedSql.contains(lowerDisplayName) || 
-                    normalizedSql.matches("(?s).*\\b" + java.util.regex.Pattern.quote(lowerDisplayName) + "\\b.*")) {
-                    found = true;
-                }
-            }
-            
-            if (found) {
-                matched.add(displayName + "(" + columnName + ")");
+            if (sqlReferencesField(normalizedSql, field, i, !officialSource)) {
+                matched.add(sensitiveFieldLabel(field));
             }
         }
-        return matched;
+        return new ArrayList<>(matched);
+    }
+
+    private boolean sqlReferencesField(String normalizedSql, Map<String, Object> field, int fieldIndex,
+                                       boolean uploadSource) {
+        if (normalizedSql == null || normalizedSql.isBlank()) {
+            return false;
+        }
+        for (String identifier : fieldSqlIdentifiers(field, fieldIndex, uploadSource)) {
+            if (sqlContainsIdentifier(normalizedSql, identifier)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Set<String> fieldSqlIdentifiers(Map<String, Object> field, int fieldIndex, boolean uploadSource) {
+        Set<String> identifiers = new LinkedHashSet<>();
+        addIdentifier(identifiers, field.get("columnName"));
+        addIdentifier(identifiers, field.get("sourceFieldName"));
+        addIdentifier(identifiers, field.get("displayName"));
+        addIdentifier(identifiers, field.get("synonyms"));
+        if (uploadSource) {
+            addIdentifier(identifiers, uploadPhysicalColumn(fieldIndex));
+            Integer sortOrder = toInteger(field.get("sortOrder"));
+            if (sortOrder != null && sortOrder >= 0) {
+                addIdentifier(identifiers, uploadPhysicalColumn(sortOrder));
+            }
+        }
+        return identifiers;
+    }
+
+    private void addIdentifier(Set<String> identifiers, Object value) {
+        String text = Objects.toString(value, "").trim();
+        if (text.isBlank()) {
+            return;
+        }
+        for (String part : text.split("[,，、;；|/\\s]+")) {
+            String normalized = part.trim().replace("`", "").replace("\"", "");
+            if (!normalized.isBlank()) {
+                identifiers.add(normalized.toLowerCase(Locale.ROOT));
+            }
+        }
+    }
+
+    private String uploadPhysicalColumn(int zeroBasedIndex) {
+        return zeroBasedIndex < 0 ? "" : String.format(Locale.ROOT, "col_%03d", zeroBasedIndex + 1);
+    }
+
+    private Integer toInteger(Object value) {
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        String text = Objects.toString(value, "").trim();
+        if (!text.matches("^-?\\d+$")) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(text);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private boolean sqlContainsIdentifier(String normalizedSql, String identifier) {
+        String text = Objects.toString(identifier, "").trim().toLowerCase(Locale.ROOT);
+        if (text.isBlank()) {
+            return false;
+        }
+        if (normalizedSql.contains("`" + text + "`") || normalizedSql.contains("\"" + text + "\"")) {
+            return true;
+        }
+        return Pattern.compile("(?<![\\p{L}\\p{N}_])" + Pattern.quote(text) + "(?![\\p{L}\\p{N}_])",
+                Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CHARACTER_CLASS).matcher(normalizedSql).find();
+    }
+
+    private String sensitiveFieldLabel(Map<String, Object> field) {
+        String columnName = Objects.toString(field.get("columnName"), "").trim();
+        String sourceFieldName = Objects.toString(field.get("sourceFieldName"), "").trim();
+        String displayName = Objects.toString(field.get("displayName"), "").trim();
+        String primary = firstNonBlank(displayName, sourceFieldName, columnName, "未知字段");
+        String secondary = firstNonBlank(!Objects.equals(primary, sourceFieldName) ? sourceFieldName : "",
+                !Objects.equals(primary, columnName) ? columnName : "");
+        if (!secondary.isBlank() && !columnName.isBlank()) {
+            return primary + "/" + secondary + "(" + columnName + ")";
+        }
+        if (!columnName.isBlank()) {
+            return primary + "(" + columnName + ")";
+        }
+        return primary;
+    }
+
+    private String firstNonBlank(String... values) {
+        if (values == null) {
+            return "";
+        }
+        for (String value : values) {
+            String text = Objects.toString(value, "").trim();
+            if (!text.isBlank()) {
+                return text;
+            }
+        }
+        return "";
     }
 
     public String ensureLimit(String sql, int limit) {

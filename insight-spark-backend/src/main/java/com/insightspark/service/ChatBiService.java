@@ -118,6 +118,9 @@ public class ChatBiService {
     private AiChartRuleConfigService aiChartRuleConfigService;
 
     @Autowired
+    private BusinessSemanticService businessSemanticService;
+
+    @Autowired
     private ObjectProvider<AdvancedAnalysisService> advancedAnalysisServiceProvider;
 
     public Map<String, Object> executeChat(ChatQueryRequest request) {
@@ -153,21 +156,6 @@ public class ChatBiService {
         List<String> generationTrace = new ArrayList<>();
         generationTrace.add("activeTable=" + activeTable);
         generationTrace.add("selectedModel=" + selectedModelId);
-        String cacheKey = sqlAuditService.semanticCacheKey(question, activeTable);
-        Map<String, Object> cachedSqlAudit = sqlAuditService.findSemanticCache(cacheKey);
-        boolean cacheHit = !cachedSqlAudit.isEmpty();
-        if (cacheHit) {
-            SqlAuditService.AuditResult cacheAuditResult = sqlAuditService.inspectCachedSql(cacheKey, activeTable);
-            if (cacheAuditResult.blocked()) {
-                cacheHit = false;
-                cachedSqlAudit = Map.of();
-                generationTrace.add("semanticCache=REJECTED;" + cacheAuditResult.riskReason());
-            } else {
-                generationTrace.add("semanticCache=HIT;cacheAudit=" + cacheAuditResult.riskLevel());
-            }
-        } else {
-            generationTrace.add("semanticCache=MISS");
-        }
         boolean officialSource = datasourceService.isOfficialSource(activeTable);
         String queryTableName = officialSource ? datasourceService.physicalTableName(activeTable) : activeTable;
         dataUploadService.assertKnownTable(activeTable);
@@ -204,6 +192,37 @@ public class ChatBiService {
         emitProgress(progress, "FIELD_META_READY", "读取字段元数据",
                 "已加载 " + fields.size() + " 个字段，正在匹配指标、维度和时间口径", Map.of("fieldCount", fields.size()));
         ensureNotCancelled("字段元信息加载");
+        BusinessSemanticService.BusinessSemanticContext businessSemanticContext =
+                businessSemanticService.resolveContext(activeTable, safeOptions, fields);
+        BusinessSemanticService.BusinessSemanticPlan businessSemanticPlan =
+                businessSemanticService.resolvePlan(question, businessSemanticContext);
+        Map<String, Object> businessSemanticTrace = new LinkedHashMap<>(businessSemanticPlan.trace());
+        generationTrace.add(businessSemanticContext.available()
+                ? "businessSemanticContext=LOADED;modelId=" + businessSemanticContext.modelId()
+                        + ";source=" + businessSemanticContext.source()
+                : "businessSemanticContext=EMPTY");
+        generationTrace.add(businessSemanticPlan.hasSemanticConstraint()
+                ? "businessSemanticPlan=MATCHED;" + businessSemanticTrace
+                : "businessSemanticPlan=NO_MATCH");
+        String cacheKey = sqlAuditService.semanticCacheKey(question, activeTable,
+                businessSemanticContext.available()
+                        ? "businessModel=" + businessSemanticContext.modelId()
+                                + ";version=" + businessSemanticContext.modelVersion()
+                        : "businessModel=none");
+        Map<String, Object> cachedSqlAudit = sqlAuditService.findSemanticCache(cacheKey);
+        boolean cacheHit = !cachedSqlAudit.isEmpty();
+        if (cacheHit) {
+            SqlAuditService.AuditResult cacheAuditResult = sqlAuditService.inspectCachedSql(cacheKey, activeTable);
+            if (cacheAuditResult.blocked()) {
+                cacheHit = false;
+                cachedSqlAudit = Map.of();
+                generationTrace.add("semanticCache=REJECTED;" + cacheAuditResult.riskReason());
+            } else {
+                generationTrace.add("semanticCache=HIT;cacheAudit=" + cacheAuditResult.riskLevel());
+            }
+        } else {
+            generationTrace.add("semanticCache=MISS");
+        }
         Map<String, Object> graphPath = knowledgeGraphService.retrieveMultiHopContextSafely(question, activeTable);
         List<Map<String, Object>> graphContext = asMapList(graphPath.get("ragContext"));
         generationTrace.add("kgContextNodes=" + graphContext.size());
@@ -233,6 +252,7 @@ public class ChatBiService {
                 graphFallbackReason = "Graph context is empty, fallback to local field context";
             }
         }
+        graphContext = filterGraphContextForCurrentQuery(question, activeTable, fields, "", graphContext);
         emitProgress(progress, "GRAPH_CONTEXT_READY", "匹配语义上下文",
                 graphFallbackUsed
                         ? "图谱上下文不足，已回退到本地字段语义，共 " + graphContext.size() + " 个候选"
@@ -241,12 +261,16 @@ public class ChatBiService {
         ensureNotCancelled("图谱上下文准备");
         List<Map<String, Object>> previewRows = dataUploadService.preview(activeTable, 1, 8);
         ensureNotCancelled("样例数据预览");
-        Map<String, Object> graphSqlHints = knowledgeGraphService.buildSqlMappingHints(question, activeTable, graphContext);
+        Map<String, Object> graphSqlHints = new LinkedHashMap<>(
+                knowledgeGraphService.buildSqlMappingHints(question, activeTable, graphContext));
+        graphSqlHints.put("businessSemanticTrace", businessSemanticTrace);
+        Map<String, Object> modelOptions = new LinkedHashMap<>(safeOptions);
+        modelOptions.put("businessSemanticTrace", businessSemanticTrace);
         emitProgress(progress, "NL2SQL_START", "生成查询语义",
                 cacheHit ? "命中语义缓存，正在复用已审计 SQL" : "正在结合字段、样例数据和图谱提示生成 SQL",
                 Map.of("cacheHit", cacheHit));
         Optional<Map<String, Object>> aiResult = cacheHit ? Optional.empty() : pythonAiService.textToSql(question, queryTableName, fields,
-                previewRows, graphPath, graphSqlHints, safeOptions);
+                previewRows, graphPath, graphSqlHints, modelOptions);
         ensureNotCancelled("SQL 生成");
 
         String generatedSql;
@@ -301,7 +325,24 @@ public class ChatBiService {
         generatedSql = semanticCorrection.sql();
         chartType = semanticCorrection.chartType();
         fieldMapping = semanticCorrection.fieldMapping();
+        BusinessSemanticService.BusinessSqlCorrection businessCorrection =
+                businessSemanticService.enforceSql(question, queryTableName, generatedSql, chartType, fieldMapping,
+                        businessSemanticPlan);
+        generatedSql = businessCorrection.sql();
+        chartType = businessCorrection.chartType();
+        fieldMapping = businessCorrection.fieldMapping();
+        businessSemanticTrace = new LinkedHashMap<>(businessCorrection.trace());
+        if (!Objects.toString(businessCorrection.reason(), "").isBlank()) {
+            generationTrace.add("businessSemanticGuard=" + businessCorrection.reason()
+                    + ";changed=" + businessCorrection.changed());
+        }
+        SemanticSqlCorrection sortCorrection = applySortIntentGuard(question, generatedSql, chartType, fieldMapping,
+                generationTrace);
+        generatedSql = sortCorrection.sql();
+        chartType = sortCorrection.chartType();
+        fieldMapping = sortCorrection.fieldMapping();
         fieldMapping = alignFieldMappingWithSql(question, fields, generatedSql, fieldMapping, generationTrace);
+        graphContext = filterGraphContextForCurrentQuery(question, activeTable, fields, generatedSql, graphContext);
 
         log.info("Generated SQL: {}", generatedSql);
         emitProgress(progress, "SQL_GENERATED", "生成查询语句",
@@ -368,6 +409,22 @@ public class ChatBiService {
                 generatedSql = limitedFallbackSql;
                 chartType = fallbackChartType;
                 fieldMapping = fallbackFieldMapping(fieldChoice);
+                BusinessSemanticService.BusinessSqlCorrection retryBusinessCorrection =
+                        businessSemanticService.enforceSql(question, queryTableName, generatedSql, chartType, fieldMapping,
+                                businessSemanticPlan);
+                generatedSql = retryBusinessCorrection.sql();
+                chartType = retryBusinessCorrection.chartType();
+                fieldMapping = retryBusinessCorrection.fieldMapping();
+                businessSemanticTrace = new LinkedHashMap<>(retryBusinessCorrection.trace());
+                if (!Objects.toString(retryBusinessCorrection.reason(), "").isBlank()) {
+                    generationTrace.add("businessSemanticGuardRetry=" + retryBusinessCorrection.reason()
+                            + ";changed=" + retryBusinessCorrection.changed());
+                }
+                SemanticSqlCorrection retrySortCorrection = applySortIntentGuard(question, generatedSql,
+                        chartType, fieldMapping, generationTrace);
+                generatedSql = retrySortCorrection.sql();
+                chartType = retrySortCorrection.chartType();
+                fieldMapping = retrySortCorrection.fieldMapping();
                 engine = "java-fallback-exec-retry";
                 fallbackReason = "AI_SQL_EXEC_FAILED";
                 fallbackExecuted = true;
@@ -391,6 +448,11 @@ public class ChatBiService {
                     generatedSql = Objects.toString(recovery.getOrDefault("sql", generatedSql));
                     chartType = Objects.toString(recovery.getOrDefault("chartType", chartType));
                     fieldMapping = (Map<String, Object>) recovery.getOrDefault("fieldMapping", fieldMapping);
+                    SemanticSqlCorrection recoverySortCorrection = applySortIntentGuard(question, generatedSql,
+                            chartType, fieldMapping, generationTrace);
+                    generatedSql = recoverySortCorrection.sql();
+                    chartType = recoverySortCorrection.chartType();
+                    fieldMapping = recoverySortCorrection.fieldMapping();
                     queryResult = (List<Map<String, Object>>) recovery.getOrDefault("data", queryResult);
                 }
             }
@@ -402,7 +464,8 @@ public class ChatBiService {
             emitProgress(progress, "CHART_POLICY_READY", "匹配图表偏好",
                     "已根据管理员图表偏好选择 " + chartName(chartType),
                     chartPolicyMeta);
-            if ("table".equalsIgnoreCase(chartType) && shouldRequeryDetailTable(queryResult)) {
+            if ("table".equalsIgnoreCase(chartType) && shouldRequeryDetailTable(queryResult)
+                    && !businessSemanticPlan.hasSemanticConstraint()) {
                 RuleBasedNl2SqlStrategy.FieldChoice detailChoice = ruleBasedNl2SqlStrategy.chooseFields(question, fields);
                 String detailSql = sqlAuditService.ensureLimit(
                         ruleBasedNl2SqlStrategy.buildSql(queryTableName, detailChoice, "table"), 200);
@@ -451,6 +514,10 @@ public class ChatBiService {
         response.put("data", queryResult);
         response.put("chartType", chartType);
         response.put("fieldMapping", fieldMapping);
+        response.put("semanticEvidence", buildSemanticEvidence(question, fields, fieldMapping, generatedSql,
+                graphContext, graphSqlHints, businessSemanticTrace));
+        response.put("chartSortMode", Objects.toString(fieldMapping.getOrDefault("chartSortMode", "name"), "name"));
+        response.put("sortIntent", Objects.toString(fieldMapping.getOrDefault("sortIntent", "NAME_ASC"), "NAME_ASC"));
         if ("table".equalsIgnoreCase(chartType)) {
             response.put("tableColumns", buildTableColumns(queryResult, fieldMapping));
             response.put("tableRows", queryResult);
@@ -465,10 +532,13 @@ public class ChatBiService {
         response.put("graphContext", graphContext);
         response.put("graphPath", graphPath);
         response.put("graphSqlHints", graphSqlHints);
+        response.put("businessSemanticTrace", businessSemanticTrace);
         response.put("graphFallbackUsed", graphFallbackUsed);
         response.put("graphFallbackReason", graphFallbackReason);
         response.put("riskLevel", auditResult.riskLevel());
         response.put("riskReason", auditResult.riskReason());
+        response.put("sensitiveFields", auditResult.sensitiveFields());
+        response.put("matchedRules", auditResult.matchedRules());
         response.put("reasoningLogs", generationTrace);
         response.put("reasoningProcess", generationTrace);
         response.put("message", "分析完成。已基于字段「" + fieldMapping.getOrDefault("dimension", "未知维度")
@@ -1055,6 +1125,484 @@ public class ChatBiService {
         return details;
     }
 
+    private List<Map<String, Object>> buildSemanticEvidence(String question, List<Map<String, Object>> fields,
+            Map<String, Object> fieldMapping, String generatedSql, List<Map<String, Object>> graphContext,
+            Map<String, Object> graphSqlHints, Map<String, Object> businessSemanticTrace) {
+        List<Map<String, Object>> evidence = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        String metricKey = Objects.toString(fieldMapping == null ? "" : fieldMapping.get("metricKey"), "").trim();
+        String dimensionKey = Objects.toString(fieldMapping == null ? "" : fieldMapping.get("dimensionKey"), "").trim();
+        String timeKey = semanticTimeFieldKey(question, fields, fieldMapping, generatedSql);
+
+        addFieldEvidence(evidence, seen, "指标", metricKey, fields, fieldMapping, question, generatedSql,
+                "本次聚合指标", businessSemanticTrace, graphSqlHints);
+        if (!dimensionKey.isBlank() && !dimensionKey.equals(metricKey) && !isMetricAlias(dimensionKey)) {
+            String role = dimensionKey.equals(timeKey) || isTimeSeriesLikeQuestion(question) && dimensionKey.equals(timeKey)
+                    ? "时间字段"
+                    : "维度";
+            addFieldEvidence(evidence, seen, role, dimensionKey, fields, fieldMapping, question, generatedSql,
+                    "本次分组维度", businessSemanticTrace, graphSqlHints);
+        }
+        if (!timeKey.isBlank() && !timeKey.equals(metricKey) && !timeKey.equals(dimensionKey)) {
+            addFieldEvidence(evidence, seen, "时间字段", timeKey, fields, fieldMapping, question, generatedSql,
+                    hasRecentTimeSemantics(question) ? "用于最近时间窗口过滤" : "用于时间趋势排序/聚合",
+                    businessSemanticTrace, graphSqlHints);
+        }
+        addFormulaEvidence(evidence, seen, fieldMapping, businessSemanticTrace, graphSqlHints);
+        addDetailFieldEvidence(evidence, seen, question, fields, generatedSql, graphSqlHints);
+
+        if (evidence.isEmpty()) {
+            return List.of();
+        }
+        return evidence.stream()
+                .filter(item -> Boolean.TRUE.equals(item.get("matched")))
+                .limit(6)
+                .toList();
+    }
+
+    @SuppressWarnings("unchecked")
+    private void addFieldEvidence(List<Map<String, Object>> evidence, Set<String> seen, String role, String column,
+            List<Map<String, Object>> fields, Map<String, Object> fieldMapping, String question, String generatedSql,
+            String fallbackReason, Map<String, Object> businessSemanticTrace, Map<String, Object> graphSqlHints) {
+        String fieldColumn = Objects.toString(column, "").trim();
+        if (fieldColumn.isBlank() || !seen.add(role + ":" + fieldColumn)) {
+            return;
+        }
+        Map<String, Object> field = findFieldByColumn(fields, fieldColumn);
+        String label = semanticFieldLabel(role, fieldColumn, field, fieldMapping);
+        List<String> reasons = semanticEvidenceReasons(role, question, generatedSql, fieldColumn, label, field,
+                fallbackReason, businessSemanticTrace, graphSqlHints);
+        if (reasons.isEmpty()) {
+            return;
+        }
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("role", role);
+        item.put("label", label);
+        item.put("field", fieldColumn);
+        item.put("fieldType", field == null ? "" : Objects.toString(field.get("fieldType"), ""));
+        item.put("matched", true);
+        item.put("reason", String.join("；", reasons));
+        item.put("source", semanticEvidenceSource(fieldColumn, graphSqlHints));
+        if (fieldMapping != null) {
+            if ("指标".equals(role)) {
+                putIfPresent(item, "expression", fieldMapping.get("metricExpr"));
+                putIfPresent(item, "formula", fieldMapping.get("formula"));
+            } else {
+                putIfPresent(item, "expression", fieldMapping.get("dimensionExpr"));
+            }
+        }
+        evidence.add(item);
+    }
+
+    private void addDetailFieldEvidence(List<Map<String, Object>> evidence, Set<String> seen, String question,
+            List<Map<String, Object>> fields, String generatedSql, Map<String, Object> graphSqlHints) {
+        if (fields == null || fields.isEmpty() || Objects.toString(generatedSql, "").isBlank()) {
+            return;
+        }
+        boolean detailSql = isDetailProjectionSql(generatedSql);
+        for (Map<String, Object> field : fields) {
+            String column = fieldColumn(field);
+            if (column.isBlank() || !sqlReferencesColumn(generatedSql, column)) {
+                continue;
+            }
+            String label = fieldDisplayName(field);
+            String semanticTerm = matchedQuestionFieldTerm("明细字段", question, column, label, field);
+            boolean sensitive = isSensitiveField(field);
+            if (!sensitive && (!detailSql || semanticTerm.isBlank())) {
+                continue;
+            }
+            String role = sensitive ? "敏感字段" : "明细字段";
+            if (!seen.add(role + ":" + column)) {
+                continue;
+            }
+            String sourceFieldName = Objects.toString(field.get("sourceFieldName"), "").trim();
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("role", role);
+            item.put("label", label);
+            item.put("field", column);
+            item.put("fieldType", Objects.toString(field.get("fieldType"), ""));
+            item.put("matched", true);
+            item.put("sensitive", sensitive);
+            item.put("sourceFieldName", sourceFieldName);
+            List<String> reasons = new ArrayList<>();
+            String term = semanticTerm.isBlank() ? label : semanticTerm;
+            if (!term.isBlank()) {
+                reasons.add("用户提到“" + term + "”，本次 SQL 使用 `" + column + "`");
+            } else {
+                reasons.add("本次 SQL 使用 `" + column + "`");
+            }
+            if (!sourceFieldName.isBlank() && !sourceFieldName.equals(column)) {
+                reasons.add("字段映射：" + sourceFieldName + " -> " + column);
+            }
+            if (sensitive) {
+                reasons.add("字段已标记 sensitive=true，按敏感字段访问纳入审计");
+            }
+            String graphReason = graphCandidateReason(column, graphSqlHints);
+            if (!graphReason.isBlank()) {
+                reasons.add(graphReason);
+            }
+            item.put("reason", String.join("；", reasons.stream().distinct().limit(4).toList()));
+            item.put("source", sensitive ? "SQL 审计 + 字段映射" : semanticEvidenceSource(column, graphSqlHints));
+            evidence.add(item);
+        }
+    }
+
+    private void addFormulaEvidence(List<Map<String, Object>> evidence, Set<String> seen,
+            Map<String, Object> fieldMapping, Map<String, Object> businessSemanticTrace,
+            Map<String, Object> graphSqlHints) {
+        String formula = Objects.toString(fieldMapping == null ? "" : firstNonBlank(
+                fieldMapping.get("formula"),
+                businessSemanticTrace == null ? "" : businessSemanticTrace.get("analysisFormula")), "").trim();
+        if (formula.isBlank() || !seen.add("公式:" + formula)) {
+            return;
+        }
+        String metric = Objects.toString(fieldMapping.getOrDefault("metric",
+                businessSemanticTrace == null ? "" : businessSemanticTrace.get("matchedMetric")), "").trim();
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("role", "指标公式");
+        item.put("label", metric.isBlank() ? "业务公式" : metric);
+        item.put("field", Objects.toString(fieldMapping.getOrDefault("metricKey", ""), ""));
+        item.put("matched", true);
+        item.put("reason", "业务模型定义了该指标公式，本次查询按公式口径生成 SQL。");
+        item.put("formula", formula);
+        item.put("source", graphSqlHints == null || graphSqlHints.isEmpty() ? "业务模型" : "业务模型 + GraphRAG");
+        evidence.add(item);
+    }
+
+    private List<String> semanticEvidenceReasons(String role, String question, String generatedSql, String column,
+            String label, Map<String, Object> field, String fallbackReason, Map<String, Object> businessSemanticTrace,
+            Map<String, Object> graphSqlHints) {
+        List<String> reasons = new ArrayList<>();
+        String text = Objects.toString(question, "");
+        String lower = text.toLowerCase(Locale.ROOT);
+        String colLower = column.toLowerCase(Locale.ROOT);
+        if (!label.isBlank() && text.contains(label)) {
+            reasons.add("用户提到「" + label + "」，命中 " + column);
+        } else if (lower.contains(colLower)) {
+            reasons.add("用户提到字段「" + column + "」");
+        } else {
+            String semanticTerm = matchedQuestionFieldTerm(role, text, column, label, field);
+            if (!semanticTerm.isBlank()) {
+                String target = label.isBlank() ? column : label;
+                reasons.add("用户语义「" + semanticTerm + "」匹配「" + target + "」，命中 " + column);
+            }
+        }
+        String matchedMetric = Objects.toString(businessSemanticTrace == null ? "" : businessSemanticTrace.get("matchedMetric"), "").trim();
+        String metricColumn = Objects.toString(businessSemanticTrace == null ? "" : businessSemanticTrace.get("metricColumn"), "").trim();
+        if (!matchedMetric.isBlank() && column.equals(metricColumn)) {
+            reasons.add("业务模型将「" + matchedMetric + "」解析为 " + column);
+        }
+        String matchedDimension = Objects.toString(businessSemanticTrace == null ? "" : businessSemanticTrace.get("matchedDimension"), "").trim();
+        String dimensionColumn = Objects.toString(businessSemanticTrace == null ? "" : businessSemanticTrace.get("dimensionColumn"), "").trim();
+        if (!matchedDimension.isBlank() && column.equals(dimensionColumn)) {
+            reasons.add("业务模型将「" + matchedDimension + "」解析为 " + column);
+        }
+        String graphReason = graphCandidateReason(column, graphSqlHints);
+        if (!graphReason.isBlank()) {
+            reasons.add(graphReason);
+        }
+        String sql = Objects.toString(generatedSql, "");
+        if (shouldUseSqlEvidenceFallback(role, text, column, label, field) && sql.contains("`" + column + "`")
+                && reasons.stream().noneMatch(reason -> reason.contains("SQL"))) {
+            reasons.add(fallbackReason + "，SQL 已引用 `" + column + "`");
+        }
+        return reasons.stream().distinct().limit(3).toList();
+    }
+
+    private boolean shouldUseSqlEvidenceFallback(String role, String question, String column, String label,
+            Map<String, Object> field) {
+        if ("指标".equals(role)) {
+            return true;
+        }
+        if ("时间字段".equals(role)) {
+            return hasTimeEvidenceIntent(question) || (field != null && timeFieldScore(field) > 0);
+        }
+        if ("维度".equals(role)) {
+            return hasDimensionEvidenceIntent(question, column, label, field);
+        }
+        return false;
+    }
+
+    private boolean hasDimensionEvidenceIntent(String question, String column, String label, Map<String, Object> field) {
+        String text = Objects.toString(question, "");
+        String lower = text.toLowerCase(Locale.ROOT);
+        if (!matchedQuestionFieldTerm("维度", text, column, label, field).isBlank()) {
+            return true;
+        }
+        return containsAny(lower, "按", "各", "每个", "每一", "分别", "分组", "分布", "拆分", "排名",
+                "排行", "榜单", "前", "后", "最高", "最低", "最多", "最少", "对比", "比较", "相比",
+                "vs", "top", "rank", "ranking", "by ");
+    }
+
+    private boolean hasTimeEvidenceIntent(String question) {
+        String text = Objects.toString(question, "");
+        return isTimeSeriesLikeQuestion(text) || hasRecentTimeSemantics(text)
+                || containsAny(text, "今年", "去年", "前年", "明年", "本年", "本月", "上月", "下月",
+                        "昨天", "今天", "明天", "近月", "近年", "同比", "环比");
+    }
+
+    private String matchedQuestionFieldTerm(String role, String question, String column, String label,
+            Map<String, Object> field) {
+        String text = Objects.toString(question, "");
+        String lower = text.toLowerCase(Locale.ROOT);
+        for (String candidate : List.of(label, column,
+                field == null ? "" : fieldDisplayName(field),
+                field == null ? "" : Objects.toString(field.get("sourceFieldName"), "").trim())) {
+            String term = Objects.toString(candidate, "").trim();
+            if (!term.isBlank() && lower.contains(term.toLowerCase(Locale.ROOT))) {
+                return term;
+            }
+        }
+        return matchedSemanticAliasTerm(role, text, field);
+    }
+
+    private String matchedSemanticAliasTerm(String role, String question, Map<String, Object> field) {
+        String lower = Objects.toString(question, "").toLowerCase(Locale.ROOT);
+        String haystack = field == null ? "" : fieldSemanticText(field);
+        if ("指标".equals(role)) {
+            if (containsAny(haystack, "sales_amt", "sales", "amount", "amt", "revenue", "gmv", "income",
+                    "销售额", "销售", "金额", "收入", "营收", "订单金额")
+                    && containsAny(lower, "销售额", "销售", "收入", "营收", "订单金额", "gmv", "流水",
+                            "revenue", "sales", "income")) {
+                return firstMatchedTerm(lower, "销售额", "销售", "收入", "营收", "订单金额", "gmv", "流水",
+                        "revenue", "sales", "income");
+            }
+            if (containsAny(haystack, "profit", "gross", "margin", "利润", "毛利", "毛利率")
+                    && containsAny(lower, "利润", "毛利", "毛利率", "profit", "margin")) {
+                return firstMatchedTerm(lower, "利润", "毛利", "毛利率", "profit", "margin");
+            }
+            if (containsAny(haystack, "qty", "quantity", "volume", "count", "销量", "数量", "订单数")
+                    && containsAny(lower, "销量", "数量", "订单数", "件数", "qty", "quantity", "volume", "count")) {
+                return firstMatchedTerm(lower, "销量", "数量", "订单数", "件数", "qty", "quantity", "volume", "count");
+            }
+        }
+        if ("时间字段".equals(role) || (field != null && timeFieldScore(field) > 0)) {
+            if (hasTimeEvidenceIntent(question)) {
+                return firstMatchedTerm(lower, "每个月", "每月", "按月", "月度", "月份", "趋势", "走势",
+                        "季度", "年度", "同比", "环比", "最近", "近期", "今年", "去年", "本年", "日期", "时间");
+            }
+        }
+        if ("维度".equals(role)) {
+            if (containsAny(haystack, "province", "prov", "state", "省份", "省市", "省")
+                    && containsAny(lower, "各省", "省份", "省级", "按省", "分省", "省排名", "province")) {
+                return firstMatchedTerm(lower, "各省", "省份", "省级", "按省", "分省", "省排名", "province");
+            }
+            if (containsAny(haystack, "city", "城市", "地市")
+                    && containsAny(lower, "城市", "地市", "市级", "按城市", "分城市", "city")) {
+                return firstMatchedTerm(lower, "城市", "地市", "市级", "按城市", "分城市", "city");
+            }
+            if (containsAny(haystack, "region", "area", "zone", "district", "区域", "大区", "地区")
+                    && containsAny(lower, "区域", "大区", "地区", "华东", "华南", "华北", "华中", "中南",
+                            "西南", "西北", "东北", "region", "area")) {
+                return firstMatchedTerm(lower, "区域", "大区", "地区", "华东", "华南", "华北", "华中", "中南",
+                        "西南", "西北", "东北", "region", "area");
+            }
+            if (containsAny(haystack, "product", "sku", "item", "产品", "商品", "品类", "类别")
+                    && containsAny(lower, "产品", "商品", "品类", "类别", "sku", "product")) {
+                return firstMatchedTerm(lower, "产品", "商品", "品类", "类别", "sku", "product");
+            }
+            if (containsAny(haystack, "customer", "client", "客户", "顾客")
+                    && containsAny(lower, "客户", "顾客", "customer", "client")) {
+                return firstMatchedTerm(lower, "客户", "顾客", "customer", "client");
+            }
+        }
+        return "";
+    }
+
+    private String firstMatchedTerm(String text, String... candidates) {
+        String lower = Objects.toString(text, "").toLowerCase(Locale.ROOT);
+        for (String candidate : candidates) {
+            String term = Objects.toString(candidate, "").trim();
+            if (!term.isBlank() && lower.contains(term.toLowerCase(Locale.ROOT))) {
+                return term;
+            }
+        }
+        return "";
+    }
+
+    @SuppressWarnings("unchecked")
+    private String graphCandidateReason(String column, Map<String, Object> graphSqlHints) {
+        if (graphSqlHints == null || graphSqlHints.isEmpty()) {
+            return "";
+        }
+        Object candidates = graphSqlHints.get("fieldCandidates");
+        if (!(candidates instanceof List<?> list)) {
+            return "";
+        }
+        for (Object raw : list) {
+            if (!(raw instanceof Map<?, ?> map)) {
+                continue;
+            }
+            Map<String, Object> candidate = castToObjectMap(map);
+            String candidateColumn = Objects.toString(firstNonBlank(
+                    candidate.get("columnName"), candidate.get("field"), candidate.get("column")), "").trim();
+            if (!column.equals(candidateColumn)) {
+                continue;
+            }
+            String matchReason = Objects.toString(candidate.getOrDefault("matchReason", ""), "").trim();
+            return matchReason.isBlank()
+                    ? "GraphRAG 候选字段命中 " + column
+                    : "GraphRAG 候选字段命中 " + column + "（" + matchReason + "）";
+        }
+        return "";
+    }
+
+    private String semanticEvidenceSource(String column, Map<String, Object> graphSqlHints) {
+        return graphCandidateReason(column, graphSqlHints).isBlank() ? "字段映射" : "GraphRAG + 字段映射";
+    }
+
+    private String semanticFieldLabel(String role, String column, Map<String, Object> field,
+            Map<String, Object> fieldMapping) {
+        if ("指标".equals(role) && fieldMapping != null) {
+            String metric = Objects.toString(fieldMapping.get("metric"), "").trim();
+            if (!metric.isBlank() && !isMetricAlias(metric)) {
+                return metric;
+            }
+        }
+        if ("维度".equals(role) && fieldMapping != null) {
+            String dimension = Objects.toString(fieldMapping.get("dimension"), "").trim();
+            if (!dimension.isBlank() && !"dim_name".equalsIgnoreCase(dimension) && !"name".equalsIgnoreCase(dimension)) {
+                return dimension;
+            }
+        }
+        if ("时间字段".equals(role) && fieldMapping != null) {
+            String dimensionKey = Objects.toString(fieldMapping.get("dimensionKey"), "").trim();
+            String dimension = Objects.toString(fieldMapping.get("dimension"), "").trim();
+            if (column.equals(dimensionKey) && !dimension.isBlank()
+                    && !"dim_name".equalsIgnoreCase(dimension) && !"name".equalsIgnoreCase(dimension)) {
+                return dimension;
+            }
+        }
+        return field == null ? column : fieldDisplayName(field);
+    }
+
+    private boolean isDetailProjectionSql(String sql) {
+        String lower = Objects.toString(sql, "").toLowerCase(Locale.ROOT);
+        return lower.startsWith("select ")
+                && !lower.contains(" group by ")
+                && !lower.matches("(?s).*\\b(sum|avg|count|max|min)\\s*\\(.*");
+    }
+
+    private boolean sqlReferencesColumn(String sql, String column) {
+        String col = Objects.toString(column, "").trim();
+        if (col.isBlank()) {
+            return false;
+        }
+        String text = Objects.toString(sql, "");
+        if (text.contains("`" + col + "`") || text.contains("\"" + col + "\"")) {
+            return true;
+        }
+        return Pattern.compile("(?<![\\p{L}\\p{N}_])" + Pattern.quote(col) + "(?![\\p{L}\\p{N}_])",
+                Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CHARACTER_CLASS).matcher(text).find();
+    }
+
+    private boolean isSensitiveField(Map<String, Object> field) {
+        return "true".equals(formatSensitive(field == null ? null : field.get("sensitive")));
+    }
+
+    private List<Map<String, Object>> filterGraphContextForCurrentQuery(String question, String tableName,
+            List<Map<String, Object>> fields, String generatedSql, List<Map<String, Object>> graphContext) {
+        if (graphContext == null || graphContext.isEmpty()) {
+            return List.of();
+        }
+        String table = Objects.toString(tableName, "").trim();
+        Set<String> sqlColumns = referencedSqlColumns(generatedSql);
+        List<String> terms = questionTerms(question);
+        return graphContext.stream()
+                .map(node -> Map.entry(node, graphContextScore(node, table, fields, sqlColumns, terms)))
+                .filter(entry -> entry.getValue() > 0)
+                .sorted((a, b) -> Integer.compare(b.getValue(), a.getValue()))
+                .limit(12)
+                .map(Map.Entry::getKey)
+                .toList();
+    }
+
+    private int graphContextScore(Map<String, Object> node, String tableName, List<Map<String, Object>> fields,
+            Set<String> sqlColumns, List<String> questionTerms) {
+        String nodeKey = Objects.toString(node.get("nodeKey"), "");
+        String sourceId = Objects.toString(node.get("sourceId"), "");
+        String label = Objects.toString(node.get("label"), "");
+        String content = Objects.toString(node.get("content"), "");
+        String type = Objects.toString(node.get("nodeType"), "").toUpperCase(Locale.ROOT);
+        String sourceType = Objects.toString(node.get("sourceType"), "");
+        String haystack = (nodeKey + " " + sourceId + " " + label + " " + content).toLowerCase(Locale.ROOT);
+        int score = 0;
+        if (!tableName.isBlank() && (nodeKey.contains(tableName) || sourceId.contains(tableName))) {
+            score += 90;
+        } else if ("TAG".equals(type)) {
+            score += 15;
+        } else if ("OFFICIAL".equalsIgnoreCase(sourceType)) {
+            score -= 100;
+        }
+        for (String column : sqlColumns) {
+            if (!column.isBlank() && haystack.contains(column.toLowerCase(Locale.ROOT))) {
+                score += 70;
+            }
+        }
+        List<Map<String, Object>> safeFields = fields == null ? List.of() : fields;
+        for (Map<String, Object> field : safeFields) {
+            String column = fieldColumn(field);
+            if (sqlColumns.contains(column) && containsAny(haystack, column.toLowerCase(Locale.ROOT),
+                    fieldDisplayName(field).toLowerCase(Locale.ROOT),
+                    Objects.toString(field.get("sourceFieldName"), "").toLowerCase(Locale.ROOT))) {
+                score += 45;
+            }
+        }
+        for (String term : questionTerms) {
+            if (!term.isBlank() && haystack.contains(term.toLowerCase(Locale.ROOT))) {
+                score += 25;
+            }
+        }
+        if (looksLikeMojibake(label) || looksLikeMojibake(content)) {
+            score -= 120;
+        }
+        return score;
+    }
+
+    private Set<String> referencedSqlColumns(String sql) {
+        Set<String> columns = new LinkedHashSet<>();
+        Matcher matcher = Pattern.compile("`([^`]+)`").matcher(Objects.toString(sql, ""));
+        while (matcher.find()) {
+            String col = matcher.group(1).trim();
+            if (!col.isBlank() && !col.toLowerCase(Locale.ROOT).startsWith("biz_data_")) {
+                columns.add(col);
+            }
+        }
+        return columns;
+    }
+
+    private List<String> questionTerms(String question) {
+        String text = Objects.toString(question, "").toLowerCase(Locale.ROOT);
+        List<String> terms = new ArrayList<>();
+        Matcher matcher = Pattern.compile("[a-z0-9_]+|[\\u4e00-\\u9fa5]{2,}").matcher(text);
+        while (matcher.find()) {
+            terms.add(matcher.group());
+        }
+        return terms;
+    }
+
+    private boolean looksLikeMojibake(String value) {
+        String text = Objects.toString(value, "");
+        return text.contains("锛") || text.contains("鏁") || text.contains("瀹") || text.contains("绋")
+                || text.contains("ç") || text.contains("æ") || text.contains("�");
+    }
+
+    private String semanticTimeFieldKey(String question, List<Map<String, Object>> fields,
+            Map<String, Object> fieldMapping, String generatedSql) {
+        String dimensionKey = Objects.toString(fieldMapping == null ? "" : fieldMapping.get("dimensionKey"), "").trim();
+        Map<String, Object> dimensionField = findFieldByColumn(fields, dimensionKey);
+        if (dimensionField != null && timeFieldScore(dimensionField) > 0) {
+            return dimensionKey;
+        }
+        Map<String, Object> timeField = findTimeField(fields);
+        String timeColumn = timeField == null ? "" : fieldColumn(timeField);
+        if (!timeColumn.isBlank() && (isTimeSeriesLikeQuestion(question) || hasRecentTimeSemantics(question)
+                || Objects.toString(generatedSql, "").contains("`" + timeColumn + "`"))) {
+            return timeColumn;
+        }
+        return "";
+    }
+
     private Map<String, Object> rebuildQueryFromTableProfile(String activeTable, String queryTableName, String question,
             List<Map<String, Object>> fields, String chartType) {
         List<Map<String, Object>> previewRows = queryTablePreview(activeTable, queryTableName, 20);
@@ -1199,6 +1747,121 @@ public class ChatBiService {
         }
         return applyTopNIntentGuard(question, queryTableName, fields, correction.sql(), correction.chartType(),
                 correction.fieldMapping(), generationTrace);
+    }
+
+    private SemanticSqlCorrection applySortIntentGuard(String question, String generatedSql, String chartType,
+            Map<String, Object> fieldMapping, List<String> generationTrace) {
+        Map<String, Object> correctedMapping = new LinkedHashMap<>(fieldMapping == null ? Map.of() : fieldMapping);
+        SortIntent intent = resolveSortIntent(question);
+        correctedMapping.put("chartSortMode", intent.chartSortMode());
+        correctedMapping.put("sortIntent", intent.mode().name());
+        correctedMapping.put("sortExplicit", intent.explicit());
+        correctedMapping.put("sortReason", intent.reason());
+
+        String sql = Objects.toString(generatedSql, "").trim();
+        if ("table".equalsIgnoreCase(chartType) || sql.isBlank()
+                || !sql.toLowerCase(Locale.ROOT).startsWith("select") || !hasGroupBy(sql)) {
+            return new SemanticSqlCorrection(generatedSql, chartType, correctedMapping);
+        }
+        TopNIntent topNIntent = extractTopNIntent(question);
+        String correctedSql = topNIntent == null ? enforceSortOrder(sql, intent) : enforceOrderAndLimit(sql, topNIntent);
+        if (!correctedSql.equals(sql) && generationTrace != null) {
+            generationTrace.add("semanticSqlGuard=APPLIED;reason=SORT_INTENT;mode=" + intent.mode().name()
+                    + ";explicit=" + intent.explicit());
+        }
+        return new SemanticSqlCorrection(correctedSql, chartType, correctedMapping);
+    }
+
+    private SortIntent resolveSortIntent(String question) {
+        String text = Objects.toString(question, "").trim();
+        String lower = text.toLowerCase(Locale.ROOT);
+        if (text.isBlank()) {
+            return SortIntent.nameDefault();
+        }
+        TopNIntent topNIntent = extractTopNIntent(text);
+        if (topNIntent != null) {
+            return new SortIntent(topNIntent.ascending() ? SortIntentMode.VALUE_ASC : SortIntentMode.VALUE_DESC,
+                    true, "TOP_N_INTENT");
+        }
+        boolean nameSort = containsAny(text, "按名称排序", "名称排序", "名字排序", "按维度排序", "维度排序",
+                "按城市排序", "按省份排序", "按区域排序", "按地区排序", "按品类排序", "字母序", "字典序")
+                || lower.contains("sort by name") || lower.contains("order by name");
+        if (nameSort) {
+            return new SortIntent(SortIntentMode.NAME_ASC, true, "NAME_SORT");
+        }
+        boolean ascending = containsAny(text, "升序", "正序", "从低到高", "由低到高", "从小到大", "由小到大",
+                "最低", "最少", "最小", "倒数", "后几", "后十")
+                || lower.contains("ascending") || lower.contains(" asc")
+                || lower.contains("least") || lower.contains("bottom");
+        if (ascending) {
+            return new SortIntent(SortIntentMode.VALUE_ASC, true, "VALUE_ASCENDING_SEMANTIC");
+        }
+        boolean descending = containsAny(text, "降序", "倒序", "从高到低", "由高到低", "从大到小", "由大到小",
+                "最高", "最多", "最大", "排名", "排行", "榜单", "排序")
+                || lower.contains("descending") || lower.contains(" desc")
+                || lower.contains("top") || lower.contains("ranking") || lower.contains("rank");
+        if (descending) {
+            return new SortIntent(SortIntentMode.VALUE_DESC, true, "VALUE_DESCENDING_SEMANTIC");
+        }
+        return SortIntent.nameDefault();
+    }
+
+    private String enforceSortOrder(String sql, SortIntent intent) {
+        String normalized = Objects.toString(sql, "").replaceAll(";+$", "").trim();
+        if (normalized.isBlank()) {
+            return normalized;
+        }
+        Matcher limitMatcher = Pattern.compile("(?is)\\s+limit\\s+\\d+\\s*$").matcher(normalized);
+        String limitClause = "";
+        String withoutLimit = normalized;
+        if (limitMatcher.find()) {
+            limitClause = normalized.substring(limitMatcher.start()).trim();
+            withoutLimit = normalized.substring(0, limitMatcher.start()).trim();
+        }
+        String orderExpr = intent.mode() == SortIntentMode.NAME_ASC
+                ? chooseDimensionOrderExpression(withoutLimit)
+                : chooseTopNOrderExpression(withoutLimit);
+        String direction = intent.mode() == SortIntentMode.VALUE_DESC ? "DESC" : "ASC";
+        String withoutOrder = withoutLimit.replaceAll("(?is)\\s+order\\s+by\\s+.+$", "").trim();
+        return withoutOrder + " ORDER BY " + orderExpr + " " + direction
+                + (limitClause.isBlank() ? "" : " " + limitClause);
+    }
+
+    private String chooseDimensionOrderExpression(String sql) {
+        SqlSelectMapping mapping = parseSqlSelectMapping(sql);
+        if (mapping != null && !mapping.dimensionAlias().isBlank()) {
+            return mapping.dimensionAlias();
+        }
+        String lower = Objects.toString(sql, "").toLowerCase(Locale.ROOT);
+        if (Pattern.compile("(?is)\\bselect\\s+dim_name\\b").matcher(sql).find()) {
+            return "dim_name";
+        }
+        if (Pattern.compile("(?is)\\bselect\\s+name\\b").matcher(sql).find()) {
+            return "name";
+        }
+        if (lower.contains(" as dim_name")) {
+            return "dim_name";
+        }
+        if (lower.contains(" as name")) {
+            return "name";
+        }
+        String dimensionColumn = parseSelectedDimensionColumn(sql);
+        if (!dimensionColumn.isBlank()) {
+            return "`" + dimensionColumn + "`";
+        }
+        Matcher groupMatcher = Pattern.compile("(?is)\\bgroup\\s+by\\s+(.+?)(?:\\border\\s+by\\b|\\blimit\\b|$)")
+                .matcher(Objects.toString(sql, ""));
+        if (groupMatcher.find()) {
+            String groupExpr = groupMatcher.group(1).trim();
+            if (!groupExpr.isBlank() && !groupExpr.contains(",")) {
+                return groupExpr;
+            }
+        }
+        return "name";
+    }
+
+    private boolean hasGroupBy(String sql) {
+        return Pattern.compile("(?is)\\bgroup\\s+by\\b").matcher(Objects.toString(sql, "")).find();
     }
 
     private SemanticSqlCorrection applyTopNIntentGuard(String question, String queryTableName,
@@ -1362,7 +2025,7 @@ public class ChatBiService {
                 limit = parseBoundedTopN(cnSuffixMatcher.group(1));
             }
         }
-        if (limit == null && (lower.contains("top") || containsAny(text, "前几", "排名", "排行", "最高", "最多", "最低", "最少"))) {
+        if (limit == null && (lower.contains("top") || containsAny(text, "前几", "最高", "最多", "最低", "最少"))) {
             limit = 10;
         }
         if (limit == null) {
@@ -1448,6 +2111,26 @@ public class ChatBiService {
     }
 
     private record TopNIntent(int limit, boolean ascending) {
+    }
+
+    private enum SortIntentMode {
+        NAME_ASC,
+        VALUE_ASC,
+        VALUE_DESC
+    }
+
+    private record SortIntent(SortIntentMode mode, boolean explicit, String reason) {
+        private String chartSortMode() {
+            return switch (mode) {
+                case VALUE_ASC -> "asc";
+                case VALUE_DESC -> "desc";
+                case NAME_ASC -> "name";
+            };
+        }
+
+        private static SortIntent nameDefault() {
+            return new SortIntent(SortIntentMode.NAME_ASC, false, "DEFAULT_NAME_ASC");
+        }
     }
 
     private SemanticSqlCorrection applyGeoValueDataProfileGuard(String question, String queryTableName,

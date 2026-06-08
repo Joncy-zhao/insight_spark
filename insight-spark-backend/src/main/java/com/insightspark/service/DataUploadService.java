@@ -796,12 +796,6 @@ public class DataUploadService {
                 WHERE id = ? AND status = 'ACTIVE'
                 """, modelName, requirement, json, modelId);
 
-        try {
-            knowledgeGraphService.syncGraph();
-        } catch (Exception e) {
-            log.warn("业务模型更新已保存，但图谱同步失败：{}", e.getMessage());
-        }
-
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("id", modelId);
         result.put("modelName", modelName);
@@ -809,6 +803,11 @@ public class DataUploadService {
         result.put("tableName", tableName);
         result.put("modelJson", json);
         result.put("published", parseBooleanFlag(row.get("published")));
+        try {
+            knowledgeGraphService.syncGraph();
+        } catch (Exception e) {
+            log.warn("业务模型更新已保存，但图谱同步失败：{}", e.getMessage());
+        }
         return result;
     }
 

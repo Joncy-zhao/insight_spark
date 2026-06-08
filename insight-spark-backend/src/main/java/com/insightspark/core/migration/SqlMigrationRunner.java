@@ -48,7 +48,8 @@ public class SqlMigrationRunner {
             "db/migration/dashboard_view_count_migration_20260606.sql",
             "db/migration/dashboard_publisher_migration_20260606.sql",
             "db/migration/dashboard_author_migration_20260606.sql",
-            "db/migration/dashboard_save_as_migration_20260606.sql"
+            "db/migration/dashboard_save_as_migration_20260606.sql",
+            "db/migration/is_data_field_semantic_metadata_migration_20260608.sql"
     );
 
     private final DataSource dataSource;
@@ -202,6 +203,9 @@ public class SqlMigrationRunner {
             return;
         }
         if (normalized.startsWith("ALTER TABLE `IS_ADVANCED_ANALYSIS_PLAN_VERSION` ADD COLUMN ")) {
+            return;
+        }
+        if (normalized.startsWith("ALTER TABLE `IS_DATA_FIELD` ADD COLUMN ")) {
             return;
         }
         if (normalized.startsWith("SELECT IF(") || normalized.startsWith("SELECT 1")) {

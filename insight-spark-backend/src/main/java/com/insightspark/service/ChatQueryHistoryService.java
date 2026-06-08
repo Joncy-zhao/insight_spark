@@ -264,24 +264,13 @@ public class ChatQueryHistoryService {
         if (ruleCode.isBlank()) {
             return item;
         }
-        Map<String, Object> latestInteractive = aiChartRuleConfigService.latestInteractiveOptionTemplate(
+        Map<String, Object> latestTemplate = aiChartRuleConfigService.latestOptionTemplate(
                 ruleCode,
                 Objects.toString(row.getOrDefault("chartType", snapshot.getOrDefault("chartType", "bar")), "bar"));
-        if (latestInteractive.isEmpty()) {
+        if (latestTemplate.isEmpty()) {
             return item;
         }
-        Map<String, Object> optionTemplate = new LinkedHashMap<>(parseJsonMap(snapshot.get("optionTemplate")));
-        for (String key : List.of("animation", "tooltip", "dynamic")) {
-            if (latestInteractive.containsKey(key)) {
-                optionTemplate.put(key, latestInteractive.get(key));
-            }
-        }
-        if (latestInteractive.containsKey("dataZoom")) {
-            optionTemplate.put("dataZoom", latestInteractive.get("dataZoom"));
-        } else {
-            optionTemplate.remove("dataZoom");
-        }
-        snapshot.put("optionTemplate", optionTemplate);
+        snapshot.put("optionTemplate", latestTemplate);
         item.put("chartSnapshot", snapshot);
         return item;
     }
@@ -921,12 +910,17 @@ public class ChatQueryHistoryService {
         putIfNotBlank(snapshot, "chartRecommendationStatus", Objects.toString(result.get("chartRecommendationStatus"), ""));
         putIfNotBlank(snapshot, "chartRecommendationExplain", Objects.toString(result.get("chartRecommendationExplain"), ""));
         snapshot.put("fieldMapping", result.get("fieldMapping"));
+        snapshot.put("semanticEvidence", result.getOrDefault("semanticEvidence", List.of()));
         snapshot.put("graphContext", result.get("graphContext"));
         snapshot.put("graphPath", result.get("graphPath"));
         snapshot.put("graphSqlHints", result.get("graphSqlHints"));
         snapshot.put("message", result.get("message"));
         snapshot.put("sql", result.get("sql"));
         snapshot.put("data", result.get("data"));
+        snapshot.put("riskLevel", result.getOrDefault("riskLevel", "SAFE"));
+        snapshot.put("riskReason", result.getOrDefault("riskReason", ""));
+        snapshot.put("sensitiveFields", result.getOrDefault("sensitiveFields", List.of()));
+        snapshot.put("matchedRules", result.getOrDefault("matchedRules", List.of()));
         if (result.get("tableColumns") != null) {
             snapshot.put("tableColumns", result.get("tableColumns"));
         }

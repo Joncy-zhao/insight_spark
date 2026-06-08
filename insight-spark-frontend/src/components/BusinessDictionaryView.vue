@@ -7,12 +7,20 @@
           <p>复用业务模型，集中维护业务黑话同义词和衍生指标公式，保存后将参与图谱与 Text-to-SQL 映射。</p>
         </div>
         <div class="header-actions">
-          <el-button @click="refreshModels">刷新模型</el-button>
-          <el-button type="primary" :disabled="!editingModel" @click="saveModel">保存当前模型</el-button>
+          <el-button :disabled="savingModel" @click="refreshModels">刷新模型</el-button>
+          <el-button
+            type="primary"
+            :disabled="!editingModel"
+            :loading="savingModel"
+            @click="saveModel"
+          >
+            {{ savingModel ? '正在保存' : '保存当前模型' }}
+          </el-button>
           <el-button
             v-if="editingModel"
             :type="isCurrentModelPublished ? 'warning' : 'success'"
             plain
+            :disabled="savingModel"
             @click="toggleCurrentModelPublish"
           >
             {{ isCurrentModelPublished ? '取消发布' : '发布到企业模型库' }}
@@ -64,8 +72,8 @@
           </el-autocomplete>
         </el-col>
         <el-col :xs="24" :sm="24" :md="6" :lg="7" class="manage-actions">
-          <el-button :loading="creatingModel" @click="handleCreateModelClick">新建模型</el-button>
-          <el-button type="danger" plain :disabled="!editingModel" :loading="deletingModel" @click="deleteCurrentModel">删除模型</el-button>
+          <el-button :disabled="savingModel" :loading="creatingModel" @click="handleCreateModelClick">新建模型</el-button>
+          <el-button type="danger" plain :disabled="!editingModel || savingModel" :loading="deletingModel" @click="deleteCurrentModel">删除模型</el-button>
         </el-col>
       </el-row>
 
@@ -520,6 +528,7 @@ const editingModelName = ref('')
 const editingRequirement = ref('')
 const creatingModel = ref(false)
 const deletingModel = ref(false)
+const savingModel = ref(false)
 const modelSearchInput = ref('')
 const modelSearchKeyword = ref('')
 const modelSortBy = ref('updated_desc')
@@ -863,6 +872,10 @@ const tryConsumePendingFocusModel = () => {
 }
 
 const refreshModels = async () => {
+  if (savingModel.value) {
+    ElMessage.info('当前模型正在保存，请稍候再刷新')
+    return
+  }
   await loadBusinessModels()
   if (selectedModelId.value) {
     loadModelById(selectedModelId.value)
@@ -1041,6 +1054,9 @@ const removeDimensionRow = (index) => {
 }
 
 const saveModel = async () => {
+  if (savingModel.value) {
+    return
+  }
   if (!editingModel.value?.id) {
     ElMessage.warning('请先选择业务模型')
     return
@@ -1060,10 +1076,44 @@ const saveModel = async () => {
     })),
     dimensionSystem: normalizeDimensionSystem(dimensionSystem.value)
   }
-  await updateBusinessModel(editingModel.value.id, payload)
-  ElMessage.success('业务字典与业务公式已保存')
-  await loadBusinessModels()
-  loadModelById(editingModel.value.id)
+  const modelId = editingModel.value.id
+  savingModel.value = true
+  const savingMessage = ElMessage({
+    message: '正在保存当前模型并同步图谱...',
+    type: 'info',
+    duration: 0,
+    showClose: true
+  })
+  try {
+    const updatedModel = await updateBusinessModel(modelId, payload)
+    const nextModel = {
+      ...(editingModel.value || {}),
+      ...(updatedModel || {})
+    }
+    applyModel(nextModel)
+    if (Array.isArray(businessModels.value)) {
+      const index = businessModels.value.findIndex(item => String(item.id) === String(modelId))
+      if (index >= 0) {
+        businessModels.value.splice(index, 1, nextModel)
+      }
+    }
+    savingMessage.close()
+    ElMessage.success('业务字典与业务公式已保存')
+    loadBusinessModels()
+      .then(() => {
+        if (String(selectedModelId.value) === String(modelId)) {
+          loadModelById(modelId)
+        }
+      })
+      .catch(error => {
+        console.warn('refresh business models after save failed:', error)
+      })
+  } catch (error) {
+    savingMessage.close()
+    ElMessage.error(error?.response?.data?.message || error?.message || '保存业务模型失败')
+  } finally {
+    savingModel.value = false
+  }
 }
 
 const toggleCurrentModelPublish = async () => {

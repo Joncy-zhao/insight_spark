@@ -2,6 +2,7 @@ package com.insightspark.controller;
 
 import com.insightspark.common.ApiResponse;
 import com.insightspark.service.AdvancedAnalysisService;
+import com.insightspark.service.BusinessSemanticService;
 import com.insightspark.service.ChatConversationService;
 import com.insightspark.service.PythonAiService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -19,6 +20,7 @@ import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -33,6 +35,9 @@ public class AdvancedAnalysisController {
     private AdvancedAnalysisService advancedAnalysisService;
 
     @Autowired
+    private BusinessSemanticService businessSemanticService;
+
+    @Autowired
     private ChatConversationService chatConversationService;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -45,8 +50,9 @@ public class AdvancedAnalysisController {
         }
         String tableName = text(request.get("tableName"));
         Map<String, Object> context = asMap(request.get("context"));
-        Map<String, Object> result = pythonAiService.parseAdvancedAnalysisIntent(question, tableName, context)
-                .orElseGet(() -> fallbackParse(question));
+        Map<String, Object> result = applyBusinessSemanticAnalysis(question, tableName, context,
+                pythonAiService.parseAdvancedAnalysisIntent(question, tableName, context)
+                        .orElseGet(() -> fallbackParse(question)));
         return ApiResponse.success(result);
     }
 
@@ -79,8 +85,9 @@ public class AdvancedAnalysisController {
                     "字段 " + fieldCount + " 个，时间字段 " + timeFieldCount + " 个，数值字段 " + numericFieldCount + " 个");
             writeAdvancedThinkingStep(writer, "调用 LLM 识别意图", "正在判断预测、What-if 推演或预警规则，并抽取指标、公式与参数");
 
-            Map<String, Object> result = pythonAiService.parseAdvancedAnalysisIntent(question, tableName, context)
-                    .orElseGet(() -> fallbackParse(question));
+            Map<String, Object> result = applyBusinessSemanticAnalysis(question, tableName, context,
+                    pythonAiService.parseAdvancedAnalysisIntent(question, tableName, context)
+                            .orElseGet(() -> fallbackParse(question)));
             writeAdvancedThinkingStep(writer, "意图解析完成", summarizeIntentResult(result));
             writeAdvancedSse(writer, "result", result);
         } catch (Exception e) {
@@ -145,6 +152,57 @@ public class AdvancedAnalysisController {
             default -> "未识别";
         };
         return metric.isBlank() ? "识别结果：" + intentLabel : "识别结果：" + intentLabel + "，指标：" + metric;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> applyBusinessSemanticAnalysis(String question, String tableName,
+                                                              Map<String, Object> context,
+                                                              Map<String, Object> parsed) {
+        Map<String, Object> result = new LinkedHashMap<>(parsed == null ? Map.of() : parsed);
+        String intent = text(result.getOrDefault("intent", result.get("type"))).toLowerCase();
+        if (!List.of("forecast", "prediction", "timeseriesforecast", "alert", "warning").contains(intent)) {
+            return result;
+        }
+        if (businessSemanticService == null || text(tableName).isBlank()) {
+            return result;
+        }
+        try {
+            List<Map<String, Object>> fields = context.get("fields") instanceof List<?> list
+                    ? (List<Map<String, Object>>) (List<?>) list
+                    : List.of();
+            BusinessSemanticService.BusinessAnalysisResolution resolution =
+                    businessSemanticService.resolveAnalysis(question, tableName, context, fields);
+            if (!resolution.matched() || text(resolution.metricColumn()).isBlank()) {
+                return result;
+            }
+            result.put("metric", firstText(result.get("metric"), resolution.metricLabel()));
+            result.put("metricLabel", firstText(result.get("metricLabel"), resolution.metricLabel()));
+            result.put("metricField", resolution.metricColumn());
+            result.put("targetMetricField", resolution.metricColumn());
+            result.put("businessSemanticTrace", resolution.trace());
+            if (!text(resolution.metricExpression()).isBlank()) {
+                result.put("metricExpression", resolution.metricExpression());
+            }
+            if (!text(resolution.formula()).isBlank()) {
+                result.put("formula", resolution.formula());
+            }
+        } catch (Exception ignored) {
+            // Business semantic enrichment is best-effort; advanced analysis keeps its original fallback.
+        }
+        return result;
+    }
+
+    private String firstText(Object... values) {
+        if (values == null) {
+            return "";
+        }
+        for (Object value : values) {
+            String text = text(value);
+            if (!text.isBlank()) {
+                return text;
+            }
+        }
+        return "";
     }
 
     private int collectionSize(Object value) {

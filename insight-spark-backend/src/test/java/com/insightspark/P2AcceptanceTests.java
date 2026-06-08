@@ -13,8 +13,10 @@ import com.insightspark.service.PythonAiService;
 import com.insightspark.service.SqlAuditService;
 import com.insightspark.service.SmartChatService;
 import com.insightspark.service.BusinessModelAgentService;
+import com.insightspark.service.BusinessSemanticService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.web.multipart.MultipartFile;
@@ -24,6 +26,7 @@ import java.util.ArrayList;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -72,6 +75,43 @@ class P2AcceptanceTests {
 
         assertTrue(result.blocked());
         assertEquals("BLOCKED", result.riskLevel());
+    }
+
+    @Test
+    void sqlAuditDetectsSensitiveBusinessFieldWhenSqlUsesUploadPhysicalColumn() {
+        SqlAuditService service = new SqlAuditService();
+        JdbcTemplate jdbcTemplate = org.mockito.Mockito.mock(JdbcTemplate.class);
+        ReflectionTestUtils.setField(service, "jdbcTemplate", jdbcTemplate);
+        org.mockito.Mockito.when(jdbcTemplate.queryForList(
+                        org.mockito.ArgumentMatchers.contains("SELECT enabled FROM is_sql_audit_rule"),
+                        org.mockito.ArgumentMatchers.eq(Integer.class),
+                        org.mockito.ArgumentMatchers.any()))
+                .thenReturn(List.of(1));
+        org.mockito.Mockito.when(jdbcTemplate.queryForList(
+                        org.mockito.ArgumentMatchers.contains("FROM `is_data_field`"),
+                        org.mockito.ArgumentMatchers.eq("biz_data_sensitive")))
+                .thenReturn(List.of(
+                        Map.of("columnName", "name", "sourceFieldName", "name", "displayName", "客户",
+                                "commentText", "", "synonyms", "", "sensitive", 0, "sortOrder", 0),
+                        Map.of("columnName", "phone", "sourceFieldName", "phone", "displayName", "手机号",
+                                "commentText", "", "synonyms", "客户手机号,联系电话", "sensitive", 0, "sortOrder", 1)
+                ));
+        org.mockito.Mockito.when(jdbcTemplate.queryForList(
+                        org.mockito.ArgumentMatchers.contains("mask_type AS maskType")))
+                .thenReturn(List.of(Map.of("fieldKeyword", "phone", "maskType", "MOBILE")));
+        org.mockito.Mockito.when(jdbcTemplate.queryForList(
+                        org.mockito.ArgumentMatchers.contains("access_action AS accessAction")))
+                .thenReturn(List.of());
+
+        SqlAuditService.AuditResult result = service.inspect(
+                "SELECT `col_001` AS dim_name, `col_002` AS metric_value FROM `biz_data_sensitive` LIMIT 30",
+                "biz_data_sensitive");
+
+        assertFalse(result.blocked());
+        assertEquals("WARN", result.riskLevel());
+        assertTrue(result.matchedRules().contains("SENSITIVE_FIELD"));
+        assertTrue(result.sensitiveFields().stream().anyMatch(field ->
+                field.contains("手机号") && field.contains("phone")));
     }
 
     @Test
@@ -178,6 +218,219 @@ class P2AcceptanceTests {
         assertTrue(sql.contains("GROUP BY `col_007`"));
         assertTrue(sql.contains("ORDER BY metric_value DESC LIMIT 13"));
         assertEquals("col_007", fieldMapping.get("dimensionKey"));
+    }
+
+    @Test
+    void rankingWordAloneDoesNotBecomeImplicitTopTen() {
+        ChatBiService service = new ChatBiService();
+
+        Object intent = ReflectionTestUtils.invokeMethod(service, "extractTopNIntent", "看一下各省销售额排名");
+
+        assertEquals(null, intent);
+    }
+
+    @Test
+    void sortIntentDefaultsToNameWhenQuestionHasNoSortingSemantics() {
+        ChatBiService service = new ChatBiService();
+        String sql = "SELECT `col_010` AS dim_name, SUM(CAST(NULLIF(`col_017`, '') AS DECIMAL(18,2))) AS metric_value "
+                + "FROM `biz_data_1778420417028500` WHERE `col_010` IS NOT NULL AND `col_010` <> '' "
+                + "GROUP BY `col_010` ORDER BY metric_value DESC LIMIT 30";
+
+        Object correction = ReflectionTestUtils.invokeMethod(service, "applySortIntentGuard",
+                "看一下各省销售额", sql, "bar",
+                Map.of("dimensionKey", "col_010", "metricKey", "col_017"), new ArrayList<String>());
+
+        String correctedSql = ReflectionTestUtils.invokeMethod(correction, "sql");
+        Map<?, ?> fieldMapping = ReflectionTestUtils.invokeMethod(correction, "fieldMapping");
+        assertTrue(correctedSql.contains("ORDER BY dim_name ASC LIMIT 30"));
+        assertEquals("name", fieldMapping.get("chartSortMode"));
+        assertEquals("NAME_ASC", fieldMapping.get("sortIntent"));
+    }
+
+    @Test
+    void sortIntentUsesMetricDescendingForRankingSemantics() {
+        ChatBiService service = new ChatBiService();
+        String sql = "SELECT `col_010` AS dim_name, SUM(CAST(NULLIF(`col_017`, '') AS DECIMAL(18,2))) AS metric_value "
+                + "FROM `biz_data_1778420417028500` WHERE `col_010` IS NOT NULL AND `col_010` <> '' "
+                + "GROUP BY `col_010` ORDER BY dim_name ASC LIMIT 30";
+
+        Object correction = ReflectionTestUtils.invokeMethod(service, "applySortIntentGuard",
+                "看一下各省销售额排名", sql, "bar",
+                Map.of("dimensionKey", "col_010", "metricKey", "col_017"), new ArrayList<String>());
+
+        String correctedSql = ReflectionTestUtils.invokeMethod(correction, "sql");
+        Map<?, ?> fieldMapping = ReflectionTestUtils.invokeMethod(correction, "fieldMapping");
+        assertTrue(correctedSql.contains("ORDER BY metric_value DESC LIMIT 30"));
+        assertEquals("desc", fieldMapping.get("chartSortMode"));
+        assertEquals("VALUE_DESC", fieldMapping.get("sortIntent"));
+    }
+
+    @Test
+    void sortIntentUsesMetricAscendingForLowToHighSemantics() {
+        ChatBiService service = new ChatBiService();
+        String sql = "SELECT `col_010` AS dim_name, SUM(CAST(NULLIF(`col_017`, '') AS DECIMAL(18,2))) AS metric_value "
+                + "FROM `biz_data_1778420417028500` WHERE `col_010` IS NOT NULL AND `col_010` <> '' "
+                + "GROUP BY `col_010` ORDER BY metric_value DESC LIMIT 30";
+
+        Object correction = ReflectionTestUtils.invokeMethod(service, "applySortIntentGuard",
+                "各省销售额从低到高展示", sql, "bar",
+                Map.of("dimensionKey", "col_010", "metricKey", "col_017"), new ArrayList<String>());
+
+        String correctedSql = ReflectionTestUtils.invokeMethod(correction, "sql");
+        Map<?, ?> fieldMapping = ReflectionTestUtils.invokeMethod(correction, "fieldMapping");
+        assertTrue(correctedSql.contains("ORDER BY metric_value ASC LIMIT 30"));
+        assertEquals("asc", fieldMapping.get("chartSortMode"));
+        assertEquals("VALUE_ASC", fieldMapping.get("sortIntent"));
+    }
+
+    @Test
+    void sortIntentKeepsTimeSeriesOrderedByTimeWhenNoSortingSemantics() {
+        ChatBiService service = new ChatBiService();
+        String sql = "SELECT DATE_FORMAT(`col_003`, '%Y-%m') AS dim_name, "
+                + "SUM(CAST(NULLIF(`col_017`, '') AS DECIMAL(18,2))) AS metric_value "
+                + "FROM `biz_data_1778420417028500` WHERE `col_003` IS NOT NULL "
+                + "GROUP BY DATE_FORMAT(`col_003`, '%Y-%m') ORDER BY metric_value DESC LIMIT 30";
+
+        Object correction = ReflectionTestUtils.invokeMethod(service, "applySortIntentGuard",
+                "今年每个月销售额走势给我看一下", sql, "line",
+                Map.of("dimensionKey", "col_003", "metricKey", "col_017"), new ArrayList<String>());
+
+        String correctedSql = ReflectionTestUtils.invokeMethod(correction, "sql");
+        Map<?, ?> fieldMapping = ReflectionTestUtils.invokeMethod(correction, "fieldMapping");
+        assertTrue(correctedSql.contains("ORDER BY dim_name ASC LIMIT 30"));
+        assertEquals("name", fieldMapping.get("chartSortMode"));
+    }
+
+    @Test
+    void semanticEvidenceOnlyShowsFieldsRelevantToCurrentQuestion() {
+        ChatBiService service = new ChatBiService();
+        List<Map<String, Object>> fields = List.of(
+                field("col_003", "订单日期", "order_date", "DATE"),
+                field("col_010", "省份", "province", "TEXT"),
+                field("col_017", "销售额", "sales_amt", "NUMBER")
+        );
+        String sql = "SELECT `col_010` AS dim_name, SUM(CAST(NULLIF(`col_017`, '') AS DECIMAL(18,2))) AS metric_value "
+                + "FROM `biz_data_1778420417028500` WHERE `col_010` IS NOT NULL AND `col_010` <> '' "
+                + "GROUP BY `col_010` ORDER BY dim_name ASC LIMIT 30";
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> evidence = ReflectionTestUtils.invokeMethod(service, "buildSemanticEvidence",
+                "看一下销售额", fields,
+                Map.of("dimensionKey", "col_010", "dimension", "省份", "metricKey", "col_017", "metric", "销售额"),
+                sql, List.of(), Map.of(), Map.of());
+
+        assertNotNull(evidence);
+        assertEquals(1, evidence.size());
+        assertEquals("指标", evidence.get(0).get("role"));
+        assertEquals("col_017", evidence.get(0).get("field"));
+        assertTrue(Objects.toString(evidence.get(0).get("reason"), "").contains("销售额"));
+    }
+
+    @Test
+    void semanticEvidenceExplainsDimensionWithoutGraphRag() {
+        ChatBiService service = new ChatBiService();
+        List<Map<String, Object>> fields = List.of(
+                field("order_date", "订单日期", "order_date", "DATE"),
+                field("province", "省份", "province", "TEXT"),
+                field("sales_amt", "销售额", "sales_amt", "NUMBER")
+        );
+        String sql = "SELECT `province` AS dim_name, SUM(CAST(NULLIF(`sales_amt`, '') AS DECIMAL(18,2))) AS metric_value "
+                + "FROM `sales_order` WHERE `province` IS NOT NULL AND `province` <> '' "
+                + "GROUP BY `province` ORDER BY dim_name ASC LIMIT 30";
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> evidence = ReflectionTestUtils.invokeMethod(service, "buildSemanticEvidence",
+                "看一下各省销售额", fields,
+                Map.of("dimensionKey", "province", "dimension", "省份",
+                        "metricKey", "sales_amt", "metric", "销售额"),
+                sql, List.of(), Map.of(), Map.of());
+
+        assertNotNull(evidence);
+        assertTrue(evidence.stream().anyMatch(item ->
+                "指标".equals(item.get("role")) && "sales_amt".equals(item.get("field"))));
+        assertTrue(evidence.stream().anyMatch(item ->
+                "维度".equals(item.get("role")) && "province".equals(item.get("field"))
+                        && Objects.toString(item.get("reason"), "").contains("各省")));
+    }
+
+    @Test
+    void semanticEvidenceExplainsTimeFieldWithoutGraphRag() {
+        ChatBiService service = new ChatBiService();
+        List<Map<String, Object>> fields = List.of(
+                field("order_date", "订单日期", "order_date", "DATE"),
+                field("province", "省份", "province", "TEXT"),
+                field("sales_amt", "销售额", "sales_amt", "NUMBER")
+        );
+        String sql = "SELECT DATE_FORMAT(`order_date`, '%Y-%m') AS dim_name, "
+                + "SUM(CAST(NULLIF(`sales_amt`, '') AS DECIMAL(18,2))) AS metric_value "
+                + "FROM `sales_order` WHERE `order_date` IS NOT NULL "
+                + "GROUP BY DATE_FORMAT(`order_date`, '%Y-%m') ORDER BY dim_name ASC LIMIT 30";
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> evidence = ReflectionTestUtils.invokeMethod(service, "buildSemanticEvidence",
+                "今年每个月销售额走势给我看一下", fields,
+                Map.of("dimensionKey", "order_date", "dimension", "月份",
+                        "metricKey", "sales_amt", "metric", "销售额"),
+                sql, List.of(), Map.of(), Map.of());
+
+        assertNotNull(evidence);
+        assertTrue(evidence.stream().anyMatch(item ->
+                "时间字段".equals(item.get("role")) && "order_date".equals(item.get("field"))
+                        && Objects.toString(item.get("reason"), "").contains("每个月")));
+    }
+
+    @Test
+    void semanticEvidenceExplainsSensitiveDetailFieldAccess() {
+        ChatBiService service = new ChatBiService();
+        List<Map<String, Object>> fields = List.of(
+                field("col_001", "name", "name", "TEXT"),
+                field("col_002", "phone", "phone", "NUMBER", 1),
+                field("col_003", "email", "email", "TEXT")
+        );
+        String sql = "SELECT `col_001` AS dim_name, `col_002` AS metric_value "
+                + "FROM `biz_data_1780910057373700` LIMIT 30";
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> evidence = ReflectionTestUtils.invokeMethod(service, "buildSemanticEvidence",
+                "查看客户手机号", fields, Map.of("dimensionKey", "col_001", "metricKey", "col_002"),
+                sql, List.of(), Map.of(), Map.of());
+
+        assertNotNull(evidence);
+        assertTrue(evidence.stream().anyMatch(item ->
+                "敏感字段".equals(item.get("role"))
+                        && "col_002".equals(item.get("field"))
+                        && Boolean.TRUE.equals(item.get("sensitive"))
+                        && Objects.toString(item.get("reason"), "").contains("phone -> col_002")
+                        && Objects.toString(item.get("reason"), "").contains("sensitive=true")));
+    }
+
+    @Test
+    void graphContextFallbackOnlyKeepsCurrentQueryRelevantNodes() {
+        ChatBiService service = new ChatBiService();
+        List<Map<String, Object>> fields = List.of(
+                field("col_001", "name", "name", "TEXT"),
+                field("col_002", "phone", "phone", "NUMBER", 1)
+        );
+        List<Map<String, Object>> graphContext = List.of(
+                Map.of("nodeKey", "upload_table:biz_data_1780910057373700:field:col_002",
+                        "nodeType", "FIELD", "label", "phone", "sourceType", "UPLOAD",
+                        "sourceId", "biz_data_1780910057373700.col_002",
+                        "content", "字段类型：NUMBER；敏感：true；"),
+                Map.of("nodeKey", "official_table:1:is_user",
+                        "nodeType", "OFFICIAL_TABLE", "label", "is_user", "sourceType", "OFFICIAL",
+                        "sourceId", "1.is_user", "content", "ç¹æ¨»æ乱码"),
+                Map.of("nodeKey", "tag:sensitive", "nodeType", "TAG", "label", "敏感字段",
+                        "sourceType", "SYSTEM", "sourceId", "sensitive", "content", "需要脱敏或审计关注的字段")
+        );
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> filtered = ReflectionTestUtils.invokeMethod(service,
+                "filterGraphContextForCurrentQuery", "查看客户手机号", "biz_data_1780910057373700",
+                fields, "SELECT `col_001`, `col_002` FROM `biz_data_1780910057373700` LIMIT 30", graphContext);
+
+        assertNotNull(filtered);
+        assertTrue(filtered.stream().anyMatch(item -> Objects.toString(item.get("sourceId"), "").contains("col_002")));
+        assertFalse(filtered.stream().anyMatch(item -> "1.is_user".equals(Objects.toString(item.get("sourceId"), ""))));
     }
 
     @Test
@@ -804,6 +1057,127 @@ class P2AcceptanceTests {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void smartChatForecastUsesBusinessSemanticMetricBinding() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        ReflectionTestUtils.setField(service, "businessSemanticService", businessSemanticServiceWithSalesModel("sales_amt"));
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(advancedAnalysisService.forecast(org.mockito.Mockito.anyMap())).thenAnswer(invocation -> {
+            Map<String, Object> request = invocation.getArgument(0);
+            return Map.of(
+                    "type", "forecast",
+                    "tableName", "sales_order",
+                    "metricField", request.get("metricField"),
+                    "metricLabel", request.get("metricLabel"),
+                    "timeField", request.get("timeField"),
+                    "businessSemanticTrace", request.get("businessSemanticTrace"),
+                    "series", List.of(Map.of("name", "2026-02", "forecast", 120))
+            );
+        });
+        ChatBiService.ChatQueryRequest request = chatRequest("预测未来三个月收入", "sales_order");
+        request.setFilters(Map.of("tableName", "sales_order", "activeBusinessModelId", 21L));
+
+        Map<String, Object> result = service.executeSmart(request);
+
+        org.mockito.ArgumentCaptor<Map<String, Object>> captor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(advancedAnalysisService).forecast(captor.capture());
+        assertEquals("sales_amt", captor.getValue().get("metricField"));
+        assertEquals("收入", captor.getValue().get("metricLabel"));
+        assertTrue(captor.getValue().containsKey("businessSemanticTrace"));
+        Map<String, Object> trace = (Map<String, Object>) result.get("businessSemanticTrace");
+        assertEquals(21L, trace.get("modelId"));
+        assertEquals("收入", trace.get("matchedMetric"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void smartChatAlertDraftUsesBusinessSemanticMetricBinding() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "businessSemanticService", businessSemanticServiceWithSalesModel("sales_amt"));
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        ChatBiService.ChatQueryRequest request = chatRequest("如果收入低于80万提醒我", "sales_order");
+        request.setFilters(Map.of("tableName", "sales_order", "activeBusinessModelId", 21L));
+
+        Map<String, Object> result = service.executeSmart(request);
+
+        Map<String, Object> draft = (Map<String, Object>) result.get("draft");
+        assertEquals("sales_amt", draft.get("metricField"));
+        assertEquals("收入", draft.get("metricLabel"));
+        assertTrue(draft.containsKey("businessSemanticTrace"));
+        assertEquals("ALERT_RULE_DRAFT", result.get("responseType"));
+        assertEquals("ALERT_RULE_CREATE", result.get("smartIntent"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void smartChatMultiStepSharesBusinessSemanticMetricAcrossForecastAndAlert() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        ChatBiService chatBiService = org.mockito.Mockito.mock(ChatBiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "chatBiService", chatBiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        ReflectionTestUtils.setField(service, "businessSemanticService", businessSemanticServiceWithSalesModel("sales_amt"));
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(chatBiService.executeChat(org.mockito.Mockito.any(ChatBiService.ChatQueryRequest.class))).thenReturn(new java.util.HashMap<>(Map.of(
+                "message", "趋势查询完成",
+                "sql", "SELECT 1",
+                "chartType", "line",
+                "data", List.of(Map.of("name", "2026-01", "value", 100)),
+                "businessSemanticTrace", Map.of("matchedMetric", "收入", "resolvedMetricField", "sales_amt")
+        )));
+        org.mockito.Mockito.when(advancedAnalysisService.forecast(org.mockito.Mockito.anyMap())).thenAnswer(invocation -> {
+            Map<String, Object> request = invocation.getArgument(0);
+            return Map.of(
+                    "type", "forecast",
+                    "tableName", "sales_order",
+                    "metricField", request.get("metricField"),
+                    "metricLabel", request.get("metricLabel"),
+                    "timeField", request.get("timeField"),
+                    "businessSemanticTrace", request.get("businessSemanticTrace"),
+                    "series", List.of(Map.of("name", "2026-02", "forecast", 120))
+            );
+        });
+        ChatBiService.ChatQueryRequest request = chatRequest("查收入走势，预测下个月，如果低于80万提醒我", "sales_order");
+        request.setFilters(Map.of("tableName", "sales_order", "activeBusinessModelId", 21L));
+
+        Map<String, Object> result = service.executeSmart(request);
+
+        org.mockito.ArgumentCaptor<Map<String, Object>> forecastCaptor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(advancedAnalysisService).forecast(forecastCaptor.capture());
+        assertEquals("sales_amt", forecastCaptor.getValue().get("metricField"));
+        assertEquals("收入", forecastCaptor.getValue().get("metricLabel"));
+        Map<String, Object> draft = (Map<String, Object>) result.get("alertRuleDraft");
+        assertEquals("sales_amt", draft.get("metricField"));
+        assertEquals("收入", draft.get("metricLabel"));
+        assertTrue(draft.containsKey("businessSemanticTrace"));
+        List<Map<String, Object>> steps = (List<Map<String, Object>>) result.get("stepResults");
+        Map<String, Object> forecastPayload = (Map<String, Object>) steps.get(1).get("payload");
+        Map<String, Object> alertPayload = (Map<String, Object>) steps.get(2).get("payload");
+        assertTrue(forecastPayload.containsKey("businessSemanticTrace"));
+        assertTrue(((Map<String, Object>) alertPayload.get("draft")).containsKey("businessSemanticTrace"));
+    }
+
+    @Test
     void smartChatCompletesAiMultiStepPlanWhenAlertSemanticIsMissing() {
         SmartChatService service = smartChatService();
         DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
@@ -1397,6 +1771,97 @@ class P2AcceptanceTests {
         assertEquals("region", dimensions.get(2).get("field"));
     }
 
+    @Test
+    void businessSemanticContextRebuildsSqlWithMetricAndDimensionBindings() {
+        BusinessSemanticService service = businessSemanticServiceWithModels(List.of(Map.of(
+                "id", 9L,
+                "modelName", "sales-model",
+                "tableName", "loss_order",
+                "updatedAt", "2026-06-08T10:00:00",
+                "modelJson", """
+                        {"metricDefinitions":[{"name":"收入","field":"sales_amt","aggregation":"SUM","formula":"sales_amt"}],
+                         "dimensionSystem":[{"name":"省份","field":"province"}],
+                         "dictionaryEntries":[]}
+                        """
+        )));
+        var context = service.resolveContext("loss_order", Map.of("activeBusinessModelId", 9L), lossOrderFields());
+        var plan = service.resolvePlan("各省收入排名", context);
+
+        var correction = service.enforceSql("各省收入排名", "loss_order",
+                "SELECT `city` AS dim_name, SUM(CAST(NULLIF(`profit`, '') AS DECIMAL(18,2))) AS metric_value FROM `loss_order` GROUP BY `city`",
+                "bar", Map.of("dimensionKey", "city", "metricKey", "profit"), plan);
+
+        assertTrue(correction.changed());
+        assertTrue(correction.sql().contains("`province` AS dim_name"));
+        assertTrue(correction.sql().contains("`sales_amt`"));
+        assertEquals("sales_amt", correction.fieldMapping().get("metricField"));
+        assertEquals("province", correction.fieldMapping().get("dimensionField"));
+        assertEquals(9L, correction.trace().get("modelId"));
+        assertEquals(true, correction.trace().get("finalSqlValidated"));
+    }
+
+    @Test
+    void businessSemanticDictionarySynonymResolvesMetricField() {
+        BusinessSemanticService service = businessSemanticServiceWithModels(List.of(Map.of(
+                "id", 10L,
+                "modelName", "sales-model",
+                "tableName", "loss_order",
+                "updatedAt", "2026-06-08T10:00:00",
+                "modelJson", """
+                        {"metricDefinitions":[{"name":"收入","field":"sales_amt","aggregation":"SUM","formula":"sales_amt"}],
+                         "dimensionSystem":[{"name":"城市","field":"city"}],
+                         "dictionaryEntries":[{"term":"收入","field":"sales_amt","synonyms":"GMV,流水,营收"}]}
+                        """
+        )));
+        var context = service.resolveContext("loss_order", Map.of("activeBusinessModelId", 10L), lossOrderFields());
+        var plan = service.resolvePlan("看一下GMV最高的城市", context);
+        var correction = service.enforceSql("看一下GMV最高的城市", "loss_order",
+                "SELECT `city` AS dim_name, SUM(CAST(NULLIF(`profit`, '') AS DECIMAL(18,2))) AS metric_value FROM `loss_order` GROUP BY `city`",
+                "bar", Map.of("dimensionKey", "city", "metricKey", "profit"), plan);
+
+        assertTrue(correction.sql().contains("`sales_amt`"));
+        assertEquals(true, correction.trace().get("dictionaryMatched"));
+        assertEquals("收入", correction.trace().get("matchedMetric"));
+    }
+
+    @Test
+    void businessSemanticFormulaCompilesToSqlExpression() {
+        BusinessSemanticService service = businessSemanticServiceWithModels(List.of(Map.of(
+                "id", 11L,
+                "modelName", "profit-model",
+                "tableName", "loss_order",
+                "updatedAt", "2026-06-08T10:00:00",
+                "modelJson", """
+                        {"metricDefinitions":[{"name":"毛利率","field":"profit","aggregation":"SUM","formula":"profit / sales_amt"}],
+                         "dimensionSystem":[{"name":"省份","field":"province"}],
+                         "dictionaryEntries":[]}
+                        """
+        )));
+        var context = service.resolveContext("loss_order", Map.of("activeBusinessModelId", 11L), lossOrderFields());
+        var plan = service.resolvePlan("各省毛利率排名", context);
+        var correction = service.enforceSql("各省毛利率排名", "loss_order",
+                "SELECT `province` AS dim_name, SUM(CAST(NULLIF(`profit`, '') AS DECIMAL(18,2))) AS metric_value FROM `loss_order` GROUP BY `province`",
+                "bar", Map.of("dimensionKey", "province", "metricKey", "profit"), plan);
+
+        assertTrue(correction.sql().contains("`profit`"));
+        assertTrue(correction.sql().contains("`sales_amt`"));
+        assertTrue(correction.sql().contains("NULLIF(SUM(CAST(NULLIF(`sales_amt`, '') AS DECIMAL(18,2))), 0)"));
+        assertEquals(true, correction.trace().get("formulaApplied"));
+        assertEquals("profit / sales_amt", correction.fieldMapping().get("formula"));
+    }
+
+    @Test
+    void semanticCacheKeyIncludesBusinessModelVersion() {
+        SqlAuditService service = new SqlAuditService();
+
+        String first = service.semanticCacheKey("看收入趋势", "loss_order", "businessModel=1;version=2026-06-08T10:00:00");
+        String second = service.semanticCacheKey("看收入趋势", "loss_order", "businessModel=1;version=2026-06-08T11:00:00");
+        String none = service.semanticCacheKey("看收入趋势", "loss_order", "businessModel=none");
+
+        assertFalse(first.equals(second));
+        assertFalse(first.equals(none));
+    }
+
     private MockMultipartFile csv(String name) {
         return new MockMultipartFile("file", name, "text/csv", "id,amount\n1,10\n".getBytes(StandardCharsets.UTF_8));
     }
@@ -1437,6 +1902,17 @@ class P2AcceptanceTests {
         );
     }
 
+    private Map<String, Object> field(String columnName, String displayName, String sourceFieldName, String fieldType,
+                                      Object sensitive) {
+        return Map.of(
+                "columnName", columnName,
+                "displayName", displayName,
+                "sourceFieldName", sourceFieldName,
+                "fieldType", fieldType,
+                "sensitive", sensitive
+        );
+    }
+
     private List<Map<String, Object>> salesFields() {
         return List.of(
                 Map.of("columnName", "order_date", "displayName", "订单日期", "fieldType", "DATE"),
@@ -1456,5 +1932,42 @@ class P2AcceptanceTests {
                 field("profit", "利润", "profit", "NUMBER"),
                 field("cus_name", "客户名称", "cus_name", "TEXT")
         );
+    }
+
+    private BusinessSemanticService businessSemanticServiceWithSalesModel(String incomeField) {
+        return businessSemanticServiceWithModels(List.of(Map.of(
+                "id", 21L,
+                "modelName", "sales-model",
+                "tableName", "sales_order",
+                "updatedAt", "2026-06-08T12:00:00",
+                "modelJson", """
+                        {"metricDefinitions":[{"name":"收入","field":"%s","aggregation":"SUM","formula":"%s"}],
+                         "dimensionSystem":[{"name":"省份","field":"province"}],
+                         "dictionaryEntries":[{"term":"收入","field":"%s","synonyms":"营收,GMV,流水"}]}
+                        """.formatted(incomeField, incomeField, incomeField)
+        )));
+    }
+
+    private BusinessSemanticService businessSemanticServiceWithModels(List<Map<String, Object>> models) {
+        BusinessSemanticService service = new BusinessSemanticService();
+        org.springframework.jdbc.core.JdbcTemplate jdbcTemplate = org.mockito.Mockito.mock(org.springframework.jdbc.core.JdbcTemplate.class);
+        org.mockito.Mockito.when(jdbcTemplate.queryForList(
+                        org.mockito.ArgumentMatchers.contains("WHERE id = ? AND status = 'ACTIVE'"),
+                        org.mockito.ArgumentMatchers.<Object[]>any()))
+                .thenAnswer(invocation -> {
+                    Long id = extractFirstLongArgument(invocation.getArgument(1));
+                    return models.stream().filter(model -> id.equals(model.get("id"))).toList();
+                });
+        org.mockito.Mockito.when(jdbcTemplate.queryForList(
+                        org.mockito.ArgumentMatchers.contains("WHERE table_name = ? AND status = 'ACTIVE'"),
+                        org.mockito.ArgumentMatchers.<Object[]>any()))
+                .thenAnswer(invocation -> models);
+        ReflectionTestUtils.setField(service, "jdbcTemplate", jdbcTemplate);
+        return service;
+    }
+
+    private Long extractFirstLongArgument(Object value) {
+        Object raw = value instanceof Object[] args && args.length > 0 ? args[0] : value;
+        return Long.parseLong(String.valueOf(raw));
     }
 }

@@ -28,6 +28,9 @@ public class SmartChatService {
     private BusinessModelAgentService businessModelAgentService;
 
     @Autowired
+    private BusinessSemanticService businessSemanticService;
+
+    @Autowired
     private DataUploadService dataUploadService;
 
     @Autowired
@@ -261,10 +264,12 @@ public class SmartChatService {
 
     private Map<String, Object> executeForecast(String question, String tableName, SmartIntent intent, ThinkingEmitter trace) {
         List<Map<String, Object>> fields = safeFields(tableName);
+        BusinessSemanticService.BusinessAnalysisResolution businessResolution =
+                resolveBusinessAnalysis(question, tableName, intent.slots(), fields);
         String timeField = chooseTimeField(fields, question, firstText(
                 intent.slots().get("timeField"), intent.slots().get("dateField"), intent.slots().get("dimensionField")));
-        String metricField = chooseMetricField(fields, question, firstText(
-                intent.slots().get("metricField"), intent.slots().get("metric"), intent.slots().get("targetMetric")));
+        String metricField = firstText(businessResolution.metricColumn(), chooseMetricField(fields, question, firstText(
+                intent.slots().get("metricField"), intent.slots().get("metric"), intent.slots().get("targetMetric"))));
         if (timeField.isBlank() || metricField.isBlank()) {
             SmartIntent clarification = intent.withClarification("FORECAST", "预测需要时间字段和数值指标，请先选择或补充字段。");
             emit(trace, "NEEDS_INPUT", "预测信息不足", "缺少时间字段或数值指标，已转为补充信息提示",
@@ -275,21 +280,40 @@ public class SmartChatService {
                 intent.slots().get("granularity"), intent.slots().get("timeGranularity"), inferGranularity(question)));
         int horizon = normalizeHorizon(intent.slots().get("horizon"), question, granularity);
         String algorithm = firstText(intent.slots().get("algorithm"), "Holt-Winters");
+        if (businessResolution.matched()) {
+            emit(trace, "BUSINESS_SEMANTIC_APPLIED", "应用业务模型语义",
+                    "预测指标已按业务模型解析为 " + firstText(businessResolution.metricLabel(), businessResolution.metricColumn()),
+                    businessResolution.trace());
+        }
         emit(trace, "FORECAST_SOURCE_READY", "确认预测数据源",
                 "使用时间字段 " + timeField + " 和指标 " + metricField + " 重新聚合原始数据",
-                Map.of("timeField", timeField, "metricField", metricField, "tableName", tableName));
+                withBusinessTrace(metadataOf("timeField", timeField, "metricField", metricField, "tableName", tableName),
+                        businessResolution));
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("tableName", tableName);
         request.put("timeField", timeField);
         request.put("metricField", metricField);
+        if (businessResolution.matched()) {
+            request.put("metricLabel", firstText(businessResolution.metricLabel(), metricField));
+            request.put("businessSemanticTrace", businessResolution.trace());
+            if (businessResolution.formulaApplied() && !text(businessResolution.metricExpression()).isBlank()) {
+                request.put("metricExpression", businessResolution.metricExpression());
+                request.put("formula", businessResolution.formula());
+            }
+        }
         request.put("granularity", granularity);
         request.put("horizon", horizon);
         request.put("algorithm", algorithm);
         request.put("sourceQuestion", question);
-        Map<String, Object> forecast = advancedAnalysisService.forecast(request);
+        Map<String, Object> forecast = new LinkedHashMap<>(advancedAnalysisService.forecast(request));
+        if (businessResolution.matched()) {
+            forecast.put("businessSemanticTrace", businessResolution.trace());
+            forecast.put("metricLabel", firstText(businessResolution.metricLabel(), forecast.get("metricLabel"), metricField));
+        }
         emit(trace, "FORECAST_FINISHED", "预测完成",
                 "已生成 " + horizon + " 期" + granularityLabel(granularity) + "预测，算法 " + algorithm,
-                Map.of("horizon", horizon, "granularity", granularity, "algorithm", algorithm));
+                withBusinessTrace(metadataOf("horizon", horizon, "granularity", granularity, "algorithm", algorithm),
+                        businessResolution));
         return advancedToChatResult(forecast, "FORECAST", "已根据语义直接触发时序预测。");
     }
 
@@ -299,8 +323,11 @@ public class SmartChatService {
 
     private Map<String, Object> buildAlertRuleDraft(String question, String tableName, SmartIntent intent, ThinkingEmitter trace) {
         List<Map<String, Object>> fields = safeFields(tableName);
+        BusinessSemanticService.BusinessAnalysisResolution businessResolution =
+                resolveBusinessAnalysis(question, tableName, intent.slots(), fields);
         String timeField = firstText(intent.slots().get("timeField"), chooseField(fields, "DATE", question));
-        String metricField = firstText(intent.slots().get("metricField"), chooseMetricField(fields, question), text(intent.slots().get("metric")));
+        String metricField = firstText(businessResolution.metricColumn(), intent.slots().get("metricField"),
+                chooseMetricField(fields, question), text(intent.slots().get("metric")));
         Object threshold = firstPresent(intent.slots().get("threshold"), inferThreshold(question));
         String operator = firstText(intent.slots().get("operator"), inferOperator(question));
         String channel = firstText(intent.slots().get("channel"), inferChannel(question));
@@ -325,14 +352,32 @@ public class SmartChatService {
         draft.put("granularity", inferGranularity(question));
         draft.put("channels", List.of(channel));
         draft.put("sourceQuestion", question);
+        if (businessResolution.matched()) {
+            draft.put("metricLabel", firstText(businessResolution.metricLabel(), metricField));
+            draft.put("businessSemanticTrace", businessResolution.trace());
+            if (businessResolution.formulaApplied()) {
+                draft.put("formula", businessResolution.formula());
+                draft.put("metricExpression", businessResolution.metricExpression());
+            }
+        }
 
         Map<String, Object> result = draftCard("ALERT_RULE_DRAFT", "已识别为预警规则创建意图，已生成规则草稿，请确认后再创建。", draft);
         result.put("requiresConfirmation", true);
         result.put("sideEffectMode", "DRAFT_ONLY");
         result.put("chartType", "table");
+        if (businessResolution.matched()) {
+            result.put("businessSemanticTrace", businessResolution.trace());
+            result.put("fieldMapping", Map.of(
+                    "metric", firstText(businessResolution.metricLabel(), metricField),
+                    "metricKey", metricField,
+                    "metricField", metricField,
+                    "timeField", timeField
+            ));
+        }
         emit(trace, "ALERT_DRAFT_READY", "生成预警草稿",
                 "当 " + metricField + " " + operatorLabel(operator) + " " + threshold + " 时提醒，等待确认后创建",
-                Map.of("metricField", metricField, "timeField", timeField, "operator", operator, "threshold", threshold));
+                withBusinessTrace(metadataOf("metricField", metricField, "timeField", timeField,
+                        "operator", operator, "threshold", threshold), businessResolution));
         return result;
     }
 
@@ -410,11 +455,11 @@ public class SmartChatService {
             result.put("dashboardActionStatus", "NO_CHART");
             result.put("skipChartArtifact", true);
             emit(trace, "NEEDS_INPUT", "缺少可钉入图表", "当前会话没有可钉入的图表结果，需要先完成一次图表查询",
-                    Map.of("conversationId", conversationId));
+                    metadataOf("conversationId", conversationId));
             return result;
         }
         emit(trace, "DASHBOARD_SOURCE_RESOLVING", "定位图表来源",
-                "正在优先使用当前选中图表，缺失时回退到会话最近图表", Map.of("conversationId", conversationId));
+                "正在优先使用当前选中图表，缺失时回退到会话最近图表", metadataOf("conversationId", conversationId));
         Map<String, Object> source = explicitPinSource(request, question, tableName);
         if (source.isEmpty()) {
             Map<String, Object> artifact = chatConversationService.latestChartArtifactForConversation(conversationId);
@@ -438,7 +483,7 @@ public class SmartChatService {
             result.put("dashboardActionStatus", "NO_CHART");
             result.put("skipChartArtifact", true);
             emit(trace, "NEEDS_INPUT", "缺少可钉入图表", "未找到当前图表或历史图表，需要先完成一次图表查询",
-                    Map.of("conversationId", conversationId));
+                    metadataOf("conversationId", conversationId));
             return result;
         }
         emit(trace, "DASHBOARD_TARGET_RESOLVING", "识别目标看板",
@@ -457,7 +502,7 @@ public class SmartChatService {
         result.put("requiresConfirmation", readBoolean(result.get("requiresConfirmation")));
         emit(trace, "DASHBOARD_PIN_FINISHED", "看板动作完成",
                 trimTo(firstText(result.get("message"), "看板钉入动作已处理"), 120),
-                Map.of("requiresConfirmation", readBoolean(result.get("requiresConfirmation")),
+                metadataOf("requiresConfirmation", readBoolean(result.get("requiresConfirmation")),
                         "status", firstText(result.get("status"), result.get("dashboardActionStatus"))));
         return result;
     }
@@ -502,7 +547,7 @@ public class SmartChatService {
             emit(trace, "PLAN_MODEL_RESULT", "编排模型返回", "已收到 AI 动作编排结果，正在做语义校验和缺失动作补全",
                     Map.of("hasActions", smartRoute.get().containsKey("actions")));
             SmartActionPlan aiPlan = actionPlanFromAiRoute(question, tableName, smartRoute.get(), request);
-            aiPlan = completePlanWithSemanticTasks(question, tableName, aiPlan, queryTask, forecastTask, alertTask);
+            aiPlan = completePlanWithSemanticTasks(question, tableName, aiPlan, queryTask, forecastTask, alertTask, request);
             if (dashboardPinTask) {
                 aiPlan = withDeferredDashboardPin(aiPlan, question);
             }
@@ -516,7 +561,7 @@ public class SmartChatService {
         }
 
         List<SmartActionStep> actions = new ArrayList<>();
-        Map<String, Object> slots = inferPlanSlots(question, tableName);
+        Map<String, Object> slots = inferPlanSlots(question, tableName, request);
         if (dashboardPinTask) {
             slots.put("deferredDashboardPin", true);
             slots.put("dashboardPinQuestion", dashboardPinQuestionForPlan(question));
@@ -553,10 +598,11 @@ public class SmartChatService {
                                                           SmartActionPlan plan,
                                                           boolean queryTask,
                                                           boolean forecastTask,
-                                                          boolean alertTask) {
+                                                          boolean alertTask,
+                                                          ChatBiService.ChatQueryRequest request) {
         SmartActionPlan source = plan == null ? SmartActionPlan.empty() : plan;
         List<SmartActionStep> actions = new ArrayList<>();
-        Map<String, Object> canonicalSlots = mergeCanonicalSlots(source.slots(), inferPlanSlots(question, tableName));
+        Map<String, Object> canonicalSlots = mergeCanonicalSlots(source.slots(), inferPlanSlots(question, tableName, request));
         for (SmartActionStep action : source.actions()) {
             actions.add(new SmartActionStep(
                     action.id(),
@@ -914,7 +960,8 @@ public class SmartChatService {
         for (String key : List.of("responseType", "message", "sql", "chartType", "advancedAnalysisType",
                 "forecastMeta", "draft", "fieldMapping", "queryTableName", "tableName", "sideEffectMode",
                 "chartRecommendation", "chartRuleCode", "chartRuleName", "chartScenarioType",
-                "chartRecommendationStatus", "chartRecommendationExplain", "voiceSummary", "optionTemplate")) {
+                "chartRecommendationStatus", "chartRecommendationExplain", "voiceSummary", "optionTemplate",
+                "businessSemanticTrace")) {
             if (payload.containsKey(key)) {
                 compact.put(key, payload.get(key));
             }
@@ -1311,11 +1358,16 @@ public class SmartChatService {
         result.put("dimensions", List.of("name", "history", "forecast", "upper", "lower", "value", "anomaly"));
         result.put("fieldMapping", Map.of(
                 "mappingType", text(advanced.get("type")),
-                "metric", firstText(advanced.get("metricField"), advanced.get("targetMetric")),
+                "metric", firstText(advanced.get("metricLabel"), advanced.get("metricField"), advanced.get("targetMetric")),
                 "metricKey", firstText(advanced.get("metricField"), advanced.get("targetMetric")),
+                "metricField", firstText(advanced.get("metricField"), advanced.get("targetMetric")),
+                "metricExpression", firstText(advanced.get("metricExpression")),
                 "dimension", firstText(advanced.get("timeField"), "时间"),
                 "dimensionKey", firstText(advanced.get("timeField"), "name")
         ));
+        if (advanced.containsKey("businessSemanticTrace")) {
+            result.put("businessSemanticTrace", advanced.get("businessSemanticTrace"));
+        }
         result.put("message", message);
         result.put("smartRouted", true);
         return result;
@@ -1384,6 +1436,75 @@ public class SmartChatService {
         }
     }
 
+    private Map<String, Object> businessModelContextFromRequest(ChatBiService.ChatQueryRequest request) {
+        if (request == null || request.getFilters() == null || request.getFilters().isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Object> context = new LinkedHashMap<>();
+        for (String key : List.of("activeBusinessModelId", "lastCreatedBusinessModelId", "lastAppliedBusinessModelId")) {
+            Object value = request.getFilters().get(key);
+            if (value != null && !text(value).isBlank()) {
+                context.put(key, value);
+            }
+        }
+        return context.isEmpty() ? Map.of() : context;
+    }
+
+    private BusinessSemanticService.BusinessAnalysisResolution resolveBusinessAnalysis(String question,
+                                                                                       String tableName,
+                                                                                       Map<String, Object> slots,
+                                                                                       List<Map<String, Object>> fields) {
+        BusinessSemanticService.BusinessAnalysisResolution fromSlots = businessResolutionFromSlots(slots);
+        if (fromSlots.matched()) {
+            return fromSlots;
+        }
+        if (businessSemanticService == null || text(tableName).isBlank()) {
+            return BusinessSemanticService.BusinessAnalysisResolution.empty(Map.of("enabled", false));
+        }
+        Map<String, Object> options = new LinkedHashMap<>(slots == null ? Map.of() : slots);
+        try {
+            return businessSemanticService.resolveAnalysis(question, tableName, options, fields);
+        } catch (Exception ignored) {
+            return BusinessSemanticService.BusinessAnalysisResolution.empty(Map.of("enabled", false));
+        }
+    }
+
+    private BusinessSemanticService.BusinessAnalysisResolution businessResolutionFromSlots(Map<String, Object> slots) {
+        if (slots == null || slots.isEmpty() || !(slots.get("businessSemanticTrace") instanceof Map<?, ?> rawTrace)) {
+            return BusinessSemanticService.BusinessAnalysisResolution.empty(Map.of("enabled", false));
+        }
+        Map<String, Object> trace = toObjectMap(rawTrace);
+        String metricColumn = firstText(trace.get("analysisMetricField"), trace.get("metricColumn"),
+                trace.get("resolvedMetricField"), slots.get("metricField"));
+        if (metricColumn.isBlank()) {
+            return BusinessSemanticService.BusinessAnalysisResolution.empty(trace);
+        }
+        String metricLabel = firstText(slots.get("metricLabel"), trace.get("analysisMetricLabel"), trace.get("matchedMetric"), metricColumn);
+        String metricExpression = firstText(slots.get("metricExpression"), trace.get("analysisMetricExpression"));
+        String formula = firstText(slots.get("formula"), trace.get("analysisFormula"));
+        boolean formulaApplied = readBoolean(trace.get("formulaApplied")) || !metricExpression.isBlank();
+        return new BusinessSemanticService.BusinessAnalysisResolution(
+                true,
+                metricLabel,
+                metricColumn,
+                firstText(trace.get("resolvedMetricField"), metricColumn),
+                metricExpression,
+                formula,
+                formulaApplied,
+                trace
+        );
+    }
+
+    private Map<String, Object> withBusinessTrace(Map<String, Object> metadata,
+                                                  BusinessSemanticService.BusinessAnalysisResolution resolution) {
+        if (resolution == null || !resolution.matched()) {
+            return metadata == null ? Map.of() : metadata;
+        }
+        Map<String, Object> merged = new LinkedHashMap<>(metadata == null ? Map.of() : metadata);
+        merged.put("businessSemanticTrace", resolution.trace());
+        return merged;
+    }
+
     private String resolveTableName(ChatBiService.ChatQueryRequest request) {
         if (request != null && request.getFilters() != null) {
             String tableName = text(request.getFilters().get("tableName"));
@@ -1438,18 +1559,33 @@ public class SmartChatService {
     }
 
     private Map<String, Object> inferPlanSlots(String question, String tableName) {
+        return inferPlanSlots(question, tableName, null);
+    }
+
+    private Map<String, Object> inferPlanSlots(String question, String tableName, ChatBiService.ChatQueryRequest request) {
         List<Map<String, Object>> fields = safeFields(tableName);
         Map<String, Object> slots = new LinkedHashMap<>();
+        slots.putAll(businessModelContextFromRequest(request));
         String forecastQuestion = forecastQuestionForPlan(question);
         String alertQuestion = alertQuestionForPlan(question);
         String timeField = chooseTimeField(fields, question, "");
-        String metricField = chooseMetricField(fields, question);
+        BusinessSemanticService.BusinessAnalysisResolution businessResolution =
+                resolveBusinessAnalysis(question, tableName, slots, fields);
+        String metricField = firstText(businessResolution.metricColumn(), chooseMetricField(fields, question));
         if (!timeField.isBlank()) {
             slots.put("timeField", timeField);
         }
         if (!metricField.isBlank()) {
             slots.put("metricField", metricField);
             slots.put("metric", metricField);
+        }
+        if (businessResolution.matched()) {
+            slots.put("metricLabel", firstText(businessResolution.metricLabel(), metricField));
+            slots.put("businessSemanticTrace", businessResolution.trace());
+            if (businessResolution.formulaApplied()) {
+                slots.put("metricExpression", businessResolution.metricExpression());
+                slots.put("formula", businessResolution.formula());
+            }
         }
         Object threshold = inferThreshold(alertQuestion);
         if (threshold != null) {
@@ -2227,6 +2363,21 @@ public class SmartChatService {
         if (!text.isBlank()) {
             target.put(key, text);
         }
+    }
+
+    private Map<String, Object> metadataOf(Object... keyValues) {
+        if (keyValues == null || keyValues.length < 2) {
+            return Map.of();
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        for (int i = 0; i + 1 < keyValues.length; i += 2) {
+            String key = text(keyValues[i]);
+            Object value = keyValues[i + 1];
+            if (!key.isBlank() && value != null) {
+                result.put(key, value);
+            }
+        }
+        return result.isEmpty() ? Map.of() : result;
     }
 
     private record SmartActionStep(String id,
