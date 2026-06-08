@@ -128,6 +128,63 @@ public class StackCDashboardService {
                 """, uid, uid, uid);
     }
 
+    /**
+     * 钉入看板下拉：仅本人拥有、可编辑且未发布（DISABLED）的看板（含另存副本）。
+     */
+    public List<Map<String, Object>> listPinTargetDashboardsForCurrentUser() {
+        String uid = AuthContext.userId();
+        if (uid == null || uid.isBlank()) {
+            throw new IllegalArgumentException("未登录");
+        }
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT %s
+                FROM is_dashboard d
+                WHERE d.status = 'DISABLED'
+                  AND d.owner_user_id = ?
+                ORDER BY d.updated_at DESC
+                LIMIT 100
+                """.formatted(DASHBOARD_BASE_COLUMNS), uid);
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Map<String, Object> row : rows) {
+            if (!canManageDashboard(row)) {
+                continue;
+            }
+            Map<String, Object> item = new LinkedHashMap<>(row);
+            item.put("pinTargetLabel", resolvePinTargetLabel(row));
+            result.add(item);
+        }
+        return result;
+    }
+
+    /**
+     * 团队分发下拉：本人创建/另存看板（任意发布状态与开放类型）+ 他人已发布公共看板。
+     */
+    public List<Map<String, Object>> listDistributeTargetDashboardsForCurrentUser() {
+        String uid = AuthContext.userId();
+        if (uid == null || uid.isBlank()) {
+            throw new IllegalArgumentException("未登录");
+        }
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT %s
+                FROM is_dashboard d
+                WHERE d.status != 'ARCHIVED'
+                  AND (
+                    d.owner_user_id = ?
+                    OR (d.save_as_user_id IS NOT NULL AND TRIM(d.save_as_user_id) != '' AND d.save_as_user_id = ?)
+                    OR (d.is_public = 1 AND d.status = 'ACTIVE')
+                  )
+                ORDER BY d.updated_at DESC
+                LIMIT 200
+                """.formatted(DASHBOARD_BASE_COLUMNS), uid, uid);
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Map<String, Object> row : rows) {
+            Map<String, Object> item = new LinkedHashMap<>(row);
+            item.put("distributeTargetLabel", resolvePinTargetLabel(row));
+            result.add(item);
+        }
+        return result;
+    }
+
     public List<Map<String, Object>> listEditableForCurrentUser() {
         List<Map<String, Object>> visible = listVisibleForCurrentUser();
         List<Map<String, Object>> editable = new ArrayList<>();
@@ -202,8 +259,8 @@ public class StackCDashboardService {
         }
 
         List<Map<String, Object>> editableDashboards = listSmartPinEditableDashboards();
-        List<Map<String, Object>> dashboards = editableDashboards.stream()
-                .filter(this::isPublishedDashboard)
+        List<Map<String, Object>> pinTargets = editableDashboards.stream()
+                .filter(dashboard -> !isPublishedDashboard(dashboard))
                 .toList();
         if (editableDashboards.isEmpty()) {
             Map<String, Object> result = dashboardPinDraft(
@@ -216,10 +273,10 @@ public class StackCDashboardService {
             result.put("source", target);
             return result;
         }
-        if (dashboards.isEmpty()) {
+        if (pinTargets.isEmpty()) {
             Map<String, Object> result = dashboardPinDraft(
-                    "暂无已发布且可编辑的看板，请先发布目标看板后再钉入",
-                    "NO_PUBLISHED_DASHBOARD",
+                    "暂无可钉入的未发布看板；已发布看板不可钉入，请另存为副本或新建看板后再试",
+                    "NO_UNPUBLISHED_DASHBOARD",
                     null,
                     editableDashboards,
                     true
@@ -228,24 +285,30 @@ public class StackCDashboardService {
             return result;
         }
 
-        DashboardMatch unpublishedMatch = resolveDashboardMatch(question, editableDashboards.stream()
-                .filter(dashboard -> !isPublishedDashboard(dashboard))
-                .toList());
-        DashboardMatch match = unpublishedMatch.status() == DashboardMatchStatus.UNPUBLISHED_TARGET
-                ? unpublishedMatch
-                : resolveDashboardMatch(question, dashboards);
+        DashboardMatch match = resolveDashboardMatch(question, pinTargets);
         if (match.status() != DashboardMatchStatus.UNIQUE || match.dashboard() == null) {
-            String message = switch (match.status()) {
-                case AMBIGUOUS -> "已识别为钉入看板，但目标看板不唯一，请选择后确认";
-                case UNPUBLISHED_TARGET -> "已识别到目标看板「" + Objects.toString(match.keyword(), "")
-                        + "」，但该看板尚未发布，请先发布后再钉入";
-                default -> "已识别为钉入看板，请选择目标看板后确认";
-            };
+            DashboardMatch publishedMatch = resolveDashboardMatch(question, editableDashboards.stream()
+                    .filter(this::isPublishedDashboard)
+                    .toList());
+            String message;
+            String code;
+            if (publishedMatch.status() == DashboardMatchStatus.UNIQUE && publishedMatch.dashboard() != null) {
+                message = "已识别到目标看板「"
+                        + Objects.toString(publishedMatch.dashboard().get("name"), publishedMatch.keyword())
+                        + "」，但该看板已发布，不可钉入；请另存为未发布副本或选择其他未发布看板";
+                code = "PUBLISHED_TARGET";
+            } else {
+                message = switch (match.status()) {
+                    case AMBIGUOUS -> "已识别为钉入看板，但未发布目标看板不唯一，请选择后确认";
+                    default -> "已识别为钉入看板，请选择未发布目标看板后确认";
+                };
+                code = match.status().name();
+            }
             Map<String, Object> result = dashboardPinDraft(
                     message,
-                    match.status().name(),
+                    code,
                     match.keyword(),
-                    match.candidates(),
+                    match.candidates().isEmpty() ? pinTargets : match.candidates(),
                     true
             );
             result.put("source", target);
@@ -955,6 +1018,7 @@ public class StackCDashboardService {
 
     public Map<String, Object> pinChart(long id, Map<String, Object> body) {
         Map<String, Object> dashboard = getById(id);
+        assertPinTargetDashboard(dashboard);
         assertCanMutateDashboard(dashboard);
 
         PinnedTarget target = resolvePinnedTarget(body);
@@ -1161,21 +1225,25 @@ public class StackCDashboardService {
         }
         String owner = Objects.toString(row.get("ownerUserId"));
         boolean isOwner = AuthContext.userId().equals(owner);
+        long dashboardId = dashboardId(row);
         if (!"ACTIVE".equalsIgnoreCase(Objects.toString(row.get("status")))) {
-            if (!isOwner) {
+            if (!isOwner && !hasCollaborationAccess(dashboardId)) {
                 throw new IllegalArgumentException("\u770b\u677f\u4e0d\u53ef\u7528");
             }
         }
         int isPublic = parseTinyInt(row.get("isPublic"), 0);
-        long dashboardId = dashboardId(row);
         if (!isOwner
                 && isPublic != 1
-                && !hasDashboardPermission(dashboardId, "READ")
-                && !hasDashboardPermission(dashboardId, "EDIT")
-                && !hasTeamDashboardAccess(dashboardId, "READ")
-                && !hasTeamDashboardAccess(dashboardId, "EDIT")) {
+                && !hasCollaborationAccess(dashboardId)) {
             throw new IllegalArgumentException("\u65e0\u6743\u8bbf\u95ee\u8be5\u770b\u677f");
         }
+    }
+
+    private boolean hasCollaborationAccess(long dashboardId) {
+        return hasDashboardPermission(dashboardId, "READ")
+                || hasDashboardPermission(dashboardId, "EDIT")
+                || hasTeamDashboardAccess(dashboardId, "READ")
+                || hasTeamDashboardAccess(dashboardId, "EDIT");
     }
 
     private void assertOwnerOrAdmin(Map<String, Object> row) {
@@ -1196,6 +1264,13 @@ public class StackCDashboardService {
             throw new IllegalArgumentException("\u4ed6\u4eba\u516c\u5171\u770b\u677f\u4e0d\u53ef\u76f4\u63a5\u4fee\u6539\uff0c\u8bf7\u53e6\u5b58\u4e3a\u79c1\u5bc6\u770b\u677f\u540e\u518d\u7f16\u8f91");
         }
         assertEditorOrAdmin(row);
+    }
+
+    /** 钉入图表仅允许未发布看板，避免改动已发布线上布局。 */
+    private void assertPinTargetDashboard(Map<String, Object> row) {
+        if (isPublishedDashboard(row)) {
+            throw new IllegalArgumentException("\u5df2\u53d1\u5e03\u770b\u677f\u4e0d\u53ef\u9489\u5165\u56fe\u8868\uff0c\u8bf7\u9009\u62e9\u672a\u53d1\u5e03\u770b\u677f\u6216\u53e6\u5b58\u4e3a\u526f\u672c\u540e\u518d\u9489\u5165");
+        }
     }
 
     private boolean isOwner(Map<String, Object> row) {
@@ -1227,6 +1302,19 @@ public class StackCDashboardService {
 
     private boolean isPublicDashboard(Map<String, Object> row) {
         return parseTinyInt(row.get("isPublic"), 0) == 1;
+    }
+
+    private String resolvePinTargetLabel(Map<String, Object> row) {
+        String status = Objects.toString(row.get("status"), "").trim().toUpperCase();
+        boolean isPublic = isPublicDashboard(row);
+        Object sourceId = row.get("sourceDashboardId");
+        boolean saveAsCopy = sourceId instanceof Number n ? n.longValue() > 0
+                : sourceId != null && !Objects.toString(sourceId, "").isBlank()
+                && !"0".equals(Objects.toString(sourceId, "").trim());
+        if ("DISABLED".equals(status)) {
+            return saveAsCopy ? "另存·未发布" : "未发布";
+        }
+        return isPublic ? "已发布·公开" : "已发布·私有";
     }
 
     /**
@@ -1471,13 +1559,6 @@ public class StackCDashboardService {
         }
         if (isWeakDashboardKeyword(keyword, normalizedKeyword)) {
             return new DashboardMatch(DashboardMatchStatus.MISSING_TARGET, keyword, null, dashboards);
-        }
-        List<Map<String, Object>> unpublishedExact = dashboards.stream()
-                .filter(dashboard -> !isPublishedDashboard(dashboard))
-                .filter(dashboard -> isExactDashboardKeywordMatch(normalizedKeyword, dashboard))
-                .toList();
-        if (!unpublishedExact.isEmpty()) {
-            return new DashboardMatch(DashboardMatchStatus.UNPUBLISHED_TARGET, keyword, null, unpublishedExact);
         }
         List<Map<String, Object>> scored = new ArrayList<>();
         int bestScore = 0;

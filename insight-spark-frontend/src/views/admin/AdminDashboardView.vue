@@ -61,45 +61,65 @@
             <el-option label="开放类型：公共" value="1" />
             <el-option label="开放类型：私密" value="0" />
           </el-select>
-          <el-select
-            v-model="filters.groupId"
-            class="adm-filter-select adm-filter-group"
+          <el-popover
+            v-model:visible="groupFilterPopoverVisible"
+            placement="bottom-start"
+            :width="340"
+            trigger="click"
             popper-class="adm-group-filter-popper"
-            @change="onSearch"
           >
-            <el-option label="分组：全部" value="ALL" />
-            <el-option label="分组：根目录" value="-1" />
-            <el-option
-              v-for="g in platformGroupOptions"
-              :key="g.id"
-              :label="`分组：${g.name}`"
-              :value="String(g.id)"
-            >
-              <div class="adm-group-filter-option">
-                <span class="adm-group-filter-name" :title="g.name">{{ g.name }}</span>
-                <div class="adm-group-filter-actions">
-                  <el-button
-                    link
-                    type="primary"
-                    class="adm-group-filter-edit"
-                    title="重命名"
-                    @click.stop="openEditPlatformGroup(g)"
-                  >
-                    <el-icon><EditPen /></el-icon>
-                  </el-button>
-                  <el-button
-                    link
-                    type="danger"
-                    class="adm-group-filter-del"
-                    title="删除分组"
-                    @click.stop="removePlatformGroup(g)"
-                  >
-                    <el-icon><Delete /></el-icon>
-                  </el-button>
-                </div>
-              </div>
-            </el-option>
-          </el-select>
+            <template #reference>
+              <el-input
+                readonly
+                class="adm-filter-select adm-filter-group adm-group-filter-trigger"
+                :model-value="groupFilterLabel"
+                placeholder="分组：全部"
+              >
+                <template #suffix>
+                  <el-icon class="adm-group-filter-caret"><ArrowDown /></el-icon>
+                </template>
+              </el-input>
+            </template>
+            <div class="adm-group-filter-tree-wrap">
+              <el-tree
+                :data="groupFilterTree"
+                node-key="nodeKey"
+                :props="groupFilterTreeProps"
+                highlight-current
+                default-expand-all
+                :expand-on-click-node="false"
+                :current-node-key="currentGroupFilterNodeKey"
+                @node-click="onGroupFilterNodeClick"
+              >
+                <template #default="{ data }">
+                  <div class="adm-group-filter-option" :class="{ 'is-meta': data.isFilterMeta }">
+                    <el-icon v-if="data.isPlatform" class="adm-group-filter-folder" :size="14"><Folder /></el-icon>
+                    <span class="adm-group-filter-name" :title="data.name">{{ data.name }}</span>
+                    <div v-if="data.isPlatform" class="adm-group-filter-actions">
+                      <el-button
+                        link
+                        type="primary"
+                        class="adm-group-filter-edit"
+                        title="重命名"
+                        @click.stop="openEditPlatformGroup(data)"
+                      >
+                        <el-icon><EditPen /></el-icon>
+                      </el-button>
+                      <el-button
+                        link
+                        type="danger"
+                        class="adm-group-filter-del"
+                        title="删除分组"
+                        @click.stop="removePlatformGroup(data)"
+                      >
+                        <el-icon><Delete /></el-icon>
+                      </el-button>
+                    </div>
+                  </div>
+                </template>
+              </el-tree>
+            </div>
+          </el-popover>
           <el-select v-model="filters.status" class="adm-filter-select" @change="onSearch">
             <el-option label="发布状态：全部" value="ALL" />
             <el-option label="发布状态：已发布" value="ACTIVE" />
@@ -424,6 +444,7 @@ import * as echarts from 'echarts'
 import axios from 'axios'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
+  ArrowDown,
   Delete,
   EditPen,
   Folder,
@@ -446,7 +467,6 @@ import {
   canDesignBoard,
   canDirectEditBoard,
   authorDisplay,
-  flattenGroupOptions,
   isBoardOwner,
   isBoardPublished,
   isPublicSaveAsDesign,
@@ -477,6 +497,8 @@ let typeChart = null
 let topChart = null
 
 const treeSelectProps = { label: 'name', value: 'id', children: 'children' }
+const groupFilterTreeProps = { label: 'name', children: 'children' }
+const groupFilterPopoverVisible = ref(false)
 
 const filters = reactive({
   keyword: '',
@@ -535,7 +557,65 @@ const form = reactive({
 
 const groupSelectTree = computed(() => decorateGroupNodesOnly(groupTree.value))
 
-const platformGroupOptions = computed(() => flattenGroupOptions(groupTree.value))
+const GROUP_FILTER_ALL = 'ALL'
+const GROUP_FILTER_ROOT = -1
+
+function decorateGroupFilterNodes(nodes) {
+  return (Array.isArray(nodes) ? nodes : []).map((node) => {
+    const id = normalizeTreeId(node.id) ?? node.id
+    return {
+      ...node,
+      id,
+      nodeKey: `group:${id}`,
+      isPlatform: true,
+      children: decorateGroupFilterNodes(node.children)
+    }
+  })
+}
+
+const groupFilterTree = computed(() => [
+  { id: GROUP_FILTER_ALL, nodeKey: 'filter:all', name: '分组：全部', isFilterMeta: true },
+  { id: GROUP_FILTER_ROOT, nodeKey: 'filter:root', name: '分组：根目录', isFilterMeta: true },
+  ...decorateGroupFilterNodes(groupSelectTree.value)
+])
+
+const currentGroupFilterNodeKey = computed(() => {
+  if (filters.groupId === GROUP_FILTER_ALL) return 'filter:all'
+  if (filters.groupId === '-1' || Number(filters.groupId) === GROUP_FILTER_ROOT) return 'filter:root'
+  const id = normalizeTreeId(filters.groupId)
+  return id ? `group:${id}` : 'filter:all'
+})
+
+function findGroupPathInTree(nodes, id, prefix = '') {
+  const targetId = normalizeTreeId(id)
+  if (!targetId) return null
+  for (const node of Array.isArray(nodes) ? nodes : []) {
+    const name = String(node?.name || '').trim()
+    const label = prefix ? `${prefix} / ${name}` : name
+    if (normalizeTreeId(node?.id) === targetId) return label
+    const found = findGroupPathInTree(node?.children, targetId, label)
+    if (found) return found
+  }
+  return null
+}
+
+const groupFilterLabel = computed(() => {
+  if (filters.groupId === GROUP_FILTER_ALL) return '分组：全部'
+  if (filters.groupId === '-1' || Number(filters.groupId) === GROUP_FILTER_ROOT) return '分组：根目录'
+  const path = findGroupPathInTree(groupTree.value, filters.groupId)
+  return path ? `分组：${path}` : '分组：全部'
+})
+
+function onGroupFilterNodeClick(data) {
+  if (!data) return
+  if (data.isFilterMeta) {
+    filters.groupId = data.nodeKey === 'filter:root' ? '-1' : GROUP_FILTER_ALL
+  } else {
+    filters.groupId = String(data.id)
+  }
+  groupFilterPopoverVisible.value = false
+  onSearch()
+}
 
 const groupParentSelectTree = computed(() => [
   {
@@ -1201,7 +1281,26 @@ onBeforeUnmount(() => {
   width: 160px;
 }
 .adm-filter-group {
-  width: min(200px, 100%);
+  width: min(240px, 100%);
+}
+.adm-group-filter-trigger :deep(.el-input__wrapper) {
+  cursor: pointer;
+}
+.adm-group-filter-caret {
+  color: #a8abb2;
+  transition: transform 0.2s ease;
+}
+.adm-group-filter-tree-wrap {
+  max-height: 360px;
+  overflow: auto;
+  margin: -4px -2px;
+}
+.adm-group-filter-tree-wrap :deep(.el-tree-node__content) {
+  height: 34px;
+}
+.adm-group-filter-folder {
+  flex-shrink: 0;
+  color: #64748b;
 }
 .adm-group-filter-option {
   display: flex;
@@ -1277,7 +1376,10 @@ onBeforeUnmount(() => {
 </style>
 
 <style>
-.adm-group-filter-popper .el-select-dropdown__item {
-  padding-right: 10px;
+.adm-group-filter-popper {
+  padding: 10px 12px !important;
+}
+.adm-group-filter-popper .adm-group-filter-option.is-meta .adm-group-filter-name {
+  font-weight: 500;
 }
 </style>

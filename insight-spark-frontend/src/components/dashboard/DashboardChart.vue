@@ -1,7 +1,13 @@
 <template>
   <div class="dc-root">
     <div v-if="title && !hideTitle" class="dc-title">{{ title }}</div>
-    <div ref="host" class="dc-host" />
+    <div
+      ref="host"
+      class="dc-host"
+      @mousedown.stop
+      @touchstart.stop
+      @pointerdown.stop
+    />
     <div v-if="!hasData" class="dc-empty">暂无图表数据</div>
   </div>
 </template>
@@ -9,7 +15,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as echarts from 'echarts'
-import { buildOptionFromHistoryRow, resolveDynamicRefreshInterval } from '../../utils/chartOptionFromSnapshot.js'
+import { buildOptionFromHistoryRow, normalizeInteractiveDataZoom, resolveDynamicRefreshInterval } from '../../utils/chartOptionFromSnapshot.js'
 
 const props = defineProps({
   /** charts-batch 返回的单行 */
@@ -72,6 +78,9 @@ const render = () => {
   const option = props.payload?.option && typeof props.payload.option === 'object'
     ? props.payload.option
     : buildOptionFromHistoryRow(props.payload, props.chartUi || {})
+  if (Array.isArray(option?.dataZoom) && option.dataZoom.length) {
+    option.dataZoom = normalizeInteractiveDataZoom(option.dataZoom)
+  }
   chart.setOption(option, true)
   chart.resize()
   scheduleDynamicRefresh(resolveDynamicRefreshInterval(option))

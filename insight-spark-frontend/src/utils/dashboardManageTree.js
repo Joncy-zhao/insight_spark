@@ -36,6 +36,21 @@ export function toBoardTreeNode(board) {
   }
 }
 
+/** 个人侧边树：仅本人看板，且不与「公共看板」虚拟目录重复展示 */
+export function boardsForPersonalNavTree(allBoards, publicBoards, userId) {
+  const publicIds = new Set(
+    (Array.isArray(publicBoards) ? publicBoards : [])
+      .map((board) => Number(board?.id))
+      .filter((id) => Number.isFinite(id) && id > 0)
+  )
+  return (Array.isArray(allBoards) ? allBoards : []).filter((board) => {
+    if (!isBoardOwner(board, userId)) return false
+    const id = Number(board?.id)
+    if (Number.isFinite(id) && id > 0 && publicIds.has(id)) return false
+    return true
+  })
+}
+
 export function buildNavTree(groups, boards, keyword, options = {}) {
   const { includePublicGroup = false, publicBoards = [], includeUnassignedGroup = true } = options
   const boardsByGroupId = new Map()
@@ -333,9 +348,9 @@ export function isBoardPublished(data) {
   return String(data?.status || data?.raw?.status || 'ACTIVE').toUpperCase() === 'ACTIVE'
 }
 
-/** 可分发给团队：已发布公共看板，或已发布且本人创建/另存的私密看板 */
+/** 可分发给团队：本人创建/另存看板（任意发布与开放类型），或他人已发布公共看板 */
 export function canDistributeBoard(row, userId) {
+  if (isBoardOwner(row, userId) || isBoardSaveAsUser(row, userId)) return true
   if (!isBoardPublished(row)) return false
-  if (boardIsPublic(row)) return true
-  return isBoardOwner(row, userId) || isBoardSaveAsUser(row, userId)
+  return boardIsPublic(row)
 }

@@ -567,10 +567,24 @@ function buildAutoDataZoom(dynamic, categoryCount) {
     ? Math.min(100, Math.max(8, Math.ceil((dynamic.autoDataZoomThreshold / categoryCount) * 100)))
     : dynamic.dataZoomEnd
   const end = Math.max(start + 1, Math.min(dynamic.dataZoomEnd, autoEnd))
-  return [
+  return normalizeInteractiveDataZoom([
     { type: 'slider', show: true, xAxisIndex: 0, bottom: 8, height: 22, start, end },
     { type: 'inside', xAxisIndex: 0, start, end }
-  ]
+  ])
+}
+
+export function normalizeInteractiveDataZoom(dataZoom) {
+  if (!Array.isArray(dataZoom)) return dataZoom
+  return dataZoom.map((item) => {
+    if (!item || typeof item !== 'object') return item
+    return {
+      ...item,
+      disabled: false,
+      zoomLock: false,
+      brushSelect: false,
+      realtime: item.realtime !== false
+    }
+  })
 }
 
 function normalizeLegendForOverflow(legend, template, categoryCount, dynamic, chartType) {
@@ -807,13 +821,15 @@ export function applyDynamicInteractionDefaults(option, template, context = {}) 
   if (optionHasCartesianAxis(out)) {
     if (shouldEnableTemplateDataZoom(sourceTemplate, categoryCount, dynamic.autoDataZoomThreshold)) {
       out.dataZoom = Array.isArray(sourceTemplate.dataZoom)
-        ? sourceTemplate.dataZoom
+        ? normalizeInteractiveDataZoom(sourceTemplate.dataZoom)
         : buildAutoDataZoom(dynamic, categoryCount)
       if (out.grid && typeof out.grid === 'object' && !Array.isArray(out.grid)) {
         out.grid = { ...out.grid, bottom: Math.max(Number(out.grid.bottom) || 0, 72) }
       }
     } else if (isTemplateDataZoomDisabled(sourceTemplate)) {
       out.dataZoom = []
+    } else if (Array.isArray(out.dataZoom) && out.dataZoom.length > 0) {
+      out.dataZoom = normalizeInteractiveDataZoom(out.dataZoom)
     }
   }
   out.series = applySeriesAnimationDefaults(
@@ -962,7 +978,7 @@ function buildOptionFromEncodeDataset(snap, chartType, ui) {
   }
 
   if (useZoom) {
-    option.dataZoom = [
+    option.dataZoom = normalizeInteractiveDataZoom([
       {
         type: 'slider',
         show: true,
@@ -973,7 +989,7 @@ function buildOptionFromEncodeDataset(snap, chartType, ui) {
         end: endPct
       },
       { type: 'inside', xAxisIndex: 0, start: 0, end: endPct }
-    ]
+    ])
   }
 
   return option
@@ -1116,7 +1132,7 @@ function buildOptionLegacyFromPoints(snap, chartType, ui, itemOv) {
   }
 
   if (useZoom) {
-    option.dataZoom = [
+    option.dataZoom = normalizeInteractiveDataZoom([
       {
         type: 'slider',
         show: true,
@@ -1127,7 +1143,7 @@ function buildOptionLegacyFromPoints(snap, chartType, ui, itemOv) {
         end: endPct
       },
       { type: 'inside', xAxisIndex: 0, start: 0, end: endPct }
-    ]
+    ])
   }
 
   return option
@@ -1160,5 +1176,9 @@ export function buildOptionFromHistoryRow(row, ui = {}) {
   }
 
   const withTemplate = template ? applyOptionTemplateDefaults(built, template) : built
-  return applyDynamicInteractionDefaults(withTemplate, template, { chartType })
+  const finalOption = applyDynamicInteractionDefaults(withTemplate, template, { chartType })
+  if (Array.isArray(finalOption?.dataZoom) && finalOption.dataZoom.length) {
+    finalOption.dataZoom = normalizeInteractiveDataZoom(finalOption.dataZoom)
+  }
+  return finalOption
 }

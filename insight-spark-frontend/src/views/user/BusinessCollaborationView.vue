@@ -78,7 +78,12 @@
               placeholder="选择看板"
               class="board-select grant-board-select"
             >
-              <el-option v-for="d in workbenchGrantCandidates" :key="d.id" :label="d.name" :value="d.id" />
+              <el-option
+                v-for="d in workbenchGrantCandidates"
+                :key="d.id"
+                :label="formatDistributeDashboardLabel(d)"
+                :value="d.id"
+              />
             </el-select>
             <el-select v-model="workbenchGrantForm.permissionType" style="width: 120px">
               <el-option label="阅览+批注 READ" value="READ" />
@@ -254,18 +259,20 @@
           <el-card shadow="never" class="grant-card">
             <template #header>看板分发</template>
             <el-form label-position="top" size="small">
-              <el-form-item label="选择看板（已发布的公共看板，或您创建/另存的私密看板）">
+              <el-form-item label="选择看板（您的看板不限发布/开放类型；他人看板仅已发布公共）">
                 <el-select v-model="distributeDashboardId" filterable clearable placeholder="选择看板" style="width: 100%" @change="loadDashboardTeams">
                   <el-option
                     v-for="d in distributableDashboards"
                     :key="d.id"
-                    :label="d.name"
+                    :label="formatDistributeDashboardLabel(d)"
                     :value="d.id"
                   />
                 </el-select>
                 <div v-if="selectedDistributeDashboard" class="distribute-meta">
                   <el-tag size="small">{{ boardVisibilityLabel(selectedDistributeDashboard.isPublic) }}</el-tag>
-                  <el-tag size="small" type="success">已发布</el-tag>
+                  <el-tag size="small" :type="isBoardPublished(selectedDistributeDashboard) ? 'success' : 'warning'">
+                    {{ isBoardPublished(selectedDistributeDashboard) ? '已发布' : '待发布' }}
+                  </el-tag>
                   <span>所有者 {{ selectedDistributeDashboard.ownerUserId || '—' }}</span>
                   <span v-if="boardIsPublic(selectedDistributeDashboard)" class="distribute-hint">公共看板，任何用户均可分发给团队</span>
                   <span v-else-if="isBoardOwner(selectedDistributeDashboard) || isBoardSaveAsUser(selectedDistributeDashboard)" class="distribute-hint">您的私密看板，可分发给团队</span>
@@ -400,7 +407,14 @@ import {
 } from '../../utils/collabAnnotation.js'
 import { useCollabWebSocket } from '../../composables/useCollabWebSocket'
 import { consumeCollabNav } from '../../utils/collabNav.js'
-import { canDistributeBoard, boardIsPublic, isBoardOwner, isBoardSaveAsUser, boardVisibilityLabel } from '../../utils/dashboardManageTree.js'
+import {
+  canDistributeBoard,
+  boardIsPublic,
+  isBoardOwner,
+  isBoardSaveAsUser,
+  isBoardPublished,
+  boardVisibilityLabel
+} from '../../utils/dashboardManageTree.js'
 import {
   addTeamMember,
   createAnnotation,
@@ -411,7 +425,7 @@ import {
   deleteTeam,
   downloadCollabReport,
   fetchAnnotationsByDashboard,
-  fetchCollabDashboards,
+  fetchDistributeDashboards,
   fetchCollabSummary,
   fetchComments,
   fetchDashboardTeams,
@@ -490,6 +504,15 @@ const selectedHasReadScope = computed(() => selectedPermissionTypes.value.has('R
 const selectedHasEditScope = computed(() => selectedPermissionTypes.value.has('EDIT'))
 const selectedTeam = computed(() => teams.value.find((t) => t.id === selectedTeamId.value) || null)
 const distributableDashboards = computed(() => rows.value.filter((r) => canDistributeBoard(r)))
+
+function formatDistributeDashboardLabel(dashboard) {
+  const name = String(dashboard?.name || `看板#${dashboard?.id || ''}`).trim()
+  const tag = String(dashboard?.distributeTargetLabel || '').trim()
+  if (tag) return `${name}（${tag}）`
+  const vis = boardVisibilityLabel(dashboard?.isPublic)
+  const pub = isBoardPublished(dashboard) ? '已发布' : '待发布'
+  return `${name}（${vis}·${pub}）`
+}
 const workbenchGrantCandidates = computed(() => {
   const grantedIds = new Set(workbenchDashboards.value.map((d) => d.id))
   return distributableDashboards.value.filter((d) => !grantedIds.has(d.id))
@@ -718,7 +741,7 @@ const { connected: wsConnected, connect: connectWs } = useCollabWebSocket({
 async function loadList() {
   loadingList.value = true
   try {
-    rows.value = await fetchCollabDashboards()
+    rows.value = await fetchDistributeDashboards()
   } catch (e) {
     ElMessage.error(e.message || '加载看板失败')
   } finally {

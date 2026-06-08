@@ -478,6 +478,7 @@
     </el-dialog>
 
     <el-dialog v-model="pinPlanVisible" title="钉入我的看板" width="520px" destroy-on-close>
+      <p class="pin-dialog-hint">仅显示未发布的可编辑看板；已发布看板不可钉入，请先另存为副本。</p>
       <el-form label-position="top">
         <el-form-item label="预测图表">
           <el-input :model-value="pinPlanTarget?.planName || '-'" disabled />
@@ -487,7 +488,7 @@
             <el-option
               v-for="dashboard in dashboardOptions"
               :key="dashboard.id"
-              :label="dashboard.name + (dashboard.isPublic ? '（公开）' : '')"
+              :label="formatPinDashboardLabel(dashboard)"
               :value="dashboard.id"
             />
           </el-select>
@@ -706,7 +707,7 @@ import {
   updateAdvancedAlertRuleStatus
 } from '../../api/advancedAnalysis'
 import {
-  listDashboards,
+  listPinTargetDashboards,
   pinChartToDashboard
 } from '../../api/dashboard'
 
@@ -1441,17 +1442,26 @@ const removePlan = async (plan) => {
 }
 
 const loadDashboardOptions = async () => {
-  const rows = await listDashboards()
+  const rows = await listPinTargetDashboards()
   dashboardOptions.value = Array.isArray(rows)
     ? rows.map(item => ({
         id: Number(item.id),
         name: String(item.name || `看板#${item.id}`),
-        isPublic: Boolean(item.isPublic)
-      })).filter(item => Number.isFinite(item.id) && item.id > 0)
+        isPublic: Boolean(item.isPublic),
+        pinTargetLabel: String(item.pinTargetLabel || '').trim(),
+        status: String(item.status || '').trim()
+      })).filter(item => Number.isFinite(item.id) && item.id > 0 && item.status !== 'ACTIVE')
     : []
   if (!pinDashboardId.value && dashboardOptions.value.length) {
     pinDashboardId.value = dashboardOptions.value[0].id
   }
+}
+
+const formatPinDashboardLabel = (dashboard) => {
+  const name = String(dashboard?.name || `看板#${dashboard?.id || ''}`).trim()
+  const tag = String(dashboard?.pinTargetLabel || '').trim()
+  if (tag) return `${name}（${tag}）`
+  return dashboard?.isPublic ? `${name}（公开）` : name
 }
 
 const openPinPlanDialog = async (plan) => {
@@ -2793,5 +2803,12 @@ onBeforeUnmount(() => {
   .metric-card__body small {
     white-space: normal;
   }
+}
+
+.pin-dialog-hint {
+  margin: 0 0 12px;
+  color: #909399;
+  font-size: 13px;
+  line-height: 1.5;
 }
 </style>

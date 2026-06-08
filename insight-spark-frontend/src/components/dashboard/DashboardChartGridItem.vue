@@ -27,7 +27,12 @@
       </div>
     </div>
 
-    <div class="dge-chart-host">
+    <div
+      class="dge-chart-host"
+      @mousedown.stop
+      @touchstart.stop
+      @pointerdown.stop
+    >
       <slot />
     </div>
 
@@ -146,6 +151,7 @@ function onTitleDblClick() {
   color: #6b7280;
   border-bottom: 1px solid #f3f4f6;
   background: #fafafa;
+  cursor: move;
 }
 .dge-card-titlewrap {
   flex: 1;
@@ -163,6 +169,7 @@ function onTitleDblClick() {
   flex: 1;
   min-height: 0;
   padding: 6px 8px 8px;
+  cursor: default;
 }
 .dcgi-chrome {
   position: absolute;

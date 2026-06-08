@@ -39,6 +39,26 @@ public class StackCDashboardController {
         return ApiResponse.success(dashboardService.listPinnedChartsAcrossAccessibleDashboards());
     }
 
+    /** 对话查询等场景钉入图表：仅返回当前用户可编辑的未发布（DISABLED）自有/另存看板 */
+    @GetMapping("/pin-targets")
+    public ApiResponse<List<Map<String, Object>>> listPinTargets() {
+        try {
+            return ApiResponse.success(dashboardService.listPinTargetDashboardsForCurrentUser());
+        } catch (IllegalArgumentException e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    /** 团队分发：本人创建/另存看板（任意状态与开放类型）+ 他人已发布公共看板 */
+    @GetMapping("/distribute-targets")
+    public ApiResponse<List<Map<String, Object>>> listDistributeTargets() {
+        try {
+            return ApiResponse.success(dashboardService.listDistributeTargetDashboardsForCurrentUser());
+        } catch (IllegalArgumentException e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
     /** 当前用户个人私有看板（我的看板页） */
     @GetMapping("/mine")
     public ApiResponse<Map<String, Object>> listMine(

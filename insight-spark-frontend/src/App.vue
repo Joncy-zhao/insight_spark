@@ -176,7 +176,8 @@ import {
   buildAnimationReplayStartOption,
   buildForecastChartOption,
   getChartAnimationMeta,
-  hasForecastSeriesRows
+  hasForecastSeriesRows,
+  normalizeInteractiveDataZoom
 } from './utils/chartOptionFromSnapshot'
 
 const API_BASE = 'http://localhost:8080'
@@ -4178,7 +4179,7 @@ const copySqlToClipboard = async (sql) => {
 }
 
 const loadDashboardOptions = async () => {
-  const res = await axios.get(`${API_BASE}/api/c/dashboards`)
+  const res = await axios.get(`${API_BASE}/api/c/dashboards/pin-targets`)
   const body = res.data
   if (body.code && body.code !== 200) {
     throw new Error(body.message || '加载看板失败')
@@ -4187,8 +4188,10 @@ const loadDashboardOptions = async () => {
   dashboardOptions.value = rows.map(item => ({
     id: Number(item.id),
     name: String(item.name || `看板#${item.id}`),
-    isPublic: Boolean(item.isPublic)
-  }))
+    isPublic: Boolean(item.isPublic),
+    pinTargetLabel: String(item.pinTargetLabel || '').trim(),
+    status: String(item.status || '').trim()
+  })).filter(item => Number.isFinite(item.id) && item.id > 0 && item.status !== 'ACTIVE')
   if (!pinDashboardId.value && dashboardOptions.value.length) {
     pinDashboardId.value = dashboardOptions.value[0].id
   }
@@ -5707,10 +5710,10 @@ const renderChart = (data, type) => {
         splitLine: { lineStyle: { color: '#eef2f7' } }
       },
       dataZoom: shouldUseZoom
-        ? [
-            { type: 'slider', height: 18, bottom: 26, start: 0, end: 60 },
-            { type: 'inside', start: 0, end: 60 }
-          ]
+        ? normalizeInteractiveDataZoom([
+            { type: 'slider', height: 18, bottom: 26, start: 0, end: 60, xAxisIndex: 0 },
+            { type: 'inside', start: 0, end: 60, xAxisIndex: 0 }
+          ])
         : [],
       series: [{
         data: seriesData,
@@ -5738,7 +5741,7 @@ const renderChart = (data, type) => {
     instance.resize()
     window.setTimeout(() => {
       if (renderVersion !== chartRenderVersion || instance.isDisposed?.()) return
-      instance.setOption(option, { notMerge: false, lazyUpdate: false })
+      instance.setOption(option, { notMerge: true, lazyUpdate: false })
       instance.resize()
     }, 80)
     return

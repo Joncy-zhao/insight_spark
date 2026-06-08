@@ -458,7 +458,7 @@
               </div>
             </div>
 
-            <div v-show="!isLastAnalysisTable" id="echarts-container" class="chart-canvas"></div>
+            <div v-show="!isLastAnalysisTable" id="echarts-container" class="chart-canvas" @mousedown.stop @touchstart.stop @pointerdown.stop></div>
             <div v-if="isLastAnalysisTable" class="analysis-table-wrap">
               <el-table
                   :data="lastAnalysisTableRows"
@@ -549,13 +549,14 @@
             </div>
           </div>
           <el-dialog v-model="pinDialogVisible" title="钉入我的看板" width="520px" append-to-body>
+            <p class="pin-dialog-hint">仅显示您创建或另存且未发布的看板；已发布看板不可钉入，请先另存为副本。</p>
             <el-form label-position="top">
               <el-form-item label="目标看板">
                 <el-select v-model="pinDashboardId" class="full-width" placeholder="请选择看板">
                   <el-option
                       v-for="dashboard in dashboardOptions"
                       :key="dashboard.id"
-                      :label="dashboard.name + (dashboard.isPublic ? '（公开）' : '')"
+                      :label="formatPinDashboardLabel(dashboard)"
                       :value="dashboard.id"
                   />
                 </el-select>
@@ -1865,6 +1866,13 @@ const {
   userQuestion,
   xAxisData
 } = inject('workbench')
+
+const formatPinDashboardLabel = (dashboard) => {
+  const name = String(dashboard?.name || `看板#${dashboard?.id || ''}`).trim()
+  const tag = String(dashboard?.pinTargetLabel || '').trim()
+  if (tag) return `${name}（${tag}）`
+  return dashboard?.isPublic ? `${name}（公开）` : name
+}
 
 const formatTableOptionLabel = (table) => {
   const displayName = String(table?.displayName || '').trim()
@@ -5321,6 +5329,12 @@ onBeforeUnmount(() => {
 }
 .chart-panel {
   min-width: 0;
+}
+.pin-dialog-hint {
+  margin: 0 0 12px;
+  color: #909399;
+  font-size: 13px;
+  line-height: 1.5;
 }
 .chat-datasource-bar {
   display: flex;

@@ -392,7 +392,6 @@
       :auto-export="gridEditorAutoExport"
       :group-select-tree="groupSelectTree"
       use-parent-group-tree-for-save-as
-      prompt-visibility-on-save
       @saved="onGridSaved"
       @auto-export-done="gridEditorAutoExport = ''"
     />
@@ -548,6 +547,7 @@ import {
   boardStatusTag,
   boardStatusTagType,
   boardVisibilityLabel,
+  boardsForPersonalNavTree,
   buildNavTree,
   canDesignBoard,
   canDirectEditBoard,
@@ -653,11 +653,16 @@ const editRow = ref(null)
 const form = reactive({ name: '', description: '', groupId: GROUP_ROOT_PARENT_ID })
 
 const navTree = computed(() =>
-  buildNavTree(groupTree.value, allBoards.value, treeSearch.value, {
-    includePublicGroup: true,
-    includeUnassignedGroup: false,
-    publicBoards: publicBoards.value
-  })
+  buildNavTree(
+    groupTree.value,
+    boardsForPersonalNavTree(allBoards.value, publicBoards.value),
+    treeSearch.value,
+    {
+      includePublicGroup: true,
+      includeUnassignedGroup: false,
+      publicBoards: publicBoards.value
+    }
+  )
 )
 const groupSelectTree = computed(() => decorateGroupNodesOnly(groupTree.value))
 const groupSelectTreeWithRoot = computed(() => [

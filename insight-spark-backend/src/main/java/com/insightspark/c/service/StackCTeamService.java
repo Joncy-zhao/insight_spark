@@ -233,7 +233,7 @@ public class StackCTeamService {
                   WHERE p.user_id = ?
                     AND (p.expire_at IS NULL OR p.expire_at > NOW())
                 ) src ON src.dashboard_id = d.id
-                WHERE d.status = 'ACTIVE'
+                WHERE d.status != 'ARCHIVED'
                   AND d.owner_user_id != ?
                 ORDER BY d.updated_at DESC
                 LIMIT 200
@@ -305,17 +305,17 @@ public class StackCTeamService {
         if (AuthContext.isAdmin()) {
             return;
         }
+        String uid = Objects.toString(AuthContext.userId(), "").trim();
+        String owner = Objects.toString(dashboard.get("ownerUserId"), "").trim();
+        String saveAs = Objects.toString(dashboard.get("saveAsUserId"), "").trim();
+        if (uid.equals(owner) || (!saveAs.isEmpty() && uid.equals(saveAs))) {
+            return;
+        }
         String status = Objects.toString(dashboard.get("status"), "").trim().toUpperCase();
         if (!"ACTIVE".equals(status)) {
             throw new IllegalArgumentException("仅已发布看板可分发团队授权");
         }
         if (isPublicDashboard(dashboard)) {
-            return;
-        }
-        String uid = Objects.toString(AuthContext.userId(), "").trim();
-        String owner = Objects.toString(dashboard.get("ownerUserId"), "").trim();
-        String saveAs = Objects.toString(dashboard.get("saveAsUserId"), "").trim();
-        if (uid.equals(owner) || (!saveAs.isEmpty() && uid.equals(saveAs))) {
             return;
         }
         throw new IllegalArgumentException("仅看板所有者、另存人或系统管理员可分配私密看板的团队授权");

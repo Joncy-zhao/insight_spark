@@ -13,6 +13,11 @@ export async function fetchCollabDashboards() {
   return unwrap(await axios.get(`${API_BASE}/api/c/dashboards`))
 }
 
+export async function fetchDistributeDashboards() {
+  restoreSessionHeader()
+  return unwrap(await axios.get(`${API_BASE}/api/c/dashboards/distribute-targets`))
+}
+
 export async function fetchCollabSummary(dashboardId) {
   restoreSessionHeader()
   return unwrap(await axios.get(`${API_BASE}/api/c/collab/dashboards/${dashboardId}/summary`))
