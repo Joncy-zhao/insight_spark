@@ -234,6 +234,7 @@
 .adm-main {
   flex: 1;
   min-width: 0;
+  overflow-x: hidden;
 }
 .adm-filters {
   display: flex;
@@ -255,6 +256,11 @@
 .adm-table {
   width: 100%;
   font-size: 13px;
+}
+.adm-table :deep(.el-table__inner-wrapper),
+.adm-table :deep(.el-table__body-wrapper),
+.adm-table :deep(.el-scrollbar__wrap) {
+  max-width: 100%;
 }
 .adm-table :deep(.el-table__header th.el-table__cell) {
   padding: 6px 0;
@@ -307,6 +313,21 @@
 }
 .adm-dropdown-item--danger {
   color: var(--el-color-danger, #f56c6c);
+}
+.adm-dashboard-more-popper {
+  width: 180px;
+  max-height: min(420px, calc(100vh - 120px));
+  overflow: hidden;
+}
+.adm-dashboard-more-popper .el-dropdown-menu {
+  max-height: min(420px, calc(100vh - 120px));
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.adm-dashboard-more-popper .el-dropdown-menu__item {
+  min-height: 44px;
+  line-height: 22px;
+  white-space: nowrap;
 }
 .adm-pager {
   display: flex;

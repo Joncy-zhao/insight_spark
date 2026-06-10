@@ -8,6 +8,7 @@ import com.insightspark.service.BusinessModelAgentService;
 import com.insightspark.service.ChatBiService;
 import com.insightspark.service.ChatConversationService;
 import com.insightspark.service.ChatQueryHistoryService;
+import com.insightspark.service.PythonAiService;
 import com.insightspark.service.SmartChatService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
@@ -67,10 +68,19 @@ public class ChatController {
     @Autowired
     private SmartChatService smartChatService;
 
+    @Autowired
+    private PythonAiService pythonAiService;
+
+    @GetMapping("/models")
+    public ApiResponse<List<Map<String, Object>>> listModels() {
+        return ApiResponse.success(pythonAiService.listModels());
+    }
+
     @PostMapping("/ask")
     public ApiResponse<Map<String, Object>> askQuestion(@RequestBody Map<String, Object> request) {
         return executeQuestion(text(request.get("question")), text(request.get("tableName")), false,
-                toLong(request.get("conversationId")), toLong(request.get("parentTurnId")));
+                toLong(request.get("conversationId")), toLong(request.get("parentTurnId")),
+                request == null ? Map.of() : request);
     }
 
     @GetMapping("/ask")
@@ -84,7 +94,8 @@ public class ChatController {
     @PostMapping("/ask-enhanced")
     public ApiResponse<Map<String, Object>> askQuestionEnhanced(@RequestBody Map<String, Object> request) {
         return executeQuestion(text(request.get("question")), text(request.get("tableName")), true,
-                toLong(request.get("conversationId")), toLong(request.get("parentTurnId")));
+                toLong(request.get("conversationId")), toLong(request.get("parentTurnId")),
+                request == null ? Map.of() : request);
     }
 
     @PostMapping("/ask-smart")
@@ -143,7 +154,7 @@ public class ChatController {
                                                                @RequestBody Map<String, Object> request) {
         boolean enhanced = !"false".equalsIgnoreCase(text(request.get("enhanced")));
         return executeQuestion(text(request.get("question")), text(request.get("tableName")), enhanced,
-                sessionId, toLong(request.get("parentTurnId")));
+                sessionId, toLong(request.get("parentTurnId")), request == null ? Map.of() : request);
     }
 
     @PostMapping("/alert-rule-created")
@@ -345,14 +356,17 @@ public class ChatController {
                                    @RequestParam(required = false) Long pinChartId,
                                    @RequestParam(required = false) Long pinArtifactId,
                                    @RequestParam(required = false) Long pinTurnId,
-                                   @RequestParam(required = false) String pinTitle,
-                                   @RequestParam(required = false) String pinSourceQuestion,
-                                   @RequestParam(required = false) String pinTableName,
-                                   HttpServletResponse response) throws IOException {
+                                  @RequestParam(required = false) String pinTitle,
+                                  @RequestParam(required = false) String pinSourceQuestion,
+                                  @RequestParam(required = false) String pinTableName,
+                                  @RequestParam(required = false) String modelId,
+                                  @RequestParam(required = false) String modelName,
+                                  @RequestParam(required = false) String modelCategory,
+                                  HttpServletResponse response) throws IOException {
         streamQuestion(question, tableName, conversationId, parentTurnId,
                 streamRequestContext(selectedTableName, activeBusinessModelId, lastCreatedBusinessModelId,
                         lastAppliedBusinessModelId, pinChartId, pinArtifactId, pinTurnId, pinTitle,
-                        pinSourceQuestion, pinTableName),
+                        pinSourceQuestion, pinTableName, modelId, modelName, modelCategory),
                 response);
     }
 
@@ -371,11 +385,14 @@ public class ChatController {
                                           @RequestParam(required = false) String pinTitle,
                                           @RequestParam(required = false) String pinSourceQuestion,
                                           @RequestParam(required = false) String pinTableName,
+                                          @RequestParam(required = false) String modelId,
+                                          @RequestParam(required = false) String modelName,
+                                          @RequestParam(required = false) String modelCategory,
                                           HttpServletResponse response) throws IOException {
         streamQuestion(question, tableName, sessionId, parentTurnId,
                 streamRequestContext(selectedTableName, activeBusinessModelId, lastCreatedBusinessModelId,
                         lastAppliedBusinessModelId, pinChartId, pinArtifactId, pinTurnId, pinTitle,
-                        pinSourceQuestion, pinTableName),
+                        pinSourceQuestion, pinTableName, modelId, modelName, modelCategory),
                 response);
     }
 
@@ -520,6 +537,12 @@ public class ChatController {
 
     private ApiResponse<Map<String, Object>> executeQuestion(String question, String tableName, boolean enhanced,
                                                              Long conversationId, Long parentTurnId) {
+        return executeQuestion(question, tableName, enhanced, conversationId, parentTurnId, Map.of());
+    }
+
+    private ApiResponse<Map<String, Object>> executeQuestion(String question, String tableName, boolean enhanced,
+                                                             Long conversationId, Long parentTurnId,
+                                                             Map<String, Object> requestContext) {
         if (question == null || question.isBlank()) {
             return ApiResponse.badRequest("问题不能为空");
         }
@@ -529,9 +552,11 @@ public class ChatController {
                 question, tableName, Map.of("transport", "HTTP"));
         Long userTurnId = toLong(userTurn.get("id"));
         String executionQuestion = safeBuildExecutionQuestion(activeConversationId, userTurnId, question);
+        Map<String, Object> executionContext = new LinkedHashMap<>(requestContext == null ? Map.of() : requestContext);
+        executionContext.put("rawQuestion", question);
         try {
             Map<String, Object> result = chatBiService.executeChat(buildChatQueryRequest(
-                    executionQuestion, tableName, activeConversationId, parentTurnId
+                    executionQuestion, tableName, activeConversationId, parentTurnId, executionContext
             ));
             if (enhanced) {
                 enrichEnhancedResponse(result, question, tableName);
@@ -610,6 +635,9 @@ public class ChatController {
         putIfPresent(filters, "pinTitle", requestContext == null ? null : requestContext.get("pinTitle"));
         putIfPresent(filters, "pinSourceQuestion", requestContext == null ? null : requestContext.get("pinSourceQuestion"));
         putIfPresent(filters, "pinTableName", requestContext == null ? null : requestContext.get("pinTableName"));
+        putIfPresent(filters, "modelId", requestContext == null ? null : requestContext.get("modelId"));
+        putIfPresent(filters, "modelName", requestContext == null ? null : requestContext.get("modelName"));
+        putIfPresent(filters, "modelCategory", requestContext == null ? null : requestContext.get("modelCategory"));
         request.setFilters(filters);
         request.setMode("CHAT");
         return request;
@@ -779,7 +807,7 @@ public class ChatController {
                                                      String lastCreatedBusinessModelId,
                                                      String lastAppliedBusinessModelId) {
         return streamRequestContext(selectedTableName, activeBusinessModelId, lastCreatedBusinessModelId,
-                lastAppliedBusinessModelId, null, null, null, null, null, null);
+                lastAppliedBusinessModelId, null, null, null, null, null, null, null, null, null);
     }
 
     private Map<String, Object> streamRequestContext(String selectedTableName,
@@ -791,7 +819,10 @@ public class ChatController {
                                                      Long pinTurnId,
                                                      String pinTitle,
                                                      String pinSourceQuestion,
-                                                     String pinTableName) {
+                                                     String pinTableName,
+                                                     String modelId,
+                                                     String modelName,
+                                                     String modelCategory) {
         Map<String, Object> context = new LinkedHashMap<>();
         putIfPresent(context, "selectedTableName", selectedTableName);
         putIfPresent(context, "activeBusinessModelId", activeBusinessModelId);
@@ -803,6 +834,9 @@ public class ChatController {
         putIfPresent(context, "pinTitle", pinTitle);
         putIfPresent(context, "pinSourceQuestion", pinSourceQuestion);
         putIfPresent(context, "pinTableName", pinTableName);
+        putIfPresent(context, "modelId", modelId);
+        putIfPresent(context, "modelName", modelName);
+        putIfPresent(context, "modelCategory", modelCategory);
         return context;
     }
 

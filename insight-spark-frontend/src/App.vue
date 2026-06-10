@@ -182,6 +182,7 @@ import {
 
 const API_BASE = 'http://localhost:8080'
 const LAST_SELECTED_TABLE_KEY = 'insight:lastSelectedTableName'
+const CHAT_MODEL_KEY = 'insight_chat_model_id'
 const CHAT_THINKING_LOG_LIMIT = 100
 const moduleIconMap = {
   workbench: House,
@@ -368,6 +369,8 @@ const streamAbortController = ref(null)
 const activeChatRequestId = ref(0)
 const stopRequested = ref(false)
 const isStreaming = ref(false)
+const chatModelOptions = ref([])
+const selectedChatModelId = ref(localStorage.getItem(CHAT_MODEL_KEY) || 'default')
 const recentChatQueries = ref([])
 const recentChatQueryKeyword = ref('')
 const recentChatQueryTableName = ref('')
@@ -670,6 +673,39 @@ const filteredBusinessModelsByTable = (tableName) => {
 }
 
 const chatBusinessModelOptions = computed(() => filteredBusinessModelsByTable(selectedTableName.value))
+const selectedChatModel = computed(() => {
+  const selectedId = String(selectedChatModelId.value || '').trim()
+  return chatModelOptions.value.find(item => String(item?.id || '') === selectedId)
+      || chatModelOptions.value[0]
+      || null
+})
+
+const chatModelPayload = computed(() => ({
+  modelId: selectedChatModel.value?.id || '',
+  modelName: selectedChatModel.value?.name || selectedChatModel.value?.model || '',
+  modelCategory: selectedChatModel.value?.category || ''
+}))
+
+const loadChatModels = async () => {
+  try {
+    const models = unwrap(await axios.get(`${API_BASE}/api/chat/models`))
+    chatModelOptions.value = Array.isArray(models) ? models.filter(item => item?.id) : []
+    const currentId = String(selectedChatModelId.value || '').trim()
+    if (chatModelOptions.value.length && !chatModelOptions.value.some(item => String(item.id) === currentId)) {
+      selectedChatModelId.value = String(chatModelOptions.value[0]?.id || 'default')
+      localStorage.setItem(CHAT_MODEL_KEY, selectedChatModelId.value)
+    }
+  } catch (error) {
+    chatModelOptions.value = []
+  }
+}
+
+const handleChatModelChange = (modelId) => {
+  const nextId = String(modelId || '').trim()
+  if (!nextId) return
+  selectedChatModelId.value = nextId
+  localStorage.setItem(CHAT_MODEL_KEY, nextId)
+}
 
 const applyChatBusinessModelSelection = (modelId) => {
   const normalizedId = normalizeBusinessModelOptionId(modelId)
@@ -773,6 +809,13 @@ const applyChatChartContainerLayout = (template) => {
   container.style.height = `${resolveChartTemplateHeight(template)}px`
 }
 
+const resizeChatChartAfterLayout = () => {
+  window.requestAnimationFrame(() => {
+    const instance = ensureChatChartInstance()
+    instance?.resize()
+  })
+}
+
 const replayChatChartRenderAnimation = (enabled) => {
   const container = getChatChartContainer()
   if (!container) return
@@ -830,6 +873,7 @@ const bootstrapWorkbench = async () => {
       loadRecentChatQueries(),
       loadPinnedHistoryIds(),
       loadChatSessions(),
+      loadChatModels(),
       loadVoicePreferences()
     ])
   } catch (error) {
@@ -1653,6 +1697,11 @@ const createChatSession = async () => {
     activeChatSessionId.value = session.id
     clearActiveBranchParent()
     syncChatSessionListItem(session)
+    lastAnalysis.value = null
+    currentChartType.value = ''
+    chartAnimationMeta.value = null
+    pendingDashboardPinSource.value = null
+    ensureChatChartInstance()?.clear()
     messages.value = [
       { role: 'system', content: '已开始一个新的连续对话。' }
     ]
@@ -2594,6 +2643,7 @@ const runDiagnosis = async () => {
       metricField: diagnosisForm.value.metricField,
       dimensionFields: diagnosisForm.value.dimensionFields,
       timeField: diagnosisForm.value.timeField || null,
+      sourceRoute: 'diagnosis',
       detailLevel: diagnosisForm.value.detailLevel || 'detailed',
       anomalyType: diagnosisForm.value.anomalyType || 'fluctuation'
     }))
@@ -2689,6 +2739,7 @@ const confirmDiagnosisPicker = async () => {
       metricField: diagnosisPickerForm.value.metricField,
       dimensionFields: diagnosisPickerForm.value.dimensionFields,
       timeField: diagnosisPickerForm.value.timeField || null,
+      conversationId: activeChatSessionId.value || undefined,
       question: lastAnalysis.value?.sourceQuestion || lastAnalysis.value?.message || '基于当前对话查询结果生成智能诊断报告',
       sourceQuestion: lastAnalysis.value?.sourceQuestion || '',
       sourceSql: lastAnalysis.value?.sql || lastAnalysis.value?.sourceSql || '',
@@ -3069,10 +3120,11 @@ const restoreDiagnosisBinding = async (report) => {
   const snapshot = parseMaybeJson(report?.chartSnapshot)
   const binding = parseMaybeJson(report?.bindingJson)
   const source = snapshot || binding?.chartSnapshot
+  const route = String(binding?.route || snapshot?.sourceRoute || '').toLowerCase()
   if (report?.tableName) {
     selectedTableName.value = report.tableName
   }
-  if (binding?.route === 'dashboard' || snapshot?.sourceRoute === 'dashboard') {
+  if (route === 'dashboard') {
     diagnosisRestoreTarget.value = {
       route: 'dashboard',
       reportId: report?.id,
@@ -3083,6 +3135,10 @@ const restoreDiagnosisBinding = async (report) => {
       cardTitle: binding?.cardTitle || snapshot?.cardTitle || snapshot?.title || ''
     }
     activeModule.value = 'dashboard'
+    return
+  }
+  if (route !== 'chat') {
+    activeModule.value = 'diagnosis'
     return
   }
   activeModule.value = 'chat'
@@ -4751,6 +4807,7 @@ const sendQuestion = async (options = {}) => {
   const queryTableName = requestedTableName || selectedTableName.value
   const isRegenerate = Boolean(options?.regenerate)
   const branchParentTurnId = String(options?.parentTurnId || activeBranchParentTurnId.value || '').trim()
+  const selectedModelPayload = chatModelPayload.value
 
   if (!userQuestion) return
   if (!queryTableName && !shouldUseBusinessModelAgent(userQuestion)) {
@@ -4998,6 +5055,9 @@ const sendQuestion = async (options = {}) => {
       if (activeChatSessionId.value) params.set('conversationId', activeChatSessionId.value)
       if (branchParentTurnId) params.set('parentTurnId', branchParentTurnId)
       if (selectedTableName.value) params.set('selectedTableName', selectedTableName.value)
+      if (selectedModelPayload.modelId) params.set('modelId', selectedModelPayload.modelId)
+      if (selectedModelPayload.modelName) params.set('modelName', selectedModelPayload.modelName)
+      if (selectedModelPayload.modelCategory) params.set('modelCategory', selectedModelPayload.modelCategory)
       if (activeBusinessModelId.value != null) params.set('activeBusinessModelId', String(activeBusinessModelId.value))
       if (lastCreatedBusinessModelId.value != null) params.set('lastCreatedBusinessModelId', String(lastCreatedBusinessModelId.value))
       if (lastAppliedBusinessModelId.value != null) params.set('lastAppliedBusinessModelId', String(lastAppliedBusinessModelId.value))
@@ -5168,7 +5228,8 @@ const sendQuestion = async (options = {}) => {
           selectedTableName: selectedTableName.value || undefined,
           activeBusinessModelId: activeBusinessModelId.value ?? undefined,
           lastCreatedBusinessModelId: lastCreatedBusinessModelId.value ?? undefined,
-          lastAppliedBusinessModelId: lastAppliedBusinessModelId.value ?? undefined
+          lastAppliedBusinessModelId: lastAppliedBusinessModelId.value ?? undefined,
+          ...selectedModelPayload
         }, {
           signal: fallbackController.signal
         }))
@@ -5184,7 +5245,8 @@ const sendQuestion = async (options = {}) => {
           question: userQuestion,
           tableName: queryTableName,
           conversationId: activeChatSessionId.value || undefined,
-          parentTurnId: branchParentTurnId || undefined
+          parentTurnId: branchParentTurnId || undefined,
+          ...selectedModelPayload
         }, {
           signal: fallbackController.signal
         }))
@@ -5756,6 +5818,7 @@ const renderChart = (data, type) => {
   }
   const template = lastAnalysis.value?.optionTemplate || {}
   applyChatChartContainerLayout(template)
+  resizeChatChartAfterLayout()
   const instance = ensureChatChartInstance()
   if (!instance) return
   const rawRows = Array.isArray(data) ? data : []
@@ -5969,6 +6032,9 @@ provide('workbench', {
   streamAbortController,
   activeChatRequestId,
   stopRequested,
+  chatModelOptions,
+  selectedChatModelId,
+  selectedChatModel,
   businessDictionaryPanelVisible,
   businessDictionaryFocusModelId,
   activeBusinessModelId,
@@ -6094,6 +6160,7 @@ provide('workbench', {
   createBusinessModelFromTemplate,
   createBusinessModel,
   handleChatBusinessModelChange,
+  handleChatModelChange,
   openBusinessDictionaryByModelId,
   publishBusinessModel,
   applyBusinessModel,
@@ -6679,6 +6746,18 @@ provide('workbench', {
   margin: 0 10px;
 }
 
+.avatar img {
+  width: 42px;
+  height: 42px;
+  display: block;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.avatar span {
+  display: block;
+}
+
 .msg-content {
   display: flex;
   flex-direction: column;
@@ -6743,11 +6822,13 @@ provide('workbench', {
 .ask-bar {
   display: flex;
   margin-top: 16px;
-  box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.05);
+  background: transparent;
+  box-shadow: none;
 }
 
 .ask-bar .el-input__wrapper {
-  box-shadow: 0 0 0 1px #e5e7eb inset !important;
+  background: transparent !important;
+  box-shadow: inset 0 0 0 1px #e5e7eb !important;
 }
 
 .ask-bar .el-input-group__append {
