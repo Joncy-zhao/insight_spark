@@ -496,6 +496,15 @@ const chartTypeText = (value) => {
 const chartTypeLabel = computed(() => {
   return chartTypeText(currentChartType.value)
 })
+const chartTypeSwitchOptions = [
+  { label: '柱状图', value: 'bar' },
+  { label: '折线图', value: 'line' },
+  { label: '饼图', value: 'pie' }
+]
+const isAiRecommendedChartType = (type) => {
+  const recommendedType = String(lastAnalysis.value?.recommendedChartType || lastAnalysis.value?.aiRecommendedChartType || '').toLowerCase()
+  return Boolean(recommendedType && recommendedType === String(type || '').toLowerCase())
+}
 const numericFields = computed(() => fields.value.filter(field => field.fieldType === 'NUMBER'))
 const dateFields = computed(() => fields.value.filter(field => field.fieldType === 'DATE'))
 const dimensionCandidateFields = computed(() => fields.value.filter(field => field.fieldType !== 'NUMBER'))
@@ -799,7 +808,7 @@ const ensureChatChartInstance = () => {
 const resolveChartTemplateHeight = (template) => {
   const rawHeight = template?.layout?.height ?? template?.height
   const height = Number(rawHeight)
-  if (!Number.isFinite(height)) return 460
+  if (!Number.isFinite(height)) return 360
   return Math.min(800, Math.max(240, Math.round(height)))
 }
 
@@ -4964,6 +4973,7 @@ const sendQuestion = async (options = {}) => {
     const fieldBindingResults = normalizeFieldBindingResults(data?.fieldBindingResults)
     const analysisSnapshot = {
       ...data,
+      recommendedChartType: data.chartType,
       sourceQuestion: userQuestion,
       sourceSql: data.sql,
       sourceTableName,
@@ -5841,7 +5851,13 @@ const renderChart = (data, type) => {
         trigger: 'axis',
         axisPointer: { type: 'shadow' }
       },
-      grid: { left: 72, right: 24, top: 32, bottom: shouldUseZoom ? 110 : 92 },
+      grid: {
+        left: 64,
+        right: 18,
+        top: 18,
+        bottom: shouldUseZoom ? 78 : 48,
+        containLabel: true
+      },
       xAxis: {
         type: 'category',
         data: xAxisData,
@@ -5907,6 +5923,22 @@ const renderChart = (data, type) => {
   }
   instance.setOption(option, { notMerge: true, lazyUpdate: false })
   instance.resize()
+}
+
+const changeLastAnalysisChartType = (type) => {
+  const nextType = String(type || '').toLowerCase()
+  if (!chartTypeSwitchOptions.some(option => option.value === nextType)) return
+  if (!lastAnalysis.value?.data?.length) return
+  const recommendedType = lastAnalysis.value.recommendedChartType || lastAnalysis.value.aiRecommendedChartType || lastAnalysis.value.chartType || currentChartType.value
+  currentChartType.value = nextType
+  lastAnalysis.value = {
+    ...lastAnalysis.value,
+    recommendedChartType: recommendedType,
+    chartType: nextType
+  }
+  nextTick(() => {
+    renderChart(lastAnalysis.value.data, nextType)
+  })
 }
 
 const applyLiveChartOptionTemplate = (baseOption, template) => {
@@ -6045,6 +6077,7 @@ provide('workbench', {
   recentChatQueries,
   messages,
   currentChartType,
+  chartTypeSwitchOptions,
   isLastAnalysisTable,
   lastAnalysisTableColumns,
   lastAnalysisTableRows,
@@ -6059,6 +6092,8 @@ provide('workbench', {
   placeholderStep,
   previewColumns,
   chartTypeLabel,
+  changeLastAnalysisChartType,
+  isAiRecommendedChartType,
   numericFields,
   dateFields,
   dimensionCandidateFields,

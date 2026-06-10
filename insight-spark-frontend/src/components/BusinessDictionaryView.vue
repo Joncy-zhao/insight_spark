@@ -1375,19 +1375,27 @@ watch(modelOptions, () => {
 <style scoped>
 .dictionary-layout {
   display: grid;
-  gap: 14px;
+  gap: 8px;
+  margin-top: -30px;
+  padding-top: 1px;
+}
+
+.dictionary-layout > .panel:first-child {
+  box-shadow:
+    inset 0 1px 0 #e5e7eb,
+    0 1px 2px rgba(15, 23, 42, 0.04);
 }
 
 .selector-row {
-  margin-top: 10px;
+  margin-top: 6px;
 }
 
 .filter-row {
-  margin-top: 10px;
+  margin-top: 8px;
 }
 
 .tips-row {
-  margin-top: 10px;
+  margin-top: 8px;
 }
 
 .enterprise-panel {

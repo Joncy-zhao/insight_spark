@@ -15,7 +15,13 @@
               <div class="chat-filter-grid">
                 <div class="chat-filter-field">
                   <div class="chat-datasource-label">
-                    <el-icon><DataBoard /></el-icon>
+                    <span class="chat-datasource-database-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" focusable="false">
+                        <ellipse cx="12" cy="5" rx="7" ry="3"></ellipse>
+                        <path d="M5 5v6c0 1.66 3.13 3 7 3s7-1.34 7-3V5"></path>
+                        <path d="M5 11v6c0 1.66 3.13 3 7 3s7-1.34 7-3v-6"></path>
+                      </svg>
+                    </span>
                     <span>数据源</span>
                   </div>
                   <el-select
@@ -547,12 +553,35 @@
             </div>
 
             <div v-if="lastAnalysis && !isLastAnalysisTable" class="chart-control-bar">
-              <div v-if="currentChartType" class="chart-control-item">
-                <el-icon><TrendCharts /></el-icon>
-                <span>图表类型：</span>
-                <strong>{{ chartTypeLabel }}</strong>
-                <el-icon class="chart-control-chevron"><ArrowRightBold /></el-icon>
-              </div>
+              <el-select
+                  v-if="currentChartType"
+                  :model-value="currentChartType"
+                  class="chart-control-select chart-type-select"
+                  popper-class="chart-control-select-popper"
+                  @change="changeLastAnalysisChartType"
+              >
+                <template #prefix>
+                  <el-icon><TrendCharts /></el-icon>
+                  <span class="chart-control-select-label">图表类型：</span>
+                </template>
+                <template #label="{ label, value }">
+                  <span class="chart-type-selected-label">
+                    <span>{{ label }}</span>
+                    <span v-if="isAiRecommendedChartType(value)" class="chart-type-recommend-pill chart-type-recommend-pill--current">AI推荐</span>
+                  </span>
+                </template>
+                <el-option
+                    v-for="option in chartTypeSwitchOptions"
+                    :key="option.value"
+                    :label="option.label"
+                    :value="option.value"
+                >
+                  <span class="chart-type-option">
+                    <span>{{ option.label }}</span>
+                    <span v-if="isAiRecommendedChartType(option.value)" class="chart-type-recommend-pill">AI推荐</span>
+                  </span>
+                </el-option>
+              </el-select>
               <el-select
                   v-model="chartSortMode"
                   class="chart-control-select"
@@ -569,8 +598,55 @@
               </el-select>
             </div>
 
-            <div v-show="!isLastAnalysisTable" id="echarts-container" class="chart-canvas" @mousedown.stop @touchstart.stop @pointerdown.stop></div>
-            <div v-if="isLastAnalysisTable" class="analysis-table-wrap">
+            <div v-if="!lastAnalysis" class="chart-empty-state">
+              <img class="chart-empty-illustration" :src="noImageIllustration" alt="暂无图表" />
+              <h3>暂未生成图表</h3>
+              <p>请先在左侧输入分析问题，系统将为你生成图表与结果说明</p>
+              <div class="chart-empty-guide">
+                <div class="chart-empty-guide-title">
+                  <el-icon><QuestionFilled /></el-icon>
+                  <span>你可以这样开始</span>
+                </div>
+                <div class="chart-empty-guide-steps">
+                  <div class="chart-empty-guide-step">
+                    <span class="chart-empty-guide-index">1</span>
+                    <span class="chart-empty-guide-icon chart-empty-guide-icon--database" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" focusable="false">
+                        <ellipse cx="12" cy="5" rx="7" ry="3"></ellipse>
+                        <path d="M5 5v6c0 1.66 3.13 3 7 3s7-1.34 7-3V5"></path>
+                        <path d="M5 11v6c0 1.66 3.13 3 7 3s7-1.34 7-3v-6"></path>
+                      </svg>
+                    </span>
+                    <span class="chart-empty-guide-copy">
+                      <strong>选择数据源</strong>
+                      <small>选择要分析的数据范围</small>
+                    </span>
+                  </div>
+                  <div class="chart-empty-guide-step">
+                    <span class="chart-empty-guide-index">2</span>
+                    <span class="chart-empty-guide-icon">
+                      <el-icon><Box /></el-icon>
+                    </span>
+                    <span class="chart-empty-guide-copy">
+                      <strong>选择业务模型</strong>
+                      <small>选择合适的业务模型</small>
+                    </span>
+                  </div>
+                  <div class="chart-empty-guide-step">
+                    <span class="chart-empty-guide-index">3</span>
+                    <span class="chart-empty-guide-icon">
+                      <el-icon><Edit /></el-icon>
+                    </span>
+                    <span class="chart-empty-guide-copy">
+                      <strong>输入分析问题</strong>
+                      <small>用自然语言描述问题</small>
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div v-show="lastAnalysis && !isLastAnalysisTable" id="echarts-container" class="chart-canvas" @mousedown.stop @touchstart.stop @pointerdown.stop></div>
+            <div v-if="lastAnalysis && isLastAnalysisTable" class="analysis-table-wrap">
               <el-table
                   :data="lastAnalysisTableRows"
                   border
@@ -1878,6 +1954,7 @@ import BusinessDictionaryView from '../../components/BusinessDictionaryView.vue'
 import AdvancedAnalysisCard from '../../components/AdvancedAnalysisCard.vue'
 import chatQueryAvatar from '../../assets/chat-query-avatar.png'
 import chatPeopleAvatar from '../../assets/chat-people.png'
+import noImageIllustration from '../../assets/no_image.png'
 import {
   explainAdvancedAnalysisResult,
   fetchAdvancedAnalysisFieldMeta,
@@ -1917,6 +1994,9 @@ const {
   auditRiskLevel,
   body,
   chartTypeLabel,
+  chartTypeSwitchOptions,
+  changeLastAnalysisChartType,
+  isAiRecommendedChartType,
   chartSortMode,
   chartAnimationMeta,
   chatDom,
@@ -5939,7 +6019,156 @@ onBeforeUnmount(() => {
 .chart-control-select :deep(.el-select__selected-item) {
   color: #1f2937;
   font-size: 14px;
+  font-weight: 500;
+}
+.chart-type-selected-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.chart-type-option {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.chart-type-recommend-pill {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 999px;
+  background: #f3f4f6;
+  color: #9ca3af;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 600;
+}
+.chart-type-recommend-pill--current {
+  padding: 1px 7px;
+  font-size: 11px;
+  line-height: 16px;
+}
+.chart-empty-state {
+  min-height: 520px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  padding: 38px 24px 34px;
+  border: 1px solid #edf2f7;
+  border-radius: 8px;
+  background: #ffffff;
+  text-align: center;
+}
+.chart-empty-illustration {
+  width: min(360px, 78%);
+  height: auto;
+  display: block;
+  margin: 38px auto 14px;
+}
+.chart-empty-state h3 {
+  margin: 0;
+  color: #303133;
+  font-size: 18px;
+  line-height: 26px;
   font-weight: 700;
+}
+.chart-empty-state p {
+  max-width: 420px;
+  margin: 8px 0 0;
+  color: #909399;
+  font-size: 14px;
+  line-height: 22px;
+}
+.chart-empty-guide {
+  width: min(680px, 100%);
+  margin-top: 42px;
+  padding: 14px 16px 16px;
+  border: 1px solid rgba(226, 232, 240, 0.58);
+  border-radius: 8px;
+  background: rgba(248, 251, 255, 0.62);
+  box-shadow: none;
+  text-align: left;
+}
+.chart-empty-guide-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #1f2937;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 700;
+}
+.chart-empty-guide-title .el-icon {
+  color: #3b82f6;
+  font-size: 17px;
+}
+.chart-empty-guide-steps {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+.chart-empty-guide-step {
+  min-height: 62px;
+  display: grid;
+  grid-template-columns: 32px 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid rgba(226, 232, 240, 0.72);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+}
+.chart-empty-guide-index {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: #edf4ff;
+  color: #2563eb;
+  font-size: 14px;
+  font-weight: 700;
+}
+.chart-empty-guide-icon {
+  color: #3b82f6;
+  font-size: 24px;
+  line-height: 1;
+}
+.chart-empty-guide-icon--database svg {
+  width: 24px;
+  height: 24px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.chart-empty-guide-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.chart-empty-guide-copy strong {
+  color: #111827;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 700;
+}
+.chart-empty-guide-copy small {
+  color: #8a94a6;
+  font-size: 12px;
+  line-height: 18px;
+}
+.chart-canvas {
+  width: 100%;
+  height: 360px;
+  min-height: 360px;
+  margin-top: 4px;
 }
 .pin-dialog-hint {
   margin: 0 0 12px;
@@ -5989,6 +6218,24 @@ onBeforeUnmount(() => {
 .chat-datasource-label .el-icon {
   color: #2f7df6;
   font-size: 18px;
+}
+.chat-datasource-database-icon {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #2f7df6;
+}
+.chat-datasource-database-icon svg {
+  width: 20px;
+  height: 20px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .chat-toolbar-select {
   width: 100%;
@@ -7337,7 +7584,7 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 .analysis-meta {
-  margin-top: 12px;
+  margin-top: -34px;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
   background: #fff;
