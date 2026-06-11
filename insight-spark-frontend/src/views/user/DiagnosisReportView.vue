@@ -35,23 +35,26 @@
       <el-tag type="info" effect="dark">GraphRAG + Neo4j</el-tag>
     </div>
 
-    <el-form label-position="top" class="generator-form">
-      <el-form-item label="报告详细程度" class="config-field field-detail-level">
+    <div class="generator-form">
+      <div class="form-block config-field field-detail-level">
+        <label class="form-block-label">报告详细程度</label>
         <el-radio-group v-model="reportGenerateForm.detailLevel" class="report-detail-toggle">
           <el-radio label="simple">简易</el-radio>
           <el-radio label="detailed">详细</el-radio>
         </el-radio-group>
-      </el-form-item>
+      </div>
 
-      <el-form-item label="异常类型" class="config-field field-anomaly-type">
+      <div class="form-block config-field field-anomaly-type">
+        <label class="form-block-label">异常类型</label>
         <el-select v-model="reportGenerateForm.anomalyType" class="full-width">
           <el-option label="波动异常" value="fluctuation" />
           <el-option label="结构异常" value="structure" />
           <el-option label="趋势异常" value="trend" />
         </el-select>
-      </el-form-item>
+      </div>
 
-      <el-form-item label="诊断数据表" class="config-field field-data-table">
+      <div class="form-block config-field field-data-table">
+        <label class="form-block-label">诊断数据表</label>
         <el-select v-model="selectedTableName" placeholder="选择数据源" class="full-width" filterable>
           <el-option-group v-if="uploadTables?.length" label="上传数据表">
             <el-option v-for="table in uploadTables" :key="table.tableName" :label="table.displayName" :value="table.tableName" />
@@ -60,9 +63,10 @@
             <el-option v-for="table in officialQueryTables" :key="table.tableName" :label="table.displayName" :value="table.tableName" />
           </el-option-group>
         </el-select>
-      </el-form-item>
+      </div>
 
-      <el-form-item label="指标字段" class="config-field field-metric">
+      <div class="form-block config-field field-metric">
+        <label class="form-block-label">指标字段</label>
         <el-select v-model="diagnosisForm.metricField" placeholder="选择数值指标" class="full-width">
           <el-option
             v-for="field in numericFields"
@@ -71,9 +75,10 @@
             :value="field.columnName"
           />
         </el-select>
-      </el-form-item>
+      </div>
 
-      <el-form-item label="维度字段" class="config-field field-dimension">
+      <div class="form-block config-field field-dimension">
+        <label class="form-block-label">维度字段</label>
         <el-select v-model="diagnosisForm.dimensionFields" multiple placeholder="选择拆解维度" class="full-width">
           <el-option
             v-for="field in dimensionCandidateFields"
@@ -82,9 +87,10 @@
             :value="field.columnName"
           />
         </el-select>
-      </el-form-item>
+      </div>
 
-      <el-form-item label="时间字段" class="config-field field-time">
+      <div class="form-block config-field field-time">
+        <label class="form-block-label">时间字段</label>
         <el-select v-model="diagnosisForm.timeField" placeholder="可选" clearable class="full-width">
           <el-option
             v-for="field in dateFields"
@@ -93,23 +99,26 @@
             :value="field.columnName"
           />
         </el-select>
-      </el-form-item>
+      </div>
 
-      <el-form-item label="导出内容配置" class="config-field field-export-options">
+      <div class="form-block config-field field-export-options">
+        <label class="form-block-label">导出内容配置</label>
         <div class="export-options">
           <el-checkbox v-model="exportOptions.includeSnapshots">包含图表快照</el-checkbox>
           <el-checkbox v-model="exportOptions.includeReasoningLogs">包含推理日志</el-checkbox>
         </div>
-      </el-form-item>
+      </div>
 
-      <el-form-item label="PDF 加密设置" class="config-field field-pdf-encryption">
+      <div class="form-block config-field field-pdf-encryption">
+        <label class="form-block-label">PDF 加密设置</label>
         <div class="pdf-encryption-row">
           <el-switch v-model="exportOptions.enablePdfEncryption" />
           <span>启用密码保护</span>
         </div>
-      </el-form-item>
+      </div>
 
-      <el-form-item label="企业内部文档 / 行业研报" class="full-row-field">
+      <div class="form-block full-row-field">
+        <label class="form-block-label">企业内部文档 / 行业研报</label>
         <div class="knowledge-upload-panel">
           <div class="knowledge-upload-row">
             <el-upload
@@ -141,9 +150,9 @@
             </div>
           </div>
         </div>
-      </el-form-item>
+      </div>
 
-    </el-form>
+    </div>
 
   </div>
 
@@ -229,10 +238,10 @@
           <div class="summary-box">
             <strong>关键异常节点</strong>
             <el-table :data="anomalyNodeRows" size="small" border empty-text="暂无异常节点">
-              <el-table-column prop="time" label="日期/窗口" min-width="130" show-overflow-tooltip />
+              <el-table-column prop="time" label="日期/窗口" min-width="130" :show-overflow-tooltip="reportTooltipConfig" />
               <el-table-column prop="valueLabel" label="指标值" width="130" />
-              <el-table-column prop="type" label="类型" min-width="160" show-overflow-tooltip />
-              <el-table-column prop="reason" label="说明" min-width="140" show-overflow-tooltip />
+              <el-table-column prop="type" label="类型" min-width="160" :show-overflow-tooltip="reportTooltipConfig" />
+              <el-table-column prop="reason" label="说明" min-width="140" :show-overflow-tooltip="reportTooltipConfig" />
             </el-table>
           </div>
         </div>
@@ -243,12 +252,38 @@
           <div class="summary-box root-cause-box">
             <strong>根因定位</strong>
             <span class="box-caption">根因结论、业务维度拆解与改进建议。</span>
-            <el-table :data="currentDiagnosis.rootCauses || []" size="small" border empty-text="暂无根因假设">
-              <el-table-column prop="level" label="等级" width="80" />
-              <el-table-column prop="causeType" label="类型" min-width="140" />
-              <el-table-column prop="impactField" label="影响对象" min-width="110" />
-              <el-table-column prop="confidence" label="置信度" width="86" />
-              <el-table-column prop="evidence" label="证据" min-width="230" show-overflow-tooltip />
+            <el-table
+              class="root-cause-table"
+              :data="currentDiagnosis.rootCauses || []"
+              size="small"
+              border
+              empty-text="暂无根因假设"
+            >
+              <el-table-column type="expand" width="42">
+                <template #default="{ row }">
+                  <div class="root-cause-evidence-row">
+                    <span>证据说明</span>
+                    <p>{{ displayEvidenceText(row.evidence) }}</p>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column prop="level" label="等级" width="96">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="rootCauseLevelType(row.level)" effect="light">
+                    {{ row.level || 'MEDIUM' }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="causeType" label="类型" min-width="180" />
+              <el-table-column prop="impactField" label="影响对象" min-width="120" />
+              <el-table-column prop="confidence" label="置信度" width="130">
+                <template #default="{ row }">
+                  <div class="root-cause-confidence-cell">
+                    <span>{{ formatConfidence(row.confidence) }}</span>
+                    <el-progress :percentage="confidencePercent(row.confidence)" :show-text="false" />
+                  </div>
+                </template>
+              </el-table-column>
             </el-table>
           </div>
           <div class="recommendation-box">
@@ -269,7 +304,7 @@
         <el-table class="dimension-table" :data="dimensionBreakdownRows" size="small" border empty-text="暂无维度拆解">
           <el-table-column prop="scope" label="口径" width="130" />
           <el-table-column prop="dimension" label="业务维度" min-width="140" />
-          <el-table-column prop="factor" label="首要因子" min-width="160" show-overflow-tooltip />
+          <el-table-column prop="factor" label="首要因子" min-width="160" :show-overflow-tooltip="reportTooltipConfig" />
           <el-table-column prop="valueLabel" label="贡献值" width="150" />
           <el-table-column prop="ratioLabel" label="占比" width="110" />
         </el-table>
@@ -292,9 +327,9 @@
         <div v-if="detailDialogType === 'evidence'" class="tab-section dialog-tab-section">
             <h3>企业文档 / 行业研报证据</h3>
             <el-table :data="currentDiagnosis.docEvidence || []" border empty-text="暂无文档证据">
-              <el-table-column prop="label" label="文档" min-width="160" show-overflow-tooltip />
+              <el-table-column prop="label" label="文档" min-width="160" :show-overflow-tooltip="reportTooltipConfig" />
               <el-table-column prop="sourceType" label="类型" width="110" />
-              <el-table-column prop="content" label="命中片段" min-width="300" show-overflow-tooltip />
+              <el-table-column prop="content" label="命中片段" min-width="300" :show-overflow-tooltip="reportTooltipConfig" />
               <el-table-column prop="score" label="相关度" width="90" />
             </el-table>
             <h3>异常关联因素梳理</h3>
@@ -302,7 +337,7 @@
               <el-table-column prop="nodeType" label="类型" width="140" />
               <el-table-column prop="label" label="名称" min-width="160" />
               <el-table-column prop="sourceType" label="来源" width="100" />
-              <el-table-column prop="content" label="说明" min-width="260" show-overflow-tooltip />
+              <el-table-column prop="content" label="说明" min-width="260" :show-overflow-tooltip="reportTooltipConfig" />
             </el-table>
         </div>
 
@@ -311,8 +346,8 @@
             <el-table :data="currentDiagnosis.graphRagEvidenceChain || []" border empty-text="暂无 GraphRAG 证据链">
               <el-table-column prop="step" label="跳数" width="70" />
               <el-table-column prop="hopType" label="推理环节" width="150" />
-              <el-table-column prop="label" label="命中对象" min-width="160" show-overflow-tooltip />
-              <el-table-column prop="detail" label="证据说明" min-width="320" show-overflow-tooltip />
+              <el-table-column prop="label" label="命中对象" min-width="160" :show-overflow-tooltip="reportTooltipConfig" />
+              <el-table-column prop="detail" label="证据说明" min-width="320" :show-overflow-tooltip="reportTooltipConfig" />
               <el-table-column prop="confidence" label="置信度" width="90" />
             </el-table>
             <el-timeline class="reasoning-timeline">
@@ -360,22 +395,22 @@
               <el-empty v-else description="Neo4j 未返回真实图谱节点" :image-size="72" />
             </div>
             <el-table :data="realNeo4jEdges" border empty-text="Neo4j 未返回真实图谱边">
-              <el-table-column prop="fromKey" label="起点" min-width="220" show-overflow-tooltip />
+              <el-table-column prop="fromKey" label="起点" min-width="220" :show-overflow-tooltip="reportTooltipConfig" />
               <el-table-column prop="relationType" label="关系" width="120" />
-              <el-table-column prop="toKey" label="终点" min-width="220" show-overflow-tooltip />
+              <el-table-column prop="toKey" label="终点" min-width="220" :show-overflow-tooltip="reportTooltipConfig" />
               <el-table-column prop="weight" label="权重" width="90" />
             </el-table>
         </div>
 
         <div v-else-if="detailDialogType === 'snapshot'" class="tab-section dialog-tab-section">
             <div class="diagnosis-attachment-panel">
-              <div class="snapshot-frame" :class="{ clickable: chartSnapshot?.imageDataUrl }" @click="chartSnapshot?.imageDataUrl && restoreDiagnosisBinding(currentDiagnosis)">
+              <div class="snapshot-frame" :class="{ clickable: canRestoreCurrentDiagnosisBinding }" @click="canRestoreCurrentDiagnosisBinding && restoreDiagnosisBinding(currentDiagnosis)">
                 <div class="snapshot-titlebar">
                   <div>
                     <strong>{{ chartSnapshot?.title || '诊断图表快照' }}</strong>
                     <span>{{ chartSnapshotMeta }}</span>
                   </div>
-                  <el-button v-if="chartSnapshot?.imageDataUrl" link type="primary" @click.stop="restoreDiagnosisBinding(currentDiagnosis)">点击回溯</el-button>
+                  <el-button v-if="canRestoreCurrentDiagnosisBinding" link type="primary" @click.stop="restoreDiagnosisBinding(currentDiagnosis)">点击回溯</el-button>
                 </div>
                 <div class="snapshot-image-box">
                   <img v-if="chartSnapshot?.imageDataUrl" :src="chartSnapshot.imageDataUrl" alt="诊断报告绑定图表快照" />
@@ -388,10 +423,10 @@
                   <span>{{ factorChartRows.length }} 个分析块</span>
                 </div>
                 <el-table :data="factorChartRows" border empty-text="暂无关联因素图表块">
-                  <el-table-column prop="title" label="图表块" min-width="220" show-overflow-tooltip />
+                  <el-table-column prop="title" label="图表块" min-width="220" :show-overflow-tooltip="reportTooltipConfig" />
                   <el-table-column prop="chartTypeLabel" label="类型" width="110" />
                   <el-table-column prop="dataCount" label="数据点" width="90" />
-                  <el-table-column prop="topFactor" label="首要因素" min-width="180" show-overflow-tooltip />
+                  <el-table-column prop="topFactor" label="首要因素" min-width="180" :show-overflow-tooltip="reportTooltipConfig" />
                 </el-table>
               </div>
             </div>
@@ -405,7 +440,7 @@
                 :prop="column.prop"
                 :label="column.label"
                 min-width="130"
-                show-overflow-tooltip
+                :show-overflow-tooltip="reportTooltipConfig"
               />
             </el-table>
         </div>
@@ -416,7 +451,7 @@
               <el-descriptions-item label="时间字段">{{ currentDiagnosis.timeFieldLabel || currentDiagnosis.timeField || '未选择' }}</el-descriptions-item>
               <el-descriptions-item label="维度字段">{{ normalizedDimensionLabels.join('、') || '未选择' }}</el-descriptions-item>
               <el-descriptions-item label="异常类型">{{ currentDiagnosis.anomalyType || diagnosisForm.anomalyType }}</el-descriptions-item>
-              <el-descriptions-item label="报告详细程度">{{ currentDiagnosis.detailLevel || diagnosisForm.detailLevel }}</el-descriptions-item>
+              <el-descriptions-item label="报告详细程度">{{ detailLevelLabel(currentDiagnosis.detailLevel || diagnosisForm.detailLevel) }}</el-descriptions-item>
               <el-descriptions-item label="数据表">{{ currentDiagnosis.tableName || selectedTableName }}</el-descriptions-item>
             </el-descriptions>
             <h3>业务字段</h3>
@@ -498,29 +533,29 @@
     <el-table
       class="report-history-table"
       :data="pagedDiagnosisReports"
-      height="300"
+      max-height="360"
       size="small"
       empty-text="暂无历史报告"
       @row-click="loadDiagnosisReportDetail"
       @selection-change="handleReportSelectionChange"
     >
-      <el-table-column prop="title" label="报告名称" min-width="210" show-overflow-tooltip />
-      <el-table-column label="指标字段" min-width="120" show-overflow-tooltip>
+      <el-table-column prop="title" label="报告名称" min-width="210" :show-overflow-tooltip="reportTooltipConfig" />
+      <el-table-column label="指标字段" min-width="120" :show-overflow-tooltip="reportTooltipConfig">
         <template #default="{ row }">
           <span :title="row.metricField">{{ reportMetricLabel(row) }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="异常类型" min-width="110" show-overflow-tooltip>
+      <el-table-column label="异常类型" min-width="110" :show-overflow-tooltip="reportTooltipConfig">
         <template #default="{ row }">
           <span>{{ anomalyTypeLabel(row.anomalyType) }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="数据表" min-width="130" show-overflow-tooltip>
+      <el-table-column label="数据表" min-width="130" :show-overflow-tooltip="reportTooltipConfig">
         <template #default="{ row }">
           <span>{{ row.tableDisplayName || row.tableName || '-' }}</span>
         </template>
       </el-table-column>
-      <el-table-column prop="createdAt" label="生成时间" min-width="160" show-overflow-tooltip />
+      <el-table-column prop="createdAt" label="生成时间" min-width="160" :show-overflow-tooltip="reportTooltipConfig" />
       <el-table-column label="状态" width="96" align="center">
         <template #default="{ row }">
           <el-tag size="small" :type="reportStatus(row).type">{{ reportStatus(row).label }}</el-tag>
@@ -584,7 +619,7 @@
             </table>
             <div v-else-if="block.type === 'caption'" class="figure-caption">{{ block.text }}</div>
             <div v-else-if="block.type === 'evidence'" class="evidence-block" v-html="block.html"></div>
-            <button v-else-if="block.type === 'chart-link'" class="report-chart-link" type="button" @click="restoreDiagnosisBinding(currentDiagnosis)">
+            <button v-else-if="block.type === 'chart-link' && canRestoreCurrentDiagnosisBinding" class="report-chart-link" type="button" @click="restoreDiagnosisBinding(currentDiagnosis)">
               {{ block.text }}
             </button>
             <ul v-else-if="block.type === 'list'" class="report-list">
@@ -697,7 +732,7 @@ import {
 } from '@element-plus/icons-vue'
 import html2canvas from 'html2canvas'
 import { jsPDF } from 'jspdf'
-import { http } from '../../api/http'
+import { API_BASE, http } from '../../api/http'
 
 const {
   activeModule,
@@ -735,6 +770,11 @@ const previewFullscreenVisible = ref(false)
 const regenerateDialogVisible = ref(false)
 const reportPaperRef = ref(null)
 const exportPaperRef = ref(null)
+const reportTooltipConfig = {
+  popperClass: 'diagnosis-report-tooltip',
+  placement: 'top',
+  showAfter: 250
+}
 const reportFilter = ref({ type: '', anomaly: '' })
 const historyPage = ref(1)
 const historyPageSize = ref(10)
@@ -847,6 +887,10 @@ const detailLevelLabel = (value) => {
   return value || '-'
 }
 
+const reportDetailLevel = computed(() => currentDiagnosis.value?.detailLevel || diagnosisForm.value.detailLevel || 'detailed')
+const isSimpleReport = computed(() => reportDetailLevel.value === 'simple')
+const romanSection = (value) => ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X'][Math.max(0, value - 1)] || String(value)
+
 const anomalyTypeLabel = (value) => {
   const map = {
     fluctuation: '波动异常',
@@ -923,6 +967,25 @@ const chartSnapshot = computed(() => {
     return null
   }
 })
+
+const parseMaybeJson = (value) => {
+  if (!value || typeof value !== 'string') return value
+  try {
+    return JSON.parse(value)
+  } catch {
+    return null
+  }
+}
+
+const diagnosisBindingRoute = (report = currentDiagnosis.value) => {
+  const binding = parseReportBinding(report || {})
+  const snapshot = chartSnapshot.value || parseMaybeJson(report?.chartSnapshot) || binding.chartSnapshot || {}
+  return String(binding.route || snapshot.sourceRoute || '').trim().toLowerCase()
+}
+
+const canRestoreCurrentDiagnosisBinding = computed(() =>
+  ['chat', 'dashboard'].includes(diagnosisBindingRoute(currentDiagnosis.value))
+)
 
 const selectedKnowledgeDocNames = computed(() => {
   const pendingFiles = [
@@ -1221,6 +1284,68 @@ const cleanInlineMarkdown = (value) => String(value || '')
   .replace(/`([^`]+)`/g, '$1')
   .replace(/\[([^\]]+)]\([^)]+\)/g, '$1')
 
+const displayEvidenceText = (value) => {
+  const text = cleanInlineMarkdown(value || '暂无补充证据说明。')
+    .replace(/#{1,6}\s*/g, '')
+    .replace(/\s*[-*]\s+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return text || '暂无补充证据说明。'
+}
+
+const limitReportText = (value, maxLength = 320) => {
+  const text = displayEvidenceText(value)
+  if (text.length <= maxLength) return text
+  return `${text.slice(0, Math.max(0, maxLength - 1)).trim()}。`
+}
+
+const firstEvidenceSentence = (value) => {
+  const text = displayEvidenceText(value)
+    .replace(/证据：(?=《).*/, '')
+    .replace(/《[^》]+》/g, '')
+    .trim()
+  if (!text) return ''
+  const ends = ['。', '；', ';']
+    .map(separator => text.indexOf(separator))
+    .filter(index => index >= 0)
+  const end = ends.length ? Math.min(...ends) : -1
+  return limitReportText(end >= 0 ? text.slice(0, end + 1) : text, 140)
+}
+
+const addEvidenceSignal = (signals, text, pattern, label) => {
+  if (pattern.test(text) && !signals.includes(label)) signals.push(label)
+}
+
+const evidenceReportSummary = (cause = {}, metricLabel = '指标') => {
+  const rawEvidence = displayEvidenceText(cause.evidence || '')
+  const causeType = displayEvidenceText(cause.causeType || '根因假设')
+  const impactField = displayEvidenceText(cause.impactField || metricLabel)
+  if (!rawEvidence || rawEvidence === '暂无补充证据说明。') {
+    return '关键证据：当前证据链未命中文档原文，结论主要依据异常节点、维度贡献和图谱关系综合评估。建议补充业务复盘材料后重新核验。'
+  }
+
+  const signals = []
+  addEvidenceSignal(signals, rawEvidence, /供应链|补货|SKU|库存|仓配/, '供应链补货、区域库存或 SKU 可得性')
+  addEvidenceSignal(signals, rawEvidence, /满减|促销|折扣|活动|大促|价格策略/, '促销退坡、价格策略或活动状态变化')
+  addEvidenceSignal(signals, rawEvidence, /企业客户|审批|采购节奏|大客户/, '企业客户审批节奏和采购周期')
+  addEvidenceSignal(signals, rawEvidence, /渠道|转化率|线上|直营|经销/, '渠道结构及转化率波动')
+  addEvidenceSignal(signals, rawEvidence, /物流|调拨|时效|退款|取消/, '物流时效、跨区调拨或履约体验')
+
+  const context = firstEvidenceSentence(rawEvidence)
+  let summary = '关键证据：'
+  if (context) {
+    summary += context
+    if (!/[。；;]$/.test(context)) summary += '。'
+  } else {
+    summary += `证据链显示「${causeType}」与「${impactField}」存在关联。`
+  }
+  summary += signals.length
+    ? `文档证据集中指向${signals.join('、')}等影响因素。`
+    : '文档证据与异常节点、维度贡献结果方向一致。'
+  summary += '建议优先核验对应日期窗口内的业务口径、运营配置和关键订单记录。'
+  return limitReportText(summary, 320)
+}
+
 const renderInlineMarkdown = (value) => escapeHtml(String(value || ''))
   .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')
   .replace(/__(.*?)__/g, '<b>$1</b>')
@@ -1267,9 +1392,10 @@ const reportArticle = computed(() => {
     : `当前未形成单一收敛根因，系统将结论标定为「${escapeHtml(rootCauseName)}」。`
   const dimensionChain = dimensions.join('/') || '未选择维度字段'
   const confidenceBands = confidenceBandText(rootCauses)
+  const simple = isSimpleReport.value
   const article = {
     docType: 'Diagnostic Analysis Report | Insight Spark System',
-    title: '基于 GraphRAG 的多跳关联推理与业务指标异常归因分析',
+    title: simple ? '业务指标异常诊断简报' : '基于 GraphRAG 的多跳关联推理与业务指标异常归因分析',
     subtitleHtml: `—— 以数据集 <span class="code-inline">${escapeHtml(tableName)}</span> ${escapeHtml(metricLabel)}指标为例`,
     authorsHtml: `自动生成环境: 智能诊断引擎 (Build: 2026.05) <br>诊断时间: ${escapeHtml(createdAt)}`,
     blocks
@@ -1278,7 +1404,7 @@ const reportArticle = computed(() => {
   blocks.push({
     type: 'abstract',
     html: `<span class="abstract-title">Abstract / 诊断摘要：</span>
-        本次分析围绕核心业务指标「${escapeHtml(metricLabel)}」展开。系统在有效观测区间内提取了 ${formatInteger(stats.count || rawDataRows.value.length)} 条样本记录进行异常扫描。统计结果显示，样本总计数值为 ${formatReportValue(stats.total)}，均值 (<span class="math">μ</span>) 为 ${formatReportValue(stats.avg)}，区间极值分别为 <span class="math">Max</span> = ${formatReportValue(stats.max)} 与 <span class="math">Min</span> = ${formatReportValue(stats.min)}。通过统计算法，系统识别出 ${markers.length} 个具备统计学显著性的异常节点。为探究异常机制，系统引入 GraphRAG（Graph Retrieval-Augmented Generation）技术，融合业务维度拆解、时序窗口回溯与 Neo4j 知识图谱（涉及 ${graphNodes.length} 个节点与 ${graphEdges.length} 条边），${rootCauseConclusion}本文档详细记录了数据特征、多跳推理路径及多维度异质性分析结果。`
+        本次分析围绕核心业务指标「${escapeHtml(metricLabel)}」展开。系统在有效观测区间内提取了 ${formatInteger(stats.count || rawDataRows.value.length)} 条样本记录进行异常扫描，识别出 ${markers.length} 个显著异常节点。统计结果显示，样本总计数值为 ${formatReportValue(stats.total)}，均值 (<span class="math">μ</span>) 为 ${formatReportValue(stats.avg)}，区间极值分别为 <span class="math">Max</span> = ${formatReportValue(stats.max)} 与 <span class="math">Min</span> = ${formatReportValue(stats.min)}。系统融合 GraphRAG、Neo4j 知识图谱与文档证据（涉及 ${graphNodes.length} 个节点与 ${graphEdges.length} 条边），${rootCauseConclusion}${simple ? '本文档聚焦异常结论、关键证据与处置建议。' : '本文档详细记录了数据特征、多跳推理路径及多维度异质性分析结果。'}`
   })
 
   blocks.push({ type: 'h2', text: 'I. 描述性统计与异常检测 (Statistical Characteristics)' })
@@ -1306,6 +1432,10 @@ const reportArticle = computed(() => {
     type: 'evidence',
     html: buildEvidenceHtml(report)
   })
+  blocks.push({
+    type: 'evidence',
+    html: buildHistoricalEvidenceHtml(report)
+  })
 
   blocks.push({ type: 'h2', text: 'III. 归因定位与置信度评估 (Attribution Analysis)' })
   blocks.push({
@@ -1319,19 +1449,21 @@ const reportArticle = computed(() => {
     ]
   })
 
-  blocks.push({ type: 'h2', text: 'IV. 多维度异质性分析 (Multidimensional Heterogeneity)' })
-  blocks.push({
-    type: 'paragraph',
-    text: `为进一步剥离异常值的结构来源，本节对${dimensions.length ? `${dimensions.length} 大核心维度（${dimensions.join('、')}）` : '核心业务维度'}进行了下钻与贡献度拆解。表 II 优先展示异常节点子集贡献；当异常节点明细不足时，回退展示全样本贡献分布。`
-  })
-  blocks.push({
-    type: 'table',
-    headers: ['分析口径 (Scope)', '一阶维度 (Dimension)', '二阶因子 (Factor)', '贡献值 (Value)', '口径内占比 (Ratio)'].map(renderInlineMarkdown),
-    rows: buildReportTableRows(['一阶维度 (Dimension)'], buildDimensionTableRows(report, metricLabel))
-  })
-  blocks.push({ type: 'caption', text: '表 II. 核心业务维度贡献与相对比重拆解（优先异常节点口径）' })
+  if (!simple) {
+    blocks.push({ type: 'h2', text: 'IV. 多维度异质性分析 (Multidimensional Heterogeneity)' })
+    blocks.push({
+      type: 'paragraph',
+      text: `为进一步剥离异常值的结构来源，本节对${dimensions.length ? `${dimensions.length} 大核心维度（${dimensions.join('、')}）` : '核心业务维度'}进行了下钻与贡献度拆解。表 II 优先展示异常节点子集贡献；当异常节点明细不足时，回退展示全样本贡献分布。`
+    })
+    blocks.push({
+      type: 'table',
+      headers: ['分析口径 (Scope)', '一阶维度 (Dimension)', '二阶因子 (Factor)', '贡献值 (Value)', '口径内占比 (Ratio)'].map(renderInlineMarkdown),
+      rows: buildReportTableRows(['一阶维度 (Dimension)'], buildDimensionTableRows(report, metricLabel))
+    })
+    blocks.push({ type: 'caption', text: '表 II. 核心业务维度贡献与相对比重拆解（优先异常节点口径）' })
+  }
 
-  blocks.push({ type: 'h2', text: 'V. 结论与对策建议 (Conclusion & Recommendations)' })
+  blocks.push({ type: 'h2', text: `${simple ? 'IV' : 'V'}. 结论与对策建议 (Conclusion & Recommendations)` })
   blocks.push({
     type: 'paragraph',
     text: '综上分析，本次指标异动具有显著的结构性与节点性特征。为防范潜在的业务连续性风险并优化数据观测模型，提出以下干预建议：'
@@ -1339,6 +1471,12 @@ const reportArticle = computed(() => {
   blocks.push({
     type: 'list',
     htmlItems: suggestions.length ? suggestions.map(item => escapeHtml(item)) : fallbackReportSuggestions(metricLabel, dimensions, timeLabel, report).map(item => escapeHtml(item))
+  })
+
+  blocks.push({ type: 'h2', text: `${simple ? 'V' : 'VI'}. 报告绑定与回溯说明 (Traceability Binding)` })
+  blocks.push({
+    type: 'paragraph',
+    text: buildTraceabilityText(report)
   })
 
   for (const block of reportTextBlocks.value) {
@@ -1356,8 +1494,10 @@ const exportArticle = computed(() => {
     ...reportArticle.value,
     blocks: [...(reportArticle.value.blocks || [])]
   }
+  let nextSection = isSimpleReport.value ? 6 : 7
   if (exportOptions.value.includeSnapshots && chartSnapshot.value?.imageDataUrl) {
-    article.blocks.push({ type: 'h2', text: 'VI. 图表快照 (Chart Snapshot)' })
+    article.blocks.push({ type: 'h2', text: `${romanSection(nextSection)}. 图表快照 (Chart Snapshot)` })
+    nextSection += 1
     article.blocks.push({
       type: 'paragraph',
       text: `本节附加诊断报告绑定的图表快照。图表类型为${chartTypeName(chartSnapshot.value.chartType)}，数据来源为${chartSnapshotSourceLabel(chartSnapshot.value)}，共包含 ${Array.isArray(chartSnapshot.value.data) ? chartSnapshot.value.data.length : rawDataRows.value.length} 个数据点，可用于回溯异常节点所在的原始对话或看板。`
@@ -1375,7 +1515,7 @@ const exportArticle = computed(() => {
       ? currentDiagnosis.value.reasoningLogs
       : diagnosisProgress.logs || []
     if (logs.length) {
-      article.blocks.push({ type: 'h2', text: 'VII. GraphRAG 推理日志 (Reasoning Logs)' })
+      article.blocks.push({ type: 'h2', text: `${romanSection(nextSection)}. GraphRAG 推理日志 (Reasoning Logs)` })
       article.blocks.push({
         type: 'table',
         headers: ['步骤 (Step)', '环节 (Stage)', '过程说明 (Detail)'].map(renderInlineMarkdown),
@@ -1385,7 +1525,7 @@ const exportArticle = computed(() => {
           escapeHtml(log.detail || '-')
         ]))
       })
-      article.blocks.push({ type: 'caption', text: '表 III. GraphRAG 多跳推理过程日志' })
+      article.blocks.push({ type: 'caption', text: `表 ${romanSection(nextSection)}. GraphRAG 多跳推理过程日志` })
     }
   }
   return article
@@ -1548,8 +1688,62 @@ const buildEvidenceHtml = (report) => {
   if (!evidence.length) {
     return '<b>检索证据缺失声明 (Corpus Absence Note)：</b><br>在 RAG 检索阶段，未命中可引用的企业内部复盘文档或外部行业研报。当前得出的根因结论高度依赖于底层统计波动特征与图谱结构的内生字段关系。建议管理层后续向知识库补充非结构化业务说明，以提升归因模型的鲁棒性。'
   }
-  const preview = evidence.slice(0, 2).map(item => `《${escapeHtml(item.label || item.source || '知识文档')}》${escapeHtml(item.content || item.text || '')}`).join('；')
-  return `<b>检索证据摘要 (Corpus Evidence Note)：</b><br>在 RAG 检索阶段，命中 ${evidence.length} 条企业内部复盘文档或外部行业研报。代表性证据包括：${preview}。`
+  const labels = [...new Set(evidence
+    .map(item => displayEvidenceText(item.label || item.source || '知识文档'))
+    .filter(Boolean))]
+    .slice(0, 3)
+    .map(label => `《${escapeHtml(label)}》`)
+    .join('、')
+  const text = evidence.map(item => displayEvidenceText(item.content || item.text || item.preview || '')).join(' ')
+  const themes = []
+  addEvidenceSignal(themes, text, /供应链|补货|SKU|库存|仓配/, '供应链与库存可得性')
+  addEvidenceSignal(themes, text, /满减|促销|折扣|活动|大促|价格策略/, '促销退坡与价格策略变化')
+  addEvidenceSignal(themes, text, /企业客户|审批|采购节奏|大客户/, '企业客户采购审批节奏')
+  addEvidenceSignal(themes, text, /渠道|转化率|线上|直营|经销/, '渠道结构与转化率波动')
+  addEvidenceSignal(themes, text, /物流|调拨|时效|退款|取消/, '物流履约与跨区调拨')
+  const sourceText = labels || '企业内部复盘文档或外部行业研报'
+  const themeText = themes.length ? themes.join('、') : '异常节点、维度贡献和图谱关系'
+  return `<b>检索证据摘要 (Corpus Evidence Note)：</b><br>在 RAG 检索阶段，命中 ${evidence.length} 条企业内部复盘文档或外部行业研报，来源覆盖 ${sourceText}。证据主题集中在${escapeHtml(themeText)}，系统已将其纳入根因假设排序、置信度评估与建议动作生成。`
+}
+
+const buildHistoricalEvidenceHtml = (report) => {
+  const histories = Array.isArray(report.historicalSimilarReports) ? report.historicalSimilarReports : []
+  if (!histories.length) {
+    return '<b>历史相似诊断召回：</b><br>当前未命中满足相似度阈值的历史诊断报告，后续报告累积后可用于异常模式复盘。'
+  }
+  const rows = histories.slice(0, 3).map(item => {
+    const score = Number(item.score)
+    const scoreText = Number.isFinite(score) ? score.toFixed(2) : '-'
+    return `《${escapeHtml(item.title || '历史诊断报告')}》（相似度 ${scoreText}）：${escapeHtml(item.matchReason || '诊断上下文相近')}；历史根因：${escapeHtml(item.rootCause || '-')}`
+  }).join('<br>')
+  return `<b>历史相似诊断召回：</b><br>系统命中 ${histories.length} 份历史诊断报告，用于对比异常模式、根因结论和建议动作。<br>${rows}`
+}
+
+const parseReportBinding = (report = {}) => {
+  const raw = report.bindingJson || report.binding
+  if (!raw) return {}
+  if (typeof raw === 'object') return raw
+  try {
+    return JSON.parse(raw)
+  } catch (error) {
+    return {}
+  }
+}
+
+const buildTraceabilityText = (report = {}) => {
+  const binding = parseReportBinding(report)
+  const snapshot = chartSnapshot.value || report.chartSnapshot || binding.chartSnapshot || {}
+  const route = diagnosisBindingRoute(report) || 'diagnosis'
+  const routeLabel = route === 'dashboard' ? '看板页面' : (route === 'chat' ? '对话查询页面' : '智能诊断报告页面')
+  const tableName = report.tableName || binding.tableName || selectedTableName.value || '当前数据表'
+  const chartType = snapshot.chartType ? chartTypeName(snapshot.chartType) : '诊断图表'
+  const dashboardName = binding.dashboardName || snapshot.dashboardName || ''
+  const cardTitle = binding.cardTitle || snapshot.cardTitle || snapshot.title || ''
+  const rowCount = rawDataRows.value.length || (Array.isArray(binding.rawDataRows) ? binding.rawDataRows.length : 0)
+  const sourceText = dashboardName || cardTitle
+    ? `来源为「${[dashboardName, cardTitle].filter(Boolean).join(' / ')}」`
+    : `来源为「${routeLabel}」`
+  return `本报告已绑定原始数据表「${tableName}」、诊断生成时的图表快照和原始数据明细，图表类型为${chartType}，${sourceText}。当前报告保留 ${rowCount || 0} 条原始数据明细用于回溯。在线预览中点击图表快照或图表回溯入口，可定位至对应的${routeLabel}；导出的 PDF/Word 文件保留上述绑定信息，便于会议汇报和离线存档时追溯来源。`
 }
 
 const evidenceFingerprint = (item) => `${item.label || item.source || ''}|${String(item.content || item.text || '')
@@ -1620,7 +1814,7 @@ const attributionListHtml = (cause, metricLabel) => {
   const level = escapeHtml(cause.level || 'MEDIUM')
   const type = escapeHtml(cause.causeType || '根因假设')
   const impact = escapeHtml(cause.impactField || metricLabel)
-  const evidence = escapeHtml(cause.evidence || '')
+  const evidence = escapeHtml(evidenceReportSummary(cause, metricLabel))
   return `<b>[置信度: ${confidence} / ${level}] ${type}：</b> 主要影响对象为「${impact}」。${evidence}`
 }
 
@@ -1650,6 +1844,20 @@ const formatPercent = (value) => {
 const formatConfidence = (value) => {
   const number = Number(value)
   return Number.isFinite(number) ? number.toFixed(2) : '-'
+}
+
+const confidencePercent = (value) => {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return 0
+  const normalized = number <= 1 ? number * 100 : number
+  return Math.max(0, Math.min(100, Math.round(normalized)))
+}
+
+const rootCauseLevelType = (level) => {
+  const text = String(level || '').toUpperCase()
+  if (text === 'HIGH') return 'danger'
+  if (text === 'LOW') return 'info'
+  return 'warning'
 }
 
 const deviationText = (value, avg) => {
@@ -1735,9 +1943,135 @@ const defaultExportOptions = () => ({
 })
 
 const runDiagnosisWithDetail = async () => {
+  if (!selectedTableName.value) {
+    ElMessage.warning('请先选择诊断数据表')
+    return
+  }
+  if (!diagnosisForm.value.metricField) {
+    ElMessage.warning('请选择指标字段')
+    return
+  }
   diagnosisForm.value.detailLevel = reportGenerateForm.value.detailLevel
   diagnosisForm.value.anomalyType = reportGenerateForm.value.anomalyType
-  await runDiagnosis()
+  diagnosisLoading.value = true
+  currentDiagnosis.value = null
+  diagnosisProgress.value = {
+    percentage: 3,
+    step: '任务接收',
+    logs: [{ step: 0, title: '任务接收', status: 'running', detail: '诊断报告生成请求已提交，等待后端确认。' }]
+  }
+  try {
+    const result = await runDiagnosisReportStream({
+      tableName: selectedTableName.value,
+      metricField: diagnosisForm.value.metricField,
+      dimensionFields: diagnosisForm.value.dimensionFields,
+      timeField: diagnosisForm.value.timeField || null,
+      detailLevel: diagnosisForm.value.detailLevel || 'detailed',
+      anomalyType: diagnosisForm.value.anomalyType || 'fluctuation'
+    })
+    if (!result) throw new Error('诊断报告生成完成事件缺失')
+    currentDiagnosis.value = result
+    applyDiagnosisStreamProgress({
+      percentage: 100,
+      step: '报告生成',
+      log: { step: 9, title: '报告生成', status: 'completed', detail: result.reportPersisted === false ? '诊断结果已生成（降级模式，未写入 Neo4j）。' : '诊断报告已生成并写入 Neo4j。' }
+    })
+    await loadDiagnosisReports()
+    ElMessage.success(result.reportPersisted === false ? '诊断结果已生成（降级模式）' : '诊断报告已生成')
+  } catch (error) {
+    ElMessage.error(error?.message || '诊断报告生成失败')
+  } finally {
+    diagnosisLoading.value = false
+  }
+}
+
+const runDiagnosisReportStream = async (payload) => {
+  const token = readDiagnosisAuthToken()
+  const response = await fetch(`${API_BASE}/api/diagnosis/run-stream`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    },
+    body: JSON.stringify(payload)
+  })
+  if (!response.ok || !response.body) {
+    throw new Error(`诊断流式接口请求失败：${response.status}`)
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  let result = null
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const frames = buffer.split(/\n\n/)
+    buffer = frames.pop() || ''
+    for (const frame of frames) {
+      const parsed = parseDiagnosisStreamFrame(frame)
+      if (!parsed) continue
+      if (parsed.event === 'progress') {
+        applyDiagnosisStreamProgress(parsed.data)
+      } else if (parsed.event === 'result') {
+        result = parsed.data
+      } else if (['complete', 'completed', 'done', 'FINISHED'].includes(parsed.event)) {
+        result = parsed.data?.result || parsed.data || result
+      } else if (parsed.event === 'error') {
+        throw new Error(parsed.data?.message || '诊断报告生成失败')
+      }
+    }
+  }
+  if (buffer.trim()) {
+    const parsed = parseDiagnosisStreamFrame(buffer)
+    if (parsed?.event === 'result') result = parsed.data
+    if (['complete', 'completed', 'done', 'FINISHED'].includes(parsed?.event)) {
+      result = parsed.data?.result || parsed.data || result
+    }
+    if (parsed?.event === 'error') throw new Error(parsed.data?.message || '诊断报告生成失败')
+  }
+  return result
+}
+
+const parseDiagnosisStreamFrame = (frame) => {
+  const lines = String(frame || '').split(/\r?\n/)
+  let event = 'message'
+  const dataLines = []
+  for (const line of lines) {
+    if (line.startsWith('event:')) event = line.slice(6).trim()
+    if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
+  }
+  if (!dataLines.length) return null
+  try {
+    return { event, data: JSON.parse(dataLines.join('\n')) }
+  } catch (error) {
+    return null
+  }
+}
+
+const applyDiagnosisStreamProgress = (event = {}) => {
+  const nextLog = event.log && typeof event.log === 'object' ? event.log : null
+  const logs = Array.isArray(diagnosisProgress.value?.logs) ? [...diagnosisProgress.value.logs] : []
+  if (nextLog) {
+    const key = `${nextLog.step ?? ''}-${nextLog.title ?? ''}-${nextLog.detail ?? ''}`
+    const exists = logs.some(item => `${item.step ?? ''}-${item.title ?? ''}-${item.detail ?? ''}` === key)
+    if (!exists) logs.push(nextLog)
+  }
+  diagnosisProgress.value = {
+    percentage: Math.max(Number(diagnosisProgress.value?.percentage || 0), Number(event.percentage || 0)),
+    step: event.step || diagnosisProgress.value?.step || '诊断中',
+    logs
+  }
+}
+
+const readDiagnosisAuthToken = () => {
+  const token = localStorage.getItem('token')
+  if (token) return token
+  try {
+    return JSON.parse(localStorage.getItem('insight_auth') || 'null')?.token || ''
+  } catch (error) {
+    return ''
+  }
 }
 
 const resetDiagnosisWorkspace = () => {
@@ -2105,16 +2439,17 @@ const confirmRegenerateReport = async () => {
 <style scoped>
 .generator-form {
   margin-top: 12px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  column-gap: 16px;
-  align-items: start;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 12px 16px;
 }
 
 .diagnosis-layout {
   display: grid;
   grid-template-columns: minmax(410px, 0.72fr) minmax(760px, 1.55fr);
   align-items: stretch;
+  grid-auto-rows: auto;
   gap: 10px;
   min-height: calc(100vh - 94px);
 }
@@ -2191,24 +2526,31 @@ const confirmRegenerateReport = async () => {
 
 .report-generator-panel {
   grid-column: 1;
+  grid-row: 2;
   align-self: stretch;
+  overflow: visible;
 }
 
 .diagnosis-result {
   grid-column: 2;
-  grid-row: auto;
+  grid-row: 2;
   align-self: stretch;
-  display: flex;
-  flex-direction: column;
-  min-height: 300px;
+  display: block;
+  overflow: visible;
 }
 
 .graph-rag-progress-panel {
   grid-column: 1 / -1;
+  grid-row: 3;
+  position: relative;
+  z-index: 0;
 }
 
 .report-history {
   grid-column: 1 / -1;
+  grid-row: 4;
+  position: relative;
+  z-index: 0;
 }
 
 .panel-header {
@@ -2229,55 +2571,27 @@ const confirmRegenerateReport = async () => {
   line-height: 1.5;
 }
 
-.report-generator-panel :deep(.el-form-item) {
-  margin-bottom: 12px;
-}
-
 .config-field,
 .full-row-field {
   min-width: 0;
 }
 
-.field-detail-level,
-.field-data-table,
-.field-dimension,
-.field-export-options {
-  grid-column: 1;
+.form-block {
+  display: block;
 }
 
-.field-anomaly-type,
-.field-metric,
-.field-time,
-.field-pdf-encryption {
-  grid-column: 2;
+.config-field {
+  flex: 0 0 calc(50% - 8px);
+  width: calc(50% - 8px);
 }
 
 .full-row-field {
-  grid-column: 1 / -1;
+  flex: 0 0 100%;
+  width: 100%;
 }
 
-.field-detail-level,
-.field-anomaly-type {
-  grid-row: 1;
-}
-
-.field-data-table,
-.field-metric {
-  grid-row: 2;
-}
-
-.field-dimension,
-.field-time {
-  grid-row: 3;
-}
-
-.field-export-options,
-.field-pdf-encryption {
-  grid-row: 4;
-  margin-bottom: 8px;
-}
-
-.report-generator-panel :deep(.el-form-item__label) {
+.form-block-label {
+  display: block;
   margin-bottom: 6px;
   color: #1e2f4d;
   font-size: 12px;
@@ -2325,18 +2639,19 @@ const confirmRegenerateReport = async () => {
 }
 
 .empty-report-state {
-  flex: 1;
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(220px, 0.75fr) minmax(360px, 1.25fr);
   align-items: center;
   justify-content: center;
   gap: 46px;
-  padding: 22px 60px 28px;
+  padding: 22px 60px 34px;
+  overflow: visible;
 }
 
 .report-content-body {
-  flex: 1;
+  min-width: 0;
+  overflow: visible;
 }
 
 .empty-report-visual {
@@ -2460,7 +2775,7 @@ const confirmRegenerateReport = async () => {
 
 .empty-generate-button {
   min-width: 138px;
-  margin-top: 28px;
+  margin-top: 22px;
 }
 
 .empty-report-copy small {
@@ -2487,6 +2802,8 @@ const confirmRegenerateReport = async () => {
     minmax(112px, max-content) minmax(170px, 0.9fr);
   align-items: center;
   column-gap: 14px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .graph-progress-node {
@@ -2494,6 +2811,10 @@ const confirmRegenerateReport = async () => {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
+}
+
+.graph-progress-node > div:last-child {
   min-width: 0;
 }
 
@@ -2530,6 +2851,9 @@ const confirmRegenerateReport = async () => {
   display: block;
   color: #213654;
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .graph-progress-node span {
@@ -2537,6 +2861,9 @@ const confirmRegenerateReport = async () => {
   margin-top: 4px;
   color: #8a9ab3;
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .graph-progress-status {
@@ -2544,6 +2871,7 @@ const confirmRegenerateReport = async () => {
   padding: 12px 14px;
   border-radius: 8px;
   background: linear-gradient(180deg, #f8fbff 0%, #f3f7fc 100%);
+  min-width: 0;
 }
 
 .graph-progress-status span,
@@ -2643,10 +2971,18 @@ const confirmRegenerateReport = async () => {
 .report-history :deep(.el-table) {
   width: 100%;
   font-size: 12px;
+  table-layout: fixed;
 }
 
 .report-history :deep(.el-table .cell) {
   padding: 0 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.report-history :deep(.el-table__row) {
+  height: 40px;
 }
 
 .report-history :deep(.el-table th.el-table__cell) {
@@ -2668,7 +3004,10 @@ const confirmRegenerateReport = async () => {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 12px;
+  gap: 10px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .history-row-actions :deep(.el-button) {
@@ -2676,6 +3015,7 @@ const confirmRegenerateReport = async () => {
   height: 24px;
   padding: 0;
   margin-left: 0;
+  flex: 0 0 auto;
 }
 
 .history-row-actions :deep(.el-icon) {
@@ -2777,10 +3117,9 @@ const confirmRegenerateReport = async () => {
   min-height: 32px;
   align-items: center;
   gap: 18px;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   color: #214068;
   font-size: 12px;
-  white-space: nowrap;
 }
 
 .export-options :deep(.el-checkbox) {
@@ -2836,7 +3175,7 @@ const confirmRegenerateReport = async () => {
   gap: 9px;
   color: #536782;
   font-size: 12px;
-  white-space: nowrap;
+  flex-wrap: wrap;
 }
 
 .pdf-encryption-row :deep(.el-switch) {
@@ -2873,6 +3212,7 @@ const confirmRegenerateReport = async () => {
 
 .knowledge-upload-panel {
   width: 100%;
+  min-width: 0;
 }
 
 .knowledge-upload-row {
@@ -2890,11 +3230,17 @@ const confirmRegenerateReport = async () => {
   width: 100%;
 }
 
+.knowledge-upload-row :deep(.el-upload-list) {
+  width: 100%;
+  margin-top: 8px;
+}
+
 .knowledge-upload-dropzone {
   display: grid;
   place-items: center;
   gap: 5px;
   width: 100%;
+  box-sizing: border-box;
   min-height: 68px;
   padding: 10px 12px;
   border: 1px dashed #b9c9df;
@@ -2971,6 +3317,8 @@ const confirmRegenerateReport = async () => {
   border: 1px solid #dce5f2;
   border-radius: 8px;
   background: #fff;
+  min-width: 0;
+  overflow: visible;
 }
 
 .section-heading {
@@ -3066,6 +3414,7 @@ const confirmRegenerateReport = async () => {
   border: 1px solid #dce5f2;
   border-radius: 8px;
   background: #fff;
+  overflow: visible;
 }
 
 .summary-box strong,
@@ -3098,7 +3447,52 @@ const confirmRegenerateReport = async () => {
 .root-cause-grid {
   display: grid;
   grid-template-columns: minmax(430px, 1fr) minmax(360px, 0.92fr);
+  align-items: stretch;
   gap: 8px;
+}
+
+.root-cause-table {
+  margin-top: 2px;
+}
+
+.root-cause-table :deep(.el-table__expanded-cell) {
+  padding: 0;
+  background: #f8fafc;
+}
+
+.root-cause-evidence-row {
+  padding: 12px 16px;
+  border-left: 3px solid #7aa7ff;
+}
+
+.root-cause-evidence-row span {
+  display: block;
+  margin-bottom: 5px;
+  color: #1f3a63;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.root-cause-evidence-row p {
+  margin: 0;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.root-cause-confidence-cell {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  color: #1f3a63;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.root-cause-confidence-cell :deep(.el-progress-bar__outer) {
+  height: 5px !important;
 }
 
 .recommendation-box {
@@ -3135,6 +3529,7 @@ const confirmRegenerateReport = async () => {
   --el-table-header-bg-color: #f7faff;
   color: #243655;
   font-size: 12px;
+  width: 100%;
 }
 
 .diagnosis-result :deep(.el-table th.el-table__cell) {
@@ -3146,6 +3541,11 @@ const confirmRegenerateReport = async () => {
 .diagnosis-result :deep(.el-table .cell) {
   padding: 0 10px;
   line-height: 1.5;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .tab-section {
@@ -3360,12 +3760,14 @@ const confirmRegenerateReport = async () => {
 .paper {
   background-color: var(--paper-color);
   max-width: 210mm;
+  width: 100%;
   min-height: 297mm;
   margin: 0 auto;
   padding: 25.4mm 31.8mm;
   box-shadow: 0 4px 12px rgba(0,0,0,0.3);
   box-sizing: border-box;
   text-align: justify;
+  overflow: visible;
 }
 
 .header {
@@ -3545,17 +3947,16 @@ const confirmRegenerateReport = async () => {
   .report-history {
     grid-column: auto;
     grid-row: auto;
-    min-height: 0;
   }
 
   .generator-form {
-    grid-template-columns: 1fr;
+    gap: 12px;
   }
 
   .config-field,
   .full-row-field {
-    grid-column: 1 / -1;
-    grid-row: auto;
+    flex-basis: 100%;
+    width: 100%;
   }
 
   .report-reader {
@@ -3567,6 +3968,7 @@ const confirmRegenerateReport = async () => {
     min-height: auto;
     padding: 18mm 12mm;
   }
+
 }
 
 @media (min-width: 901px) and (max-width: 1360px) {
@@ -3582,5 +3984,15 @@ const confirmRegenerateReport = async () => {
   .root-cause-grid {
     grid-template-columns: 1fr;
   }
+}
+</style>
+
+<style>
+.diagnosis-report-tooltip {
+  max-width: min(520px, calc(100vw - 48px));
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.6;
 }
 </style>

@@ -311,6 +311,8 @@
                 <el-dropdown
                   v-if="canShowBoardMoreActions(row)"
                   trigger="click"
+                  :teleported="true"
+                  popper-class="adm-dashboard-more-popper"
                   @command="(cmd) => onTableRowCommand(cmd, row)"
                 >
                   <el-button link type="primary">更多</el-button>

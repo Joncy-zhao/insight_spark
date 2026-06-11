@@ -204,11 +204,12 @@ public class ChatBiService {
         generationTrace.add(businessSemanticPlan.hasSemanticConstraint()
                 ? "businessSemanticPlan=MATCHED;" + businessSemanticTrace
                 : "businessSemanticPlan=NO_MATCH");
+        String modelCacheScope = ";modelId=" + (selectedModelId.isBlank() ? "default" : selectedModelId);
         String cacheKey = sqlAuditService.semanticCacheKey(question, activeTable,
                 businessSemanticContext.available()
                         ? "businessModel=" + businessSemanticContext.modelId()
-                                + ";version=" + businessSemanticContext.modelVersion()
-                        : "businessModel=none");
+                                + ";version=" + businessSemanticContext.modelVersion() + modelCacheScope
+                        : "businessModel=none" + modelCacheScope);
         Map<String, Object> cachedSqlAudit = sqlAuditService.findSemanticCache(cacheKey);
         boolean cacheHit = !cachedSqlAudit.isEmpty();
         if (cacheHit) {

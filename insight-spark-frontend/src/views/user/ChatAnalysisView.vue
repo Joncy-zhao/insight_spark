@@ -3,8 +3,8 @@
           <div class="panel chat-panel">
             <div class="panel-header">
               <div>
-                <h2>✨ 智能问答助理</h2>
-                <p>随时随地，像对话一样探索您的业务数据及图表</p>
+                <h2>自然语言分析</h2>
+                <p>选择数据源与业务模型后，输入业务问题即可生成图表与洞察。</p>
               </div>
               <el-button size="small" plain @click="businessDictionaryPanelVisible = true">
                 业务字典/公式维护
@@ -14,7 +14,16 @@
             <div class="chat-datasource-bar">
               <div class="chat-filter-grid">
                 <div class="chat-filter-field">
-                  <div class="chat-datasource-label">数据源</div>
+                  <div class="chat-datasource-label">
+                    <span class="chat-datasource-database-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" focusable="false">
+                        <ellipse cx="12" cy="5" rx="7" ry="3"></ellipse>
+                        <path d="M5 5v6c0 1.66 3.13 3 7 3s7-1.34 7-3V5"></path>
+                        <path d="M5 11v6c0 1.66 3.13 3 7 3s7-1.34 7-3v-6"></path>
+                      </svg>
+                    </span>
+                    <span>数据源</span>
+                  </div>
                   <el-select
                       v-model="selectedTableName"
                       placeholder="请选择数据源"
@@ -45,7 +54,10 @@
                   </div>
                 </div>
                 <div class="chat-filter-field">
-                  <div class="chat-datasource-label">业务模型</div>
+                  <div class="chat-datasource-label">
+                    <el-icon><Box /></el-icon>
+                    <span>业务模型</span>
+                  </div>
                   <el-select
                       :model-value="selectedChatBusinessModelId"
                       placeholder="请选择业务模型"
@@ -70,7 +82,7 @@
               </div>
             </div>
 
-            <div class="chat-thread-header">
+            <div v-if="chatContentMode === 'sessions'" class="chat-thread-header">
               <button
                   type="button"
                   class="chat-thread-toggle"
@@ -83,7 +95,7 @@
                 </el-icon>
               </button>
               <div class="chat-thread-title-wrap">
-                <div class="chat-thread-title">{{ chatContentMode === 'messages' ? currentChatSessionTitle : '连续对话' }}</div>
+                <div class="chat-thread-title">{{ chatContentMode === 'messages' ? currentChatSessionTitle : '会话记录' }}</div>
                 <div class="chat-thread-subtitle">
                   {{ chatContentMode === 'messages' ? currentChatSessionSubtitle : '查看、切换和管理已有对话' }}
                 </div>
@@ -122,9 +134,6 @@
                     <el-option label="已归档" value="ARCHIVED" />
                     <el-option label="全部" value="ALL" />
                   </el-select>
-                  <el-button size="small" text type="primary" :loading="chatSessionLoading" @click="createSessionAndOpen">
-                    新建
-                  </el-button>
                 </div>
                 <div class="chat-session-manager-list">
                   <div
@@ -168,16 +177,48 @@
                       </button>
                     </div>
                   </div>
-                  <div v-if="!chatSessions?.value?.length" class="chat-session-manager-empty">
-                    <div class="chat-session-manager-empty__title">暂无会话</div>
-                    <div class="chat-session-manager-empty__text">发送问题后会自动创建，或现在新建一个空会话。</div>
-                    <el-button size="small" type="primary" @click="createSessionAndOpen">新建会话</el-button>
-                  </div>
                 </div>
               </div>
             </template>
 
             <template v-else>
+              <div class="chat-conversation-shell">
+                <div class="chat-thread-header chat-thread-header--inside">
+                  <button
+                      type="button"
+                      class="chat-thread-toggle"
+                      :title="'打开会话管理'"
+                      :aria-label="'打开会话管理'"
+                      @click="toggleChatContentMode"
+                  >
+                    <el-icon>
+                      <ArrowLeftBold />
+                    </el-icon>
+                  </button>
+                  <div class="chat-thread-title-wrap">
+                    <div class="chat-thread-title">{{ currentChatSessionTitle }}</div>
+                    <div class="chat-thread-subtitle">{{ currentChatSessionSubtitle }}</div>
+                  </div>
+                  <div class="chat-thread-actions">
+                    <el-button
+                        size="small"
+                        plain
+                        class="chat-thread-new-btn"
+                        :loading="chatSessionLoading"
+                        @click="createSessionAndOpen"
+                    >
+                      新建对话
+                    </el-button>
+                    <el-tag
+                        v-if="currentChatSession?.status === 'ARCHIVED'"
+                        size="small"
+                        effect="plain"
+                    >
+                      已归档
+                    </el-tag>
+                  </div>
+                </div>
+                <div class="chat-conversation-main">
               <div v-if="activeBranchParentTurnMeta" class="chat-branch-banner">
                 <span>当前将基于指定消息继续追问</span>
                 <small>{{ activeBranchParentTurnMeta.preview || `Turn #${activeBranchParentTurnMeta.turnNo || activeBranchParentTurnMeta.turnId}` }}</small>
@@ -186,7 +227,10 @@
 
               <div class="message-list" id="chatHistory">
                 <div v-for="(msg, index) in messages" :key="index" :class="['message-wrapper', msg.role]">
-                  <div class="avatar">{{ msg.role === 'system' ? '🤖' : '👤' }}</div>
+                  <div class="avatar">
+                    <img v-if="msg.role === 'system'" :src="chatQueryAvatar" alt="" aria-hidden="true" />
+                    <img v-else :src="chatPeopleAvatar" alt="" aria-hidden="true" />
+                  </div>
                   <div class="msg-content">
                     <div v-if="msg.isFollowUp && msg.followUpMeta" class="message-followup-ref">
                       <div class="message-followup-ref__label">
@@ -200,7 +244,12 @@
                         {{ msg.followUpMeta.source === 'history' ? '来自历史产物' : '来自当前对话' }} · {{ msg.followUpMeta.tableName }}
                       </div>
                     </div>
-                    <div class="bubble">{{ msg.content }}</div>
+                    <div class="bubble" :class="{ 'bubble--thinking': msg.thinkingLogs?.length && msg.thinkingCollapsed === false }">
+                      <span v-if="msg.thinkingLogs?.length && msg.thinkingCollapsed === false" class="thinking-spinner" aria-hidden="true">
+                        <i v-for="spinnerIndex in 8" :key="spinnerIndex"></i>
+                      </span>
+                      <span>{{ msg.content }}</span>
+                    </div>
                     <div v-if="msg.advancedAnalysis" class="advanced-dialog-entry">
                       <div class="advanced-dialog-entry__main">
                         <div class="advanced-dialog-entry__type">{{ advancedAnalysisTypeLabel(msg.advancedAnalysis.type) }}</div>
@@ -356,99 +405,248 @@
                 </div>
                 <el-button size="small" text @click="clearActiveBranchParent">取消追问</el-button>
               </div>
+                </div>
 
               <div class="ask-bar">
                 <el-input
                     v-model="question"
-                    placeholder="试试问我：按省份统计销售额、按日期看趋势、分类占比等..."
-                    :disabled="loading"
-                    @keyup.enter="sendChatQuestion"
+                    placeholder="试试问我：按省份统计销售额、按日期看趋势..."
+                    :readonly="loading"
+                    @keyup.enter="!loading && sendChatQuestion()"
                 >
-                  <template #append>
-                    <el-button type="primary" :loading="loading" @click="sendChatQuestion">
-                      <span v-if="!loading">🚀 发送分析</span>
-                      <span v-else>思考中...</span>
-                    </el-button>
+                  <template #prefix>
+                    <span v-if="loading" class="ask-input-loading" aria-label="思考中">
+                      <i v-for="spinnerIndex in 8" :key="spinnerIndex"></i>
+                    </span>
+                  </template>
+                  <template #suffix>
+                    <span class="ask-input-actions">
+                      <el-popover
+                          v-if="chatModelOptions?.length"
+                          v-model:visible="chatModelPickerVisible"
+                          trigger="click"
+                          placement="top-start"
+                          :width="236"
+                          :teleported="false"
+                          popper-class="chat-model-menu-popper"
+                      >
+                        <template #reference>
+                          <button
+                              type="button"
+                              :class="['chat-model-trigger', { active: chatModelPickerVisible }]"
+                              title="切换模型"
+                              aria-label="切换模型"
+                          >
+                            <span>{{ currentChatModelShortLabel }}</span>
+                            <el-icon><ArrowDown /></el-icon>
+                          </button>
+                        </template>
+                        <div class="chat-model-menu">
+                          <div class="chat-model-menu__group">模型</div>
+                          <button
+                              v-for="model in chatModelOptions"
+                              :key="model.id"
+                              type="button"
+                              :class="['chat-model-menu__item', { active: String(model.id) === String(selectedChatModelId) }]"
+                              @click="selectChatModel(model.id)"
+                          >
+                            <span>{{ formatChatModelLabel(model) }}</span>
+                            <span v-if="String(model.id) === String(selectedChatModelId)" class="chat-model-menu__check">✓</span>
+                          </button>
+                        </div>
+                      </el-popover>
+                      <button
+                          type="button"
+                          :class="['ask-input-icon-btn', { active: listening }]"
+                          :disabled="!recognitionSupported"
+                          :title="listening ? '停止语音输入' : '开始语音输入'"
+                          :aria-label="listening ? '停止语音输入' : '开始语音输入'"
+                          @click="listening ? stopVoiceQuestionInput() : startVoiceQuestionInput()"
+                      >
+                        <el-icon><Microphone /></el-icon>
+                      </button>
+                      <button
+                          type="button"
+                          class="ask-input-icon-btn"
+                          title="语音设置"
+                          aria-label="语音设置"
+                          @click="voicePanelVisible = true"
+                      >
+                        <el-icon><Setting /></el-icon>
+                      </button>
+                      <button
+                          v-if="!loading"
+                          type="button"
+                          class="ask-input-send-btn"
+                          title="发送分析"
+                          aria-label="发送分析"
+                          @click="sendChatQuestion"
+                      >
+                        <el-icon><Promotion /></el-icon>
+                      </button>
+                      <button
+                          v-else
+                          type="button"
+                          class="ask-input-stop-btn"
+                          title="停止生成"
+                          aria-label="停止生成"
+                          @click="stopQuestionGeneration"
+                      >
+                        <span class="stop-btn__disc">
+                          <span class="stop-btn__square"></span>
+                        </span>
+                      </button>
+                    </span>
                   </template>
                 </el-input>
-                <el-button
-                    class="voice-btn"
-                    :type="listening ? 'danger' : 'primary'"
-                    plain
-                    :disabled="loading || !recognitionSupported"
-                    :title="listening ? '停止语音输入' : '开始语音输入'"
-                    :aria-label="listening ? '停止语音输入' : '开始语音输入'"
-                    @click="listening ? stopVoiceQuestionInput() : startVoiceQuestionInput()"
-                >
-                  <el-icon><Microphone /></el-icon>
-                </el-button>
-                <el-button
-                    class="voice-btn"
-                    plain
-                    title="语音设置"
-                    aria-label="语音设置"
-                    @click="voicePanelVisible = true"
-                >
-                  <el-icon><Setting /></el-icon>
-                </el-button>
-                <el-button v-if="loading" type="danger" plain class="stop-btn" @click="stopQuestionGeneration">
-                  停止生成
-                </el-button>
+              </div>
               </div>
             </template>
           </div>
 
           <div class="panel chart-panel">
             <div class="panel-header">
-              <div>
-                <h2>📊 智能可视化呈现</h2>
-                <p>AI 将理解您的意图并推荐最合适的 ECharts 图表类型</p>
+              <div class="chart-panel-title">
+                <span class="chart-panel-icon" aria-hidden="true">
+                  <el-icon><DataAnalysis /></el-icon>
+                </span>
+                <span class="chart-panel-title-text">
+                  <h2>智能可视化呈现</h2>
+                  <p>AI 将理解您的意图并推荐最合适的 ECharts 图表类型</p>
+                </span>
               </div>
               <div class="chart-actions">
-                <el-tag v-if="lastAnalysis" type="info" effect="plain" round>AI 推荐图表</el-tag>
-                <el-tag v-if="currentChartType" type="success" effect="dark" round>
-                  {{ chartTypeLabel }}效果
-                </el-tag>
-                <el-tooltip
-                    v-if="chartAnimationMeta && !isLastAnalysisTable"
-                    :content="`${chartAnimationMeta.label}，${chartAnimationMeta.mode}，入场 ${chartAnimationMeta.duration}ms，更新 ${chartAnimationMeta.updateDuration}ms`"
-                    placement="top"
-                >
-                  <el-tag :type="chartAnimationMeta.enabled ? 'success' : 'info'" effect="plain" round>
-                    动画{{ chartAnimationMeta.enabled ? '开启' : '关闭' }} · {{ chartAnimationMeta.duration }}ms
-                  </el-tag>
-                </el-tooltip>
                 <el-button
                     v-if="canRegenerateLastAnalysis"
                     size="small"
                     type="primary"
                     plain
+                    class="chart-action-btn chart-action-btn--primary"
                     :disabled="loading || isStreaming"
                     @click="regenerateLastAnalysis"
                 >
-                  重新生成
+                  <el-icon><Refresh /></el-icon>
+                  <span>重新生成</span>
                 </el-button>
-                <el-select v-if="!isLastAnalysisTable" v-model="chartSortMode" size="small" style="width: 150px;" @change="() => lastAnalysis?.data?.length && renderChart(lastAnalysis.data, currentChartType)">
-                  <el-option label="按名称排序" value="name" />
-                  <el-option label="按数值降序" value="desc" />
-                  <el-option label="按数值升序" value="asc" />
-                </el-select>
-                <el-button v-if="lastAnalysis?.data?.length && !isLastAnalysisTable" size="small" @click="exportChartAsImage">导出图片</el-button>
+                <el-button
+                    v-if="lastAnalysis?.data?.length && !isLastAnalysisTable"
+                    size="small"
+                    class="chart-action-btn"
+                    @click="exportChartAsImage"
+                >
+                  <el-icon><Document /></el-icon>
+                  <span>导出图片</span>
+                </el-button>
                 <el-button
                     v-if="canPinLastAnalysis"
                     size="small"
                     type="success"
                     plain
+                    class="chart-action-btn"
                     :disabled="loading || isStreaming"
                     @click="openPinDialog"
                 >
+                  <el-icon><Management /></el-icon>
                   钉入看板
                 </el-button>
               </div>
             </div>
 
-            <div v-show="!isLastAnalysisTable" id="echarts-container" class="chart-canvas" @mousedown.stop @touchstart.stop @pointerdown.stop></div>
-            <div v-if="isLastAnalysisTable" class="analysis-table-wrap">
+            <div v-if="lastAnalysis && !isLastAnalysisTable" class="chart-control-bar">
+              <el-select
+                  v-if="currentChartType"
+                  :model-value="currentChartType"
+                  class="chart-control-select chart-type-select"
+                  popper-class="chart-control-select-popper"
+                  @change="changeLastAnalysisChartType"
+              >
+                <template #prefix>
+                  <el-icon><TrendCharts /></el-icon>
+                  <span class="chart-control-select-label">图表类型：</span>
+                </template>
+                <template #label="{ label, value }">
+                  <span class="chart-type-selected-label">
+                    <span>{{ label }}</span>
+                    <span v-if="isAiRecommendedChartType(value)" class="chart-type-recommend-pill chart-type-recommend-pill--current">AI推荐</span>
+                  </span>
+                </template>
+                <el-option
+                    v-for="option in chartTypeSwitchOptions"
+                    :key="option.value"
+                    :label="option.label"
+                    :value="option.value"
+                >
+                  <span class="chart-type-option">
+                    <span>{{ option.label }}</span>
+                    <span v-if="isAiRecommendedChartType(option.value)" class="chart-type-recommend-pill">AI推荐</span>
+                  </span>
+                </el-option>
+              </el-select>
+              <el-select
+                  v-model="chartSortMode"
+                  class="chart-control-select"
+                  popper-class="chart-control-select-popper"
+                  @change="() => lastAnalysis?.data?.length && renderChart(lastAnalysis.data, currentChartType)"
+              >
+                <template #prefix>
+                  <el-icon><Sort /></el-icon>
+                  <span class="chart-control-select-label">排序：</span>
+                </template>
+                <el-option label="按名称排序" value="name" />
+                <el-option label="按数值降序" value="desc" />
+                <el-option label="按数值升序" value="asc" />
+              </el-select>
+            </div>
+
+            <div v-if="!lastAnalysis" class="chart-empty-state">
+              <img class="chart-empty-illustration" :src="noImageIllustration" alt="暂无图表" />
+              <h3>暂未生成图表</h3>
+              <p>请先在左侧输入分析问题，系统将为你生成图表与结果说明</p>
+              <div class="chart-empty-guide">
+                <div class="chart-empty-guide-title">
+                  <el-icon><QuestionFilled /></el-icon>
+                  <span>你可以这样开始</span>
+                </div>
+                <div class="chart-empty-guide-steps">
+                  <div class="chart-empty-guide-step">
+                    <span class="chart-empty-guide-index">1</span>
+                    <span class="chart-empty-guide-icon chart-empty-guide-icon--database" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" focusable="false">
+                        <ellipse cx="12" cy="5" rx="7" ry="3"></ellipse>
+                        <path d="M5 5v6c0 1.66 3.13 3 7 3s7-1.34 7-3V5"></path>
+                        <path d="M5 11v6c0 1.66 3.13 3 7 3s7-1.34 7-3v-6"></path>
+                      </svg>
+                    </span>
+                    <span class="chart-empty-guide-copy">
+                      <strong>选择数据源</strong>
+                      <small>选择要分析的数据范围</small>
+                    </span>
+                  </div>
+                  <div class="chart-empty-guide-step">
+                    <span class="chart-empty-guide-index">2</span>
+                    <span class="chart-empty-guide-icon">
+                      <el-icon><Box /></el-icon>
+                    </span>
+                    <span class="chart-empty-guide-copy">
+                      <strong>选择业务模型</strong>
+                      <small>选择合适的业务模型</small>
+                    </span>
+                  </div>
+                  <div class="chart-empty-guide-step">
+                    <span class="chart-empty-guide-index">3</span>
+                    <span class="chart-empty-guide-icon">
+                      <el-icon><Edit /></el-icon>
+                    </span>
+                    <span class="chart-empty-guide-copy">
+                      <strong>输入分析问题</strong>
+                      <small>用自然语言描述问题</small>
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div v-show="lastAnalysis && !isLastAnalysisTable" id="echarts-container" class="chart-canvas" @mousedown.stop @touchstart.stop @pointerdown.stop></div>
+            <div v-if="lastAnalysis && isLastAnalysisTable" class="analysis-table-wrap">
               <el-table
                   :data="lastAnalysisTableRows"
                   border
@@ -514,7 +712,7 @@
             </el-descriptions>
 
             <section
-                v-if="lastAnalysis || currentDiagnosis"
+                v-if="lastAnalysis || diagnosisPreviewHasReport"
                 class="diagnosis-preview-card"
                 :class="{ 'is-pending': !diagnosisPreviewHasReport }"
                 aria-label="最新诊断报告预览"
@@ -768,6 +966,7 @@
               v-model="historyDrawerVisible"
               title="历史产物"
               size="72%"
+              class="history-product-drawer"
               destroy-on-close
           >
             <div class="history-drawer">
@@ -834,6 +1033,8 @@
                     <el-option label="失败" value="FAILED" />
                     <el-option label="取消" value="CANCELLED" />
                   </el-select>
+                </div>
+                <div class="history-toolbar__secondary">
                   <el-date-picker
                       v-model="recentChatQueryDateRange"
                       class="history-toolbar__date"
@@ -844,18 +1045,22 @@
                       value-format="YYYY-MM-DD"
                       @change="syncHistorySearch"
                   />
-                </div>
-                <div class="history-toolbar__secondary">
                   <div class="history-toolbar__quick-range">
-                    <el-segmented
-                        v-model="historyQuickDateRange"
-                        :options="historyQuickDateOptions"
-                        @change="applyHistoryQuickDateRange"
-                    />
+                    <el-button
+                        v-for="option in historyQuickDateOptions"
+                        :key="option.value || 'all'"
+                        :class="{ 'is-active': historyQuickDateRange === option.value }"
+                        plain
+                        @click="applyHistoryQuickDateRange(option.value)"
+                    >
+                      {{ option.label }}
+                    </el-button>
                   </div>
                   <div class="history-toolbar__sort">
                     <el-button plain @click="toggleHistorySortDirection">
+                      <el-icon><Sort /></el-icon>
                       {{ recentChatQuerySortDirection === 'ASC' ? '时间正序' : '时间倒序' }}
+                      <el-icon><ArrowDown /></el-icon>
                     </el-button>
                   </div>
                   <div class="history-toolbar__actions">
@@ -1742,11 +1947,14 @@
 <script setup>
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import axios from 'axios'
-import { ArrowLeftBold, ArrowRightBold, Calendar, Close, DataAnalysis, Document, Edit, Files, Management, Microphone, QuestionFilled, Refresh, Search, Setting, Share, TrendCharts, View } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowLeftBold, ArrowRightBold, Box, Calendar, Close, DataAnalysis, DataBoard, Document, Edit, Files, Management, Microphone, Promotion, QuestionFilled, Refresh, Search, Setting, Share, Sort, TrendCharts, View } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 import { ElMessage } from 'element-plus'
 import BusinessDictionaryView from '../../components/BusinessDictionaryView.vue'
 import AdvancedAnalysisCard from '../../components/AdvancedAnalysisCard.vue'
+import chatQueryAvatar from '../../assets/chat-query-avatar.png'
+import chatPeopleAvatar from '../../assets/chat-people.png'
+import noImageIllustration from '../../assets/no_image.png'
 import {
   explainAdvancedAnalysisResult,
   fetchAdvancedAnalysisFieldMeta,
@@ -1786,6 +1994,9 @@ const {
   auditRiskLevel,
   body,
   chartTypeLabel,
+  chartTypeSwitchOptions,
+  changeLastAnalysisChartType,
+  isAiRecommendedChartType,
   chartSortMode,
   chartAnimationMeta,
   chatDom,
@@ -1835,6 +2046,9 @@ const {
   streamAbortController,
   activeChatRequestId,
   stopRequested,
+  chatModelOptions,
+  selectedChatModelId,
+  selectedChatModel,
   messages,
   moduleSubtitle,
   moduleTitle,
@@ -1966,12 +2180,15 @@ const {
   unwrap,
   updateSchemaField,
   handleChatBusinessModelChange,
+  handleChatModelChange,
   uploadFile,
   uploadResult,
   uploading,
   userQuestion,
   xAxisData
 } = inject('workbench')
+
+const chatModelPickerVisible = ref(false)
 
 const formatPinDashboardLabel = (dashboard) => {
   const name = String(dashboard?.name || `看板#${dashboard?.id || ''}`).trim()
@@ -1996,6 +2213,25 @@ const formatBusinessModelLabel = (model) => {
     return `${modelName}（${tableName}）`
   }
   return modelName || `模型 ${model?.id ?? ''}`
+}
+
+const formatChatModelLabel = (model) => {
+  const name = String(model?.name || model?.model || model?.id || '').trim()
+  return name || '默认模型'
+}
+
+const currentChatModelShortLabel = computed(() => {
+  const raw = formatChatModelLabel(selectedChatModel?.value || selectedChatModel || {})
+  const compact = raw
+    .replace(/^deepseek-/i, 'DS-')
+    .replace(/^qwen-/i, 'Qwen-')
+    .replace(/^gpt-/i, 'GPT-')
+  return compact.length > 10 ? `${compact.slice(0, 9)}...` : compact
+})
+
+const selectChatModel = (modelId) => {
+  handleChatModelChange(modelId)
+  chatModelPickerVisible.value = false
 }
 
 const selectedTableSummary = computed(() => {
@@ -2035,7 +2271,37 @@ const normalizeAuditList = (value) => {
 
 const analysisSensitiveFields = computed(() => normalizeAuditList(lastAnalysis?.value?.sensitiveFields))
 
-const diagnosisPreviewReport = computed(() => currentDiagnosis?.value || null)
+const parseDiagnosisPreviewJson = (value) => {
+  if (!value || typeof value !== 'string') return value
+  try {
+    return JSON.parse(value)
+  } catch {
+    return null
+  }
+}
+
+const diagnosisPreviewConversationId = (report) => {
+  if (!report || typeof report !== 'object') return ''
+  const binding = parseDiagnosisPreviewJson(report.bindingJson) || {}
+  const snapshot = parseDiagnosisPreviewJson(report.chartSnapshot) || {}
+  return String(
+    report.conversationId
+    || binding.conversationId
+    || snapshot.conversationId
+    || ''
+  ).trim()
+}
+
+const diagnosisPreviewBelongsToActiveSession = (report) => {
+  const activeId = String(activeChatSessionId?.value || '').trim()
+  const reportConversationId = diagnosisPreviewConversationId(report)
+  return Boolean(activeId && reportConversationId && activeId === reportConversationId)
+}
+
+const diagnosisPreviewReport = computed(() => {
+  const report = currentDiagnosis?.value || null
+  return diagnosisPreviewBelongsToActiveSession(report) ? report : null
+})
 
 const diagnosisPreviewHasReport = computed(() => Boolean(diagnosisPreviewReport.value))
 
@@ -5572,9 +5838,39 @@ onBeforeUnmount(() => {
 .chart-actions {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 10px;
   justify-content: flex-end;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.chart-action-btn {
+  min-width: 96px;
+  height: 36px;
+  padding: 0 14px;
+  flex: 0 0 auto;
+  border-radius: 7px;
+  border-color: #dce4f0;
+  background: #fff;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+.chart-action-btn :deep(.el-icon) {
+  margin-right: 5px;
+  font-size: 15px;
+}
+.chart-action-btn--primary {
+  border-color: #72a4ff;
+  color: #3478f6;
+  background: #f8fbff;
+}
+.chart-action-btn--primary:hover,
+.chart-action-btn--primary:focus {
+  border-color: #4f8dff;
+  color: #2563eb;
+  background: #f4f8ff;
 }
 .chat-panel .panel-header {
   align-items: center;
@@ -5588,16 +5884,291 @@ onBeforeUnmount(() => {
 }
 .chat-layout {
   display: grid;
-  grid-template-columns: minmax(420px, 0.95fr) minmax(480px, 1.35fr);
+  grid-template-columns: minmax(380px, 0.95fr) minmax(520px, 1.35fr);
   gap: 16px;
   min-height: 0;
+  align-items: start;
 }
 .chat-panel {
-  min-width: 420px;
+  min-width: 0;
   min-height: 0;
+  overflow: hidden;
 }
 .chart-panel {
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.chart-panel .panel-header {
+  align-items: center;
+  gap: 12px;
+}
+.chart-panel-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 auto;
+}
+.chart-panel-icon {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  background: #eef4ff;
+  color: #2563eb;
+}
+.chart-panel-icon .el-icon {
+  font-size: 18px;
+}
+.chart-panel-title-text {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.chart-panel-title-text h2 {
+  margin: 0;
+  color: #111827;
+  font-size: 16px;
+  line-height: 1.2;
+  font-weight: 700;
+}
+.chart-panel-title-text p {
+  margin: 0;
+  color: #667085;
+  font-size: 13px;
+  line-height: 1.5;
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chart-control-bar {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin: 16px 0 12px;
+  padding: 12px;
+  border: 1px solid #e5ebf5;
+  border-radius: 8px;
+  background: #fff;
+}
+.chart-control-item,
+.chart-control-select {
+  min-width: 0;
+  width: 100%;
+}
+.chart-control-item {
+  height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  border: 1px solid #e5ebf5;
+  border-radius: 7px;
+  background: #fff;
+  color: #344054;
+  font-size: 14px;
+  font-weight: 500;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+}
+.chart-control-item > .el-icon:first-child {
+  flex: 0 0 auto;
+  color: #3478f6;
+  font-size: 18px;
+}
+.chart-control-item span,
+.chart-control-item strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chart-control-item strong {
+  color: #1f2937;
+  font-weight: 700;
+}
+.chart-control-chevron {
+  margin-left: auto;
+  color: #98a2b3;
+  font-size: 12px;
+  transform: rotate(90deg);
+}
+.chart-control-select :deep(.el-select__wrapper) {
+  min-height: 38px;
+  padding: 0 14px;
+  border-radius: 7px;
+  background: #fff;
+  box-shadow: 0 0 0 1px #e5ebf5 inset, 0 1px 2px rgba(15, 23, 42, 0.03);
+}
+.chart-control-select :deep(.el-select__prefix) {
+  gap: 8px;
+  color: #3478f6;
+}
+.chart-control-select :deep(.el-select__prefix .el-icon) {
+  font-size: 18px;
+}
+.chart-control-select-label {
+  color: #344054;
+  font-size: 14px;
+  font-weight: 500;
+}
+.chart-control-select :deep(.el-select__selected-item) {
+  color: #1f2937;
+  font-size: 14px;
+  font-weight: 500;
+}
+.chart-type-selected-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.chart-type-option {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.chart-type-recommend-pill {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 999px;
+  background: #f3f4f6;
+  color: #9ca3af;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 600;
+}
+.chart-type-recommend-pill--current {
+  padding: 1px 7px;
+  font-size: 11px;
+  line-height: 16px;
+}
+.chart-empty-state {
+  min-height: 520px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  padding: 38px 24px 34px;
+  border: 1px solid #edf2f7;
+  border-radius: 8px;
+  background: #ffffff;
+  text-align: center;
+}
+.chart-empty-illustration {
+  width: min(360px, 78%);
+  height: auto;
+  display: block;
+  margin: 38px auto 14px;
+}
+.chart-empty-state h3 {
+  margin: 0;
+  color: #303133;
+  font-size: 18px;
+  line-height: 26px;
+  font-weight: 700;
+}
+.chart-empty-state p {
+  max-width: 420px;
+  margin: 8px 0 0;
+  color: #909399;
+  font-size: 14px;
+  line-height: 22px;
+}
+.chart-empty-guide {
+  width: min(680px, 100%);
+  margin-top: 42px;
+  padding: 14px 16px 16px;
+  border: 1px solid rgba(226, 232, 240, 0.58);
+  border-radius: 8px;
+  background: rgba(248, 251, 255, 0.62);
+  box-shadow: none;
+  text-align: left;
+}
+.chart-empty-guide-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #1f2937;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 700;
+}
+.chart-empty-guide-title .el-icon {
+  color: #3b82f6;
+  font-size: 17px;
+}
+.chart-empty-guide-steps {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+.chart-empty-guide-step {
+  min-height: 62px;
+  display: grid;
+  grid-template-columns: 32px 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid rgba(226, 232, 240, 0.72);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+}
+.chart-empty-guide-index {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: #edf4ff;
+  color: #2563eb;
+  font-size: 14px;
+  font-weight: 700;
+}
+.chart-empty-guide-icon {
+  color: #3b82f6;
+  font-size: 24px;
+  line-height: 1;
+}
+.chart-empty-guide-icon--database svg {
+  width: 24px;
+  height: 24px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.chart-empty-guide-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.chart-empty-guide-copy strong {
+  color: #111827;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 700;
+}
+.chart-empty-guide-copy small {
+  color: #8a94a6;
+  font-size: 12px;
+  line-height: 18px;
+}
+.chart-canvas {
+  width: 100%;
+  height: 360px;
+  min-height: 360px;
+  margin-top: 4px;
 }
 .pin-dialog-hint {
   margin: 0 0 12px;
@@ -5607,39 +6178,85 @@ onBeforeUnmount(() => {
 }
 .chat-datasource-bar {
   display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 6px;
+  align-items: center;
   margin-bottom: 10px;
-  padding: 8px 10px;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  background: #f8fafc;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 .chat-filter-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 6px;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 32px;
 }
 .chat-filter-field {
   min-width: 0;
   display: grid;
-  grid-template-columns: 58px minmax(0, 1fr);
+  grid-template-columns: auto 1fr;
   align-items: center;
-  gap: 6px;
+  gap: 16px;
+}
+.chat-filter-field:first-child {
+  flex: 1.08 1 0;
+}
+.chat-filter-field:last-child {
+  flex: 0.92 1 0;
 }
 .chat-datasource-label {
   margin: 0;
-  color: #475467;
-  font-size: 12px;
-  line-height: 1.4;
-  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #1f2937;
+  font-size: 15px;
+  line-height: 1;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.chat-datasource-label .el-icon {
+  color: #2f7df6;
+  font-size: 18px;
+}
+.chat-datasource-database-icon {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #2f7df6;
+}
+.chat-datasource-database-icon svg {
+  width: 20px;
+  height: 20px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .chat-toolbar-select {
   width: 100%;
 }
 .chat-toolbar-select :deep(.el-select__wrapper) {
-  min-height: 30px;
+  min-height: 34px;
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 0 0 1px #e3e9f2 inset;
+  padding: 0 10px;
+}
+.chat-toolbar-select :deep(.el-select__wrapper:hover) {
+  box-shadow: 0 0 0 1px #d4dfec inset;
+}
+.chat-toolbar-select :deep(.el-select__wrapper.is-focused) {
+  box-shadow: 0 0 0 1px #a7c6ff inset;
+}
+.chat-toolbar-select :deep(.el-select__placeholder),
+.chat-toolbar-select :deep(.el-select__selected-item) {
+  color: #667085;
+  font-size: 13px;
 }
 .chat-toolbar-select :deep(.el-select__selected-item),
 .chat-toolbar-select :deep(.el-select__placeholder) {
@@ -5649,23 +6266,17 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 .chat-selection-hint {
-  grid-column: 2;
-  margin-top: -5px;
-  color: #98a2b3;
-  font-size: 11px;
-  line-height: 1.25;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: none;
 }
 .chat-thread-header {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 10px;
-  padding: 10px 12px;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
+  margin-bottom: 0;
+  padding: 12px 14px 10px;
+  border: 1px solid #e6ebf2;
+  border-bottom: 0;
+  border-radius: 18px 18px 0 0;
   background: #fff;
 }
 .chat-thread-toggle {
@@ -5717,22 +6328,95 @@ onBeforeUnmount(() => {
 .chat-thread-history-btn {
   border-radius: 8px;
 }
+.chat-thread-new-btn {
+  border-radius: 8px;
+}
+.chat-thread-header--inside {
+  margin: 0;
+  padding: 12px 14px 8px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.chat-conversation-shell {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #e6ebf2;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: inset 0 -1px 0 rgba(148, 163, 184, 0.08);
+}
+.chat-conversation-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0 14px 0;
+  background: #fff;
+}
+.chat-conversation-shell .message-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 10px 2px 12px;
+}
+.chat-conversation-shell .avatar {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow: none;
+  overflow: visible;
+}
+.chat-conversation-shell .avatar img,
+.chat-conversation-shell .avatar span {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.chat-conversation-shell .avatar img {
+  width: 44px;
+  height: 44px;
+  object-fit: contain;
+}
+.chat-conversation-shell .message-wrapper.user .avatar {
+  width: 64px;
+  height: 64px;
+  flex-basis: 64px;
+  margin: -10px 12px 0 -2px;
+}
+.chat-conversation-shell .message-wrapper.user .avatar img {
+  width: 64px;
+  height: 64px;
+}
 .chat-session-manager {
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  gap: 8px;
-  padding: 10px;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  background: #f8fafc;
+  gap: 10px;
+  padding: 4px 14px 14px;
+  border: 1px solid #e6ebf2;
+  border-top: 0;
+  border-radius: 0 0 18px 18px;
+  background: #fff;
 }
 .chat-session-toolbar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 110px auto;
+  grid-template-columns: minmax(0, 1fr) 110px;
   gap: 6px;
   align-items: center;
+  padding-top: 0;
 }
 .chat-session-status {
   width: 110px;
@@ -5823,33 +6507,13 @@ onBeforeUnmount(() => {
   background: #fef2f2;
   color: #dc2626;
 }
-.chat-session-manager-empty {
-  min-height: 220px;
-  display: grid;
-  place-items: center;
-  gap: 8px;
-  text-align: center;
-  border: 1px dashed #cbd5e1;
-  border-radius: 10px;
-  background: #fff;
-  padding: 20px;
-}
-.chat-session-manager-empty__title {
-  color: #0f172a;
-  font-size: 15px;
-  font-weight: 700;
-}
-.chat-session-manager-empty__text {
-  color: #64748b;
-  font-size: 12px;
-  line-height: 1.6;
-}
 .ask-bar {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 4px;
-  margin-top: 10px;
+  padding: 10px 12px 12px;
+  background: transparent;
+  box-shadow: none;
 }
 .message-followup-ref {
   display: grid;
@@ -5891,7 +6555,7 @@ onBeforeUnmount(() => {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  margin-top: 12px;
+  margin: 8px 0 10px;
   padding: 12px 14px;
   border: 1px solid #dbe7f6;
   border-radius: 12px;
@@ -5924,27 +6588,251 @@ onBeforeUnmount(() => {
   flex: 1;
   min-width: 0;
 }
-.ask-bar :deep(.el-button + .el-button) {
-  margin-left: 0;
+.ask-bar :deep(.el-input__wrapper) {
+  min-height: 44px;
+  padding: 5px 7px 5px 16px;
+  border-radius: 999px;
+  background: #f7f9fc;
+  box-shadow: inset 0 0 0 1px #e5eaf1;
 }
-.stop-btn {
-  flex: 0 0 auto;
+.ask-bar :deep(.el-input__wrapper.is-focus) {
+  background: #fff;
+  box-shadow: inset 0 0 0 1px #c7d7fe, 0 0 0 3px rgba(59, 130, 246, 0.08);
 }
-.voice-btn {
-  flex: 0 0 auto;
-  width: 28px;
-  min-width: 28px;
+.ask-bar :deep(.el-input__inner) {
+  height: 32px;
+  color: #111827;
+  font-size: 14px;
+}
+.ask-bar :deep(.el-input__prefix) {
+  margin-right: 5px;
+}
+.ask-bar :deep(.el-input__suffix) {
+  margin-left: 8px;
+}
+.ask-input-loading {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  display: inline-block;
+  position: relative;
+  animation: askLoadingSpin 0.9s linear infinite;
+  opacity: 0.72;
+}
+.ask-input-loading i {
+  position: absolute;
+  left: 8px;
+  top: 1px;
+  width: 2px;
+  height: 5px;
+  border-radius: 999px;
+  background: #aeb9c6;
+  transform-origin: 1px 8px;
+}
+.ask-input-loading i:nth-child(1) { transform: rotate(0deg); opacity: 1; }
+.ask-input-loading i:nth-child(2) { transform: rotate(45deg); opacity: 0.86; }
+.ask-input-loading i:nth-child(3) { transform: rotate(90deg); opacity: 0.72; }
+.ask-input-loading i:nth-child(4) { transform: rotate(135deg); opacity: 0.58; }
+.ask-input-loading i:nth-child(5) { transform: rotate(180deg); opacity: 0.44; }
+.ask-input-loading i:nth-child(6) { transform: rotate(225deg); opacity: 0.34; }
+.ask-input-loading i:nth-child(7) { transform: rotate(270deg); opacity: 0.26; }
+.ask-input-loading i:nth-child(8) { transform: rotate(315deg); opacity: 0.18; }
+.ask-input-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 32px;
+}
+.chat-model-trigger {
+  width: auto;
+  min-width: 68px;
+  max-width: 92px;
   height: 28px;
-  padding: 0;
-}
-.voice-btn :deep(.el-icon) {
-  font-size: 13px;
-}
-.voice-btn :deep(.el-button__text),
-.voice-btn :deep(.el-button__inner) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 2px;
+  padding: 0 5px 0 7px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: none;
+  outline: none;
+  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+.chat-model-trigger:hover {
+  background: #f4f7fb;
+  color: #1d4ed8;
+  box-shadow: none;
+}
+.chat-model-trigger.active,
+.chat-model-trigger:focus {
+  background: #eef6ff;
+  border-color: #b8d6ff;
+  color: #1d4ed8;
+  box-shadow: none;
+}
+.chat-model-trigger span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-model-trigger .el-icon {
+  flex: 0 0 auto;
+  font-size: 11px;
+}
+.ask-input-actions :deep(.chat-model-menu-popper.el-popover.el-popper) {
+  padding: 8px;
+  border: 1px solid #dde6f3;
+  border-radius: 14px;
+  background: #f8fafc;
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.16);
+}
+.chat-model-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.chat-model-menu__group {
+  padding: 4px 10px 6px;
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 700;
+}
+.chat-model-menu__item {
+  width: 100%;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: #1f2937;
+  font-size: 14px;
+  font-weight: 650;
+  text-align: left;
+  cursor: pointer;
+}
+.chat-model-menu__item:hover {
+  background: #eef6ff;
+  color: #1d4ed8;
+}
+.chat-model-menu__item.active {
+  background: #e8f1ff;
+  color: #1d4ed8;
+}
+.chat-model-menu__check {
+  color: #2563eb;
+  font-size: 15px;
+}
+.ask-input-icon-btn,
+.ask-input-send-btn,
+.ask-input-stop-btn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 999px;
+  padding: 0;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  transition: background-color 0.18s ease, color 0.18s ease, transform 0.18s ease;
+}
+.ask-input-icon-btn:hover,
+.ask-input-icon-btn.active {
+  background: #eef2f7;
+  color: #2563eb;
+}
+.ask-input-icon-btn:disabled {
+  cursor: not-allowed;
+  color: #cbd5e1;
+  background: transparent;
+}
+.ask-input-send-btn {
+  width: 30px;
+  height: 30px;
+  background: #2563eb;
+  color: #fff;
+}
+.ask-input-send-btn:hover {
+  background: #1d4ed8;
+  transform: translateY(-1px);
+}
+.ask-input-send-btn .el-icon {
+  font-size: 16px;
+}
+.ask-input-stop-btn {
+  width: 32px;
+  height: 32px;
+}
+.ask-input-stop-btn:hover .stop-btn__disc {
+  background: #d7dce5;
+}
+.stop-btn__disc {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #e5e7eb;
+  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.08);
+}
+.stop-btn__square {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: #111827;
+}
+@keyframes askLoadingSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.bubble--thinking {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.thinking-spinner {
+  position: relative;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  animation: thinkingSpinnerRotate 0.9s linear infinite;
+}
+.thinking-spinner i {
+  position: absolute;
+  left: 9px;
+  top: 1px;
+  width: 2px;
+  height: 6px;
+  border-radius: 999px;
+  background: #8ea1b6;
+  transform-origin: 1px 9px;
+}
+.thinking-spinner i:nth-child(1) { transform: rotate(0deg); opacity: 1; }
+.thinking-spinner i:nth-child(2) { transform: rotate(45deg); opacity: 0.86; }
+.thinking-spinner i:nth-child(3) { transform: rotate(90deg); opacity: 0.72; }
+.thinking-spinner i:nth-child(4) { transform: rotate(135deg); opacity: 0.58; }
+.thinking-spinner i:nth-child(5) { transform: rotate(180deg); opacity: 0.44; }
+.thinking-spinner i:nth-child(6) { transform: rotate(225deg); opacity: 0.34; }
+.thinking-spinner i:nth-child(7) { transform: rotate(270deg); opacity: 0.26; }
+.thinking-spinner i:nth-child(8) { transform: rotate(315deg); opacity: 0.18; }
+@keyframes thinkingSpinnerRotate {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .bubble-voice-action {
   display: flex;
@@ -6301,32 +7189,45 @@ onBeforeUnmount(() => {
 .semantic-evidence-empty {
   padding: 8px 0 2px;
 }
+:global(.history-product-drawer .el-drawer__header) {
+  margin-bottom: 0;
+  padding: 16px 18px 6px;
+}
+:global(.history-product-drawer .el-drawer__title) {
+  color: #111827;
+  font-weight: 800;
+}
+:global(.history-product-drawer .el-drawer__body) {
+  padding: 0 18px 20px;
+}
 .history-drawer {
   height: 100%;
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
-  gap: 14px;
+  gap: 12px;
+  padding-top: 0;
 }
 .history-toolbar {
   display: grid;
   gap: 10px;
-  padding: 12px;
-  border: 1px solid #e2e8f0;
-  border-radius: 12px;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  padding: 12px 14px 14px;
+  border: 1px solid #e1e8f2;
+  border-radius: 8px;
+  background: #fbfdff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.03);
 }
 .history-toolbar__primary {
   display: grid;
-  grid-template-columns: minmax(240px, 1.5fr) repeat(3, minmax(120px, 0.8fr)) minmax(260px, 1.1fr);
-  gap: 10px;
+  grid-template-columns: minmax(260px, 1.5fr) repeat(4, minmax(150px, 1fr));
+  gap: 12px;
   align-items: center;
 }
 .history-toolbar__secondary {
-  display: flex;
+  display: grid;
+  grid-template-columns: 390px 88px 88px 88px minmax(24px, 1fr) 126px 92px 82px;
+  grid-template-rows: 36px 36px;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
+  gap: 10px 14px;
 }
 .history-toolbar :deep(.el-input),
 .history-toolbar :deep(.el-select),
@@ -6335,19 +7236,35 @@ onBeforeUnmount(() => {
 }
 .history-toolbar :deep(.el-input__wrapper),
 .history-toolbar :deep(.el-select__wrapper) {
-  min-height: 40px;
-  border-radius: 10px;
-  box-shadow: 0 0 0 1px #d8e1ee inset;
+  min-height: 36px;
+  border-radius: 7px;
+  box-shadow: 0 0 0 1px #dce5f0 inset;
   background: #fff;
+  color: #172033;
 }
 .history-toolbar :deep(.el-range-editor.el-input__wrapper) {
-  min-height: 40px;
+  min-height: 36px;
+  width: 390px;
+  max-width: 100%;
   padding-right: 10px;
 }
 .history-toolbar :deep(.el-input__wrapper:hover),
 .history-toolbar :deep(.el-select__wrapper:hover),
 .history-toolbar :deep(.el-range-editor.el-input__wrapper:hover) {
-  box-shadow: 0 0 0 1px #b8c8df inset;
+  box-shadow: 0 0 0 1px #b6c7dd inset;
+}
+.history-toolbar :deep(.el-input__inner),
+.history-toolbar :deep(.el-select__placeholder),
+.history-toolbar :deep(.el-range-input),
+.history-toolbar :deep(.el-range-separator) {
+  color: #6b7588;
+  font-size: 13px;
+  font-weight: 500;
+}
+.history-toolbar :deep(.el-input__prefix),
+.history-toolbar :deep(.el-select__caret),
+.history-toolbar :deep(.el-range__icon) {
+  color: #8a96a8;
 }
 .history-toolbar__keyword,
 .history-toolbar__table,
@@ -6359,40 +7276,97 @@ onBeforeUnmount(() => {
 .history-toolbar__sort {
   min-width: 0;
 }
-.history-toolbar__quick-range :deep(.el-segmented) {
-  width: 100%;
-  padding: 4px;
-  border-radius: 10px;
-  background: #eef3fb;
+.history-toolbar__date {
+  grid-column: 1;
+  grid-row: 1;
+  width: 390px;
+  max-width: 100%;
+}
+.history-toolbar__date :deep(.el-range-input) {
+  flex: 1 1 128px;
+  min-width: 98px;
+}
+.history-toolbar__date :deep(.el-range-separator) {
+  flex: 0 0 34px;
+  min-width: 34px;
+  padding: 0;
+  text-align: center;
 }
 .history-toolbar__quick-range {
-  flex: 1 1 280px;
+  grid-column: 1 / span 4;
+  grid-row: 2;
+  display: grid;
+  grid-template-columns: repeat(4, 88px);
+  gap: 14px;
+}
+.history-toolbar__quick-range :deep(.el-button) {
+  width: 100%;
+  height: 34px;
   min-width: 0;
+  padding: 0 12px;
+  border: 1px solid #dfe7f2;
+  border-radius: 7px;
+  background: #fff;
+  color: #172033;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.02);
+}
+.history-toolbar__quick-range :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+.history-toolbar__quick-range :deep(.el-button.is-active) {
+  border-color: #0b73ff;
+  background: #0b73ff;
+  color: #fff;
+  box-shadow: 0 6px 14px rgba(11, 115, 255, 0.2);
 }
 .history-toolbar__sort {
   display: flex;
-  justify-content: flex-start;
+  justify-content: stretch;
+  grid-column: 6;
+  grid-row: 2;
 }
 .history-toolbar__sort :deep(.el-button) {
-  min-width: 110px;
-  border-radius: 10px;
-  border-color: #d7e3f4;
+  width: 100%;
+  min-height: 34px;
+  border-radius: 7px;
+  border-color: #dfe7f2;
+  background: #fff;
   color: #334155;
+  font-size: 13px;
+  font-weight: 600;
+  gap: 5px;
 }
 .history-toolbar__actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: 92px 82px;
   align-items: center;
   justify-content: flex-end;
-  gap: 8px;
-  flex: 0 0 auto;
-  flex-wrap: wrap;
+  gap: 16px;
+  grid-column: 7 / span 2;
+  grid-row: 2;
 }
 .history-toolbar__actions :deep(.el-button + .el-button) {
   margin-left: 0;
 }
 .history-toolbar__actions :deep(.el-button) {
-  min-width: 96px;
-  border-radius: 10px;
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.history-toolbar__actions :deep(.el-button--primary) {
+  background: #0b73ff;
+  border-color: #0b73ff;
+  box-shadow: 0 6px 14px rgba(11, 115, 255, 0.2);
+}
+.history-toolbar__actions :deep(.el-button.is-plain) {
+  background: #fff;
+  border-color: #dfe7f2;
+  color: #172033;
 }
 .history-summary {
   display: flex;
@@ -6535,7 +7509,7 @@ onBeforeUnmount(() => {
 .history-detail__title {
   color: #0f172a;
   font-size: 18px;
-  font-weight: 700;
+  font-weight: 500;
   line-height: 1.45;
   word-break: break-word;
 }
@@ -6562,7 +7536,7 @@ onBeforeUnmount(() => {
 .history-detail__section-title {
   color: #0f172a;
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 500;
 }
 .history-detail__status-grid {
   display: grid;
@@ -6587,7 +7561,7 @@ onBeforeUnmount(() => {
 .history-detail__kv-value {
   color: #0f172a;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 400;
   word-break: break-word;
 }
 .history-detail__kv-grid {
@@ -6610,7 +7584,7 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 .analysis-meta {
-  margin-top: 12px;
+  margin-top: -34px;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
   background: #fff;
@@ -6747,14 +7721,14 @@ onBeforeUnmount(() => {
 .history-detail__reasoning-stepno {
   color: #2563eb;
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 500;
   letter-spacing: 0;
   white-space: nowrap;
 }
 .history-detail__reasoning-title {
   color: #0f172a;
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 400;
   line-height: 1.5;
 }
 .history-detail__reasoning-detail {
@@ -6797,7 +7771,7 @@ onBeforeUnmount(() => {
 .history-detail__thumbnail-title {
   color: #0f172a;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 500;
 }
 .history-detail__thumbnail-meta {
   color: #64748b;
@@ -6840,7 +7814,7 @@ onBeforeUnmount(() => {
 .history-detail__snapshot-card-value {
   color: #1d4ed8;
   font-size: 16px;
-  font-weight: 700;
+  font-weight: 400;
   line-height: 1.3;
   word-break: break-word;
 }
@@ -6888,7 +7862,7 @@ onBeforeUnmount(() => {
 .history-detail__snapshot-table th {
   background: #f8fafc;
   color: #0f172a;
-  font-weight: 700;
+  font-weight: 500;
   white-space: nowrap;
   overflow-wrap: normal;
   word-break: keep-all;
@@ -7439,8 +8413,22 @@ onBeforeUnmount(() => {
     grid-column: 1 / -1;
   }
   .history-toolbar__secondary {
-    flex-direction: column;
+    grid-template-columns: 1fr;
+    grid-template-rows: auto;
     align-items: stretch;
+  }
+  .history-toolbar__date,
+  .history-toolbar__quick-range,
+  .history-toolbar__sort,
+  .history-toolbar__actions {
+    grid-column: 1 / -1;
+  }
+  .history-toolbar__date,
+  .history-toolbar :deep(.el-range-editor.el-input__wrapper) {
+    width: 100%;
+  }
+  .history-toolbar__quick-range {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
   .history-toolbar__actions,
   .history-toolbar__sort {
@@ -7558,6 +8546,12 @@ onBeforeUnmount(() => {
   }
   .history-toolbar__primary {
     grid-template-columns: 1fr;
+  }
+  .history-toolbar__quick-range {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .history-toolbar__actions {
+    grid-template-columns: 1fr 1fr;
   }
   .history-toolbar__actions :deep(.el-button) {
     flex: 1;

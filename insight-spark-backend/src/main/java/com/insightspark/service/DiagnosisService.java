@@ -46,6 +46,7 @@ import java.awt.Color;
 import java.awt.Font;
 import java.awt.FontMetrics;
 import java.awt.Graphics2D;
+import java.awt.GraphicsEnvironment;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
@@ -84,8 +85,12 @@ import java.util.Map;
 import java.util.Objects;
 
 import java.util.Optional;
+import java.util.LinkedHashSet;
+import java.util.Set;
 
 import java.util.concurrent.ThreadLocalRandom;
+
+import java.util.function.Consumer;
 
 import java.util.regex.Matcher;
 
@@ -177,6 +182,15 @@ public class DiagnosisService {
 
     public Map<String, Object> runDiagnosis(Map<String, Object> request) {
 
+        return runDiagnosis(request, progress -> {
+        });
+
+    }
+
+    public Map<String, Object> runDiagnosis(Map<String, Object> request, Consumer<Map<String, Object>> progressConsumer) {
+
+        emitDiagnosisProgress(progressConsumer, 8, "\u4efb\u52a1\u521b\u5efa", 1, "\u5df2\u63a5\u6536\u8bca\u65ad\u8bf7\u6c42\uff0c\u5f00\u59cb\u6821\u9a8c\u6570\u636e\u8868\u3001\u6307\u6807\u5b57\u6bb5\u548c\u62a5\u544a\u53c2\u6570\u3002", "running");
+
         String tableName = requiredString(request, "tableName");
 
         String metricField = requiredString(request, "metricField");
@@ -204,6 +218,8 @@ public class DiagnosisService {
             assertFieldExists(tableName, timeField);
 
         }
+
+        emitDiagnosisProgress(progressConsumer, 18, "\u5b57\u6bb5\u6821\u9a8c", 2, "\u6570\u636e\u8868\u4e0e\u8bca\u65ad\u5b57\u6bb5\u6821\u9a8c\u5b8c\u6210\uff0c\u51c6\u5907\u8bfb\u53d6\u539f\u59cb\u6837\u672c\u3002", "running");
 
 
 
@@ -242,6 +258,8 @@ public class DiagnosisService {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(selectSql);
         Map<String, String> fieldLabels = loadFieldLabels(tableName);
 
+        emitDiagnosisProgress(progressConsumer, 30, "\u5f02\u5e38\u626b\u63cf", 3, "\u5df2\u8bfb\u53d6\u539f\u59cb\u6570\u636e " + rows.size() + " \u6761\uff0c\u5f00\u59cb\u8bc6\u522b\u5f02\u5e38\u8282\u70b9\u548c\u7edf\u8ba1\u6ce2\u52a8\u3002", "running");
+
 
 
         String sourceQuestion = optionalString(request, "sourceQuestion");
@@ -253,7 +271,7 @@ public class DiagnosisService {
         try {
             knowledgeGraphService.syncGraph();
         } catch (Exception ignored) {
-            // 诊断阶段优先使用 Neo4j 现有图谱，自动同步失败会在推理证据中体现为图谱上下文不足。
+            // 璇婃柇闃舵浼樺厛浣跨敤 Neo4j 鐜版湁鍥捐氨锛岃嚜鍔ㄥ悓姝ュけ璐ヤ細鍦ㄦ帹鐞嗚瘉鎹腑浣撶幇涓哄浘璋变笂涓嬫枃涓嶈冻銆?
         }
         Map<String, Object> graphPath = knowledgeGraphService.retrieveMultiHopContextSafely(question, tableName);
 
@@ -261,10 +279,14 @@ public class DiagnosisService {
 
         List<Map<String, Object>> graphEdges = castMapList(graphPath.getOrDefault("edges", List.of()));
 
+        emitDiagnosisProgress(progressConsumer, 45, "Neo4j \u591a\u8df3\u6269\u5c55", 4, "\u5df2\u6269\u5c55\u56fe\u8c31\u8282\u70b9 " + graphNodes.size() + " \u4e2a\u3001\u5173\u7cfb " + graphEdges.size() + " \u6761\uff0c\u5f00\u59cb\u53ec\u56de\u77e5\u8bc6\u6587\u6863\u8bc1\u636e\u3002", "running");
+
         List<Map<String, Object>> anomalyMarkers = buildAnomalyMarkers(rows, metricField, dimensionFields, timeField, Map.of());
         String documentSearchQuery = buildDiagnosisDocumentSearchQuery(question, rows, metricField, dimensionFields,
                 timeField, fieldLabels, anomalyMarkers);
         List<Map<String, Object>> docEvidence = knowledgeDocumentService.search(documentSearchQuery, 10);
+
+        emitDiagnosisProgress(progressConsumer, 58, "GraphRAG \u6587\u6863\u53ec\u56de", 5, "\u5df2\u53ec\u56de\u4f01\u4e1a\u6587\u6863/\u884c\u4e1a\u7814\u62a5\u8bc1\u636e " + docEvidence.size() + " \u6761\uff0c\u5f00\u59cb\u878d\u5408\u591a\u8df3\u8bc1\u636e\u94fe\u3002", "running");
 
 
 
@@ -273,6 +295,10 @@ public class DiagnosisService {
                         dimensionFields, timeField, graphPath, docEvidence, rows, fieldLabels, detailLevel, anomalyType)
 
                 ;
+
+        emitDiagnosisProgress(progressConsumer, 72, "\u6839\u56e0\u63a8\u7406", 6, graphRagResult.isPresent()
+                ? "GraphRAG AI \u5df2\u8fd4\u56de\u6839\u56e0\u63a8\u7406\u7ed3\u679c\uff0c\u6b63\u5728\u7ed3\u6784\u5316\u62a5\u544a\u5185\u5bb9\u3002"
+                : "GraphRAG AI \u672a\u8fd4\u56de\u53ef\u7528\u7ed3\u679c\uff0c\u5df2\u5207\u6362\u5230\u540e\u7aef\u89c4\u5219\u8bca\u65ad\u3002", "running");
 
         boolean graphRagAiUsed = graphRagResult.isPresent();
 
@@ -299,6 +325,10 @@ public class DiagnosisService {
         aiResult.put("sourceQuestion", sourceQuestion == null ? question : sourceQuestion);
 
         aiResult.put("sourceSql", optionalString(request, "sourceSql"));
+        Object conversationId = request.get("conversationId");
+        if (conversationId != null && !Objects.toString(conversationId, "").isBlank()) {
+            aiResult.put("conversationId", Objects.toString(conversationId, ""));
+        }
 
         anomalyMarkers = buildAnomalyMarkers(rows, metricField, dimensionFields, timeField, aiResult);
         aiResult.put("anomalyMarkers", anomalyMarkers);
@@ -310,9 +340,24 @@ public class DiagnosisService {
         aiResult.put("detailLevel", detailLevel);
         aiResult.put("anomalyType", anomalyType);
         enhanceBusinessDiagnosis(aiResult, rows, tableName, metricField, dimensionFields, timeField,
-                fieldLabels, docEvidence, graphNodes, graphEdges, anomalyType);
+                fieldLabels, docEvidence, graphNodes, graphEdges, detailLevel, anomalyType);
+        List<Map<String, Object>> historicalSimilarReports = findSimilarHistoricalReports(tableName, metricField,
+                anomalyType, dimensionFields, aiResult);
+        aiResult.put("historicalSimilarReports", historicalSimilarReports);
+        if (!historicalSimilarReports.isEmpty()) {
+            List<Map<String, Object>> logs = new ArrayList<>(castMapList(aiResult.getOrDefault("reasoningLogs", List.of())));
+            logs.add(Map.of(
+                    "step", logs.size() + 1,
+                    "title", "\u5386\u53f2\u76f8\u4f3c\u8bca\u65ad\u53ec\u56de",
+                    "status", "completed",
+                    "detail", "\u5df2\u547d\u4e2d " + historicalSimilarReports.size() + " \u4efd\u5386\u53f2\u8bca\u65ad\u62a5\u544a\uff0c\u7528\u4e8e\u5bf9\u6bd4\u5f02\u5e38\u6a21\u5f0f\u548c\u6839\u56e0\u7ed3\u8bba\u3002"
+            ));
+            aiResult.put("reasoningLogs", logs);
+        }
         aiResult.put("chartSnapshot", normalizeChartSnapshot(request.get("chartSnapshot"), aiResult, rows, metricField,
                 castMapList(aiResult.getOrDefault("anomalyMarkers", anomalyMarkers))));
+
+        emitDiagnosisProgress(progressConsumer, 86, "\u62a5\u544a\u7ec4\u88c5", 7, "\u5df2\u5b8c\u6210\u5f02\u5e38\u8282\u70b9\u3001\u6839\u56e0\u7ed3\u8bba\u3001\u56fe\u8868\u5feb\u7167\u548c\u62a5\u544a\u6b63\u6587\u7ec4\u88c5\uff0c\u51c6\u5907\u5199\u5165 Neo4j\u3002", "running");
 
 
 
@@ -340,6 +385,10 @@ public class DiagnosisService {
             aiResult.put("reportFallbackReason", persistError);
         }
 
+        emitDiagnosisProgress(progressConsumer, 96, "\u62a5\u544a\u6301\u4e45\u5316", 8, reportPersisted
+                ? "\u62a5\u544a\u5df2\u5199\u5165 Neo4j\uff0c\u51c6\u5907\u8fd4\u56de\u524d\u7aef\u3002"
+                : "\u62a5\u544a\u672a\u80fd\u5199\u5165 Neo4j\uff0c\u5c06\u4ee5\u672c\u6b21\u5185\u5b58\u7ed3\u679c\u8fd4\u56de\u3002", reportPersisted ? "completed" : "warning");
+
 
 
         Map<String, Object> result = new LinkedHashMap<>(aiResult);
@@ -358,6 +407,31 @@ public class DiagnosisService {
 
         return result;
 
+    }
+
+    private void emitDiagnosisProgress(Consumer<Map<String, Object>> progressConsumer,
+                                       int percentage,
+                                       String step,
+                                       int logStep,
+                                       String detail,
+                                       String status) {
+        if (progressConsumer == null) {
+            return;
+        }
+        Map<String, Object> event = new LinkedHashMap<>();
+        event.put("percentage", percentage);
+        event.put("step", step);
+        event.put("log", Map.of(
+                "step", logStep,
+                "title", step,
+                "status", status,
+                "detail", detail
+        ));
+        try {
+            progressConsumer.accept(event);
+        } catch (Exception ignored) {
+            // 娴佸紡杩涘害鏄寮轰綋楠岋紝鎺ㄩ€佸け璐ヤ笉搴斾腑鏂瘖鏂富娴佺▼銆?
+        }
     }
 
 
@@ -479,7 +553,7 @@ public class DiagnosisService {
 
         if (rows.isEmpty()) {
 
-            throw new IllegalArgumentException("诊断报告不存在：" + reportId);
+            throw new IllegalArgumentException("璇婃柇鎶ュ憡涓嶅瓨鍦細" + reportId);
 
         }
 
@@ -508,6 +582,7 @@ public class DiagnosisService {
                 report.put("chartSnapshot", snapshot);
                 result.put("chartSnapshot", snapshot);
             }
+            report.put("chartSnapshot", result.get("chartSnapshot"));
             report.put("resultJson", result);
         }
         return report;
@@ -516,7 +591,7 @@ public class DiagnosisService {
 
     public Map<String, Object> deleteReport(Long reportId) {
         if (reportId == null) {
-            throw new IllegalArgumentException("报告ID不能为空");
+            throw new IllegalArgumentException("鎶ュ憡ID涓嶈兘涓虹┖");
         }
         return deleteReports(List.of(reportId));
     }
@@ -524,7 +599,7 @@ public class DiagnosisService {
     public Map<String, Object> deleteReports(Object rawIds) {
         List<Long> reportIds = castLongList(rawIds);
         if (reportIds.isEmpty()) {
-            throw new IllegalArgumentException("请选择要删除的诊断报告");
+            throw new IllegalArgumentException("璇烽€夋嫨瑕佸垹闄ょ殑璇婃柇鎶ュ憡");
         }
         String cypher = """
                 MATCH (r:DiagnosisReport)
@@ -539,7 +614,7 @@ public class DiagnosisService {
         ));
         long deleted = rows.isEmpty() ? 0L : Math.round(toDouble(rows.get(0).get("deleted")));
         if (deleted <= 0) {
-            throw new IllegalArgumentException("诊断报告不存在或无权删除");
+            throw new IllegalArgumentException("璇婃柇鎶ュ憡涓嶅瓨鍦ㄦ垨鏃犳潈鍒犻櫎");
         }
         return Map.of("deleted", deleted, "requested", reportIds.size());
     }
@@ -554,14 +629,11 @@ public class DiagnosisService {
         ));
     }
 
-    public ExportFile exportReport(Long reportId, String format, Map<String, Object> exportOptions) {
+        public ExportFile exportReport(Long reportId, String format, Map<String, Object> exportOptions) {
         Map<String, Object> report = getReport(reportId);
         String normalized = format == null ? "markdown" : format.trim().toLowerCase();
-        String title = Objects.toString(report.getOrDefault("title", "智能诊断报告"));
-        String markdown = Objects.toString(report.getOrDefault("reportMarkdown", ""));
-        if (markdown.isBlank()) {
-            markdown = "# " + title + "\n\n" + Objects.toString(report.getOrDefault("summary", ""));
-        }
+        String title = cleanDisplayText(report.getOrDefault("title", "\u667a\u80fd\u8bca\u65ad\u62a5\u544a"), "\u667a\u80fd\u8bca\u65ad\u62a5\u544a");
+        String markdown = cleanReportMarkdown(report);
 
         boolean includeSnapshots = Boolean.parseBoolean(Objects.toString(exportOptions.getOrDefault("includeSnapshots", true)));
         boolean includeReasoningLogs = Boolean.parseBoolean(Objects.toString(exportOptions.getOrDefault("includeReasoningLogs", true)));
@@ -577,7 +649,7 @@ public class DiagnosisService {
         }
 
         if ("pdf".equals(normalized)) {
-            return new ExportFile(safeFilename(title) + ".pdf", "application/pdf", buildPdf(content, enablePdfEncryption, extractSnapshotImage(report)));
+            return new ExportFile(safeFilename(title) + ".pdf", "application/pdf", buildPdf(content, enablePdfEncryption, includeSnapshots ? extractSnapshotImage(report) : null));
         }
 
         return new ExportFile(safeFilename(title) + ".md", "text/markdown; charset=UTF-8", content.getBytes(StandardCharsets.UTF_8));
@@ -585,10 +657,10 @@ public class DiagnosisService {
 
     public ExportFile encryptVisualPdf(byte[] pdfBytes, String filename) {
         if (pdfBytes == null || pdfBytes.length == 0) {
-            throw new IllegalArgumentException("待加密 PDF 不能为空");
+            throw new IllegalArgumentException("寰呭姞瀵?PDF 涓嶈兘涓虹┖");
         }
         if (pdfBytes.length > 200L * 1024L * 1024L) {
-            throw new IllegalArgumentException("PDF 文件超过 200MB，无法在线加密");
+            throw new IllegalArgumentException("PDF 鏂囦欢瓒呰繃 200MB锛屾棤娉曞湪绾垮姞瀵?");
         }
         try (PDDocument document = PDDocument.load(new ByteArrayInputStream(pdfBytes), MemoryUsageSetting.setupTempFileOnly());
              ByteArrayOutputStream out = new ByteArrayOutputStream()) {
@@ -603,13 +675,13 @@ public class DiagnosisService {
             if (!containsAsciiToken(encryptedBytes, "/Encrypt")) {
                 throw new IllegalStateException("PDF encryption failed: missing encryption dictionary");
             }
-            String safeName = safeFilename(filename == null || filename.isBlank() ? "智能诊断报告" : filename);
+            String safeName = safeFilename(filename == null || filename.isBlank() ? "鏅鸿兘璇婃柇鎶ュ憡" : filename);
             if (!safeName.toLowerCase().endsWith(".pdf")) {
                 safeName += ".pdf";
             }
             return new ExportFile(safeName, "application/pdf", encryptedBytes);
         } catch (Exception e) {
-            throw new IllegalArgumentException("PDF 加密失败：" + e.getMessage());
+            throw new IllegalArgumentException("PDF \u5bfc\u51fa\u5931\u8d25\uff1a" + e.getMessage());
         }
     }
 
@@ -632,29 +704,54 @@ public class DiagnosisService {
                                       boolean enablePdfEncryption) {
         StringBuilder content = new StringBuilder();
         content.append("# ").append(title).append("\n\n")
-                .append("- 数据表：").append(Objects.toString(report.get("tableName"), "")).append("\n")
-                .append("- 指标字段：").append(Objects.toString(report.get("metricField"), "")).append("\n")
-                .append("- 生成时间：").append(Objects.toString(report.get("createdAt"), "")).append("\n")
-                .append("- 导出加密：").append(enablePdfEncryption ? "已请求 PDF 加密" : "未启用").append("\n\n");
-        if (includeReasoningLogs) {
-            content.append("## GraphRAG 根因链路\n\n")
-                    .append(extractGraphPath(report))
+                .append("- \u6570\u636e\u8868\uff1a").append(Objects.toString(report.get("tableName"), "")).append("\n")
+                .append("- \u6307\u6807\u5b57\u6bb5\uff1a").append(Objects.toString(report.get("metricField"), "")).append("\n")
+                .append("- \u751f\u6210\u65f6\u95f4\uff1a").append(Objects.toString(report.get("createdAt"), "")).append("\n")
+                .append("- \u5bfc\u51fa\u52a0\u5bc6\uff1a").append(enablePdfEncryption ? "\u5df2\u8bf7\u6c42 PDF \u52a0\u5bc6" : "\u672a\u542f\u7528").append("\n\n");
+        content.append(markdown == null ? "" : markdown).append("\n\n");
+        Map<String, Object> exportData = mergedReportData(report);
+        if (!"simple".equalsIgnoreCase(Objects.toString(exportData.getOrDefault("detailLevel", report.get("detailLevel")), ""))) {
+            content.append("## \u62a5\u544a\u7ed1\u5b9a\u4e0e\u56de\u6eaf\u8bf4\u660e\n\n")
+                    .append(buildTraceabilityNarrative(report, exportData))
                     .append("\n\n");
         }
         if (includeSnapshots) {
-            content.append("## 图表快照\n\n")
+            content.append("## \u56fe\u8868\u5feb\u7167\n\n")
                     .append(buildSnapshotExportSummary(report))
                     .append("\n\n");
         }
-        content.append("## 异常节点标注\n\n")
+        content.append("## \u5f02\u5e38\u8282\u70b9\u6807\u6ce8\n\n")
                 .append(buildAnomalyExportSummary(report))
                 .append("\n\n")
-                .append("## 原始数据明细\n\n")
+                .append("## \u539f\u59cb\u6570\u636e\u660e\u7ec6\n\n")
                 .append(buildRawDataExportSummary(report))
                 .append("\n\n");
-        content.append(markdown);
+        if (includeReasoningLogs) {
+            content.append("## GraphRAG \u63a8\u7406\u65e5\u5fd7\n\n")
+                    .append(extractGraphPath(report))
+                    .append("\n\n");
+        }
         return content.toString();
     }
+
+    private String cleanReportMarkdown(Map<String, Object> report) {
+        Map<String, Object> data = mergedReportData(report);
+        Map<String, String> fieldLabels = toStringMap(data.get("fieldLabels"));
+        String markdown = Objects.toString(data.getOrDefault("reportMarkdown", report.getOrDefault("reportMarkdown", "")), "").trim();
+        if (!markdown.isBlank() && !looksMojibake(markdown)) {
+            return markdown;
+        }
+        String tableName = Objects.toString(data.getOrDefault("tableName", report.getOrDefault("tableName", "biz_data")));
+        String metricField = Objects.toString(data.getOrDefault("metricField", report.getOrDefault("metricField", "metric")));
+        String timeField = Objects.toString(data.getOrDefault("timeField", report.getOrDefault("timeField", "")));
+        List<String> dimensionFields = castStringList(data.getOrDefault("dimensionFields", report.getOrDefault("dimensionFields", List.of())));
+        List<Map<String, Object>> rows = castMapList(data.getOrDefault("rawDataRows", data.getOrDefault("queryRows", List.of())));
+        List<Map<String, Object>> evidence = distinctEvidence(castMapList(data.getOrDefault("docEvidence", List.of())));
+        List<Map<String, Object>> rootCauses = castMapList(data.getOrDefault("rootCauses", List.of()));
+        return buildBusinessReportMarkdown(data, tableName, metricField, dimensionFields, timeField, fieldLabels,
+                rows, evidence, rootCauses, Objects.toString(data.getOrDefault("detailLevel", "detailed")));
+    }
+
 
     private String buildAnomalyExportSummary(Map<String, Object> report) {
         Map<String, Object> result = toStringKeyMap(report.get("resultJson"));
@@ -664,16 +761,16 @@ public class DiagnosisService {
             markers = castMapList(snapshot.getOrDefault("anomalyMarkers", List.of()));
         }
         if (markers.isEmpty()) {
-            return "未识别到超过阈值的异常节点。";
+            return "\u672a\u8bc6\u522b\u5230\u8d85\u8fc7\u9608\u503c\u7684\u5f02\u5e38\u8282\u70b9\u3002";
         }
         StringBuilder builder = new StringBuilder();
         for (Map<String, Object> marker : markers) {
             builder.append("- ")
-                    .append(Objects.toString(marker.getOrDefault("label", "异常点")))
-                    .append("：")
-                    .append(Objects.toString(marker.getOrDefault("valueLabel", marker.getOrDefault("value", ""))))
-                    .append("，")
-                    .append(Objects.toString(marker.getOrDefault("reason", "已标注为异常节点")))
+                    .append(cleanDisplayText(marker.getOrDefault("label", "\u5f02\u5e38\u70b9"), "\u5f02\u5e38\u70b9"))
+                    .append("\uff1a")
+                    .append(cleanDisplayText(marker.getOrDefault("valueLabel", marker.getOrDefault("value", "")), "-"))
+                    .append("\uff0c")
+                    .append(cleanDisplayText(marker.getOrDefault("reason", "\u5df2\u6807\u6ce8\u4e3a\u5f02\u5e38\u8282\u70b9"), "\u5df2\u6807\u6ce8\u4e3a\u5f02\u5e38\u8282\u70b9"))
                     .append("\n");
         }
         return builder.toString().trim();
@@ -683,7 +780,7 @@ public class DiagnosisService {
         Map<String, Object> result = toStringKeyMap(report.get("resultJson"));
         List<Map<String, Object>> rows = castMapList(result.getOrDefault("rawDataRows", result.getOrDefault("queryRows", List.of())));
         if (rows.isEmpty()) {
-            return "未绑定原始数据明细。";
+            return "\u672a\u7ed1\u5b9a\u539f\u59cb\u6570\u636e\u660e\u7ec6\u3002";
         }
         StringBuilder builder = new StringBuilder();
         int index = 1;
@@ -691,13 +788,13 @@ public class DiagnosisService {
             builder.append(index++).append(". ");
             builder.append(row.entrySet().stream()
                     .limit(8)
-                    .map(entry -> entry.getKey() + "=" + Objects.toString(entry.getValue(), ""))
-                    .reduce((a, b) -> a + "；" + b)
+                    .map(entry -> cleanDisplayText(entry.getKey(), "") + "=" + cleanDisplayText(entry.getValue(), ""))
+                    .reduce((a, b) -> a + "\uff1b" + b)
                     .orElse(""));
             builder.append("\n");
         }
         if (rows.size() > 10) {
-            builder.append("... 共绑定 ").append(rows.size()).append(" 条明细，导出仅展示前 10 条。\n");
+            builder.append("... \u5171\u7ed1\u5b9a ").append(rows.size()).append(" \u6761\u660e\u7ec6\uff0c\u5bfc\u51fa\u4ec5\u5c55\u793a\u524d 10 \u6761\u3002\n");
         }
         return builder.toString().trim();
     }
@@ -705,17 +802,18 @@ public class DiagnosisService {
     private String buildSnapshotExportSummary(Map<String, Object> report) {
         Map<String, Object> snapshot = toStringKeyMap(report.get("chartSnapshot"));
         if (snapshot.isEmpty()) {
-            return "未绑定图表快照。";
+            return "\u672a\u7ed1\u5b9a\u56fe\u8868\u5feb\u7167\u3002";
         }
-        String title = Objects.toString(snapshot.getOrDefault("title", "诊断图表快照"));
-        String chartType = Objects.toString(snapshot.getOrDefault("chartType", "chart"));
+        String title = cleanDisplayText(snapshot.getOrDefault("title", "\u8bca\u65ad\u56fe\u8868\u5feb\u7167"), "\u8bca\u65ad\u56fe\u8868\u5feb\u7167");
+        String chartType = chartTypeLabel(Objects.toString(snapshot.getOrDefault("chartType", "chart")));
         List<Map<String, Object>> data = castMapList(snapshot.getOrDefault("data", List.of()));
         String source = Objects.toString(snapshot.getOrDefault("source", "frontend-captured"));
-        return "- 快照标题：" + title + "\n"
-                + "- 图表类型：" + chartType + "\n"
-                + "- 数据点数量：" + data.size() + "\n"
-                + "- 快照来源：" + ("server-generated".equals(source) ? "后端自动生成" : "前端图表截图") + "\n"
-                + "- 图片内容：已作为图表快照插入导出的 PDF/Word，正文不再展开 base64 图片数据。";
+        String sourceLabel = "server-generated".equals(source) ? "\u540e\u7aef\u81ea\u52a8\u751f\u6210" : "\u524d\u7aef\u56fe\u8868\u622a\u56fe";
+        return "- \u5feb\u7167\u6807\u9898\uff1a" + title + "\n"
+                + "- \u56fe\u8868\u7c7b\u578b\uff1a" + chartType + "\n"
+                + "- \u6570\u636e\u70b9\u6570\u91cf\uff1a" + data.size() + "\n"
+                + "- \u5feb\u7167\u6765\u6e90\uff1a" + sourceLabel + "\n"
+                + "- \u56fe\u7247\u5185\u5bb9\uff1a\u5df2\u4f5c\u4e3a\u56fe\u8868\u5feb\u7167\u63d2\u5165\u5bfc\u51fa\u7684 PDF/Word\uff0c\u6b63\u6587\u4e0d\u5c55\u5f00 base64 \u56fe\u7247\u6570\u636e\u3002";
     }
 
     private Long saveReport(String tableName, String metricField, List<String> dimensionFields,
@@ -724,7 +822,7 @@ public class DiagnosisService {
 
         if (!neo4jEnabled) {
 
-            throw new IllegalStateException("Neo4j 未启用，无法保存诊断报告。请开启 insight.neo4j.enabled");
+            throw new IllegalStateException("Neo4j 鏈惎鐢紝鏃犳硶淇濆瓨璇婃柇鎶ュ憡銆傝寮€鍚?insight.neo4j.enabled");
 
         }
 
@@ -763,7 +861,7 @@ public class DiagnosisService {
         if (persistedFieldLabels.isEmpty() && !tableName.isBlank()) {
             persistedFieldLabels.putAll(loadFieldLabels(tableName));
         }
-        String title = replacePhysicalFields(Objects.toString(aiResult.getOrDefault("title", "智能诊断报告")), persistedFieldLabels);
+        String title = replacePhysicalFields(Objects.toString(aiResult.getOrDefault("title", "鏅鸿兘璇婃柇鎶ュ憡")), persistedFieldLabels);
         String summary = replacePhysicalFields(Objects.toString(aiResult.getOrDefault("summary", "")), persistedFieldLabels);
         String reportMarkdown = replacePhysicalFields(Objects.toString(aiResult.getOrDefault("reportMarkdown", "")), persistedFieldLabels);
         aiResult.put("title", title);
@@ -1064,7 +1162,7 @@ public class DiagnosisService {
 
         } catch (Exception e) {
 
-            throw new IllegalStateException("Neo4j 查询失败：" + safeErrorMessage(e), e);
+            throw new IllegalStateException("Neo4j 鏌ヨ澶辫触锛?" + safeErrorMessage(e), e);
 
         }
 
@@ -1082,7 +1180,7 @@ public class DiagnosisService {
                 })
                 .filter(item -> !item.isBlank())
                 .findFirst()
-                .orElse("未知 Neo4j 错误");
+                .orElse("鏈煡 Neo4j 閿欒");
     }
 
     private String safeErrorMessage(Exception e) {
@@ -1096,7 +1194,7 @@ public class DiagnosisService {
 
         if (relatedKnowledge == null || relatedKnowledge.isEmpty()) {
 
-            return "暂无图谱上下文，建议先在“知识图谱与GraphRAG”中同步图谱。";
+            return "\u6682\u65e0\u56fe\u8c31\u4e0a\u4e0b\u6587\uff0c\u5efa\u8bae\u5148\u5728\u300c\u77e5\u8bc6\u56fe\u8c31\u4e0e GraphRAG\u300d\u4e2d\u540c\u6b65\u56fe\u8c31\u3002";
 
         }
 
@@ -1104,9 +1202,9 @@ public class DiagnosisService {
 
                 .limit(6)
 
-                .map(item -> Objects.toString(item.get("nodeType"), "节点") + "「"
+                .map(item -> Objects.toString(item.get("nodeType"), "??") + "?"
 
-                        + Objects.toString(item.get("label"), "") + "」")
+                        + Objects.toString(item.get("label"), "") + "?")
 
                 .reduce((a, b) -> a + " -> " + b)
 
@@ -1122,13 +1220,13 @@ public class DiagnosisService {
 
         for (Map<String, Object> chunk : docChunks) {
 
-            sources.add(Objects.toString(chunk.get("source"), "知识文档") + "：" + previewText(chunk.get("chunkText")));
+            sources.add(Objects.toString(chunk.get("source"), "鐭ヨ瘑鏂囨。") + "锛?" + previewText(chunk.get("chunkText")));
 
         }
 
         if (!graphContext.isEmpty()) {
 
-            sources.add("知识图谱路径：" + buildGraphReasoningPath(graphContext));
+            sources.add("鐭ヨ瘑鍥捐氨璺緞锛?" + buildGraphReasoningPath(graphContext));
 
         }
 
@@ -1146,6 +1244,7 @@ public class DiagnosisService {
                                           List<Map<String, Object>> docEvidence,
                                           List<Map<String, Object>> graphNodes,
                                           List<Map<String, Object>> graphEdges,
+                                          String detailLevel,
                                           String anomalyType) {
         aiResult.put("fieldLabels", fieldLabels);
         aiResult.put("metricFieldLabel", labelOf(fieldLabels, metricField));
@@ -1160,13 +1259,13 @@ public class DiagnosisService {
         aiResult.put("dimensionContributions", relabelContributionBlocks(
                 castMapList(aiResult.getOrDefault("dimensionContributions", List.of())),
                 fieldLabels,
-                "全样本"));
+                "\u5168\u6837\u672c"));
         aiResult.put("anomalyDimensionContributions", buildDimensionContributionBlocks(
                 rawAnomalyRows.isEmpty() ? rows : rawAnomalyRows,
                 metricField,
                 dimensionFields,
                 fieldLabels,
-                rawAnomalyRows.isEmpty() ? "全样本" : "异常节点子集"));
+                rawAnomalyRows.isEmpty() ? "\u5168\u6837\u672c" : "\u5f02\u5e38\u8282\u70b9\u5b50\u96c6"));
         aiResult.put("factorChartBlocks", relabelFactorChartBlocks(
                 castMapList(aiResult.getOrDefault("factorChartBlocks", List.of())),
                 fieldLabels,
@@ -1203,10 +1302,10 @@ public class DiagnosisService {
         aiResult.put("relatedKnowledge", mergeBusinessKnowledge(graphNodes, evidence, rootCauses));
         aiResult.put("reasoningLogs", buildBusinessReasoningLogs(rows, graphNodes, graphEdges, evidence,
                 graphRagEvidenceChain, rootCauses, anomalyType));
-        aiResult.put("title", replacePhysicalFields(Objects.toString(aiResult.getOrDefault("title", "智能诊断报告")), fieldLabels));
+        aiResult.put("title", replacePhysicalFields(Objects.toString(aiResult.getOrDefault("title", "鏅鸿兘璇婃柇鎶ュ憡")), fieldLabels));
         aiResult.put("summary", replacePhysicalFields(Objects.toString(aiResult.getOrDefault("summary", "")), fieldLabels));
         aiResult.put("reportMarkdown", buildBusinessReportMarkdown(aiResult, tableName, metricField,
-                dimensionFields, timeField, fieldLabels, rows, evidence, rootCauses));
+                dimensionFields, timeField, fieldLabels, rows, evidence, rootCauses, detailLevel));
 
         Map<String, Object> snapshot = toStringKeyMap(aiResult.get("chartSnapshot"));
         if (!snapshot.isEmpty()) {
@@ -1284,12 +1383,12 @@ public class DiagnosisService {
         List<Map<String, Object>> dimensionContributions = relabelContributionBlocks(
                 castMapList(result.getOrDefault("dimensionContributions", List.of())),
                 fieldLabels,
-                "全样本");
+                "鍏ㄦ牱鏈?");
         result.put("dimensionContributions", dimensionContributions);
         result.put("anomalyDimensionContributions", relabelContributionBlocks(
                 castMapList(result.getOrDefault("anomalyDimensionContributions", List.of())),
                 fieldLabels,
-                "异常节点子集"));
+                "寮傚父鑺傜偣瀛愰泦"));
     }
 
     private List<Map<String, Object>> hydrateReportListRows(List<Map<String, Object>> reports) {
@@ -1353,9 +1452,10 @@ public class DiagnosisService {
             Map<String, Object> normalized = new LinkedHashMap<>(contribution);
             String dimensionField = Objects.toString(contribution.getOrDefault("dimensionField", contribution.getOrDefault("dimension", "")));
             String dimensionLabel = readableFieldLabel(dimensionField, contribution.getOrDefault("dimensionLabel", ""), fieldLabels);
+            String rawScope = displayText(contribution.getOrDefault("scope", scope));
             normalized.put("dimensionField", dimensionField);
             normalized.put("dimensionLabel", dimensionLabel.isBlank() ? labelOf(fieldLabels, dimensionField) : dimensionLabel);
-            normalized.put("scope", Objects.toString(contribution.getOrDefault("scope", scope)));
+            normalized.put("scope", looksMojibake(rawScope) || rawScope.isBlank() ? scope : rawScope);
             normalized.put("topItems", relabelContributionItems(castMapList(contribution.getOrDefault("topItems", List.of())), fieldLabels));
             result.add(normalized);
         }
@@ -1412,14 +1512,14 @@ public class DiagnosisService {
             String rawDimension = Objects.toString(contribution.getOrDefault("dimensionField", block.getOrDefault("dimensionField", "")));
             String dimensionLabel = readableFieldLabel(rawDimension, contribution.getOrDefault("dimensionLabel", block.getOrDefault("dimensionLabel", "")), fieldLabels);
             String title = Objects.toString(block.getOrDefault("title", "")).trim();
-            if (looksPhysicalField(title.replace(" 贡献拆解", "")) || title.matches("(?i).*col_\\d{3}.*")) {
-                title = (dimensionLabel.isBlank() ? "业务维度" : dimensionLabel) + "贡献拆解";
+            if (looksPhysicalField(title.replace(" \u8d21\u732e\u62c6\u89e3", "")) || title.matches("(?i).*col_\\d{3}.*") || looksMojibake(title)) {
+                title = (dimensionLabel.isBlank() ? "\u4e1a\u52a1\u7ef4\u5ea6" : dimensionLabel) + "\u8d21\u732e\u62c6\u89e3";
             } else {
                 for (Map.Entry<String, String> entry : fieldLabels.entrySet()) {
                     title = title.replace(entry.getKey(), entry.getValue());
                 }
             }
-            block.put("title", title.isBlank() ? "关联因素图表块" : title);
+            block.put("title", title.isBlank() ? "\u5173\u8054\u56e0\u7d20\u56fe\u8868" : title);
             block.put("dimensionLabel", dimensionLabel);
             block.put("data", relabelContributionItems(castMapList(block.getOrDefault("data", List.of())), fieldLabels));
             result.add(block);
@@ -1432,10 +1532,11 @@ public class DiagnosisService {
         for (Map.Entry<String, String> entry : fieldLabels.entrySet()) {
             title = title.replace(entry.getKey(), entry.getValue());
         }
-        if (title.matches("(?i).*col_\\d{3}.*")) {
+        if (title.matches("(?i).*col_\\d{3}.*") || looksMojibake(title)) {
             Object mapping = toStringKeyMap(snapshot.get("fieldMapping")).get("dimension");
             List<String> dimensions = castStringList(mapping);
-            title = (dimensions.isEmpty() ? "业务维度" : dimensions.get(0)) + "贡献拆解";
+            String dimension = dimensions.isEmpty() ? "" : readableFieldLabel(dimensions.get(0), dimensions.get(0), fieldLabels);
+            title = (dimension.isBlank() ? "\u8bca\u65ad\u56fe\u8868" : dimension) + "\u8d21\u732e\u56fe\u8868";
         }
         if (!title.isBlank()) {
             snapshot.put("title", title);
@@ -1533,10 +1634,11 @@ public class DiagnosisService {
     private Map<String, Object> normalizeDocEvidence(Map<String, Object> item) {
         Map<String, Object> evidence = new LinkedHashMap<>();
         evidence.put("nodeType", "DOC_EVIDENCE");
-        evidence.put("sourceType", Objects.toString(item.getOrDefault("docType", "文档")));
-        evidence.put("label", Objects.toString(item.getOrDefault("title", item.getOrDefault("fileName", "知识文档"))));
+        evidence.put("sourceType", Objects.toString(item.getOrDefault("docType", "鏂囨。")));
+        evidence.put("label", Objects.toString(item.getOrDefault("title", item.getOrDefault("fileName", "鐭ヨ瘑鏂囨。"))));
         evidence.put("source", Objects.toString(item.getOrDefault("source", evidence.get("label"))));
-        evidence.put("content", previewText(item.get("chunkText")));
+        evidence.put("content", fullText(item.get("chunkText")));
+        evidence.put("preview", previewText(item.get("chunkText")));
         evidence.put("score", item.getOrDefault("score", 0));
         return evidence;
     }
@@ -1555,17 +1657,17 @@ public class DiagnosisService {
         String metricLabel = labelOf(fieldLabels, metricField);
         List<Map<String, Object>> markers = castMapList(aiResult.getOrDefault("anomalyMarkers", List.of()));
         Map<String, Object> topMarker = markers.isEmpty() ? Map.of() : markers.get(0);
-        String anomalyLabel = Objects.toString(topMarker.getOrDefault("label", "关键异常节点"));
+        String anomalyLabel = Objects.toString(topMarker.getOrDefault("label", "\u5173\u952e\u5f02\u5e38\u8282\u70b9"));
         String anomalyValue = Objects.toString(topMarker.getOrDefault("valueLabel", metricLabel));
         String evidenceText = evidence.isEmpty()
-                ? "暂无命中的企业文档/行业研报证据，结论主要来自数据波动和知识图谱字段关系。"
+                ? "\u672a\u547d\u4e2d\u5916\u90e8\u6587\u6863\u8bc1\u636e\uff0c\u4e3b\u8981\u4f9d\u636e\u539f\u59cb\u6570\u636e\u3001\u7ef4\u5ea6\u8d21\u732e\u548c\u56fe\u8c31\u4e0a\u4e0b\u6587\u5224\u65ad\u3002"
                 : distinctEvidence(evidence).stream()
                     .limit(2)
-                    .map(item -> "《" + item.get("label") + "》" + Objects.toString(item.get("content"), ""))
-                    .reduce((a, b) -> a + "；" + b)
+                    .map(item -> "\u300a" + item.get("label") + "\u300b" + Objects.toString(item.get("content"), ""))
+                    .reduce((a, b) -> a + "\uff1b" + b)
                     .orElse("");
         String businessContext = describeTopBusinessContext(rows, metricField, dimensionFields, timeField, fieldLabels);
-        String firstEvidenceLabel = evidence.isEmpty() ? "企业复盘与行业研报" : "《" + evidence.get(0).get("label") + "》";
+        String firstEvidenceLabel = evidence.isEmpty() ? "\u539f\u59cb\u6570\u636e\u660e\u7ec6" : "\u300a" + evidence.get(0).get("label") + "\u300b";
         Map<String, Double> topDimensionContribution = dimensionFields.isEmpty()
                 ? Map.of()
                 : aggregateByDimension(rows, metricField, dimensionFields.get(0));
@@ -1576,23 +1678,23 @@ public class DiagnosisService {
         String businessCauseName = buildBusinessRootCauseName(topMarker, dimensionFields, fieldLabels, topDimensionName);
 
         causes.add(rootCause("HIGH", businessCauseName, metricLabel, 0.9,
-                anomalyLabel + " 出现 " + anomalyValue + "，" + businessContext
-                        + "依据" + firstEvidenceLabel + "及异常节点数据，需要优先核验当前业务场景中对 "
-                        + metricLabel + " 产生直接影响的事件、口径变化或运营条件。证据：" + evidenceText,
-                "复核异常节点对应的原始记录、业务事件、统计口径和数据采集链路，确认波动是否由真实业务变化触发。"));
+                anomalyLabel + " \u7684" + anomalyValue + "\uff0c" + businessContext
+                        + "\u7ed3\u5408" + firstEvidenceLabel + "\u4e0e\u7ef4\u5ea6\u8d21\u732e\u5206\u6790\uff0c\u53ef\u5224\u65ad\u8be5\u5f02\u5e38\u66f4\u50cf\u662f\u7531\u5177\u4f53\u4e1a\u52a1\u8282\u70b9\u6216\u7ec4\u5408\u53e3\u5f84\u96c6\u4e2d\u62c9\u52a8\u3002\u5f53\u524d\u6307\u6807\u300c"
+                        + metricLabel + "\u300d\u7684\u9ad8\u4f4e\u53d8\u5316\u4e0e\u5bf9\u5e94\u7ef4\u5ea6\u5206\u5e03\u9ad8\u5ea6\u76f8\u5173\u3002" + evidenceText,
+                "\u4f18\u5148\u590d\u6838\u5f02\u5e38\u8282\u70b9\u5bf9\u5e94\u7684\u539f\u59cb\u8bb0\u5f55\u3001\u4e1a\u52a1\u4e8b\u4ef6\u3001\u7edf\u8ba1\u53e3\u5f84\u548c\u6570\u636e\u91c7\u96c6\u94fe\u8def\uff0c\u786e\u8ba4\u6ce2\u52a8\u662f\u5426\u7531\u771f\u5b9e\u4e1a\u52a1\u53d8\u5316\u89e6\u53d1\u3002"));
 
         if (!graphNodes.isEmpty()) {
             boolean metadataOnly = isMetadataOnlyGraph(graphEdges);
             causes.add(rootCause(metadataOnly ? "MEDIUM" : "HIGH",
-                    metadataOnly ? "Neo4j 字段关系支撑的结构线索" : "Neo4j 多跳关系支持的业务因素",
+                    metadataOnly ? "Neo4j \u5143\u6570\u636e\u4e0a\u4e0b\u6587\u4e0d\u8db3" : "Neo4j \u591a\u8df3\u5173\u8054\u6307\u5411\u4e1a\u52a1\u94fe\u8def\u5f02\u5e38",
                     metricLabel,
                     metadataOnly ? 0.68 : 0.86,
-                    "Neo4j 从当前数据表和查询语义出发扩展到 "
-                            + graphNodes.size() + " 个节点、" + graphEdges.size() + " 条关系。"
+                    "Neo4j \u53ec\u56de\u7684\u56fe\u8c31\u4e0a\u4e0b\u6587\u5305\u542b "
+                            + graphNodes.size() + " \u4e2a\u8282\u70b9\u3001" + graphEdges.size() + " \u6761\u5173\u7cfb\u3002"
                             + summarizeGraphEvidence(graphNodes, graphEdges)
-                            + (metadataOnly ? " 当前图谱关系以表字段元数据为主，可支撑回溯链路，但不足以单独构成业务因果根因。" : ""),
-                    metadataOnly ? "补充业务事件、文档证据或历史诊断节点后，再将图谱线索升级为因果判断。"
-                            : "沿图谱命中的表、字段、历史报告或业务标签继续核验上游数据口径和下游分析结论。"));
+                            + (metadataOnly ? " \u4f46\u5173\u7cfb\u4ee5\u5b57\u6bb5\u6216\u8868\u7ed3\u6784\u4e3a\u4e3b\uff0c\u5c1a\u672a\u5f62\u6210\u8db3\u591f\u7684\u4e1a\u52a1\u56e0\u679c\u94fe\uff0c\u9700\u8981\u7ed3\u5408\u4eba\u5de5\u590d\u76d8\u3002" : ""),
+                    metadataOnly ? "\u5b8c\u5584\u56fe\u8c31\u4e2d\u4e1a\u52a1\u5b9e\u4f53\u3001\u4e8b\u4ef6\u548c\u6307\u6807\u7684\u5173\u8054\u5173\u7cfb\uff0c\u907f\u514d\u62a5\u544a\u53ea\u57fa\u4e8e\u5b57\u6bb5\u5143\u6570\u636e\u63a8\u65ad\u3002"
+                            : "\u6cbf\u56fe\u8c31\u5173\u7cfb\u8ffd\u6eaf\u76f8\u5173\u4e1a\u52a1\u5bf9\u8c61\u3001\u4e8b\u4ef6\u548c\u7ec4\u7ec7\u73af\u8282\uff0c\u5bf9\u9ad8\u8d21\u732e\u8282\u70b9\u505a\u4e13\u9879\u590d\u6838\u3002"));
         }
 
         if (!dimensionFields.isEmpty()) {
@@ -1601,24 +1703,24 @@ public class DiagnosisService {
             Map<String, Double> contribution = aggregateByDimension(rows, metricField, dimension);
             String topDimension = contribution.entrySet().stream()
                     .max(Map.Entry.comparingByValue())
-                    .map(entry -> entry.getKey() + " 贡献 " + compactNumber(entry.getValue()))
-                    .orElse("暂无明确头部维度");
-            causes.add(rootCause("MEDIUM", "业务维度贡献集中", dimensionLabel, 0.84,
-                    dimensionLabel + " 中 " + topDimension + "，说明异常不是随机噪声，而是集中在特定业务分组。",
-                    "围绕头部维度继续拆解相关下钻维度、业务对象和时间窗口，确认该分组是否放大了异常。"));
+                    .map(entry -> entry.getKey() + " \u8d21\u732e " + compactNumber(entry.getValue()))
+                    .orElse("\u6682\u65e0\u660e\u663e\u9ad8\u8d21\u732e\u56e0\u5b50");
+            causes.add(rootCause("MEDIUM", "\u4e1a\u52a1\u7ef4\u5ea6\u8d21\u732e\u96c6\u4e2d", dimensionLabel, 0.84,
+                    dimensionLabel + " \u4e2d\u300c" + topDimension + "\u300d\uff0c\u8bf4\u660e\u6307\u6807\u5f02\u5e38\u4e0d\u662f\u5168\u5c40\u5747\u5300\u6ce2\u52a8\uff0c\u800c\u662f\u5728\u7279\u5b9a\u53e3\u5f84\u4e0a\u66f4\u96c6\u4e2d\u3002",
+                    "\u5c06\u8be5\u7ef4\u5ea6\u4f5c\u4e3a\u4e3b\u8981\u62c6\u89e3\u53e3\u5f84\uff0c\u5bf9\u9ad8\u8d21\u732e\u56e0\u5b50\u5206\u522b\u6838\u5bf9\u4e1a\u52a1\u6d3b\u52a8\u3001\u5ba2\u6237\u7ed3\u6784\u548c\u6570\u636e\u8bb0\u5f55\u3002"));
         }
 
         if (!evidence.isEmpty()) {
             Map<String, Object> firstEvidence = evidence.get(0);
-            causes.add(rootCause("MEDIUM", "文档证据指向的业务因素", "企业文档/行业研报", 0.8,
-                    "GraphRAG 检索到《" + firstEvidence.get("label") + "》：" + firstEvidence.get("content"),
-                    "把文档中提到的业务因素与异常节点的时间、维度和原始明细进行交叉验证。"));
+            causes.add(rootCause("MEDIUM", "\u6587\u6863\u8bc1\u636e\u8865\u5145\u652f\u6491\u6839\u56e0\u5047\u8bbe", "\u539f\u59cb\u6570\u636e\u4e0e\u77e5\u8bc6\u6587\u6863", 0.8,
+                    "GraphRAG \u547d\u4e2d\u6587\u6863\u300a" + firstEvidence.get("label") + "\u300b\uff1a" + firstEvidence.get("content"),
+                    "\u5c06\u547d\u4e2d\u6587\u6863\u4e2d\u7684\u4e1a\u52a1\u4e8b\u4ef6\u3001\u7b56\u7565\u53d8\u66f4\u6216\u884c\u4e1a\u80cc\u666f\u4e0e\u5f02\u5e38\u8282\u70b9\u8fdb\u884c\u4eba\u5de5\u5bf9\u9f50\u3002"));
         }
 
         if (timeField != null && !timeField.isBlank()) {
-            causes.add(rootCause("MEDIUM", "异常前后窗口的持续性风险", labelOf(fieldLabels, timeField), 0.74,
-                    "异常类型为 " + anomalyTypeLabel(anomalyType) + "，且存在可回溯时间字段 " + labelOf(fieldLabels, timeField) + "，需要按异常前后窗口比较。",
-                    "对异常节点前后相邻窗口的核心指标、相关维度和原始明细进行联动分析，判断尖峰或低谷是否会延续。"));
+            causes.add(rootCause("MEDIUM", "\u65f6\u95f4\u7a97\u53e3\u6ce2\u52a8\u6216\u77ed\u671f\u8109\u51b2", labelOf(fieldLabels, timeField), 0.74,
+                    "\u5f02\u5e38\u7c7b\u578b\u4e3a" + anomalyTypeLabel(anomalyType) + "\uff0c\u4e14\u5b58\u5728\u53ef\u56de\u6eaf\u65f6\u95f4\u5b57\u6bb5\u300c" + labelOf(fieldLabels, timeField) + "\u300d\uff0c\u9700\u8981\u6309\u5f02\u5e38\u524d\u540e\u7a97\u53e3\u6bd4\u8f83\u3002",
+                    "\u5efa\u8bae\u5efa\u7acb\u76f8\u90bb\u65f6\u95f4\u7a97\u53e3\u5bf9\u6bd4\uff0c\u533a\u5206\u77ed\u671f\u8109\u51b2\u3001\u5468\u671f\u6027\u53d8\u5316\u548c\u6301\u7eed\u8d8b\u52bf\u53d8\u5316\u3002"));
         }
         return causes;
     }
@@ -1639,9 +1741,9 @@ public class DiagnosisService {
             parts.add(fallbackDimensionValue);
         }
         if (parts.isEmpty()) {
-            return "关键异常节点业务波动";
+            return "\u5173\u952e\u5f02\u5e38\u8282\u70b9\u9a71\u52a8";
         }
-        return String.join("/", parts) + "集中波动驱动";
+        return String.join("/", parts) + "\u96c6\u4e2d\u6ce2\u52a8\u9a71\u52a8";
     }
 
     private boolean isMetadataOnlyGraph(List<Map<String, Object>> graphEdges) {
@@ -1657,10 +1759,10 @@ public class DiagnosisService {
 
     private String anomalyTypeLabel(String anomalyType) {
         return switch (Objects.toString(anomalyType, "").toLowerCase()) {
-            case "fluctuation" -> "波动异常";
-            case "structure" -> "结构异常";
-            case "trend" -> "趋势异常";
-            default -> Objects.toString(anomalyType, "异常");
+            case "fluctuation" -> "\u6ce2\u52a8\u5f02\u5e38";
+            case "structure" -> "\u7ed3\u6784\u5f02\u5e38";
+            case "trend" -> "\u8d8b\u52bf\u5f02\u5e38";
+            default -> Objects.toString(anomalyType, "\u5f02\u5e38");
         };
     }
 
@@ -1674,17 +1776,17 @@ public class DiagnosisService {
                 .orElse(Map.of());
         List<String> parts = new ArrayList<>();
         if (timeField != null && !timeField.isBlank() && topRow.get(timeField) != null) {
-            parts.add(labelOf(fieldLabels, timeField) + "为" + topRow.get(timeField));
+            parts.add(labelOf(fieldLabels, timeField) + "\u4e3a" + topRow.get(timeField));
         }
         for (String dimension : dimensionFields.stream().limit(3).toList()) {
             if (topRow.get(dimension) != null) {
-                parts.add(labelOf(fieldLabels, dimension) + "为" + topRow.get(dimension));
+                parts.add(labelOf(fieldLabels, dimension) + "\u4e3a" + topRow.get(dimension));
             }
         }
         if (parts.isEmpty()) {
             return "";
         }
-        return "高贡献记录显示" + String.join("、", parts) + "。";
+        return "\u9ad8\u8d21\u732e\u8bb0\u5f55\u663e\u793a" + String.join("\u3001", parts) + "\u3002";
     }
 
     private String summarizeGraphEvidence(List<Map<String, Object>> graphNodes, List<Map<String, Object>> graphEdges) {
@@ -1694,14 +1796,14 @@ public class DiagnosisService {
                         + "(" + Objects.toString(node.getOrDefault("nodeType", "NODE")) + ")")
                 .filter(item -> !item.isBlank())
                 .reduce((a, b) -> a + " -> " + b)
-                .orElse("暂无可展示节点");
+                .orElse("\u672a\u547d\u4e2d\u5177\u4f53\u8282\u70b9");
         String edgeSummary = graphEdges.stream()
                 .limit(3)
                 .map(edge -> Objects.toString(edge.getOrDefault("relationType", "RELATED")))
                 .filter(item -> !item.isBlank())
-                .reduce((a, b) -> a + "、" + b)
+                .reduce((a, b) -> a + "\u3001" + b)
                 .orElse("RELATED");
-        return " 关键节点链路：" + nodeSummary + "；关系类型：" + edgeSummary + "。";
+        return " \u5173\u952e\u8282\u70b9\u94fe\u8def\uff1a" + nodeSummary + "\uff0c\u5173\u7cfb\u7c7b\u578b\uff1a" + edgeSummary + "\u3002";
     }
 
     private List<Map<String, Object>> buildGraphRagEvidenceChain(String tableName,
@@ -1716,32 +1818,32 @@ public class DiagnosisService {
                                                                  List<Map<String, Object>> rootCauses) {
         List<Map<String, Object>> chain = new ArrayList<>();
         String metricLabel = labelOf(fieldLabels, metricField);
-        chain.add(evidenceHop(1, "异常指标定位", metricLabel,
-                "从数据表「" + tableName + "」读取指标「" + metricLabel + "」，识别异常节点 "
-                        + anomalyMarkers.size() + " 个。", 1.0));
+        chain.add(evidenceHop(1, "\u5f02\u5e38\u6307\u6807\u5b9a\u4f4d", metricLabel,
+                "\u4ece\u6570\u636e\u8868\u300c" + tableName + "\u300d\u4e2d\u8bc6\u522b\u6307\u6807\u300c" + metricLabel + "\u300d\u7684\u5f02\u5e38\u8282\u70b9 "
+                        + anomalyMarkers.size() + " \u4e2a\u3002", 1.0));
         int step = 2;
         for (String dimension : dimensionFields.stream().limit(3).toList()) {
-            chain.add(evidenceHop(step++, "业务维度下钻", labelOf(fieldLabels, dimension),
-                    "按业务维度「" + labelOf(fieldLabels, dimension) + "」聚合拆解异常贡献。", 0.88));
+            chain.add(evidenceHop(step++, "\u4e1a\u52a1\u7ef4\u5ea6\u4e0b\u94bb", labelOf(fieldLabels, dimension),
+                    "\u6309\u300c" + labelOf(fieldLabels, dimension) + "\u300d\u62c6\u89e3\u8d21\u732e\u5ea6\u548c\u9ad8\u8d21\u732e\u56e0\u5b50\u3002", 0.88));
         }
         if (timeField != null && !timeField.isBlank()) {
-            chain.add(evidenceHop(step++, "时间窗口回溯", labelOf(fieldLabels, timeField),
-                    "沿时间字段「" + labelOf(fieldLabels, timeField) + "」定位异常前后窗口。", 0.86));
+            chain.add(evidenceHop(step++, "\u65f6\u95f4\u7a97\u53e3\u56de\u6eaf", labelOf(fieldLabels, timeField),
+                    "\u4f7f\u7528\u300c" + labelOf(fieldLabels, timeField) + "\u300d\u5b9a\u4f4d\u5f02\u5e38\u53d1\u751f\u7a97\u53e3\u3002", 0.86));
         }
         if (!graphNodes.isEmpty()) {
-            chain.add(evidenceHop(step++, "Neo4j 图谱扩展", "图谱节点/关系",
+            chain.add(evidenceHop(step++, "Neo4j \u56fe\u8c31\u6269\u5c55", "\u56fe\u8c31\u8282\u70b9/\u5173\u7cfb",
                     summarizeGraphEvidence(graphNodes, graphEdges), graphEdges.isEmpty() ? 0.72 : 0.82));
         }
         for (Map<String, Object> item : evidence.stream().limit(3).toList()) {
-            chain.add(evidenceHop(step++, "文档证据召回",
-                    Objects.toString(item.getOrDefault("label", "知识文档")),
+            chain.add(evidenceHop(step++, "\u6587\u6863\u8bc1\u636e\u53ec\u56de",
+                    Objects.toString(item.getOrDefault("label", "\u77e5\u8bc6\u6587\u6863")),
                     Objects.toString(item.getOrDefault("content", "")),
                     toDouble(item.getOrDefault("score", 0)) > 0 ? 0.8 : 0.62));
         }
         if (!rootCauses.isEmpty()) {
             Map<String, Object> cause = rootCauses.get(0);
-            chain.add(evidenceHop(step, "根因结论生成",
-                    Objects.toString(cause.getOrDefault("causeType", "根因结论")),
+            chain.add(evidenceHop(step, "\u6839\u56e0\u7ed3\u8bba\u751f\u6210",
+                    Objects.toString(cause.getOrDefault("causeType", "\u6839\u56e0\u5047\u8bbe")),
                     Objects.toString(cause.getOrDefault("evidence", "")),
                     toDouble(cause.getOrDefault("confidence", 0.75))));
         }
@@ -1773,7 +1875,7 @@ public class DiagnosisService {
     private Map<String, Double> aggregateByDimension(List<Map<String, Object>> rows, String metricField, String dimensionField) {
         Map<String, Double> result = new LinkedHashMap<>();
         for (Map<String, Object> row : rows) {
-            String key = Objects.toString(row.getOrDefault(dimensionField, "未分组"));
+            String key = Objects.toString(row.getOrDefault(dimensionField, "鏈垎缁?"));
             result.put(key, result.getOrDefault(key, 0d) + toDouble(row.get(metricField)));
         }
         return result;
@@ -1794,7 +1896,7 @@ public class DiagnosisService {
                 return reportCell(rawTime);
             }
         }
-        return reportCell(Objects.toString(marker.getOrDefault("label", "异常点"), "异常点"));
+        return reportCell(Objects.toString(marker.getOrDefault("label", "寮傚父鐐?"), "寮傚父鐐?"));
     }
 
     private double reportMarkerValue(Map<String, Object> marker, Map<String, Object> markerRow, String metricField) {
@@ -1811,12 +1913,12 @@ public class DiagnosisService {
 
     private String reportOutlierType(double value, double avg) {
         if (value > avg) {
-            return "Positive Outlier (正向极值)";
+            return "Positive Outlier (\u6b63\u5411\u6781\u503c)";
         }
         if (value < avg) {
-            return "Negative Outlier (负向极值)";
+            return "Negative Outlier (\u8d1f\u5411\u6781\u503c)";
         }
-        return "Deviation Outlier (标准差偏离)";
+        return "Deviation Outlier (\u504f\u79bb\u5f02\u5e38)";
     }
 
     private String formatReportNumber(Object value) {
@@ -1836,12 +1938,12 @@ public class DiagnosisService {
 
     private String reportDeviationText(double value, double avg, String stdValue) {
         if (value > avg) {
-            return "处于样本总体极大值极点";
+            return "\u6307\u6807\u9ad8\u4e8e\u6837\u672c\u5747\u503c";
         }
         if (value < avg) {
-            return "处于样本总体极小值极点";
+            return "\u6307\u6807\u4f4e\u4e8e\u6837\u672c\u5747\u503c";
         }
-        return "偏离均值，标准差 σ = " + stdValue;
+        return "\u6307\u6807\u63a5\u8fd1\u5747\u503c\uff0c\u6807\u51c6\u5dee = " + stdValue;
     }
 
     private String reportCell(Object value) {
@@ -1855,17 +1957,16 @@ public class DiagnosisService {
         List<String> suggestions = new ArrayList<>();
         for (Map<String, Object> cause : rootCauses) {
             String action = Objects.toString(cause.get("action"), "");
-            if (!action.isBlank()) {
+            if (!action.isBlank() && !looksMojibake(action)) {
                 suggestions.add(action);
             }
         }
         if (!evidence.isEmpty()) {
-            suggestions.add("将命中的企业文档/行业研报作为复盘附件，和异常节点一并提交给业务负责人确认。");
-            suggestions.add("对照文档证据核查其中提到的业务事件、外部环境或管理动作是否影响本次异常指标。");
+            suggestions.add("\u6838\u5bf9\u547d\u4e2d\u6587\u6863\u4e0e\u5f02\u5e38\u8282\u70b9\u7684\u65f6\u95f4\u3001\u4e1a\u52a1\u5bf9\u8c61\u548c\u7edf\u8ba1\u53e3\u5f84\u662f\u5426\u4e00\u81f4\uff0c\u907f\u514d\u5c06\u80cc\u666f\u6750\u6599\u8bef\u5224\u4e3a\u76f4\u63a5\u539f\u56e0\u3002");
         }
-        suggestions.add("复盘异常节点对应的业务维度和原始明细，重点核查头部记录、口径变更和数据采集异常。");
-        suggestions.add("对异常低谷或尖峰建立相邻时间窗口对比，并把处理结论回写到报告回溯记录。");
-        suggestions.add("为核心指标设置按业务字段命名的监控阈值，避免后续报告继续使用物理字段名。");
+        suggestions.add("\u590d\u6838\u5f02\u5e38\u8282\u70b9\u5bf9\u5e94\u7684\u539f\u59cb\u8bb0\u5f55\u3001\u4e1a\u52a1\u4e8b\u4ef6\u3001\u7edf\u8ba1\u53e3\u5f84\u548c\u6570\u636e\u91c7\u96c6\u94fe\u8def\uff0c\u786e\u8ba4\u6ce2\u52a8\u662f\u5426\u7531\u771f\u5b9e\u4e1a\u52a1\u53d8\u5316\u89e6\u53d1\u3002");
+        suggestions.add("\u5bf9\u5f02\u5e38\u5cf0\u503c\u6216\u4f4e\u8c37\u5efa\u7acb\u76f8\u90bb\u65f6\u95f4\u7a97\u53e3\u5bf9\u6bd4\uff0c\u5224\u65ad\u6ce2\u52a8\u662f\u77ed\u671f\u8109\u51b2\u8fd8\u662f\u8d8b\u52bf\u53d8\u5316\u3002");
+        suggestions.add("\u4e3a\u6838\u5fc3\u6307\u6807\u8bbe\u7f6e\u6309\u4e1a\u52a1\u5b57\u6bb5\u547d\u540d\u7684\u76d1\u63a7\u9608\u503c\uff0c\u907f\u514d\u540e\u7eed\u62a5\u544a\u7ee7\u7eed\u4f7f\u7528\u7269\u7406\u5b57\u6bb5\u540d\u3002");
         return suggestions.stream().distinct().limit(6).toList();
     }
 
@@ -1879,22 +1980,22 @@ public class DiagnosisService {
                                                    List<Map<String, Object>> evidence,
                                                    List<Map<String, Object>> rootCauses) {
         List<String> hops = new ArrayList<>();
-        hops.add("数据表「" + tableName + "」");
-        hops.add("指标「" + labelOf(fieldLabels, metricField) + "」异常");
+        hops.add("\u6570\u636e\u8868\u300c" + tableName + "\u300d");
+        hops.add("\u6307\u6807\u300c" + labelOf(fieldLabels, metricField) + "\u300d\u5f02\u5e38\u5b9a\u4f4d");
         for (String dimension : dimensionFields.stream().limit(2).toList()) {
-            hops.add("业务维度「" + labelOf(fieldLabels, dimension) + "」拆解");
+            hops.add("\u7ef4\u5ea6\u300c" + labelOf(fieldLabels, dimension) + "\u300d\u8d21\u732e\u62c6\u89e3");
         }
         if (timeField != null && !timeField.isBlank()) {
-            hops.add("时间窗口「" + labelOf(fieldLabels, timeField) + "」回溯");
+            hops.add("\u65f6\u95f4\u300c" + labelOf(fieldLabels, timeField) + "\u300d\u56de\u6eaf");
         }
         if (!evidence.isEmpty()) {
-            hops.add("文档证据「" + evidence.get(0).get("label") + "」");
+            hops.add("\u6587\u6863\u8bc1\u636e\u300c" + evidence.get(0).get("label") + "\u300d");
         }
         if (!graphNodes.isEmpty()) {
-            hops.add("Neo4j 图谱节点 " + graphNodes.size() + " 个 / 关系 " + graphEdges.size() + " 条");
+            hops.add("Neo4j \u8282\u70b9 " + graphNodes.size() + " \u4e2a / \u5173\u7cfb " + graphEdges.size() + " \u6761");
         }
         if (!rootCauses.isEmpty()) {
-            hops.add("根因「" + rootCauses.get(0).get("causeType") + "」");
+            hops.add("\u6839\u56e0\u300c" + rootCauses.get(0).get("causeType") + "\u300d");
         }
         return String.join(" -> ", hops);
     }
@@ -1924,19 +2025,19 @@ public class DiagnosisService {
                                                                  List<Map<String, Object>> rootCauses,
                                                                  String anomalyType) {
         return List.of(
-                Map.of("step", 1, "title", "业务字段映射", "status", "completed",
-                        "detail", "将物理字段转换为业务字段后扫描 " + rows.size() + " 条原始数据。"),
-                Map.of("step", 2, "title", "异常节点识别", "status", "completed",
-                        "detail", "围绕 " + anomalyType + " 计算极值、均值、标准差和异常节点。"),
-                Map.of("step", 3, "title", "GraphRAG 文档召回", "status", "completed",
-                        "detail", "检索企业内部文档/行业研报证据 " + evidence.size() + " 条。"),
-                Map.of("step", 4, "title", "Neo4j 多跳扩展", "status", "completed",
-                        "detail", "扩展图谱节点 " + graphNodes.size() + " 个、关系 " + graphEdges.size() + " 条。"),
-                Map.of("step", 5, "title", "GraphRAG 证据链融合", "status", "completed",
-                        "detail", "融合异常节点、业务维度、Neo4j 图谱和文档证据，形成 "
-                                + graphRagEvidenceChain.size() + " 跳证据链。"),
-                Map.of("step", 6, "title", "根因模板融合", "status", "completed",
-                        "detail", "融合数据异常、业务维度、文档证据生成 " + rootCauses.size() + " 条根因结论。")
+                Map.of("step", 1, "title", "\u6570\u636e\u8868\u4e0e\u5b57\u6bb5\u6821\u9a8c", "status", "completed",
+                        "detail", "\u5df2\u8bfb\u53d6\u539f\u59cb\u6570\u636e " + rows.size() + " \u6761\uff0c\u5e76\u5b8c\u6210\u6307\u6807\u4e0e\u7ef4\u5ea6\u5b57\u6bb5\u6821\u9a8c\u3002"),
+                Map.of("step", 2, "title", "\u5f02\u5e38\u8282\u70b9\u8bc6\u522b", "status", "completed",
+                        "detail", "\u5df2\u6309 " + anomalyTypeLabel(anomalyType) + " \u8bc6\u522b\u6307\u6807\u6781\u503c\u548c\u504f\u79bb\u5747\u503c\u7684\u89c2\u6d4b\u70b9\u3002"),
+                Map.of("step", 3, "title", "GraphRAG \u6587\u6863\u53ec\u56de", "status", "completed",
+                        "detail", "\u547d\u4e2d\u77e5\u8bc6\u6587\u6863 " + evidence.size() + " \u6761\uff0c\u7528\u4e8e\u8865\u5145\u4e1a\u52a1\u80cc\u666f\u548c\u8bc1\u636e\u3002"),
+                Map.of("step", 4, "title", "Neo4j \u56fe\u8c31\u6269\u5c55", "status", "completed",
+                        "detail", "\u53ec\u56de\u56fe\u8c31\u8282\u70b9 " + graphNodes.size() + " \u4e2a\u3001\u5173\u7cfb " + graphEdges.size() + " \u6761\u3002"),
+                Map.of("step", 5, "title", "GraphRAG \u8bc1\u636e\u94fe\u7ec4\u88c5", "status", "completed",
+                        "detail", "\u5df2\u5c06\u5f02\u5e38\u8282\u70b9\u3001\u7ef4\u5ea6\u8d21\u732e\u3001\u6587\u6863\u8bc1\u636e\u548c Neo4j \u56fe\u8c31\u4e0a\u4e0b\u6587\u7ec4\u88c5\u4e3a "
+                                + graphRagEvidenceChain.size() + " \u6b65\u8bc1\u636e\u94fe\u3002"),
+                Map.of("step", 6, "title", "\u6839\u56e0\u4e0e\u5efa\u8bae\u751f\u6210", "status", "completed",
+                        "detail", "\u5df2\u751f\u6210 " + rootCauses.size() + " \u6761\u6839\u56e0\u5047\u8bbe\u53ca\u5bf9\u5e94\u5904\u7f6e\u5efa\u8bae\u3002")
         );
     }
 
@@ -1948,14 +2049,16 @@ public class DiagnosisService {
                                                Map<String, String> fieldLabels,
                                                List<Map<String, Object>> rows,
                                                List<Map<String, Object>> evidence,
-                                               List<Map<String, Object>> rootCauses) {
-        String title = Objects.toString(aiResult.getOrDefault("title", "智能诊断报告"));
+                                               List<Map<String, Object>> rootCauses,
+                                               String detailLevel) {
+        boolean simpleReport = "simple".equalsIgnoreCase(Objects.toString(detailLevel, ""));
         String metricLabel = labelOf(fieldLabels, metricField);
         Map<String, Object> statistics = toStringKeyMap(aiResult.get("statistics"));
         List<Map<String, Object>> markers = castMapList(aiResult.getOrDefault("anomalyMarkers", List.of()));
         List<Map<String, Object>> graphRagEvidenceChain = castMapList(aiResult.getOrDefault("graphRagEvidenceChain", List.of()));
         List<Map<String, Object>> graphEdges = castMapList(aiResult.getOrDefault("graphEdges", List.of()));
         List<Map<String, Object>> graphNodes = castMapList(aiResult.getOrDefault("relatedKnowledge", List.of()));
+        List<Map<String, Object>> historicalSimilarReports = castMapList(aiResult.getOrDefault("historicalSimilarReports", List.of()));
         List<String> suggestions = castStringList(aiResult.getOrDefault("suggestions", List.of()));
         String createdAt = DATE_TIME_FORMATTER.format(Instant.now());
         String maxValue = formatReportNumber(statistics.get("max"));
@@ -1968,38 +2071,59 @@ public class DiagnosisService {
                 .map(field -> labelOf(fieldLabels, field))
                 .filter(name -> name != null && !name.isBlank())
                 .reduce((a, b) -> a + "/" + b)
-                .orElse("未选择维度");
-        String timeName = timeField != null && !timeField.isBlank() ? labelOf(fieldLabels, timeField) : "未选择时间字段";
+                .orElse("\u672a\u9009\u62e9\u7ef4\u5ea6");
+        String timeName = timeField != null && !timeField.isBlank() ? labelOf(fieldLabels, timeField) : "\u672a\u9009\u62e9\u65f6\u95f4\u5b57\u6bb5";
+        List<String> markdownSuggestions = suggestions.isEmpty()
+                ? fallbackReportSuggestions(metricLabel, dimensionFields.stream().map(field -> labelOf(fieldLabels, field)).toList(), timeName, evidence, markers)
+                : suggestions;
 
         StringBuilder md = new StringBuilder();
-        md.append("# 基于 GraphRAG 的多跳关联推理与业务指标异常归因分析\n\n");
+        if (simpleReport) {
+            md.append("# \u667a\u80fd\u8bca\u65ad\u7b80\u62a5\n\n");
+            md.append("## \u6458\u8981\n\n");
+            md.append("\u672c\u6b21\u5bf9\u6570\u636e\u8868\u300c").append(tableName).append("\u300d\u7684\u6307\u6807\u300c").append(metricLabel)
+                    .append("\u300d\u8fdb\u884c\u8bca\u65ad\uff0c\u5171\u5206\u6790 ").append(rows.size()).append(" \u6761\u8bb0\u5f55\uff0c\u8bc6\u522b ")
+                    .append(markers.size()).append(" \u4e2a\u91cd\u70b9\u5f02\u5e38\u8282\u70b9\u3002\u6837\u672c\u603b\u91cf\u4e3a ").append(totalValue)
+                    .append("\uff0c\u5747\u503c\u4e3a ").append(avgValue).append("\uff0c\u6700\u5927\u503c\u4e3a ").append(maxValue)
+                    .append("\uff0c\u6700\u5c0f\u503c\u4e3a ").append(minValue).append("\u3002")
+                    .append(rootCauseConclusion(rootCauses)).append("\n\n");
+            md.append("## \u5173\u952e\u5f02\u5e38\u70b9\n\n");
+            appendMarkerBullets(md, markers, statistics, metricField, metricLabel, timeField, fieldLabels, 3);
+            md.append("\n## \u9996\u8981\u6839\u56e0\n\n");
+            if (rootCauses.isEmpty()) {
+                md.append("- \u6682\u672a\u5f62\u6210\u53ef\u9760\u6839\u56e0\u5047\u8bbe\u3002\n");
+            } else {
+                Map<String, Object> cause = rootCauses.get(0);
+                md.append("- **").append(cause.getOrDefault("causeType", "\u6839\u56e0\u5047\u8bbe"))
+                        .append("**\uff1a").append(evidenceReportSummary(cause, metricLabel)).append("\n");
+            }
+            md.append("\n## \u8bc1\u636e\n\n");
+            appendEvidenceBullets(md, evidence, graphRagEvidenceChain, rootCauses, 3);
+            md.append("\n## \u5904\u7f6e\u5efa\u8bae\n\n");
+            markdownSuggestions.stream().limit(3).forEach(item -> md.append("- ").append(item).append("\n"));
+            md.append("\n## \u56de\u6eaf\u4fe1\u606f\n\n");
+            md.append("- \u751f\u6210\u65f6\u95f4\uff1a").append(createdAt).append("\n");
+            md.append("- \u6570\u636e\u8868\uff1a").append(tableName).append("\n");
+            md.append("- \u6307\u6807\u5b57\u6bb5\uff1a").append(metricLabel).append("\n");
+            md.append("- \u5206\u6790\u7ef4\u5ea6\uff1a").append(dimensionNames).append("\n");
+            md.append("- \u65f6\u95f4\u5b57\u6bb5\uff1a").append(timeName).append("\n");
+            return md.toString();
+        }
+
+        md.append("# \u667a\u80fd\u8bca\u65ad\u62a5\u544a\n\n");
         md.append(":::report-meta\n");
         md.append("Diagnostic Analysis Report | Insight Spark System  \n");
-        md.append("数据集：`").append(tableName).append("` | 目标指标：").append(metricLabel).append("  \n");
-        md.append("自动生成环境：智能诊断引擎 | 诊断时间：").append(createdAt).append("\n");
+        md.append("\u6570\u636e\u8868\uff1a`").append(tableName).append("` | \u6307\u6807\uff1a").append(metricLabel).append("  \n");
+        md.append("\u5206\u6790\u7ef4\u5ea6\uff1a").append(dimensionNames).append(" | \u751f\u6210\u65f6\u95f4\uff1a").append(createdAt).append("\n");
         md.append(":::\n\n");
+        md.append("> **Abstract / \u6458\u8981\uff1a** ");
+        md.append(detailedSummaryText(metricLabel, statistics, rows, markers, rootCauses, graphNodes, graphEdges)).append("\n\n");
 
-        md.append("> **Abstract / 诊断摘要：** ");
-        md.append("本次分析围绕核心业务指标「").append(metricLabel).append("」展开。系统在有效观测区间内提取了 ")
-                .append(rows.size()).append(" 条样本记录进行异常扫描。");
-        md.append("统计结果显示，样本总计数值为 ").append(totalValue)
-                .append("，均值 μ 为 ").append(avgValue)
-                .append("，区间极值分别为 Max = ").append(maxValue)
-                .append(" 与 Min = ").append(minValue).append("。");
-        md.append("通过统计算法，系统识别出 ").append(markers.size()).append(" 个具备统计学显著性的异常节点。");
-        md.append("为探究异常机制，系统引入 GraphRAG 技术，融合业务维度拆解、时序窗口回溯与 Neo4j 知识图谱");
-        md.append("（涉及 ").append(graphNodes.size()).append(" 个节点与 ").append(graphEdges.size()).append(" 条边），");
-        md.append(rootCauseConclusion(rootCauses)).append("本文档详细记录了数据特征、多跳推理路径及多维度异质性分析结果。\n\n");
-
-        md.append("## I. 描述性统计与异常检测 (Statistical Characteristics)\n\n");
-        md.append("针对数据集 `").append(tableName).append("` 中的目标变量「").append(metricLabel)
-                .append("」，系统执行了基准扫描。有效样本量 N = ").append(rows.size())
-                .append("。基于分布特征，系统标定了 ").append(markers.size())
-                .append(" 个显著偏离常态分布区间的异常观测点。具体检测结果如表 I 所示。\n\n");
-        md.append("| 观测窗口 | 指标数值 | 偏离度 / 统计检验量 | 异常标定类型 |\n");
+        md.append("## I. \u5f02\u5e38\u8282\u70b9\u4e0e\u7edf\u8ba1\u7279\u5f81\n\n");
+        md.append("| \u89c2\u6d4b\u7a97\u53e3 | \u6307\u6807\u6570\u503c | \u504f\u79bb\u8bf4\u660e | \u5f02\u5e38\u7c7b\u578b |\n");
         md.append("| --- | ---: | --- | --- |\n");
         if (markers.isEmpty()) {
-            md.append("| - | - | 未发现 Z-Score 绝对值超过阈值的节点 | Normal Observation |\n");
+            md.append("| - | - | \u672a\u53d1\u73b0\u8d85\u8fc7\u9608\u503c\u7684\u5f02\u5e38\u8282\u70b9 | Normal Observation |\n");
         } else {
             for (Map<String, Object> marker : markers.stream().limit(5).toList()) {
                 Map<String, Object> markerRow = toStringKeyMap(marker.get("row"));
@@ -2012,70 +2136,110 @@ public class DiagnosisService {
                         .append(" |\n");
             }
         }
-        md.append("\n*表 I. 核心指标异常节点识别清单*\n\n");
 
-        md.append("## II. 图谱知识检索与多跳推理链路 (GraphRAG Reasoning)\n\n");
-        md.append("为克服单一数据视角的局限性，本次诊断未仅停留在字段级的相关性分析，而是构建了基于 GraphRAG 的因果推理拓扑。");
-        md.append("推理链路严格遵循以下演进次序：数据表关联 -> 指标层映射 -> 业务维度空间拆解（")
-                .append(dimensionNames).append("） -> 时序变量回溯（").append(timeName).append("）。\n\n");
-        md.append("在图计算阶段，系统调用 Neo4j 图数据库，遍历 ").append(graphNodes.size())
-                .append(" 个关联实体节点与 ").append(graphEdges.size())
-                .append(" 条语义关系边，")
-                .append(rootCauseConclusion(rootCauses));
-        md.append("\n\n");
+        md.append("\n## II. GraphRAG \u63a8\u7406\u8def\u5f84\n\n");
+        md.append("\u63a8\u7406\u8def\u5f84\uff1a").append(graphPath.isBlank() ? "\u672a\u5f62\u6210\u5b8c\u6574\u8def\u5f84" : graphPath).append("\n\n");
+        md.append("\u672c\u6b21\u53ec\u56de Neo4j \u8282\u70b9 ").append(graphNodes.size()).append(" \u4e2a\u3001\u5173\u7cfb ").append(graphEdges.size())
+                .append(" \u6761\uff0c\u8bc1\u636e\u94fe\u5171 ").append(graphRagEvidenceChain.size()).append(" \u6b65\u3002\n\n");
         if (evidence.isEmpty()) {
-            md.append("> **检索证据缺失声明 (Corpus Absence Note)：** 在 RAG 检索阶段，未命中可引用的企业内部复盘文档或外部行业研报。当前得出的根因结论高度依赖于底层统计波动特征与图谱结构的内生字段关系。建议管理层后续向知识库补充非结构化业务说明，以提升归因模型的鲁棒性。\n\n");
+            md.append("> **Corpus Absence Note / \u6587\u6863\u8bc1\u636e\u4e0d\u8db3\uff1a** RAG \u68c0\u7d22\u672a\u547d\u4e2d\u8db3\u591f\u5916\u90e8\u6587\u6863\u8bc1\u636e\uff0c\u5f53\u524d\u7ed3\u8bba\u4e3b\u8981\u4f9d\u636e\u539f\u59cb\u6570\u636e\u3001\u7ef4\u5ea6\u8d21\u732e\u548c\u56fe\u8c31\u4e0a\u4e0b\u6587\u3002\n\n");
         } else {
-            md.append("> **检索证据摘要 (Corpus Evidence Note)：** RAG 检索阶段命中 ")
-                    .append(evidence.size()).append(" 条企业文档或行业研报证据，系统已将其纳入根因假设排序与建议动作生成。\n\n");
+            md.append("> **Corpus Evidence Note / \u6587\u6863\u8bc1\u636e\uff1a** RAG \u68c0\u7d22\u547d\u4e2d ").append(evidence.size())
+                    .append(" \u6761\u77e5\u8bc6\u6587\u6863\uff0c\u5df2\u7eb3\u5165\u6839\u56e0\u5047\u8bbe\u6392\u5e8f\u548c\u5efa\u8bae\u751f\u6210\u3002\n\n");
         }
-        md.append("## III. 归因定位与置信度评估 (Attribution Analysis)\n\n");
-        md.append("基于上述多跳推理逻辑，系统对诱发指标波动的潜在因素进行了权重分配与显著性评估。当前根因结论覆盖")
-                .append(confidenceBandText(rootCauses))
-                .append("置信区间：\n\n");
+        appendHistoricalSimilarReportsMarkdown(md, historicalSimilarReports);
+
+        md.append("## III. \u6839\u56e0\u5206\u6790\n\n");
         for (Map<String, Object> cause : rootCauses) {
-            md.append("- **[置信度: ").append(formatConfidence(cause.get("confidence")))
+            md.append("- **[\u7f6e\u4fe1\u5ea6 ").append(formatConfidence(cause.get("confidence")))
                     .append(" / ").append(cause.getOrDefault("level", "MEDIUM")).append("] ")
-                    .append(cause.getOrDefault("causeType", "根因假设"))
-                    .append("：** 主要影响对象为「").append(cause.getOrDefault("impactField", metricLabel))
-                    .append("」。").append(cause.getOrDefault("evidence", "")).append("\n");
+                    .append(cause.getOrDefault("causeType", "\u6839\u56e0\u5047\u8bbe"))
+                    .append("**\uff1a\u5f71\u54cd\u5b57\u6bb5 ").append(cause.getOrDefault("impactField", metricLabel))
+                    .append("\uff0c").append(evidenceReportSummary(cause, metricLabel)).append("\n");
         }
 
-        md.append("\n## IV. 多维度异质性分析 (Multidimensional Heterogeneity)\n\n");
-        md.append("为进一步剥离异常值的结构来源，本节对核心维度（").append(dimensionNames)
-                .append("）进行了下钻与贡献度拆解。表 II 优先展示异常节点子集贡献；当异常节点明细不足时，回退展示全样本贡献分布。\n\n");
+        md.append("\n## IV. \u7ef4\u5ea6\u5f52\u56e0\n\n");
         if (dimensionFields.isEmpty()) {
-            md.append("- 未选择拆解维度，建议至少选择可解释该指标波动的业务维度。\n");
+            md.append("- \u672a\u9009\u62e9\u53ef\u62c6\u89e3\u7ef4\u5ea6\uff0c\u5f53\u524d\u4ec5\u80fd\u6309\u6307\u6807\u6574\u4f53\u6ce2\u52a8\u5206\u6790\u3002\n");
         } else {
-            md.append("| 分析口径 (Scope) | 一阶维度 (Dimension) | 二阶因子 (Factor) | 贡献值 (Value) | 口径内占比 (Ratio) |\n");
+            md.append("| \u5206\u6790\u53e3\u5f84 | \u7ef4\u5ea6 | \u56e0\u5b50 | \u8d21\u732e\u503c | \u5360\u6bd4 |\n");
             md.append("| --- | --- | --- | ---: | ---: |\n");
             List<List<String>> dimensionRows = dimensionDocxRows(aiResult, rows, metricField, metricLabel, dimensionFields,
                     dimensionFields.stream().map(field -> labelOf(fieldLabels, field)).toList(), fieldLabels);
             for (List<String> row : dimensionRows.stream().skip(1).toList()) {
-                md.append("| ")
-                        .append(String.join(" | ", row))
-                        .append(" |\n");
+                md.append("| ").append(String.join(" | ", row)).append(" |\n");
             }
-            md.append("\n*表 II. 核心业务维度贡献与相对比重拆解（优先异常节点口径）*\n");
         }
-
         if (!evidence.isEmpty()) {
-            md.append("\n### 企业文档 / 行业研报证据\n\n");
+            md.append("\n### \u77e5\u8bc6\u6587\u6863\u8bc1\u636e\n\n");
             for (Map<String, Object> item : evidence.stream().limit(5).toList()) {
-                md.append("- 《").append(item.getOrDefault("label", "知识文档")).append("》：")
-                        .append(item.getOrDefault("content", "")).append("\n");
+                md.append("- \u300a").append(item.getOrDefault("label", "\u77e5\u8bc6\u6587\u6863")).append("\u300b\uff1a")
+                        .append(item.getOrDefault("preview", item.getOrDefault("content", ""))).append("\n");
             }
         }
 
-        md.append("\n## V. 结论与对策建议 (Conclusion & Recommendations)\n\n");
-        md.append("综上分析，本次指标异动具有显著的结构性与节点性特征。为防范潜在的业务连续性风险并优化数据观测模型，提出以下干预建议：\n\n");
-        List<String> markdownSuggestions = suggestions.isEmpty()
-                ? fallbackReportSuggestions(metricLabel, dimensionFields.stream().map(field -> labelOf(fieldLabels, field)).toList(), timeName, evidence, markers)
-                : suggestions;
-        for (String suggestion : markdownSuggestions) {
-            md.append("- ").append(suggestion).append("\n");
-        }
+        md.append("\n## V. \u7ed3\u8bba\u4e0e\u5904\u7f6e\u5efa\u8bae\n\n");
+        markdownSuggestions.forEach(item -> md.append("- ").append(item).append("\n"));
         return md.toString();
+    }
+
+
+    private void appendMarkerBullets(StringBuilder md,
+                                     List<Map<String, Object>> markers,
+                                     Map<String, Object> statistics,
+                                     String metricField,
+                                     String metricLabel,
+                                     String timeField,
+                                     Map<String, String> fieldLabels,
+                                     int limit) {
+        if (markers.isEmpty()) {
+            md.append("- \u672a\u53d1\u73b0\u8d85\u8fc7\u9608\u503c\u7684\u5f02\u5e38\u8282\u70b9\u3002\n");
+            return;
+        }
+        double avg = toDouble(statistics.get("avg"));
+        String stdValue = formatReportNumber(statistics.get("std"));
+        for (Map<String, Object> marker : markers.stream().limit(limit).toList()) {
+            Map<String, Object> markerRow = toStringKeyMap(marker.get("row"));
+            String window = reportObservationWindow(marker, markerRow, timeField, fieldLabels);
+            double value = reportMarkerValue(marker, markerRow, metricField);
+            md.append("- ").append(window)
+                    .append("\uff1a").append(metricLabel).append(" = ").append(formatReportNumber(value))
+                    .append("\uff0c").append(reportDeviationText(value, avg, stdValue))
+                    .append("\uff0c").append(Objects.toString(marker.getOrDefault("reason", reportOutlierType(value, avg))))
+                    .append("\n");
+        }
+    }
+
+    private void appendEvidenceBullets(StringBuilder md,
+                                       List<Map<String, Object>> evidence,
+                                       List<Map<String, Object>> graphRagEvidenceChain,
+                                       List<Map<String, Object>> rootCauses,
+                                       int limit) {
+        int count = 0;
+        for (Map<String, Object> item : evidence.stream().limit(limit).toList()) {
+            md.append("- \u6587\u6863\u8bc1\u636e\u300a")
+                    .append(item.getOrDefault("label", "\u77e5\u8bc6\u6587\u6863"))
+                    .append("\u300b\uff1a")
+                    .append(item.getOrDefault("preview", item.getOrDefault("content", "")))
+                    .append("\n");
+            count++;
+        }
+        if (count < limit && !graphRagEvidenceChain.isEmpty()) {
+            md.append("- GraphRAG \u8bc1\u636e\u94fe\uff1a\u5171 ")
+                    .append(graphRagEvidenceChain.size())
+                    .append(" \u6b65\uff0c\u8986\u76d6\u5f02\u5e38\u5b9a\u4f4d\u3001\u7ef4\u5ea6\u62c6\u89e3\u548c\u6839\u56e0\u751f\u6210\u3002\n");
+            count++;
+        }
+        if (count < limit && !rootCauses.isEmpty()) {
+            Map<String, Object> cause = rootCauses.get(0);
+            md.append("- \u6839\u56e0\u8bc1\u636e\uff1a")
+                    .append(evidenceReportSummary(cause, Objects.toString(cause.getOrDefault("impactField", "\u6307\u6807"))))
+                    .append("\n");
+            count++;
+        }
+        if (count == 0) {
+            md.append("- \u5f53\u524d\u8bc1\u636e\u4e3b\u8981\u6765\u81ea\u539f\u59cb\u6570\u636e\u7684\u5f02\u5e38\u8282\u70b9\u3001\u7ef4\u5ea6\u8d21\u732e\u548c\u7edf\u8ba1\u504f\u79bb\u3002\n");
+        }
     }
 
     private List<Map<String, Object>> buildReasoningLogs(List<Map<String, Object>> rows,
@@ -2096,6 +2260,29 @@ public class DiagnosisService {
                         + ", docEvidence=" + graphRagRuntime.getOrDefault("docEvidenceCount", 0)
         ));
         return logs;
+    }
+
+    private void appendHistoricalSimilarReportsMarkdown(StringBuilder md, List<Map<String, Object>> reports) {
+        if (reports == null || reports.isEmpty()) {
+            md.append("> **鍘嗗彶鐩镐技璇婃柇鍙洖锛?* 褰撳墠鏈懡涓弧瓒崇浉浼煎害闃堝€肩殑鍘嗗彶璇婃柇鎶ュ憡锛屽悗缁姤鍛婄疮绉悗鍙敤浜庡紓甯告ā寮忓鐩樸€俓n\n");
+            return;
+        }
+        md.append("> **鍘嗗彶鐩镐技璇婃柇鍙洖锛?* 绯荤粺鍛戒腑 ").append(reports.size())
+                .append(" 浠藉巻鍙茶瘖鏂姤鍛婏紝鐢ㄤ簬瀵规瘮寮傚父妯″紡銆佹牴鍥犵粨璁哄拰寤鸿鍔ㄤ綔銆俓n\n");
+        md.append("| 鍘嗗彶鎶ュ憡 | 鐩镐技搴?| 鍖归厤鍘熷洜 | 鍘嗗彶鏍瑰洜 |\n");
+        md.append("| --- | ---: | --- | --- |\n");
+        for (Map<String, Object> report : reports) {
+            md.append("| ")
+                    .append(cleanMarkdownText(report.getOrDefault("title", "鍘嗗彶璇婃柇鎶ュ憡")))
+                    .append(" | ")
+                    .append(formatConfidence(report.getOrDefault("score", 0)))
+                    .append(" | ")
+                    .append(cleanMarkdownText(report.getOrDefault("matchReason", "")))
+                    .append(" | ")
+                    .append(cleanMarkdownText(report.getOrDefault("rootCause", "")))
+                    .append(" |\n");
+        }
+        md.append("\n");
     }
 
     private Map<String, Object> buildGraphRagRuntime(boolean graphRagAiUsed,
@@ -2125,23 +2312,24 @@ public class DiagnosisService {
                                                           Map<String, Object> aiResult,
                                                           String anomalyType) {
         return List.of(
-                Map.of("step", 1, "title", "扫描原始异常数据", "status", "completed",
-                        "detail", "读取原始数据 " + rows.size() + " 条，计算指标波动、极值、均值和标准差。"),
-                Map.of("step", 2, "title", "命中 Neo4j 表/字段节点", "status", "completed",
-                        "detail", "围绕异常类型 " + anomalyType + " 命中 " + graphNodes.size() + " 个图谱节点。"),
-                Map.of("step", 3, "title", "扩展企业内部文档与行业研报", "status", "completed",
-                        "detail", "检索企业文档/研报证据 " + docEvidence.size() + " 条。"),
-                Map.of("step", 4, "title", "关联历史报告与图谱关系", "status", "completed",
-                        "detail", "扫描 Neo4j 多跳关系 " + graphEdges.size() + " 条，关联历史诊断和字段上下文。"),
-                Map.of("step", 5, "title", "输出根因定位结论", "status", "completed",
-                        "detail", "生成根因假设 " + castMapList(aiResult.getOrDefault("rootCauses", List.of())).size() + " 条，并输出改进建议。")
+                Map.of("step", 1, "title", "鎵弿鍘熷寮傚父鏁版嵁", "status", "completed",
+                        "detail", "璇诲彇鍘熷鏁版嵁 " + rows.size() + " 鏉★紝璁＄畻鎸囨爣娉㈠姩銆佹瀬鍊笺€佸潎鍊煎拰鏍囧噯宸€?"),
+                Map.of("step", 2, "title", "鍛戒腑 Neo4j 琛?瀛楁鑺傜偣", "status", "completed",
+                        "detail", "鍥寸粫寮傚父绫诲瀷 " + anomalyType + " 鍛戒腑 " + graphNodes.size() + " 涓浘璋辫妭鐐广€?"),
+                Map.of("step", 3, "title", "鎵╁睍浼佷笟鍐呴儴鏂囨。涓庤涓氱爺鎶?", "status", "completed",
+                        "detail", "妫€绱紒涓氭枃妗?鐮旀姤璇佹嵁 " + docEvidence.size() + " 鏉°€?"),
+                Map.of("step", 4, "title", "鍏宠仈鍘嗗彶鎶ュ憡涓庡浘璋卞叧绯?", "status", "completed",
+                        "detail", "鎵弿 Neo4j 澶氳烦鍏崇郴 " + graphEdges.size() + " 鏉★紝鍏宠仈鍘嗗彶璇婃柇鍜屽瓧娈典笂涓嬫枃銆?"),
+                Map.of("step", 5, "title", "杈撳嚭鏍瑰洜瀹氫綅缁撹", "status", "completed",
+                        "detail", "鐢熸垚鏍瑰洜鍋囪 " + castMapList(aiResult.getOrDefault("rootCauses", List.of())).size() + " 鏉★紝骞惰緭鍑烘敼杩涘缓璁€?")
         );
     }
 
     private String buildBindingJson(String tableName, Map<String, Object> aiResult, Map<String, Object> request) {
         Map<String, Object> binding = new LinkedHashMap<>();
-        binding.put("route", Objects.toString(request.getOrDefault("sourceRoute", "chat"), "chat"));
+        binding.put("route", Objects.toString(request.getOrDefault("sourceRoute", "diagnosis"), "diagnosis"));
         binding.put("tableName", tableName);
+        binding.put("conversationId", request.get("conversationId"));
         binding.put("sourceQuestion", aiResult.getOrDefault("sourceQuestion", ""));
         binding.put("sourceSql", aiResult.getOrDefault("sourceSql", ""));
         binding.put("chartSnapshot", aiResult.get("chartSnapshot"));
@@ -2157,6 +2345,148 @@ public class DiagnosisService {
         return toJsonString(binding);
     }
 
+    private List<Map<String, Object>> findSimilarHistoricalReports(String tableName,
+                                                                    String metricField,
+                                                                    String anomalyType,
+                                                                    List<String> dimensionFields,
+                                                                    Map<String, Object> currentResult) {
+        if (!neo4jEnabled) {
+            return List.of();
+        }
+        String cypher = """
+                MATCH (r:DiagnosisReport)
+                WHERE r.userId = $userId
+                RETURN {
+                  id: r.reportId,
+                  title: r.title,
+                  summary: r.summary,
+                  tableName: r.tableName,
+                  metricField: r.metricField,
+                  dimensionFields: r.dimensionFields,
+                  anomalyType: r.anomalyType,
+                  createdAt: r.createdAt,
+                  resultJson: r.resultJson
+                } AS row
+                ORDER BY r.createdAtEpoch DESC
+                LIMIT 50
+                """;
+        try {
+            List<Map<String, Object>> candidates = neo4jQueryRows(cypher, Map.of(
+                    "userId", com.insightspark.core.auth.AuthContext.userId()
+            ));
+            List<Map<String, Object>> scored = new ArrayList<>();
+            for (Map<String, Object> report : candidates) {
+                Map<String, Object> candidateResult = toStringKeyMap(report.get("resultJson"));
+                double score = historicalSimilarityScore(report, candidateResult, tableName, metricField,
+                        anomalyType, dimensionFields, currentResult);
+                if (score < 0.35) {
+                    continue;
+                }
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", report.get("id"));
+                row.put("title", Objects.toString(report.getOrDefault("title", "鍘嗗彶璇婃柇鎶ュ憡")));
+                row.put("createdAt", Objects.toString(report.getOrDefault("createdAt", "")));
+                row.put("tableName", Objects.toString(report.getOrDefault("tableName", "")));
+                row.put("metricField", Objects.toString(report.getOrDefault("metricField", "")));
+                row.put("anomalyType", Objects.toString(report.getOrDefault("anomalyType", "")));
+                row.put("score", Math.round(score * 100.0) / 100.0);
+                row.put("rootCause", primaryRootCauseName(castMapList(candidateResult.getOrDefault("rootCauses", List.of()))));
+                row.put("summary", safeText(Objects.toString(report.getOrDefault("summary", "")), 180));
+                row.put("matchReason", historicalMatchReason(report, candidateResult, tableName, metricField, anomalyType, dimensionFields));
+                scored.add(row);
+            }
+            scored.sort((a, b) -> Double.compare(toDouble(b.get("score")), toDouble(a.get("score"))));
+            return dedupeHistoricalReports(scored).stream().limit(3).toList();
+        } catch (Exception e) {
+            log.warn("Historical diagnosis retrieval skipped: {}", safeErrorMessage(e));
+            return List.of();
+        }
+    }
+
+    private List<Map<String, Object>> dedupeHistoricalReports(List<Map<String, Object>> reports) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        for (Map<String, Object> report : reports) {
+            String tableName = normalizedReportText(report.get("tableName"));
+            String metricField = normalizedReportText(report.get("metricField"));
+            String anomalyType = normalizedReportText(report.get("anomalyType"));
+            String rootCause = normalizedReportText(report.get("rootCause"));
+            String title = normalizedReportText(report.get("title"));
+            String exactKey = "id:" + normalizedReportText(report.get("id"));
+            String semanticKey = String.join("|", tableName, metricField, anomalyType, rootCause);
+            String fallbackKey = String.join("|", title, tableName, metricField, rootCause);
+            if (!exactKey.equals("id:") && !seen.add(exactKey)) {
+                continue;
+            }
+            if (!rootCause.isBlank() && !seen.add("semantic:" + semanticKey)) {
+                continue;
+            }
+            if (rootCause.isBlank() && !seen.add("fallback:" + fallbackKey)) {
+                continue;
+            }
+            result.add(report);
+        }
+        return result;
+    }
+
+    private double historicalSimilarityScore(Map<String, Object> report,
+                                             Map<String, Object> candidateResult,
+                                             String tableName,
+                                             String metricField,
+                                             String anomalyType,
+                                             List<String> dimensionFields,
+                                             Map<String, Object> currentResult) {
+        double score = 0;
+        if (Objects.equals(Objects.toString(report.get("tableName"), ""), tableName)) {
+            score += 0.28;
+        }
+        if (Objects.equals(Objects.toString(report.get("metricField"), ""), metricField)) {
+            score += 0.24;
+        }
+        if (Objects.equals(Objects.toString(report.get("anomalyType"), ""), anomalyType)) {
+            score += 0.16;
+        }
+        List<String> candidateDimensions = castStringList(report.getOrDefault("dimensionFields", candidateResult.get("dimensionFields")));
+        long overlap = dimensionFields.stream().filter(candidateDimensions::contains).count();
+        if (!dimensionFields.isEmpty()) {
+            score += Math.min(0.16, overlap * 0.08);
+        }
+        String currentRoot = primaryRootCauseName(castMapList(currentResult.getOrDefault("rootCauses", List.of())));
+        String candidateRoot = primaryRootCauseName(castMapList(candidateResult.getOrDefault("rootCauses", List.of())));
+        if (!currentRoot.isBlank() && !candidateRoot.isBlank()) {
+            if (currentRoot.equals(candidateRoot)) {
+                score += 0.16;
+            } else if (currentRoot.contains(candidateRoot) || candidateRoot.contains(currentRoot)) {
+                score += 0.08;
+            }
+        }
+        return Math.min(1.0, score);
+    }
+
+    private String historicalMatchReason(Map<String, Object> report,
+                                         Map<String, Object> candidateResult,
+                                         String tableName,
+                                         String metricField,
+                                         String anomalyType,
+                                         List<String> dimensionFields) {
+        List<String> reasons = new ArrayList<>();
+        if (Objects.equals(Objects.toString(report.get("tableName"), ""), tableName)) {
+            reasons.add("鍚屼竴鏁版嵁琛?");
+        }
+        if (Objects.equals(Objects.toString(report.get("metricField"), ""), metricField)) {
+            reasons.add("鍚屼竴鎸囨爣");
+        }
+        if (Objects.equals(Objects.toString(report.get("anomalyType"), ""), anomalyType)) {
+            reasons.add("寮傚父绫诲瀷涓€鑷?");
+        }
+        List<String> candidateDimensions = castStringList(report.getOrDefault("dimensionFields", candidateResult.get("dimensionFields")));
+        long overlap = dimensionFields.stream().filter(candidateDimensions::contains).count();
+        if (overlap > 0) {
+            reasons.add("缁村害瀛楁閲嶅悎 " + overlap + " 椤?");
+        }
+        return reasons.isEmpty() ? "鏍瑰洜鏂囨湰鎴栬瘖鏂笂涓嬫枃鐩歌繎" : String.join("銆?", reasons);
+    }
+
 
 
     private String previewText(Object value) {
@@ -2164,6 +2494,104 @@ public class DiagnosisService {
         String text = Objects.toString(value, "").replaceAll("\\s+", " ").trim();
 
         return text.length() <= 80 ? text : text.substring(0, 80) + "...";
+
+    }
+
+    private String fullText(Object value) {
+
+        return cleanMarkdownText(value);
+
+    }
+
+    private String cleanMarkdownText(Object value) {
+
+        return Objects.toString(value, "")
+                .replaceAll("(?m)^\\s{0,3}#{1,6}\\s*", "")
+                .replaceAll("(?m)^\\s*[-*+]\\s+", "")
+                .replaceAll("\\*\\*(.*?)\\*\\*", "$1")
+                .replaceAll("__(.*?)__", "$1")
+                .replaceAll("`([^`]+)`", "$1")
+                .replaceAll("\\[([^\\]]+)]\\([^)]+\\)", "$1")
+                .replaceAll("\\s+", " ")
+                .trim();
+
+    }
+
+    private String evidenceReportSummary(Map<String, Object> cause, String metricLabel) {
+
+        String rawEvidence = cleanMarkdownText(cause.getOrDefault("evidence", ""));
+        String causeType = cleanMarkdownText(cause.getOrDefault("causeType", ""));
+        String impactField = cleanMarkdownText(cause.getOrDefault("impactField", metricLabel));
+        String context = firstEvidenceSentence(rawEvidence);
+        List<String> signals = new ArrayList<>();
+
+        addEvidenceSignal(signals, rawEvidence, "\u4f9b\u5e94\u94fe|\u8865\u8d27|SKU|\u5e93\u5b58|\u4ed3\u914d", "\u4f9b\u5e94\u94fe\u3001\u8865\u8d27\u6216\u5e93\u5b58\u53ef\u5f97\u6027");
+        addEvidenceSignal(signals, rawEvidence, "\u6ee1\u51cf|\u4fc3\u9500|\u6298\u6263|\u6d3b\u52a8|\u5927\u4fc3|\u4ef7\u683c\u7b56\u7565", "\u4fc3\u9500\u3001\u4ef7\u683c\u7b56\u7565\u6216\u6d3b\u52a8\u72b6\u6001");
+        addEvidenceSignal(signals, rawEvidence, "\u4f01\u4e1a\u5ba2\u6237|\u5ba1\u6279|\u91c7\u8d2d\u8282\u594f|\u5927\u5ba2\u6237", "\u4f01\u4e1a\u5ba2\u6237\u91c7\u8d2d\u6216\u5ba1\u6279\u8282\u594f");
+        addEvidenceSignal(signals, rawEvidence, "\u6e20\u9053|\u8f6c\u5316\u7387|\u7ebf\u4e0a|\u76f4\u8425|\u7ecf\u9500", "\u6e20\u9053\u7ed3\u6784\u6216\u8f6c\u5316\u7387\u6ce2\u52a8");
+        addEvidenceSignal(signals, rawEvidence, "\u7269\u6d41|\u8c03\u62e8|\u65f6\u6548|\u9000\u6b3e|\u53d6\u6d88", "\u7269\u6d41\u5c65\u7ea6\u3001\u8c03\u62e8\u6216\u9000\u6b3e\u53d6\u6d88");
+
+        if (rawEvidence.isBlank()) {
+            return "\u5173\u952e\u8bc1\u636e\uff1a\u5f53\u524d\u672a\u547d\u4e2d\u53ef\u76f4\u63a5\u5f15\u7528\u7684\u6587\u6863\u539f\u6587\uff0c\u7ed3\u8bba\u4e3b\u8981\u4f9d\u636e\u5f02\u5e38\u8282\u70b9\u3001\u7ef4\u5ea6\u8d21\u732e\u548c\u56fe\u8c31\u5173\u7cfb\u7efc\u5408\u8bc4\u4f30\u3002\u5efa\u8bae\u8865\u5145\u4e1a\u52a1\u590d\u76d8\u6750\u6599\u540e\u91cd\u65b0\u6821\u9a8c\u3002";
+        }
+
+        StringBuilder summary = new StringBuilder("\u5173\u952e\u8bc1\u636e\uff1a");
+        if (!context.isBlank()) {
+            summary.append(context);
+            if (!context.endsWith("\u3002") && !context.endsWith("\uff1b") && !context.endsWith(";")) {
+                summary.append("\u3002");
+            }
+        } else {
+            summary.append("\u8bc1\u636e\u94fe\u663e\u793a\u300c").append(causeType.isBlank() ? "\u6839\u56e0\u5047\u8bbe" : causeType)
+                    .append("\u300d\u4e0e\u300c").append(impactField.isBlank() ? metricLabel : impactField).append("\u300d\u5b58\u5728\u5173\u8054\u3002");
+        }
+
+        if (signals.isEmpty()) {
+            summary.append("\u6587\u6863\u8bc1\u636e\u4e0e\u5f02\u5e38\u8282\u70b9\u3001\u7ef4\u5ea6\u8d21\u732e\u7ed3\u679c\u65b9\u5411\u4e00\u81f4\u3002");
+        } else {
+            summary.append("\u6587\u6863\u8bc1\u636e\u96c6\u4e2d\u6307\u5411").append(String.join("\u3001", signals)).append("\u7b49\u5f71\u54cd\u56e0\u7d20\u3002");
+        }
+        summary.append("\u5efa\u8bae\u4f18\u5148\u6821\u9a8c\u5bf9\u5e94\u65f6\u95f4\u7a97\u53e3\u5185\u7684\u4e1a\u52a1\u53e3\u5f84\u3001\u8fd0\u8425\u914d\u7f6e\u548c\u5173\u952e\u8bb0\u5f55\u3002");
+        return limitReportText(summary.toString(), 320);
+
+    }
+
+    private void addEvidenceSignal(List<String> signals, String text, String regex, String label) {
+
+        if (Pattern.compile(regex).matcher(text).find() && !signals.contains(label)) {
+            signals.add(label);
+        }
+
+    }
+
+    private String firstEvidenceSentence(String text) {
+
+        String clean = cleanMarkdownText(text)
+                .replaceAll("\u8bc1\u636e\uff1a?=?.*", "")
+                .replaceAll("\u300a[^\\u300b]+\u300b", "")
+                .trim();
+        if (clean.isBlank()) {
+            return "";
+        }
+        int end = -1;
+        for (String separator : List.of("\u3002", "\uff1b", ";")) {
+            int index = clean.indexOf(separator);
+            if (index >= 0 && (end < 0 || index < end)) {
+                end = index;
+            }
+        }
+        String sentence = end >= 0 ? clean.substring(0, end + 1) : clean;
+        return limitReportText(sentence, 140);
+
+    }
+
+    private String limitReportText(String text, int maxLength) {
+
+        String clean = cleanMarkdownText(text);
+        if (clean.length() <= maxLength) {
+            return clean;
+        }
+        return clean.substring(0, Math.max(0, maxLength - 1)).trim() + "\u2026";
 
     }
 
@@ -2207,7 +2635,7 @@ public class DiagnosisService {
 
         if (!SAFE_COLUMN_NAME.matcher(columnName).matches()) {
 
-            throw new IllegalArgumentException("非法字段名：" + columnName);
+            throw new IllegalArgumentException("闈炴硶瀛楁鍚嶏細" + columnName);
 
         }
 
@@ -2223,7 +2651,7 @@ public class DiagnosisService {
 
         if (count == null || count == 0) {
 
-            throw new IllegalArgumentException("字段不存在或无权访问：" + columnName);
+            throw new IllegalArgumentException("瀛楁涓嶅瓨鍦ㄦ垨鏃犳潈璁块棶锛?" + columnName);
 
         }
 
@@ -2235,7 +2663,7 @@ public class DiagnosisService {
 
         if (!SAFE_COLUMN_NAME.matcher(columnName).matches()) {
 
-            throw new IllegalArgumentException("非法字段名：" + columnName);
+            throw new IllegalArgumentException("闈炴硶瀛楁鍚嶏細" + columnName);
 
         }
 
@@ -2251,7 +2679,7 @@ public class DiagnosisService {
 
         if (value == null || String.valueOf(value).isBlank()) {
 
-            throw new IllegalArgumentException("缺少必填项：" + key);
+            throw new IllegalArgumentException("缂哄皯蹇呭～椤癸細" + key);
 
         }
 
@@ -2327,6 +2755,45 @@ public class DiagnosisService {
 
     }
 
+    private String displayText(Object value) {
+        String text = Objects.toString(value, "").trim();
+        return "null".equalsIgnoreCase(text) ? "" : text;
+    }
+
+
+
+    private String cleanDisplayText(Object value, String fallback) {
+        String text = displayText(value);
+        if (text.isBlank() || looksMojibake(text)) {
+            return fallback;
+        }
+        return text;
+    }
+
+    private boolean looksMojibake(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        long hits = text.chars()
+                .filter(ch -> ch == '\ufffd'
+                        || ch == '\u95c2'
+                        || ch == '\u9359'
+                        || ch == '\u9366'
+                        || ch == '\u9427'
+                        || ch == '\u95b8'
+                        || ch == '\u701a'
+                        || ch == '\u5a34'
+                        || ch == '\u6d93'
+                        || ch == '\u95bf'
+                        || ch == '\u95b5')
+                .count();
+        return hits >= 2 || text.contains("???");
+    }
+
+    private String normalizedReportText(Object value) {
+        return displayText(value).replaceAll("\\s+", " ").trim().toLowerCase();
+    }
+
     private String toJsonString(Object value) {
         if (value == null) {
             return "";
@@ -2351,9 +2818,9 @@ public class DiagnosisService {
             boolean hadPhysicalTitle = Objects.toString(snapshot.getOrDefault("title", "")).matches("(?i).*col_\\d{3}.*");
             snapshot.putIfAbsent("anomalyMarkers", anomalyMarkers);
             relabelChartSnapshot(snapshot, fieldLabels);
-            String renderTitle = Objects.toString(snapshot.getOrDefault("title", "诊断图表快照"));
+            String renderTitle = cleanDisplayText(snapshot.getOrDefault("title", "\u8bca\u65ad\u56fe\u8868\u5feb\u7167"), "\u8bca\u65ad\u56fe\u8868\u5feb\u7167");
             String renderSignature = snapshotRenderSignature(snapshot, fieldLabels);
-            boolean needsContentRerender = forceRerender || hadPhysicalTitle || snapshotNeedsRerender(snapshot, fieldLabels);
+            boolean needsContentRerender = forceRerender || hadPhysicalTitle || snapshotNeedsRerender(snapshot, fieldLabels) || looksMojibake(renderTitle);
             boolean needsLegacyServerRerender = !renderSignature.equals(Objects.toString(snapshot.getOrDefault("renderSignature", "")))
                     && shouldRefreshStoredSnapshotImage(snapshot);
             if (needsContentRerender || needsLegacyServerRerender) {
@@ -2369,16 +2836,19 @@ public class DiagnosisService {
 
         List<Map<String, Object>> chartData = new ArrayList<>();
         String chartType = "bar";
-        String title = "异常数据图表快照";
+        String title = "\u5f02\u5e38\u6570\u636e\u56fe\u8868\u5feb\u7167";
 
         List<Map<String, Object>> blocks = castMapList(aiResult.getOrDefault("factorChartBlocks", List.of()));
         if (!blocks.isEmpty()) {
             Map<String, Object> block = blocks.get(0);
             chartType = Objects.toString(block.getOrDefault("chartType", "bar"));
-            title = Objects.toString(block.getOrDefault("title", title));
+            title = cleanDisplayText(block.getOrDefault("title", title), title);
             chartData.addAll(normalizeSnapshotData(castMapList(block.getOrDefault("data", List.of())), metricField));
         }
         title = replacePhysicalFields(title, fieldLabels);
+        if (looksMojibake(title)) {
+            title = "\u5f02\u5e38\u6570\u636e\u56fe\u8868\u5feb\u7167";
+        }
 
         if (chartData.isEmpty()) {
             int index = 1;
@@ -2391,7 +2861,7 @@ public class DiagnosisService {
                     continue;
                 }
                 Map<String, Object> item = new LinkedHashMap<>();
-                item.put("name", Objects.toString(row.getOrDefault("name", row.getOrDefault("time", "记录" + index))));
+                item.put("name", cleanDisplayText(row.getOrDefault("name", row.getOrDefault("time", "\u8282\u70b9" + index)), "\u8282\u70b9" + index));
                 item.put("value", value);
                 chartData.add(item);
                 index++;
@@ -2400,7 +2870,7 @@ public class DiagnosisService {
 
         if (chartData.isEmpty()) {
             Map<String, Object> emptyItem = new LinkedHashMap<>();
-            emptyItem.put("name", "暂无数据");
+            emptyItem.put("name", "\u6682\u65e0\u6570\u636e");
             emptyItem.put("value", 0);
             chartData.add(emptyItem);
         }
@@ -2525,7 +2995,9 @@ public class DiagnosisService {
             marker.put("value", value);
             marker.put("valueLabel", metricField + " = " + compactNumber(value));
             marker.put("deviation", Math.round(deviation * 100.0) / 100.0);
-            marker.put("reason", extreme ? "指标处于当前样本极值，已标记为异常节点" : "指标偏离均值 " + marker.get("deviation") + " 个标准差");
+            marker.put("reason", extreme
+                    ? "\u6307\u6807\u6570\u503c\u5904\u4e8e\u5f53\u524d\u6837\u672c\u7684\u6781\u503c\u533a\u95f4\uff0c\u5df2\u6807\u8bb0\u4e3a\u5f02\u5e38\u8282\u70b9"
+                    : "\u6307\u6807\u504f\u79bb\u5747\u503c " + marker.get("deviation") + " \u4e2a\u6807\u51c6\u5dee");
             marker.put("row", row);
             markers.add(marker);
             index++;
@@ -2536,11 +3008,11 @@ public class DiagnosisService {
         if (markers.isEmpty()) {
             Map<String, Object> first = new LinkedHashMap<>();
             first.put("key", "anomaly-top");
-            first.put("label", "最高波动点");
+            first.put("label", "\u6700\u9ad8\u6307\u6807\u8bb0\u5f55");
             first.put("metricField", metricField);
             first.put("value", max);
             first.put("valueLabel", metricField + " = " + compactNumber(max));
-            first.put("reason", "当前样本未超过阈值，默认标注最高值用于回溯");
+            first.put("reason", "\u6837\u672c\u672a\u8d85\u8fc7\u6807\u51c6\u5dee\u9608\u503c\uff0c\u7cfb\u7edf\u9009\u53d6\u6700\u9ad8\u6307\u6807\u8bb0\u5f55\u4f5c\u4e3a\u91cd\u70b9\u89c2\u6d4b\u8282\u70b9");
             first.put("row", rows.stream().filter(row -> Math.abs(toDouble(row.get(metricField)) - max) < 0.000001).findFirst().orElse(Map.of()));
             markers.add(first);
         }
@@ -2556,7 +3028,7 @@ public class DiagnosisService {
                 return Objects.toString(row.get(dimensionField));
             }
         }
-        return "记录" + fallbackIndex;
+        return "\u8282\u70b9" + fallbackIndex;
     }
 
     private String renderSnapshotImage(String title, String chartType, List<Map<String, Object>> data) {
@@ -2569,8 +3041,8 @@ public class DiagnosisService {
             g.setColor(Color.WHITE);
             g.fillRect(0, 0, width, height);
             g.setColor(new Color(25, 38, 70));
-            g.setFont(new Font("Microsoft YaHei", Font.BOLD, 26));
-            g.drawString(title == null || title.isBlank() ? "诊断图表快照" : title, 42, 54);
+            g.setFont(chartFont(Font.BOLD, 26));
+            g.drawString(title == null || title.isBlank() ? "\u8bca\u65ad\u56fe\u8868\u5feb\u7167" : title, 42, 54);
 
             int left = 78;
             int right = 48;
@@ -2596,8 +3068,8 @@ public class DiagnosisService {
             g.setColor(Color.WHITE);
             g.fillRect(0, 0, width, height);
             g.setColor(Color.DARK_GRAY);
-            g.setFont(new Font("Microsoft YaHei", Font.BOLD, 24));
-            g.drawString("诊断图表快照生成失败", 42, 72);
+            g.setFont(chartFont(Font.BOLD, 24));
+            g.drawString("\u8bca\u65ad\u56fe\u8868\u5feb\u7167\u751f\u6210\u5931\u8d25", 42, 72);
         } finally {
             g.dispose();
         }
@@ -2613,7 +3085,7 @@ public class DiagnosisService {
         int count = Math.max(1, data.size());
         int gap = 14;
         int barWidth = Math.max(18, (chartWidth - gap * (count + 1)) / count);
-        Font labelFont = new Font("Microsoft YaHei", Font.PLAIN, 15);
+        Font labelFont = chartFont(Font.PLAIN, 15);
         g.setFont(labelFont);
         FontMetrics metrics = g.getFontMetrics();
         for (int i = 0; i < data.size(); i++) {
@@ -2637,7 +3109,7 @@ public class DiagnosisService {
         int previousX = -1;
         int previousY = -1;
         g.setStroke(new BasicStroke(3f));
-        g.setFont(new Font("Microsoft YaHei", Font.PLAIN, 15));
+        g.setFont(chartFont(Font.PLAIN, 15));
         for (int i = 0; i < data.size(); i++) {
             Map<String, Object> item = data.get(i);
             double value = Math.max(0, toDouble(item.get("value")));
@@ -2669,9 +3141,19 @@ public class DiagnosisService {
 
     private String compactNumber(double value) {
         if (Math.abs(value) >= 10000) {
-            return String.format("%.1f万", value / 10000);
+            return String.format("%.1f\u4e07", value / 10000);
         }
         return String.format("%.0f", value);
+    }
+
+    private Font chartFont(int style, int size) {
+        Set<String> available = new LinkedHashSet<>(List.of(GraphicsEnvironment.getLocalGraphicsEnvironment().getAvailableFontFamilyNames()));
+        for (String family : List.of("Microsoft YaHei", "SimHei", "SimSun", "Noto Sans CJK SC", "Arial Unicode MS", "Dialog")) {
+            if (available.contains(family) || "Dialog".equals(family)) {
+                return new Font(family, style, size);
+            }
+        }
+        return new Font(Font.SANS_SERIF, style, size);
     }
 
     private String trimLabel(String label, int maxLength) {
@@ -2693,7 +3175,7 @@ public class DiagnosisService {
             coverRun.setBold(true);
             coverRun.setFontFamily("SimSun");
             coverRun.setFontSize(18);
-            coverRun.setText(title == null || title.isBlank() ? "智能诊断报告" : title);
+            coverRun.setText(title == null || title.isBlank() ? "\u667a\u80fd\u8bca\u65ad\u62a5\u544a" : title);
 
             XWPFParagraph subtitle = document.createParagraph();
             subtitle.setAlignment(ParagraphAlignment.CENTER);
@@ -2703,7 +3185,7 @@ public class DiagnosisService {
             subtitleRun.setFontSize(12);
             subtitleRun.setItalic(true);
             subtitleRun.setColor("333333");
-            subtitleRun.setText("GraphRAG 多跳推理 | Neo4j 知识图谱 | 原始数据可回溯");
+            subtitleRun.setText("GraphRAG \u591a\u8df3\u63a8\u7406 | Neo4j \u77e5\u8bc6\u56fe\u8c31 | \u539f\u59cb\u6570\u636e\u53ef\u56de\u6eaf");
 
             for (ReportBlock block : parseReportBlocks(content)) {
                 appendDocxBlock(document, block, false);
@@ -2716,7 +3198,7 @@ public class DiagnosisService {
                 captionRun.setBold(true);
                 captionRun.setFontFamily("SimSun");
                 captionRun.setFontSize(12);
-                captionRun.setText("图表快照");
+                captionRun.setText("\u56fe\u8868\u5feb\u7167");
 
                 XWPFParagraph imageParagraph = document.createParagraph();
                 imageParagraph.setAlignment(ParagraphAlignment.CENTER);
@@ -2733,7 +3215,7 @@ public class DiagnosisService {
             document.write(out);
             return out.toByteArray();
         } catch (Exception e) {
-            throw new IllegalArgumentException("Word 导出失败：" + e.getMessage());
+            throw new IllegalArgumentException("Word 瀵煎嚭澶辫触锛?" + e.getMessage());
         }
     }
 
@@ -2744,12 +3226,12 @@ public class DiagnosisService {
             Map<String, Object> chartSnapshot = toStringKeyMap(data.get("chartSnapshot"));
             Map<String, String> fieldLabels = toStringMap(data.get("fieldLabels"));
             String tableName = Objects.toString(data.getOrDefault("tableName", report.getOrDefault("tableName", "biz_data")));
-            String metricField = Objects.toString(data.getOrDefault("metricField", report.getOrDefault("metricField", "指标")));
+            String metricField = Objects.toString(data.getOrDefault("metricField", report.getOrDefault("metricField", "metric")));
             String metricLabel = readableFieldLabel(metricField, data.get("metricFieldLabel"), fieldLabels);
             String timeField = Objects.toString(data.getOrDefault("timeField", report.getOrDefault("timeField", "")));
             String timeLabel = readableFieldLabel(timeField, data.get("timeFieldLabel"), fieldLabels);
             if (timeLabel.isBlank()) {
-                timeLabel = "日期";
+                timeLabel = "\u65f6\u95f4";
             }
             List<String> dimensionFields = castStringList(data.getOrDefault("dimensionFields", report.getOrDefault("dimensionFields", List.of())));
             List<String> dimensionLabels = resolveDimensionLabels(data, dimensionFields, fieldLabels);
@@ -2759,104 +3241,251 @@ public class DiagnosisService {
             List<Map<String, Object>> rootCauses = castMapList(data.getOrDefault("rootCauses", List.of()));
             List<Map<String, Object>> evidence = distinctEvidence(castMapList(data.getOrDefault("docEvidence", List.of())));
             List<String> suggestions = castStringList(data.getOrDefault("suggestions", List.of()));
-            List<Map<String, Object>> graphNodes = castMapList(toStringKeyMap(data.get("graphPath")).getOrDefault("nodes", List.of()));
-            List<Map<String, Object>> graphEdges = castMapList(toStringKeyMap(data.get("graphPath")).getOrDefault("edges", List.of()));
-            String rootCauseName = primaryRootCauseName(rootCauses);
-            String rootCauseConclusion = rootCauseConclusion(rootCauses);
-            String dimensionChain = dimensionLabels.isEmpty() ? "未选择维度字段" : String.join("/", dimensionLabels);
-            String confidenceBands = confidenceBandText(rootCauses);
+            boolean simpleReport = "simple".equalsIgnoreCase(Objects.toString(data.getOrDefault("detailLevel", report.getOrDefault("detailLevel", ""))));
             String createdAt = Objects.toString(report.getOrDefault("createdAt", DATE_TIME_FORMATTER.format(Instant.now())));
             if (createdAt.length() > 10) {
                 createdAt = createdAt.substring(0, 10);
             }
-            String count = Objects.toString(stats.getOrDefault("count", rows.size()));
-
-            appendDocType(document, "Diagnostic Analysis Report | Insight Spark System");
-            appendDocTitle(document, "基于 GraphRAG 的多跳关联推理与业务指标异常归因分析");
-            appendSubtitle(document, "—— 以数据集 " + tableName + " " + metricLabel + "指标为例");
-            appendAuthors(document, "自动生成环境: 智能诊断引擎 (Build: 2026.05)\n诊断时间: " + createdAt);
-            appendHeaderDivider(document);
-
-            appendAbstract(document, "Abstract / 诊断摘要：", "本次分析围绕核心业务指标「" + metricLabel + "」展开。系统在有效观测区间内提取了 "
-                    + count + " 条样本记录进行异常扫描。统计结果显示，样本总计数值为 " + formatReportNumber(stats.get("total"))
-                    + "，均值 (μ) 为 " + formatReportNumber(stats.get("avg"))
-                    + "，区间极值分别为 Max = " + formatReportNumber(stats.get("max"))
-                    + " 与 Min = " + formatReportNumber(stats.get("min")) + "。通过统计算法，系统识别出 "
-                    + markers.size() + " 个具备统计学显著性的异常节点。为探究异常机制，系统引入 GraphRAG（Graph Retrieval-Augmented Generation）技术，融合业务维度拆解、时序窗口回溯与 Neo4j 知识图谱（涉及 "
-                    + graphNodes.size() + " 个节点与 " + graphEdges.size() + " 条边），" + rootCauseConclusion
-                    + "本文档详细记录了数据特征、多跳推理路径及多维度异质性分析结果。");
-
-            appendDocxBlock(document, new ReportBlock(ReportBlockType.H2, "I. 描述性统计与异常检测 (Statistical Characteristics)"), false);
-            appendDocxBlock(document, new ReportBlock(ReportBlockType.PARAGRAPH, "针对数据集 " + tableName + " 中的目标变量「" + metricLabel
-                    + "」，系统执行了基准扫描。有效样本量 N = " + count + "。基于分布特征，系统标定了 "
-                    + markers.size() + " 个显著偏离常态分布区间的异常观测点。具体检测结果如表 I 所示。"), false);
-            appendDocxTable(document, ReportBlock.table(anomalyDocxRows(markers, stats, timeField, timeLabel, metricField, metricLabel)));
-            appendCaption(document, "表 I. 核心指标异常节点识别清单");
-
-            appendDocxBlock(document, new ReportBlock(ReportBlockType.H2, "II. 图谱知识检索与多跳推理链路 (GraphRAG Reasoning)"), false);
-            appendDocxBlock(document, new ReportBlock(ReportBlockType.PARAGRAPH, "为克服单一数据视角的局限性，本次诊断未仅停留在字段级的相关性分析，而是构建了基于 GraphRAG 的因果推理拓扑。推理链路严格遵循以下演进次序：数据表关联 -> 指标层映射 -> 业务维度空间拆解（"
-                    + dimensionChain + "） -> 时序变量回溯（" + timeLabel + "）。"), false);
-            appendDocxBlock(document, new ReportBlock(ReportBlockType.PARAGRAPH, "在图计算阶段，系统调用 Neo4j 图数据库，遍历 "
-                    + graphNodes.size() + " 个关联实体节点与 " + graphEdges.size() + " 条语义关系边，" + rootCauseConclusion), false);
-            appendEvidenceBlock(document, evidence.isEmpty()
-                    ? "检索证据缺失声明 (Corpus Absence Note)：在 RAG 检索阶段，未命中可引用的企业内部复盘文档或外部行业研报。当前得出的根因结论高度依赖于底层统计波动特征与图谱结构的内生字段关系。建议管理层后续向知识库补充非结构化业务说明，以提升归因模型的鲁棒性。"
-                    : "检索证据摘要 (Corpus Evidence Note)：在 RAG 检索阶段，命中 " + evidence.size() + " 条企业内部复盘文档或外部行业研报。代表性证据包括：" + evidencePreview(evidence) + "。");
-
-            appendDocxBlock(document, new ReportBlock(ReportBlockType.H2, "III. 归因定位与置信度评估 (Attribution Analysis)"), false);
-            appendDocxBlock(document, new ReportBlock(ReportBlockType.PARAGRAPH, "基于上述多跳推理逻辑，系统对诱发指标波动的潜在因素进行了权重分配与显著性评估。当前根因结论覆盖" + confidenceBands + "置信区间："), false);
-            if (rootCauses.isEmpty()) {
-                appendDocxBlock(document, new ReportBlock(ReportBlockType.LIST_ITEM, "[置信度: 0.45 / LOW] 证据不足：主要影响对象为「" + metricLabel + "」。当前样本未形成高置信度根因，建议补充业务维度、时间窗口与知识文档后重新诊断。"), false);
-            } else {
-                for (Map<String, Object> cause : rootCauses) {
-                    appendCauseBlock(document, cause, metricLabel);
-                }
+            if (simpleReport) {
+                appendSimpleDiagnosisBrief(document, report, data, tableName, metricLabel, timeField, timeLabel,
+                        metricField, fieldLabels, stats, rows, markers, rootCauses, evidence, suggestions, createdAt);
+                appendDocxExportAppendices(document, report, data, chartSnapshot, snapshotImage, includeReasoningLogs,
+                        markers, rows, 7, false);
+                document.write(out);
+                return out.toByteArray();
             }
 
-            appendDocxBlock(document, new ReportBlock(ReportBlockType.H2, "IV. 多维度异质性分析 (Multidimensional Heterogeneity)"), false);
-            appendDocxBlock(document, new ReportBlock(ReportBlockType.PARAGRAPH, "为进一步剥离异常值的结构来源，本节对"
-                    + (dimensionLabels.isEmpty() ? "核心业务维度" : dimensionLabels.size() + " 大核心维度（" + String.join("、", dimensionLabels) + "）")
-                    + "进行了下钻与贡献度拆解。表 II 优先展示异常节点子集贡献；当异常节点明细不足时，回退展示全样本贡献分布。"), false);
-            appendDocxTable(document, ReportBlock.table(dimensionDocxRows(data, rows, metricField, metricLabel, dimensionFields, dimensionLabels, fieldLabels)));
-            appendCaption(document, "表 II. 核心业务维度贡献与相对比重拆解（优先异常节点口径）");
+            appendDetailedDiagnosisReport(document, report, data, tableName, metricLabel, timeField, timeLabel,
+                    metricField, fieldLabels, stats, rows, markers, rootCauses, evidence, suggestions, dimensionFields,
+                    dimensionLabels, createdAt);
 
-            appendDocxBlock(document, new ReportBlock(ReportBlockType.H2, "V. 结论与对策建议 (Conclusion & Recommendations)"), false);
-            appendDocxBlock(document, new ReportBlock(ReportBlockType.PARAGRAPH, "综上分析，本次指标异动具有显著的结构性与节点性特征。为防范潜在的业务连续性风险并优化数据观测模型，提出以下干预建议："), false);
-            if (suggestions.isEmpty()) {
-                for (String suggestion : fallbackReportSuggestions(metricLabel, dimensionLabels, timeLabel, evidence, markers)) {
-                    appendDocxBlock(document, new ReportBlock(ReportBlockType.LIST_ITEM, suggestion), false);
-                }
-            } else {
-                for (String suggestion : suggestions) {
-                    appendDocxBlock(document, new ReportBlock(ReportBlockType.LIST_ITEM, suggestion), false);
-                }
+            appendDocxExportAppendices(document, report, data, chartSnapshot, snapshotImage, includeReasoningLogs,
+                    markers, rows, 7, true);
+
+            document.write(out);
+            return out.toByteArray();
+        } catch (Exception e) {
+            throw new IllegalArgumentException("Word \u5bfc\u51fa\u5931\u8d25\uff1a" + e.getMessage());
+        }
+    }
+
+    private void appendDocxExportAppendices(XWPFDocument document,
+                                            Map<String, Object> report,
+                                            Map<String, Object> data,
+                                            Map<String, Object> chartSnapshot,
+                                            byte[] snapshotImage,
+                                            boolean includeReasoningLogs,
+                                            List<Map<String, Object>> markers,
+                                            List<Map<String, Object>> rows,
+                                            int startSectionNumber,
+                                            boolean includeTraceability) throws Exception {
+            int nextSectionNumber = startSectionNumber;
+            if (includeTraceability) {
+                appendDocxBlock(document, new ReportBlock(ReportBlockType.H2, romanSection(nextSectionNumber++) + ". \u62a5\u544a\u7ed1\u5b9a\u4e0e\u56de\u6eaf\u8bf4\u660e (Traceability Binding)"), false);
+                appendDocxBlock(document, new ReportBlock(ReportBlockType.PARAGRAPH, buildTraceabilityNarrative(report, data)), false);
             }
-
-            boolean snapshotIncluded = snapshotImage != null && snapshotImage.length > 0;
-            if (snapshotIncluded) {
-                appendDocxBlock(document, new ReportBlock(ReportBlockType.H2, "VI. 图表快照 (Chart Snapshot)"), false);
+            if (snapshotImage != null && snapshotImage.length > 0) {
+                appendDocxBlock(document, new ReportBlock(ReportBlockType.H2, romanSection(nextSectionNumber++) + ". \u56fe\u8868\u5feb\u7167 (Chart Snapshot)"), false);
                 appendDocxBlock(document, new ReportBlock(ReportBlockType.PARAGRAPH, buildSnapshotNarrative(chartSnapshot, markers, rows)), false);
                 XWPFParagraph imageParagraph = document.createParagraph();
                 imageParagraph.setAlignment(ParagraphAlignment.CENTER);
                 XWPFRun imageRun = imageParagraph.createRun();
                 imageRun.addPicture(new ByteArrayInputStream(snapshotImage), Document.PICTURE_TYPE_PNG, "chart-snapshot.png", Units.toEMU(390), Units.toEMU(220));
             }
-
             if (includeReasoningLogs) {
                 List<Map<String, Object>> reasoningLogs = castMapList(data.getOrDefault("reasoningLogs", List.of()));
                 if (!reasoningLogs.isEmpty()) {
-                    String sectionNo = snapshotIncluded ? "VII" : "VI";
-                    appendDocxBlock(document, new ReportBlock(ReportBlockType.H2, sectionNo + ". GraphRAG 推理日志 (Reasoning Logs)"), false);
-                    appendDocxBlock(document, new ReportBlock(ReportBlockType.PARAGRAPH, "本节记录诊断引擎从字段映射、异常扫描、知识检索、多跳推理到根因输出的关键执行过程，用于回溯报告生成依据与模型判断路径。"), false);
+                    String sectionNo = romanSection(nextSectionNumber);
+                    appendDocxBlock(document, new ReportBlock(ReportBlockType.H2, sectionNo + ". GraphRAG \u63a8\u7406\u65e5\u5fd7 (Reasoning Logs)"), false);
+                    appendDocxBlock(document, new ReportBlock(ReportBlockType.PARAGRAPH,
+                            "\u672c\u8282\u8bb0\u5f55\u8bca\u65ad\u5f15\u64ce\u4ece\u5b57\u6bb5\u6620\u5c04\u3001\u5f02\u5e38\u626b\u63cf\u3001\u77e5\u8bc6\u68c0\u7d22\u3001\u591a\u8df3\u63a8\u7406\u5230\u6839\u56e0\u8f93\u51fa\u7684\u5173\u952e\u6267\u884c\u8fc7\u7a0b\uff0c\u7528\u4e8e\u56de\u6eaf\u62a5\u544a\u751f\u6210\u4f9d\u636e\u4e0e\u6a21\u578b\u5224\u65ad\u8def\u5f84\u3002"), false);
                     appendDocxTable(document, ReportBlock.table(reasoningLogDocxRows(reasoningLogs)));
-                    appendCaption(document, "表 " + sectionNo + ". GraphRAG 推理过程日志");
+                    appendCaption(document, "\u8868 " + sectionNo + ". GraphRAG \u63a8\u7406\u8fc7\u7a0b\u65e5\u5fd7");
                 }
             }
+    }
 
-            document.write(out);
-            return out.toByteArray();
-        } catch (Exception e) {
-            throw new IllegalArgumentException("Word 导出失败：" + e.getMessage());
+
+    private void appendDetailedDiagnosisReport(XWPFDocument document,
+                                               Map<String, Object> report,
+                                               Map<String, Object> data,
+                                               String tableName,
+                                               String metricLabel,
+                                               String timeField,
+                                               String timeLabel,
+                                               String metricField,
+                                               Map<String, String> fieldLabels,
+                                               Map<String, Object> stats,
+                                               List<Map<String, Object>> rows,
+                                               List<Map<String, Object>> markers,
+                                               List<Map<String, Object>> rootCauses,
+                                               List<Map<String, Object>> evidence,
+                                               List<String> suggestions,
+                                               List<String> dimensionFields,
+                                               List<String> dimensionLabels,
+                                               String createdAt) {
+        appendDocType(document, "Diagnostic Analysis Report | Insight Spark System");
+        appendDocTitle(document, "\u667a\u80fd\u8bca\u65ad\u62a5\u544a");
+        appendSubtitle(document, "\u6570\u636e\u8868: " + tableName + " | \u6307\u6807: " + metricLabel);
+        appendAuthors(document, "\u5206\u6790\u7ef4\u5ea6: " + String.join("\u3001", dimensionLabels)
+                + "\n\u751f\u6210\u65f6\u95f4: " + createdAt);
+        appendHeaderDivider(document);
+
+        appendAbstract(document, "Abstract / \u6458\u8981", detailedSummaryText(metricLabel, stats, rows, markers, rootCauses,
+                castMapList(data.getOrDefault("relatedKnowledge", List.of())),
+                castMapList(data.getOrDefault("graphEdges", List.of()))));
+
+        appendDocxBlock(document, new ReportBlock(ReportBlockType.H2, "1. \u5173\u952e\u5f02\u5e38\u70b9"), false);
+        appendDocxTable(document, ReportBlock.table(anomalyDocxRows(markers, stats, timeField, timeLabel, metricField, metricLabel)));
+
+        appendDocxBlock(document, new ReportBlock(ReportBlockType.H2, "2. \u6839\u56e0\u5224\u65ad"), false);
+        if (rootCauses.isEmpty()) {
+            appendDocxBlock(document, new ReportBlock(ReportBlockType.PARAGRAPH,
+                    "\u5f53\u524d\u8bc1\u636e\u4e0d\u8db3\uff0c\u5c1a\u672a\u5f62\u6210\u7a33\u5b9a\u6839\u56e0\u7ed3\u8bba\u3002"), false);
+        } else {
+            for (Map<String, Object> cause : rootCauses.stream().limit(3).toList()) {
+                appendCauseBlock(document, cause, metricLabel);
+            }
         }
+
+        appendDocxBlock(document, new ReportBlock(ReportBlockType.H2, "3. \u7ef4\u5ea6\u8d21\u732e\u5206\u6790"), false);
+        appendDocxTable(document, ReportBlock.table(dimensionDocxRows(data, rows, metricField, metricLabel,
+                dimensionFields, dimensionLabels, fieldLabels)));
+
+        appendDocxBlock(document, new ReportBlock(ReportBlockType.H2, "4. \u8bc1\u636e\u94fe"), false);
+        for (String item : simpleEvidenceItems(evidence, rootCauses, markers, metricLabel).stream().limit(5).toList()) {
+            appendDocxBlock(document, new ReportBlock(ReportBlockType.LIST_ITEM, item), false);
+        }
+
+        appendDocxBlock(document, new ReportBlock(ReportBlockType.H2, "5. \u5904\u7f6e\u5efa\u8bae"), false);
+        List<String> reportSuggestions = suggestions.isEmpty()
+                ? fallbackReportSuggestions(metricLabel, dimensionLabels, timeLabel, evidence, markers)
+                : suggestions;
+        for (String suggestion : reportSuggestions.stream().limit(5).toList()) {
+            appendDocxBlock(document, new ReportBlock(ReportBlockType.LIST_ITEM, suggestion), false);
+        }
+
+        appendDocxBlock(document, new ReportBlock(ReportBlockType.H2, "6. \u5386\u53f2\u76f8\u4f3c\u62a5\u544a"), false);
+        appendHistoricalSimilarReportsDocx(document, castMapList(data.getOrDefault("similarReports", data.getOrDefault("historicalReports", List.of()))));
+    }
+
+    private void appendSimpleDiagnosisBrief(XWPFDocument document,
+                                             Map<String, Object> report,
+                                             Map<String, Object> data,
+                                             String tableName,
+                                             String metricLabel,
+                                             String timeField,
+                                             String timeLabel,
+                                             String metricField,
+                                             Map<String, String> fieldLabels,
+                                             Map<String, Object> stats,
+                                             List<Map<String, Object>> rows,
+                                             List<Map<String, Object>> markers,
+                                             List<Map<String, Object>> rootCauses,
+                                             List<Map<String, Object>> evidence,
+                                             List<String> suggestions,
+                                             String createdAt) {
+        appendDocType(document, "Diagnostic Brief | Insight Spark System");
+        appendDocTitle(document, "\u4e1a\u52a1\u6307\u6807\u5f02\u5e38\u8bca\u65ad\u7b80\u62a5");
+        appendSubtitle(document, "\u4ee5\u6570\u636e\u96c6 " + tableName + " \u7684 " + metricLabel + " \u6307\u6807\u4e3a\u4f8b");
+        appendAuthors(document, "\u81ea\u52a8\u751f\u6210\u73af\u5883: \u667a\u80fd\u8bca\u65ad\u5f15\u64ce (Build: 2026.05)\n\u8bca\u65ad\u65f6\u95f4: " + createdAt);
+        appendHeaderDivider(document);
+
+        appendAbstract(document, "1. \u6458\u8981", simpleSummaryText(metricLabel, stats, rows, markers, rootCauses));
+
+        appendDocxBlock(document, new ReportBlock(ReportBlockType.H2, "2. \u5173\u952e\u5f02\u5e38\u70b9"), false);
+        appendDocxTable(document, ReportBlock.table(anomalyDocxRows(markers.stream().limit(3).toList(), stats,
+                timeField, timeLabel, metricField, metricLabel)));
+
+        appendDocxBlock(document, new ReportBlock(ReportBlockType.H2, "3. \u9996\u8981\u6839\u56e0"), false);
+        if (rootCauses.isEmpty()) {
+            appendDocxBlock(document, new ReportBlock(ReportBlockType.PARAGRAPH,
+                    "\u5f53\u524d\u8bc1\u636e\u4e0d\u8db3\uff0c\u5efa\u8bae\u8865\u5145\u4e1a\u52a1\u7ef4\u5ea6\u3001\u65f6\u95f4\u7a97\u53e3\u4e0e\u77e5\u8bc6\u6587\u6863\u540e\u91cd\u65b0\u8bca\u65ad\u3002"), false);
+        } else {
+            appendCauseBlock(document, rootCauses.get(0), metricLabel);
+        }
+
+        appendDocxBlock(document, new ReportBlock(ReportBlockType.H2, "4. \u5173\u952e\u8bc1\u636e"), false);
+        List<String> evidenceItems = simpleEvidenceItems(evidence, rootCauses, markers, metricLabel);
+        for (String item : evidenceItems.stream().limit(3).toList()) {
+            appendDocxBlock(document, new ReportBlock(ReportBlockType.LIST_ITEM, item), false);
+        }
+
+        appendDocxBlock(document, new ReportBlock(ReportBlockType.H2, "5. \u5904\u7f6e\u5efa\u8bae"), false);
+        List<String> briefSuggestions = suggestions.isEmpty()
+                ? fallbackReportSuggestions(metricLabel, resolveDimensionLabels(data, castStringList(data.getOrDefault("dimensionFields", List.of())), fieldLabels), timeLabel, evidence, markers)
+                : suggestions;
+        for (String suggestion : briefSuggestions.stream().limit(3).toList()) {
+            appendDocxBlock(document, new ReportBlock(ReportBlockType.LIST_ITEM, suggestion), false);
+        }
+
+        appendDocxBlock(document, new ReportBlock(ReportBlockType.H2, "6. \u56de\u6eaf\u4fe1\u606f"), false);
+        appendDocxBlock(document, new ReportBlock(ReportBlockType.PARAGRAPH, buildTraceabilityNarrative(report, data)), false);
+    }
+
+    private String simpleSummaryText(String metricLabel,
+                                     Map<String, Object> stats,
+                                     List<Map<String, Object>> rows,
+                                     List<Map<String, Object>> markers,
+                                     List<Map<String, Object>> rootCauses) {
+        String rootCause = rootCauses.isEmpty() ? "\u8bc1\u636e\u4e0d\u8db3" : primaryRootCauseName(rootCauses);
+        return "\u672c\u6b21\u56f4\u7ed5\u300c" + metricLabel + "\u300d\u5206\u6790 "
+                + Objects.toString(stats.getOrDefault("count", rows.size()))
+                + " \u6761\u6837\u672c\uff0c\u5408\u8ba1 " + formatReportNumber(stats.get("total"))
+                + "\uff0c\u5747\u503c " + formatReportNumber(stats.get("avg"))
+                + "\uff0c\u8bc6\u522b " + markers.size()
+                + " \u4e2a\u5173\u952e\u5f02\u5e38\u70b9\u3002\u9996\u8981\u6839\u56e0\u5224\u65ad\u4e3a\u300c" + rootCause + "\u300d\u3002";
+    }
+
+    private String detailedSummaryText(String metricLabel,
+                                       Map<String, Object> stats,
+                                       List<Map<String, Object>> rows,
+                                       List<Map<String, Object>> markers,
+                                       List<Map<String, Object>> rootCauses,
+                                       List<Map<String, Object>> graphNodes,
+                                       List<Map<String, Object>> graphEdges) {
+        String rootCause = rootCauses == null || rootCauses.isEmpty() ? "\u8bc1\u636e\u4e0d\u8db3" : primaryRootCauseName(rootCauses);
+        return "\u672c\u6b21\u56f4\u7ed5\u6838\u5fc3\u4e1a\u52a1\u6307\u6807\u300c" + metricLabel + "\u300d\u5c55\u5f00\u3002"
+                + "\u7cfb\u7edf\u5728\u6709\u6548\u89c2\u6d4b\u533a\u95f4\u5185\u63d0\u53d6\u4e86 " + rows.size()
+                + " \u6761\u6837\u672c\u8bb0\u5f55\u8fdb\u884c\u5f02\u5e38\u626b\u63cf\uff0c\u8bc6\u522b\u51fa "
+                + (markers == null ? 0 : markers.size()) + " \u4e2a\u663e\u8457\u5f02\u5e38\u8282\u70b9\u3002"
+                + "\u7edf\u8ba1\u7ed3\u679c\u663e\u793a\uff0c\u6837\u672c\u603b\u8ba1\u6570\u503c\u4e3a " + formatReportNumber(stats.get("total"))
+                + "\uff0c\u5747\u503c (\u03bc) \u4e3a " + formatReportNumber(stats.get("avg"))
+                + "\uff0c\u533a\u95f4\u6781\u503c\u5206\u522b\u4e3a Max = " + formatReportNumber(stats.get("max"))
+                + " \u4e0e Min = " + formatReportNumber(stats.get("min")) + "\u3002"
+                + "\u7cfb\u7edf\u878d\u5408 GraphRAG\u3001Neo4j \u77e5\u8bc6\u56fe\u8c31\u4e0e\u6587\u6863\u8bc1\u636e"
+                + "\uff08\u6d89\u53ca " + (graphNodes == null ? 0 : graphNodes.size()) + " \u4e2a\u8282\u70b9\u4e0e "
+                + (graphEdges == null ? 0 : graphEdges.size()) + " \u6761\u8fb9\uff09\uff0c"
+                + "\u6700\u7ec8\u5c06\u6838\u5fc3\u6839\u56e0\u6307\u5411\u300c" + rootCause + "\u300d\u3002"
+                + "\u672c\u6587\u6863\u8be6\u7ec6\u8bb0\u5f55\u4e86\u6570\u636e\u7279\u5f81\u3001\u591a\u8df3\u63a8\u7406\u8def\u5f84\u53ca\u591a\u7ef4\u5ea6\u5f02\u8d28\u6027\u5206\u6790\u7ed3\u679c\u3002";
+    }
+
+    private List<String> simpleEvidenceItems(List<Map<String, Object>> evidence,
+                                             List<Map<String, Object>> rootCauses,
+                                             List<Map<String, Object>> markers,
+                                             String metricLabel) {
+        List<String> items = new ArrayList<>();
+        if (!markers.isEmpty()) {
+            Map<String, Object> marker = markers.get(0);
+            items.add("\u5f02\u5e38\u70b9: " + Objects.toString(marker.getOrDefault("label", "-"))
+                    + "\uff0c" + metricLabel + " = " + Objects.toString(marker.getOrDefault("valueLabel", marker.getOrDefault("value", "-"))));
+        }
+        if (!rootCauses.isEmpty()) {
+            Map<String, Object> cause = rootCauses.get(0);
+            String summary = cleanMarkdownText(cause.getOrDefault("evidence", cause.getOrDefault("description", "")));
+            if (!summary.isBlank()) {
+                items.add(summary);
+            }
+        }
+        for (Map<String, Object> item : distinctEvidence(evidence).stream().limit(2).toList()) {
+            String label = cleanMarkdownText(item.getOrDefault("label", item.getOrDefault("source", "\u6587\u6863\u8bc1\u636e")));
+            String content = cleanMarkdownText(item.getOrDefault("preview", item.getOrDefault("content", item.getOrDefault("text", ""))));
+            items.add(label + "\uff1a" + safeText(content, 160));
+        }
+        if (items.isEmpty()) {
+            items.add("\u6682\u65e0\u53ef\u5f15\u7528\u7684\u6587\u6863\u8bc1\u636e\uff0c\u5efa\u8bae\u8865\u5145\u4e1a\u52a1\u590d\u76d8\u6587\u6863\u540e\u91cd\u65b0\u751f\u6210\u3002");
+        }
+        return items;
     }
 
     private void configureDocxPage(XWPFDocument document) {
@@ -2952,27 +3581,27 @@ public class DiagnosisService {
     private String evidenceFingerprint(String content) {
         String normalized = Objects.toString(content, "")
                 .replaceAll("\\s+", "")
-                .replaceAll("[，。；：、,.!！?？#\\-_*`~\\[\\]()（）【】《》<>]", "");
+                .replaceAll("[锛屻€傦紱锛氥€?.!锛?锛?\\-_*`~\\[\\]()锛堬級銆愩€戙€娿€?>]", "");
         return normalized.length() <= 80 ? normalized : normalized.substring(0, 80);
     }
 
     private String primaryRootCauseName(List<Map<String, Object>> rootCauses) {
         if (rootCauses == null || rootCauses.isEmpty()) {
-            return "证据不足，暂未形成单一收敛根因";
+            return "\u8bc1\u636e\u4e0d\u8db3\uff0c\u6682\u672a\u5f62\u6210\u660e\u786e\u6839\u56e0";
         }
-        return Objects.toString(rootCauses.get(0).getOrDefault("causeType", "根因假设")).trim();
+        return Objects.toString(rootCauses.get(0).getOrDefault("causeType", "\u6839\u56e0\u5047\u8bbe")).trim();
     }
 
     private String rootCauseConclusion(List<Map<String, Object>> rootCauses) {
         if (rootCauses == null || rootCauses.isEmpty()) {
-            return "当前未形成单一收敛根因，系统将结论标定为「证据不足」。";
+            return "\u5f53\u524d\u8bc1\u636e\u4e0d\u8db3\uff0c\u5efa\u8bae\u8865\u5145\u66f4\u591a\u4e1a\u52a1\u4e0a\u4e0b\u6587\u540e\u518d\u786e\u8ba4\u6839\u56e0\u3002";
         }
-        return "最终将核心根因指向「" + primaryRootCauseName(rootCauses) + "」。";
+        return "\u6700\u7ec8\u5c06\u6838\u5fc3\u6839\u56e0\u6307\u5411\u300c" + primaryRootCauseName(rootCauses) + "\u300d\u3002";
     }
 
     private String confidenceBandText(List<Map<String, Object>> rootCauses) {
         if (rootCauses == null || rootCauses.isEmpty()) {
-            return "低（Low）";
+            return "\u4f4e\u7f6e\u4fe1";
         }
         List<String> levels = new ArrayList<>();
         for (Map<String, Object> cause : rootCauses) {
@@ -2982,16 +3611,32 @@ public class DiagnosisService {
             }
         }
         if (levels.isEmpty()) {
-            return "中（Medium）";
+            return "\u4e2d\u7f6e\u4fe1";
         }
         return levels.stream()
                 .map(level -> switch (level) {
-                    case "HIGH" -> "高（High）";
-                    case "LOW" -> "低（Low）";
-                    default -> "中（Medium）";
+                    case "HIGH" -> "\u9ad8\u7f6e\u4fe1";
+                    case "LOW" -> "\u4f4e\u7f6e\u4fe1";
+                    default -> "\u4e2d\u7f6e\u4fe1";
                 })
-                .reduce((a, b) -> a + "、" + b)
-                .orElse("中（Medium）");
+                .reduce((a, b) -> a + "\u3001" + b)
+                .orElse("\u4e2d\u7f6e\u4fe1");
+    }
+
+    private String romanSection(int number) {
+        return switch (number) {
+            case 1 -> "I";
+            case 2 -> "II";
+            case 3 -> "III";
+            case 4 -> "IV";
+            case 5 -> "V";
+            case 6 -> "VI";
+            case 7 -> "VII";
+            case 8 -> "VIII";
+            case 9 -> "IX";
+            case 10 -> "X";
+            default -> String.valueOf(number);
+        };
     }
 
     private List<String> fallbackReportSuggestions(String metricLabel,
@@ -3001,20 +3646,20 @@ public class DiagnosisService {
                                                    List<Map<String, Object>> markers) {
         List<String> suggestions = new ArrayList<>();
         if (!markers.isEmpty()) {
-            suggestions.add("复核异常节点对应的原始记录，确认「" + metricLabel + "」波动是否来自真实业务事件、统计口径变化或数据采集异常。");
+            suggestions.add("\u4f18\u5148\u590d\u6838\u5f02\u5e38\u8282\u70b9\u5bf9\u5e94\u7684\u539f\u59cb\u8bb0\u5f55\uff0c\u786e\u8ba4\u300c" + metricLabel + "\u300d\u6ce2\u52a8\u662f\u5426\u6765\u81ea\u771f\u5b9e\u4e1a\u52a1\u4e8b\u4ef6\u3001\u7edf\u8ba1\u53e3\u5f84\u53d8\u5316\u6216\u6570\u636e\u91c7\u96c6\u5f02\u5e38\u3002");
         } else {
-            suggestions.add("补充更长观测窗口或更高频明细数据后重新扫描「" + metricLabel + "」，避免样本不足导致异常判断不稳定。");
+            suggestions.add("\u8865\u5145\u66f4\u957f\u89c2\u6d4b\u7a97\u53e3\u6216\u66f4\u9ad8\u9897\u7c92\u5ea6\u660e\u7ec6\u6570\u636e\u540e\u91cd\u65b0\u626b\u63cf\u300c" + metricLabel + "\u300d\uff0c\u907f\u514d\u6837\u672c\u4e0d\u8db3\u5bfc\u81f4\u5f02\u5e38\u5224\u65ad\u4e0d\u7a33\u5b9a\u3002");
         }
         if (dimensionLabels != null && !dimensionLabels.isEmpty()) {
-            suggestions.add("围绕「" + String.join("、", dimensionLabels.stream().limit(3).toList()) + "」继续下钻到明细对象，验证头部贡献项是否集中放大指标波动。");
+            suggestions.add("\u56f4\u7ed5\u300c" + String.join("\u3001", dimensionLabels.stream().limit(3).toList()) + "\u300d\u7ee7\u7eed\u4e0b\u94bb\u5230\u660e\u7ec6\u5bf9\u8c61\uff0c\u9a8c\u8bc1\u5934\u90e8\u8d21\u732e\u662f\u5426\u96c6\u4e2d\u653e\u5927\u6307\u6807\u6ce2\u52a8\u3002");
         } else {
-            suggestions.add("补充可解释「" + metricLabel + "」变化的业务维度字段，用于生成可归因的贡献拆解。");
+            suggestions.add("\u8865\u5145\u53ef\u89e3\u91ca\u300c" + metricLabel + "\u300d\u53d8\u5316\u7684\u4e1a\u52a1\u7ef4\u5ea6\u5b57\u6bb5\uff0c\u7528\u4e8e\u751f\u6210\u53ef\u5f52\u56e0\u7684\u8d21\u732e\u62c6\u89e3\u3002");
         }
         if (timeLabel != null && !timeLabel.isBlank()) {
-            suggestions.add("以「" + timeLabel + "」为轴对异常节点前后相邻窗口做对比，判断波动是短期脉冲还是趋势变化。");
+            suggestions.add("\u4ee5\u300c" + timeLabel + "\u300d\u4e3a\u8f74\u5bf9\u5f02\u5e38\u8282\u70b9\u524d\u540e\u76f8\u90bb\u7a97\u53e3\u505a\u5bf9\u6bd4\uff0c\u5224\u65ad\u6ce2\u52a8\u662f\u77ed\u671f\u8109\u51b2\u8fd8\u662f\u8d8b\u52bf\u53d8\u5316\u3002");
         }
         if (evidence == null || evidence.isEmpty()) {
-            suggestions.add("上传企业复盘文档或行业研报并重新纳入 GraphRAG，以提升根因结论的外部证据支撑。");
+            suggestions.add("\u4e0a\u4f20\u4f01\u4e1a\u590d\u76d8\u6587\u6863\u6216\u884c\u4e1a\u7814\u62a5\u5e76\u91cd\u65b0\u7eb3\u5165 GraphRAG\uff0c\u4ee5\u63d0\u5347\u6839\u56e0\u7ed3\u8bba\u7684\u5916\u90e8\u8bc1\u636e\u652f\u6491\u3002");
         }
         return suggestions.stream().distinct().limit(4).toList();
     }
@@ -3083,7 +3728,7 @@ public class DiagnosisService {
         titleRun.setBold(true);
         titleRun.setFontFamily("Arial");
         titleRun.setFontSize(9);
-        titleRun.setText(label);
+        titleRun.setText(label + ": ");
         XWPFRun bodyRun = paragraph.createRun();
         bodyRun.setFontFamily("SimSun");
         bodyRun.setFontSize(9);
@@ -3107,58 +3752,141 @@ public class DiagnosisService {
     private void appendCauseBlock(XWPFDocument document, Map<String, Object> cause, String metricLabel) {
         String confidence = formatConfidence(cause.get("confidence"));
         String level = Objects.toString(cause.getOrDefault("level", "MEDIUM"));
-        String causeType = Objects.toString(cause.getOrDefault("causeType", "根因假设"));
+        String causeType = cleanMarkdownText(cause.getOrDefault("causeType", "\u6839\u56e0\u5047\u8bbe"));
         String impactField = Objects.toString(cause.getOrDefault("impactField", metricLabel));
-        String evidence = Objects.toString(cause.getOrDefault("evidence", "")).trim();
+        String evidence = evidenceReportSummary(cause, metricLabel);
         String action = Objects.toString(cause.getOrDefault("action", "")).trim();
         appendDocxBlock(document, new ReportBlock(ReportBlockType.LIST_ITEM,
-                "[置信度: " + confidence + " / " + level + "] " + causeType + "：主要影响对象为「" + impactField + "」。"), false);
+                "[\u7f6e\u4fe1\u5ea6 " + confidence + " / " + level + "] " + causeType + "\uff1a\u4e3b\u8981\u5f71\u54cd\u5bf9\u8c61\u4e3a\u300c" + impactField + "\u300d\u3002"), false);
         if (!evidence.isBlank()) {
-            appendDocxBlock(document, new ReportBlock(ReportBlockType.PARAGRAPH, "关键证据：" + evidence), false);
+            appendDocxBlock(document, new ReportBlock(ReportBlockType.PARAGRAPH, evidence), false);
         }
         if (!action.isBlank()) {
-            appendDocxBlock(document, new ReportBlock(ReportBlockType.PARAGRAPH, "建议动作：" + action), false);
+            appendDocxBlock(document, new ReportBlock(ReportBlockType.PARAGRAPH, "\u5efa\u8bae\u52a8\u4f5c\uff1a" + action), false);
         }
+    }
+
+    private void appendHistoricalSimilarReportsDocx(XWPFDocument document, List<Map<String, Object>> reports) {
+        if (reports == null || reports.isEmpty()) {
+            appendEvidenceBlock(document, "\u5386\u53f2\u76f8\u4f3c\u8bca\u65ad\u53ec\u56de\uff1a\u5f53\u524d\u672a\u547d\u4e2d\u6ee1\u8db3\u76f8\u4f3c\u5ea6\u9608\u503c\u7684\u5386\u53f2\u8bca\u65ad\u62a5\u544a\uff0c\u540e\u7eed\u62a5\u544a\u7d2f\u79ef\u540e\u53ef\u7528\u4e8e\u5f02\u5e38\u6a21\u5f0f\u590d\u76d8\u3002");
+            return;
+        }
+        appendEvidenceBlock(document, "\u5386\u53f2\u76f8\u4f3c\u8bca\u65ad\u53ec\u56de\uff1a\u7cfb\u7edf\u547d\u4e2d " + reports.size()
+                + " \u4efd\u5386\u53f2\u8bca\u65ad\u62a5\u544a\uff0c\u7528\u4e8e\u5bf9\u6bd4\u5f02\u5e38\u6a21\u5f0f\u3001\u6839\u56e0\u7ed3\u8bba\u548c\u5efa\u8bae\u52a8\u4f5c\u3002");
+        List<List<String>> rows = new ArrayList<>();
+        rows.add(List.of("\u5386\u53f2\u62a5\u544a", "\u76f8\u4f3c\u5ea6", "\u5339\u914d\u539f\u56e0", "\u5386\u53f2\u6839\u56e0"));
+        for (Map<String, Object> report : reports) {
+            rows.add(List.of(
+                    cleanMarkdownText(report.getOrDefault("title", "\u5386\u53f2\u8bca\u65ad\u62a5\u544a")),
+                    formatConfidence(report.getOrDefault("score", 0)),
+                    cleanMarkdownText(report.getOrDefault("matchReason", "")),
+                    cleanMarkdownText(report.getOrDefault("rootCause", ""))
+            ));
+        }
+        appendDocxTable(document, ReportBlock.table(rows));
+    }
+
+    private String buildTraceabilityNarrative(Map<String, Object> report, Map<String, Object> data) {
+        Map<String, Object> binding = toStringKeyMap(report.getOrDefault("bindingJson", data.get("bindingJson")));
+        Map<String, Object> snapshot = toStringKeyMap(data.getOrDefault("chartSnapshot", report.get("chartSnapshot")));
+        String route = Objects.toString(binding.getOrDefault("route", snapshot.getOrDefault("sourceRoute", ""))).trim();
+        boolean hasExplicitRoute = "dashboard".equals(route) || "chat".equals(route);
+        String routeLabel = "dashboard".equals(route) ? "\u770b\u677f\u9875\u9762"
+                : ("chat".equals(route) ? "\u5bf9\u8bdd\u67e5\u8be2\u9875\u9762" : "\u8bca\u65ad\u751f\u6210\u8fc7\u7a0b");
+        String tableName = displayText(data.getOrDefault("tableName", report.getOrDefault("tableName", "")));
+        String dashboardName = displayText(binding.getOrDefault("dashboardName", snapshot.getOrDefault("dashboardName", "")));
+        String cardTitle = displayText(binding.getOrDefault("cardTitle", snapshot.getOrDefault("cardTitle", snapshot.getOrDefault("title", ""))));
+        String chartType = displayText(snapshot.getOrDefault("chartType", binding.getOrDefault("chartType", "")));
+        int rowCount = castMapList(data.getOrDefault("rawDataRows", data.getOrDefault("queryRows", List.of()))).size();
+        List<String> parts = new ArrayList<>();
+        parts.add("\u672c\u62a5\u544a\u5df2\u7ed1\u5b9a\u539f\u59cb\u6570\u636e\u8868\u300c" + tableName + "\u300d\u4e0e\u8bca\u65ad\u751f\u6210\u65f6\u7684\u56fe\u8868\u5feb\u7167");
+        if (!chartType.isBlank()) {
+            parts.add("\u56fe\u8868\u7c7b\u578b\u4e3a\u300c" + chartTypeLabel(chartType) + "\u300d");
+        }
+        if (!dashboardName.isBlank() || !cardTitle.isBlank()) {
+            String sourceText = List.of(dashboardName, cardTitle).stream()
+                    .filter(item -> item != null && !item.isBlank())
+                    .reduce((a, b) -> a + " / " + b)
+                    .orElse("");
+            parts.add("\u6765\u6e90\u4e3a\u300c" + sourceText + "\u300d");
+        } else if (hasExplicitRoute) {
+            parts.add("\u6765\u6e90\u4e3a\u300c" + routeLabel + "\u300d");
+        } else {
+            parts.add("\u6765\u6e90\u4e3a\u300c\u8bca\u65ad\u751f\u6210\u8fc7\u7a0b / \u540e\u7aef\u81ea\u52a8\u751f\u6210\u300d");
+        }
+        parts.add("\u5f53\u524d\u62a5\u544a\u4fdd\u7559 " + rowCount + " \u6761\u539f\u59cb\u6570\u636e\u660e\u7ec6\u7528\u4e8e\u56de\u6eaf");
+        String suffix = hasExplicitRoute
+                ? "\u3002\u5728\u7ebf\u9884\u89c8\u4e2d\u53ef\u901a\u8fc7\u56fe\u8868\u5feb\u7167\u6216\u56de\u6eaf\u5165\u53e3\u5b9a\u4f4d\u81f3\u5bf9\u5e94\u7684" + routeLabel + "\uff1b\u5bfc\u51fa\u7684 PDF/Word \u6587\u4ef6\u4fdd\u7559\u4e0a\u8ff0\u7ed1\u5b9a\u4fe1\u606f\u3002"
+                : "\u3002\u672c\u62a5\u544a\u672a\u7ed1\u5b9a\u5230\u5177\u4f53\u7684\u5bf9\u8bdd\u67e5\u8be2\u6216\u770b\u677f\u9875\u9762\uff0c\u5bfc\u51fa\u6587\u4ef6\u4ec5\u4fdd\u7559\u8bca\u65ad\u8bf7\u6c42\u3001\u539f\u59cb\u6570\u636e\u548c\u56fe\u8868\u5feb\u7167\u7528\u4e8e\u79bb\u7ebf\u590d\u6838\u3002";
+        return String.join("\uff0c", parts) + suffix;
     }
 
     private String evidencePreview(List<Map<String, Object>> evidence) {
         return evidence.stream()
                 .limit(2)
-                .map(item -> "《" + Objects.toString(item.getOrDefault("label", item.getOrDefault("source", "知识文档"))) + "》" + previewText(item.getOrDefault("content", item.getOrDefault("text", ""))))
-                .reduce((a, b) -> a + "；" + b)
-                .orElse("知识文档命中片段");
+                .map(item -> "\u300a" + Objects.toString(item.getOrDefault("label", item.getOrDefault("source", "\u77e5\u8bc6\u6587\u6863"))) + "\u300b" + Objects.toString(item.getOrDefault("preview", previewText(item.getOrDefault("content", item.getOrDefault("text", ""))))))
+                .reduce((a, b) -> a + "\uff1b" + b)
+                .orElse("\u77e5\u8bc6\u6587\u6863\u547d\u4e2d\u7247\u6bb5\u4e0d\u8db3");
+    }
+
+    private String corpusEvidenceSummary(List<Map<String, Object>> evidence) {
+        List<String> labels = evidence.stream()
+                .map(item -> cleanMarkdownText(item.getOrDefault("label", item.getOrDefault("source", "\u77e5\u8bc6\u6587\u6863"))))
+                .filter(label -> !label.isBlank())
+                .distinct()
+                .limit(3)
+                .map(label -> "\u300a" + label + "\u300b")
+                .toList();
+        String text = evidence.stream()
+                .map(item -> cleanMarkdownText(item.getOrDefault("content", item.getOrDefault("text", item.getOrDefault("preview", "")))))
+                .reduce("", (a, b) -> a + " " + b);
+        List<String> themes = new ArrayList<>();
+        addEvidenceSignal(themes, text, "\u4f9b\u5e94\u94fe|\u8865\u8d27|SKU|\u5e93\u5b58|\u4ed3\u914d", "\u4f9b\u5e94\u94fe\u4e0e\u5e93\u5b58\u53ef\u5f97\u6027");
+        addEvidenceSignal(themes, text, "\u6ee1\u51cf|\u4fc3\u9500|\u6298\u6263|\u6d3b\u52a8|\u5927\u4fc3|\u4ef7\u683c\u7b56\u7565", "\u4fc3\u9500\u4e0e\u4ef7\u683c\u7b56\u7565\u53d8\u5316");
+        addEvidenceSignal(themes, text, "\u4f01\u4e1a\u5ba2\u6237|\u5ba1\u6279|\u91c7\u8d2d\u8282\u594f|\u5927\u5ba2\u6237", "\u4f01\u4e1a\u5ba2\u6237\u91c7\u8d2d\u8282\u594f");
+        addEvidenceSignal(themes, text, "\u6e20\u9053|\u8f6c\u5316\u7387|\u7ebf\u4e0a|\u76f4\u8425|\u7ecf\u9500", "\u6e20\u9053\u7ed3\u6784\u4e0e\u8f6c\u5316\u7387\u6ce2\u52a8");
+        addEvidenceSignal(themes, text, "\u7269\u6d41|\u8c03\u62e8|\u65f6\u6548|\u9000\u6b3e|\u53d6\u6d88", "\u7269\u6d41\u5c65\u7ea6\u4e0e\u8de8\u533a\u8c03\u62e8");
+        String sourceText = labels.isEmpty() ? "\u4f01\u4e1a\u590d\u76d8\u6587\u6863\u6216\u884c\u4e1a\u7814\u62a5" : String.join("\u3001", labels);
+        String themeText = themes.isEmpty() ? "\u5f02\u5e38\u8282\u70b9\u3001\u7ef4\u5ea6\u8d21\u732e\u548c\u56fe\u8c31\u5173\u7cfb" : String.join("\u3001", themes);
+        return "\u68c0\u7d22\u8bc1\u636e\u6458\u8981 (Corpus Evidence Note)\uff1a\u5728 RAG \u68c0\u7d22\u9636\u6bb5\uff0c\u547d\u4e2d " + evidence.size()
+                + " \u6761\u4f01\u4e1a\u590d\u76d8\u6587\u6863\u6216\u5916\u90e8\u884c\u4e1a\u7814\u62a5\uff0c\u6765\u6e90\u5305\u62ec " + sourceText
+                + "\u3002\u8bc1\u636e\u4e3b\u9898\u96c6\u4e2d\u5728" + themeText
+                + "\uff0c\u7cfb\u7edf\u5df2\u5c06\u5176\u7eb3\u5165\u6839\u56e0\u5047\u8bbe\u6392\u5e8f\u3001\u7f6e\u4fe1\u5ea6\u8bc4\u4f30\u4e0e\u5efa\u8bae\u52a8\u4f5c\u751f\u6210\u3002";
     }
 
     private String buildSnapshotNarrative(Map<String, Object> snapshot, List<Map<String, Object>> markers, List<Map<String, Object>> rows) {
-        String title = Objects.toString(snapshot.getOrDefault("title", "诊断图表快照"));
+        String title = cleanDisplayText(snapshot.getOrDefault("title", "\u8bca\u65ad\u56fe\u8868\u5feb\u7167"), "\u8bca\u65ad\u56fe\u8868\u5feb\u7167");
+        if (looksMojibake(title) || title.contains("\u7481") || title.contains("\u5c1e") || title.contains("\u9397")) {
+            title = "\u8bca\u65ad\u56fe\u8868\u5feb\u7167";
+        }
         String chartType = chartTypeLabel(Objects.toString(snapshot.getOrDefault("chartType", "chart")));
         String source = Objects.toString(snapshot.getOrDefault("source", snapshot.getOrDefault("sourceRoute", "")));
-        String sourceLabel = source.isBlank() ? "诊断生成过程" : ("server-generated".equals(source) ? "后端自动生成" : source);
+        String sourceLabel = source.isBlank() || "server-generated".equals(source) ? "\u540e\u7aef\u81ea\u52a8\u751f\u6210" : source;
         int dataPointCount = castMapList(snapshot.getOrDefault("data", List.of())).size();
         if (dataPointCount == 0) {
             dataPointCount = rows.size();
         }
-        return "图表快照用于固定本次诊断生成时的原始图表状态。当前快照「" + title + "」为" + chartType
-                + "，来源为" + sourceLabel + "，包含 " + dataPointCount + " 个数据点，并标注 "
-                + markers.size() + " 个异常节点，可用于后续回溯诊断结论所依据的图表现场。";
+        return "\u56fe\u8868\u5feb\u7167\u7528\u4e8e\u56fa\u5b9a\u672c\u6b21\u8bca\u65ad\u751f\u6210\u65f6\u7684\u539f\u59cb\u56fe\u8868\u72b6\u6001\u3002\u5f53\u524d\u5feb\u7167\u300c" + title + "\u300d\u4e3a" + chartType
+                + "\uff0c\u6765\u6e90\u4e3a" + sourceLabel + "\uff0c\u5305\u542b " + dataPointCount + " \u4e2a\u6570\u636e\u70b9\uff0c\u5e76\u6807\u6ce8 "
+                + markers.size() + " \u4e2a\u5f02\u5e38\u8282\u70b9\uff0c\u53ef\u7528\u4e8e\u540e\u7eed\u56de\u6eaf\u8bca\u65ad\u7ed3\u8bba\u6240\u4f9d\u636e\u7684\u56fe\u8868\u73b0\u573a\u3002";
     }
 
     private String chartTypeLabel(String chartType) {
         return switch (Objects.toString(chartType, "").toLowerCase()) {
-            case "bar" -> "柱状图";
-            case "line" -> "折线图";
-            case "pie" -> "饼图";
-            case "scatter" -> "散点图";
-            default -> chartType == null || chartType.isBlank() ? "图表" : chartType;
+            case "bar" -> "\u67f1\u72b6\u56fe";
+            case "line" -> "\u6298\u7ebf\u56fe";
+            case "pie" -> "\u997c\u56fe";
+            case "scatter" -> "\u6563\u70b9\u56fe";
+            default -> chartType == null || chartType.isBlank() || looksMojibake(chartType) ? "\u56fe\u8868" : chartType;
         };
     }
 
     private List<List<String>> anomalyDocxRows(List<Map<String, Object>> markers, Map<String, Object> stats,
                                                String timeField, String timeLabel, String metricField, String metricLabel) {
         List<List<String>> rows = new ArrayList<>();
-        rows.add(List.of("观测日期 (Time Window)", "指标数值 (Value)", "偏离度 / 统计检验量", "异常标定类型"));
+        rows.add(List.of("\u89c2\u6d4b\u65e5\u671f (Time Window)", "\u6307\u6807\u6570\u503c (Value)", "\u504f\u79bb\u5ea6 / \u7edf\u8ba1\u68c0\u9a8c\u91cf", "\u5f02\u5e38\u6807\u5b9a\u7c7b\u578b"));
         if (markers.isEmpty()) {
-            rows.add(List.of("-", "-", "未发现 Z-Score 绝对值超过阈值的节点", "Normal Observation"));
+            rows.add(List.of("-", "-", "\u672a\u53d1\u73b0 Z-Score \u7edd\u5bf9\u503c\u8d85\u8fc7\u9608\u503c\u7684\u8282\u70b9", "Normal Observation"));
             return rows;
         }
         double avg = toDouble(stats.get("avg"));
@@ -3166,14 +3894,14 @@ public class DiagnosisService {
         for (Map<String, Object> marker : markers.stream().limit(5).toList()) {
             Map<String, Object> markerRow = toStringKeyMap(marker.get("row"));
             String window = reportObservationWindow(marker, markerRow, timeField, Map.of(timeField, timeLabel));
-            if ("异常点".equals(window) || window.isBlank()) {
-                window = Objects.toString(marker.getOrDefault("label", "-"));
+            if (looksMojibake(window) || window.isBlank()) {
+                window = cleanDisplayText(marker.getOrDefault("label", "-"), "-");
             }
             double value = reportMarkerValue(marker, markerRow, metricLabel);
             if (value == 0) {
                 value = reportMarkerValue(marker, markerRow, metricField);
             }
-            rows.add(List.of(window, formatReportNumber(value), Objects.toString(marker.getOrDefault("reason", reportDeviationText(value, avg, stdValue))), reportOutlierType(value, avg)));
+            rows.add(List.of(window, formatReportNumber(value), cleanDisplayText(marker.getOrDefault("reason", reportDeviationText(value, avg, stdValue)), reportDeviationText(value, avg, stdValue)), reportOutlierType(value, avg)));
         }
         return rows;
     }
@@ -3183,7 +3911,7 @@ public class DiagnosisService {
                                                  List<String> dimensionFields, List<String> dimensionLabels,
                                                  Map<String, String> fieldLabels) {
         List<List<String>> tableRows = new ArrayList<>();
-        tableRows.add(List.of("分析口径 (Scope)", "一阶维度 (Dimension)", "二阶因子 (Factor)", "贡献值 (Value)", "口径内占比 (Ratio)"));
+        tableRows.add(List.of("\u5206\u6790\u53e3\u5f84 (Scope)", "\u4e00\u9636\u7ef4\u5ea6 (Dimension)", "\u4e8c\u9636\u56e0\u5b50 (Factor)", "\u8d21\u732e\u503c (Value)", "\u53e3\u5f84\u5185\u5360\u6bd4 (Ratio)"));
         List<Map<String, Object>> contributions = castMapList(data.getOrDefault("anomalyDimensionContributions", List.of()));
         if (contributions.isEmpty()) {
             contributions = castMapList(data.getOrDefault("dimensionContributions", List.of()));
@@ -3192,10 +3920,10 @@ public class DiagnosisService {
             for (Map<String, Object> contribution : contributions.stream().limit(3).toList()) {
                 String dimensionField = Objects.toString(contribution.getOrDefault("dimensionField", contribution.getOrDefault("dimension", "")));
                 String dimension = readableFieldLabel(dimensionField, contribution.getOrDefault("dimensionLabel", contribution.getOrDefault("dimension", "")), fieldLabels);
-                if (dimension.isBlank()) {
-                    dimension = "业务维度";
+                if (dimension.isBlank() || looksMojibake(dimension)) {
+                    dimension = "\u4e1a\u52a1\u7ef4\u5ea6";
                 }
-                String scope = Objects.toString(contribution.getOrDefault("scope", "全样本"));
+                String scope = cleanDisplayText(contribution.getOrDefault("scope", "\u5168\u6837\u672c"), "\u5168\u6837\u672c");
                 for (Map<String, Object> item : castMapList(contribution.getOrDefault("topItems", List.of())).stream().limit(4).toList()) {
                     tableRows.add(List.of(scope, dimension, mappedFieldName(Objects.toString(item.getOrDefault("name", item.getOrDefault("label", "-"))), fieldLabels), formatReportNumber(item.get("value")), formatPercentValue(item.get("share"))));
                 }
@@ -3212,28 +3940,28 @@ public class DiagnosisService {
                 contribution.entrySet().stream()
                         .sorted((a, b) -> Double.compare(b.getValue(), a.getValue()))
                         .limit(4)
-                        .forEach(entry -> tableRows.add(List.of("全样本", dimensionLabel, entry.getKey(), formatReportNumber(entry.getValue()), total == 0 ? "0.0%" : String.format("%.1f%%", entry.getValue() / total * 100))));
+                        .forEach(entry -> tableRows.add(List.of("\u5168\u6837\u672c", dimensionLabel, entry.getKey(), formatReportNumber(entry.getValue()), total == 0 ? "0.0%" : String.format("%.1f%%", entry.getValue() / total * 100))));
             }
         }
         if (tableRows.size() == 1) {
-            tableRows.add(List.of("未选择维度", "当前报告未提供可拆解维度", "-", "-", "-"));
+            tableRows.add(List.of("\u672a\u9009\u62e9\u7ef4\u5ea6", "\u5f53\u524d\u62a5\u544a\u672a\u63d0\u4f9b\u53ef\u62c6\u89e3\u7ef4\u5ea6", "-", "-", "-"));
         }
         return tableRows;
     }
 
     private List<List<String>> reasoningLogDocxRows(List<Map<String, Object>> reasoningLogs) {
         List<List<String>> rows = new ArrayList<>();
-        rows.add(List.of("步骤 (Step)", "环节 (Stage)", "状态 (Status)", "过程说明 (Detail)"));
+        rows.add(List.of("\u6b65\u9aa4 (Step)", "\u73af\u8282 (Stage)", "\u72b6\u6001 (Status)", "\u8fc7\u7a0b\u8bf4\u660e (Detail)"));
         int fallbackStep = 1;
         for (Map<String, Object> log : reasoningLogs.stream().limit(12).toList()) {
             String step = Objects.toString(log.getOrDefault("step", fallbackStep++), "");
-            String title = Objects.toString(log.getOrDefault("title", log.getOrDefault("stage", "推理步骤")), "");
+            String title = cleanDisplayText(log.getOrDefault("title", log.getOrDefault("stage", "\u63a8\u7406\u6b65\u9aa4")), "\u63a8\u7406\u6b65\u9aa4");
             String status = Objects.toString(log.getOrDefault("status", "completed"), "");
-            String detail = Objects.toString(log.getOrDefault("detail", log.getOrDefault("message", "")), "");
+            String detail = cleanDisplayText(log.getOrDefault("detail", log.getOrDefault("message", "")), "");
             rows.add(List.of(step, title, status, detail));
         }
         if (rows.size() == 1) {
-            rows.add(List.of("-", "暂无推理日志", "-", "当前报告未绑定可导出的推理过程日志"));
+            rows.add(List.of("-", "\u6682\u65e0\u63a8\u7406\u65e5\u5fd7", "-", "\u5f53\u524d\u62a5\u544a\u672a\u7ed1\u5b9a\u53ef\u5bfc\u51fa\u7684\u63a8\u7406\u8fc7\u7a0b\u65e5\u5fd7"));
         }
         return rows;
     }
@@ -3285,7 +4013,7 @@ public class DiagnosisService {
         } else if (block.type() == ReportBlockType.LIST_ITEM) {
             paragraph.setIndentationLeft(360);
             paragraph.setIndentationHanging(180);
-            run.setText("• " + line);
+            run.setText("\u2022 " + line);
         } else if (block.type() == ReportBlockType.BLANK) {
             run.setText("");
         } else {
@@ -3371,12 +4099,12 @@ public class DiagnosisService {
                 coverStream.beginText();
                 coverStream.setFont(font, 22);
                 coverStream.newLineAtOffset(60, coverPage.getMediaBox().getHeight() - 140);
-                coverStream.showText("智能诊断报告");
+                coverStream.showText("\u667a\u80fd\u8bca\u65ad\u62a5\u544a");
                 coverStream.setFont(font, 12);
                 coverStream.newLineAtOffset(0, -36);
-                coverStream.showText("GraphRAG 多跳推理 | Neo4j 知识图谱 | 原始数据可回溯");
+                coverStream.showText("GraphRAG \u591a\u8df3\u63a8\u7406 | Neo4j \u77e5\u8bc6\u56fe\u8c31 | \u539f\u59cb\u6570\u636e\u53ef\u56de\u6eaf");
                 coverStream.newLineAtOffset(0, -40);
-                coverStream.showText("生成时间：" + DATE_TIME_FORMATTER.format(Instant.now()));
+                coverStream.showText("\u751f\u6210\u65f6\u95f4\uff1a" + DATE_TIME_FORMATTER.format(Instant.now()));
                 coverStream.endText();
             }
             PDPage page = null;
@@ -3398,7 +4126,7 @@ public class DiagnosisService {
                             stream.beginText();
                             stream.setFont(font, 8);
                             stream.newLineAtOffset(margin, 28);
-                            stream.showText("Insight Spark 智能诊断报告 | Page " + pageNumber);
+                            stream.showText("Insight Spark \u667a\u80fd\u8bca\u65ad\u62a5\u544a | Page " + pageNumber);
                             stream.endText();
                             stream.close();
                             pageNumber++;
@@ -3411,7 +4139,7 @@ public class DiagnosisService {
                         stream.newLineAtOffset(margin, y);
                     }
                     stream.setFont(block.type() == ReportBlockType.H1 || block.type() == ReportBlockType.H2 || block.type() == ReportBlockType.H3 ? boldFont : font, fontSize);
-                    String prefix = block.type() == ReportBlockType.LIST_ITEM ? "• " : "";
+                    String prefix = block.type() == ReportBlockType.LIST_ITEM ? "- " : "";
                     String safeLine = toPdfSafeText(prefix + line);
                     stream.showText(safeLine);
                     stream.newLineAtOffset(0, -leading);
@@ -3427,7 +4155,7 @@ public class DiagnosisService {
                 stream.beginText();
                 stream.setFont(font, 8);
                 stream.newLineAtOffset(margin, 28);
-                stream.showText("Insight Spark 智能诊断报告 | Page " + pageNumber);
+                stream.showText("Insight Spark 鏅鸿兘璇婃柇鎶ュ憡 | Page " + pageNumber);
                 stream.endText();
                 stream.close();
             }
@@ -3456,7 +4184,7 @@ public class DiagnosisService {
             document.save(out);
             return out.toByteArray();
         } catch (Exception e) {
-            throw new IllegalArgumentException("PDF 导出失败：" + e.getMessage());
+            throw new IllegalArgumentException("PDF \u5bfc\u51fa\u5931\u8d25\uff1a" + e.getMessage());
         }
     }
 
@@ -3517,9 +4245,17 @@ public class DiagnosisService {
     private List<ReportBlock> parseReportBlocks(String markdown) {
         List<ReportBlock> blocks = new ArrayList<>();
         String[] lines = Objects.toString(markdown, "").split("\\R", -1);
+        boolean skipDirectiveBlock = false;
         for (int index = 0; index < lines.length; index++) {
             String rawLine = lines[index];
             String line = rawLine == null ? "" : rawLine.trim();
+            if (line.startsWith(":::")) {
+                skipDirectiveBlock = !skipDirectiveBlock;
+                continue;
+            }
+            if (skipDirectiveBlock) {
+                continue;
+            }
             if (line.isBlank()) {
                 blocks.add(new ReportBlock(ReportBlockType.BLANK, ""));
             } else if (isMarkdownTableStart(lines, index)) {
@@ -3540,7 +4276,7 @@ public class DiagnosisService {
                 blocks.add(new ReportBlock(ReportBlockType.H1, cleanMarkdownInline(line.substring(2))));
             } else if (line.matches("^[-*]\\s+.*")) {
                 blocks.add(new ReportBlock(ReportBlockType.LIST_ITEM, cleanMarkdownInline(line.replaceFirst("^[-*]\\s+", ""))));
-            } else if (line.matches("^\\*[^*].*表\\s*[IVXLC]+.*\\*$")) {
+            } else if (line.matches("^\\*[^*].*琛╘\s*[IVXLC]+.*\\*$")) {
                 blocks.add(new ReportBlock(ReportBlockType.CAPTION, cleanMarkdownInline(line.replaceAll("^\\*", "").replaceAll("\\*$", ""))));
             } else {
                 blocks.add(new ReportBlock(ReportBlockType.PARAGRAPH, cleanMarkdownInline(line)));
@@ -3584,11 +4320,11 @@ public class DiagnosisService {
     }
 
     private record ReportBlock(ReportBlockType type, String text, List<List<String>> tableRows) {
-        private ReportBlock(ReportBlockType type, String text) {
+    private ReportBlock(ReportBlockType type, String text) {
             this(type, text, List.of());
         }
 
-        private static ReportBlock table(List<List<String>> tableRows) {
+    private static ReportBlock table(List<List<String>> tableRows) {
             return new ReportBlock(ReportBlockType.TABLE, "", tableRows);
         }
     }
@@ -3690,4 +4426,3 @@ public class DiagnosisService {
     }
 
 }
-
