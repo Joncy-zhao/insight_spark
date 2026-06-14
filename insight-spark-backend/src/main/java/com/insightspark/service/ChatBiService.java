@@ -146,7 +146,7 @@ public class ChatBiService {
         ensureNotCancelled("请求初始化");
         Map<String, Object> safeOptions = executionOptions == null ? Map.of() : executionOptions;
         ProgressListener progress = progressListener(safeOptions.get("progressListener"));
-        String selectedModelId = Objects.toString(safeOptions.getOrDefault("modelId", "gpt-4"), "gpt-4").trim();
+        String selectedModelId = Objects.toString(safeOptions.getOrDefault("modelId", "default"), "default").trim();
         String selectedModelName = Objects.toString(safeOptions.getOrDefault("modelName", selectedModelId), selectedModelId).trim();
 
         String activeTable = (tableName == null || tableName.isBlank()) ? dataUploadService.latestTableName()
@@ -279,6 +279,7 @@ public class ChatBiService {
         Map<String, Object> fieldMapping;
         String engine;
         String fallbackReason = null;
+        Map<String, Object> aiMetadata = Map.of();
 
         if (cacheHit) {
             generatedSql = Objects.toString(cachedSqlAudit.getOrDefault("cachedSql", ""), "").trim();
@@ -290,6 +291,7 @@ public class ChatBiService {
         } else if (aiResult.isPresent()) {
             try {
                 Map<String, Object> ai = aiResult.get();
+                aiMetadata = ai;
                 generatedSql = Objects.toString(ai.get("sql"), "").trim();
                 chartType = Objects.toString(ai.getOrDefault("chartType", "bar"), "bar").trim();
                 fieldMapping = safeFieldMapping(ai.get("fieldMapping"));
@@ -527,6 +529,16 @@ public class ChatBiService {
         response.put("modelId", selectedModelId);
         response.put("modelName", selectedModelName);
         response.put("modelCategory", safeOptions.getOrDefault("modelCategory", ""));
+        response.put("llmModelUsed", engine.startsWith("java-fallback")
+                ? engine
+                : firstTextValue(
+                        aiMetadata.get("modelName"),
+                        aiMetadata.get("model"),
+                        aiMetadata.get("modelId"),
+                        selectedModelName,
+                        selectedModelId,
+                        engine
+                ));
         response.put("cacheHit", cacheHit);
         response.put("fallbackUsed", engine.startsWith("java-fallback") || fallbackExecuted);
         response.put("fallbackReason", fallbackReason);

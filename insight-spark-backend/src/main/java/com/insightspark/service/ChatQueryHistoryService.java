@@ -38,6 +38,9 @@ public class ChatQueryHistoryService {
     private static final int MAX_AUDIT_INFO_LENGTH = 4000;
     private static final int MAX_MODEL_NAME_LENGTH = 50;
     private static final int MAX_CHART_TYPE_LENGTH = 50;
+    private static final int ADMIN_CONTEXT_MAX_TURNS = 6;
+    private static final int ROUTE_AUDIT_SAMPLE_LIMIT = 1000;
+    private static final double ROUTE_AUDIT_LOW_CONFIDENCE_THRESHOLD = 0.75D;
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -371,6 +374,8 @@ public class ChatQueryHistoryService {
         if (userId == null) {
             return buildHistoryPageResponse(safePage, safePageSize, keyword, 0L, List.of());
         }
+        backfillOrphanAdvancedAlertHistory(userId);
+        repairAdvancedAlertHistoryStatus(userId);
 
         String text = normalizeKeyword(keyword);
         String table = normalizeKeyword(tableName);
@@ -443,6 +448,8 @@ public class ChatQueryHistoryService {
                                                     String chartType, String riskLevel, String executionStatus,
                                                     String modelType, String dateFrom, String dateTo,
                                                     Boolean cacheHit, Boolean slowQuery, String sortDirection) {
+        backfillOrphanAdvancedAlertHistory();
+        repairAdvancedAlertHistoryStatus("");
         int safePage = Math.max(1, page);
         int safePageSize = Math.max(1, Math.min(pageSize, 100));
         String text = normalizeKeyword(keyword);
@@ -533,6 +540,260 @@ public class ChatQueryHistoryService {
         return item;
     }
 
+    private void backfillOrphanAdvancedAlertHistory() {
+        backfillOrphanAdvancedAlertHistory("");
+    }
+
+    private void backfillOrphanAdvancedAlertHistory(String targetUserId) {
+        if (!tableExists("is_chat_conversation_artifact")
+                || !tableExists("is_chat_conversation")
+                || !tableExists("is_chat_conversation_turn")) {
+            return;
+        }
+        try {
+            String userFilter = Objects.toString(targetUserId, "").trim();
+            List<Object> args = new ArrayList<>();
+            String sql = """
+                    SELECT a.id AS artifactId,
+                           a.conversation_id AS conversationId,
+                           a.turn_id AS turnId,
+                           a.artifact_type AS artifactType,
+                           a.artifact_json AS artifactJson,
+                           a.chart_type AS chartType,
+                           a.risk_level AS riskLevel,
+                           a.created_at AS createdAt,
+                           t.turn_no AS turnNo,
+                           c.user_id AS userId
+                      FROM is_chat_conversation_artifact a
+                      JOIN is_chat_conversation c ON c.id = a.conversation_id
+                      LEFT JOIN is_chat_conversation_turn t ON t.id = a.turn_id
+                     WHERE (a.history_id IS NULL OR a.history_id = 0)
+                        AND a.artifact_type = 'ADVANCED_ALERT'
+                    """;
+            if (!userFilter.isBlank()) {
+                sql += " AND c.user_id = ?";
+                args.add(userFilter);
+            }
+            sql += " ORDER BY a.id DESC LIMIT 50";
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, args.toArray());
+            for (Map<String, Object> row : rows) {
+                backfillOneAdvancedAlertHistory(row);
+            }
+        } catch (Exception ignored) {
+            // 补录是兼容增强，失败不能影响管理员历史列表查询。
+        }
+    }
+
+    private void backfillOneAdvancedAlertHistory(Map<String, Object> row) {
+        Long artifactId = toLong(row.get("artifactId"));
+        if (artifactId == null || artifactId <= 0) {
+            return;
+        }
+        Map<String, Object> artifact = parseJsonMap(row.get("artifactJson"));
+        String userId = Objects.toString(row.get("userId"), "").trim();
+        if (userId.isBlank()) {
+            return;
+        }
+        String tableName = firstNonBlank(artifact.get("tableName"), nestedValue(artifact, "params", "tableName"));
+        String question = firstNonBlank(artifact.get("sourceQuestion"), artifact.get("question"), artifact.get("title"), artifact.get("summary"));
+        String summaryText = firstNonBlank(artifact.get("summary"), artifact.get("message"), artifact.get("title"), "智能预警记录已生成");
+        Map<String, Object> snapshot = new LinkedHashMap<>(artifact);
+        snapshot.putIfAbsent("advancedAnalysisType", "alert");
+        snapshot.putIfAbsent("type", "alert");
+        snapshot.putIfAbsent("chartType", "alert");
+        snapshot.putIfAbsent("message", summaryText);
+        snapshot.putIfAbsent("tableName", tableName);
+        snapshot.putIfAbsent("riskLevel", "WARN");
+        try {
+            KeyHolder keyHolder = new GeneratedKeyHolder();
+            jdbcTemplate.update(connection -> {
+                PreparedStatement ps = connection.prepareStatement("""
+                        INSERT INTO is_chat_query_history(
+                            user_id, data_source_id, query_table_name, query_text, generated_sql,
+                            reasoning_process, llm_model_used, chart_type, chart_snapshot,
+                            execution_status, risk_level, audit_info, execution_time_ms, is_hit_cache, is_deleted,
+                            conversation_id, parent_history_id, turn_no, message_role, intent_type,
+                            artifact_type, summary_text
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+                        """, Statement.RETURN_GENERATED_KEYS);
+                int i = 1;
+                ps.setString(i++, safeText(userId, 64));
+                ps.setLong(i++, resolveDatasourceId(tableName));
+                if (tableName.isBlank()) {
+                    ps.setNull(i++, Types.VARCHAR);
+                } else {
+                    ps.setString(i++, safeText(tableName, 255));
+                }
+                ps.setString(i++, safeText(question, MAX_QUERY_TEXT_LENGTH));
+                ps.setNull(i++, Types.LONGVARCHAR);
+                ps.setString(i++, toJson(firstPresent(artifact.get("thinkingLogs"), List.of())));
+                ps.setString(i++, "advanced-analysis");
+                ps.setString(i++, "alert");
+                ps.setString(i++, toJson(snapshot));
+                ps.setInt(i++, 1);
+                ps.setString(i++, "WARN");
+                ps.setString(i++, safeText(summaryText, MAX_AUDIT_INFO_LENGTH));
+                ps.setNull(i++, Types.INTEGER);
+                ps.setInt(i++, 0);
+                ps.setLong(i++, toLong(row.get("conversationId")));
+                ps.setNull(i++, Types.BIGINT);
+                Long turnNo = toLong(row.get("turnNo"));
+                if (turnNo == null) {
+                    ps.setNull(i++, Types.INTEGER);
+                } else {
+                    ps.setInt(i++, turnNo.intValue());
+                }
+                ps.setString(i++, "ASSISTANT");
+                ps.setString(i++, "ADVANCED_ALERT");
+                ps.setString(i++, "ADVANCED_ALERT");
+                ps.setString(i++, safeText(summaryText, MAX_AUDIT_INFO_LENGTH));
+                return ps;
+            }, keyHolder);
+            Number key = keyHolder.getKey();
+            if (key != null) {
+                jdbcTemplate.update("""
+                        UPDATE is_chat_conversation_artifact
+                           SET history_id = ?
+                         WHERE id = ? AND (history_id IS NULL OR history_id = 0)
+                        """, key.longValue(), artifactId);
+            }
+        } catch (Exception ignored) {
+            // 单条补录失败跳过，继续处理其他记录。
+        }
+    }
+
+    private void repairAdvancedAlertHistoryStatus(String targetUserId) {
+        try {
+            String userFilter = Objects.toString(targetUserId, "").trim();
+            List<Object> args = new ArrayList<>();
+            String sql = """
+                    UPDATE is_chat_query_history
+                       SET execution_status = 1,
+                           execution_time_ms = NULL,
+                           is_hit_cache = 0,
+                           generated_sql = NULL,
+                           llm_model_used = CASE
+                               WHEN llm_model_used IS NULL OR llm_model_used = '' OR llm_model_used = 'unknown'
+                               THEN 'advanced-analysis'
+                               ELSE llm_model_used
+                           END
+                     WHERE is_deleted = 0
+                       AND execution_status = 0
+                       AND (
+                           chart_type = 'alert'
+                           OR artifact_type = 'ADVANCED_ALERT'
+                           OR intent_type = 'ADVANCED_ALERT'
+                           OR JSON_UNQUOTE(JSON_EXTRACT(chart_snapshot, '$.advancedAnalysisType')) = 'alert'
+                           OR JSON_UNQUOTE(JSON_EXTRACT(chart_snapshot, '$.type')) = 'alert'
+                       )
+                    """;
+            if (!userFilter.isBlank()) {
+                sql += " AND user_id = ?";
+                args.add(userFilter);
+            }
+            jdbcTemplate.update(sql, args.toArray());
+        } catch (Exception ignored) {
+            // 兼容修复失败不能影响历史列表正常读取。
+        }
+    }
+
+    public Map<String, Object> getAdminHistoryContext(Long historyId) {
+        Map<String, Object> row = findAdminHistoryRow(historyId);
+        if (row == null) {
+            throw new IllegalArgumentException("历史记录不存在");
+        }
+        Map<String, Object> current = mapAdminHistoryRow(row);
+        Map<String, Object> artifactLink = loadArtifactLinkByHistoryId(historyId);
+        long conversationId = toLong(current.get("conversationId"));
+        if (conversationId <= 0) {
+            conversationId = toLong(artifactLink.get("conversationId"));
+        }
+        Map<String, Object> currentContext = toObjectMap(current.get("context"));
+        long currentTurnId = firstPositive(
+                toLong(currentContext.get("assistantTurnId")),
+                toLong(current.get("assistantTurnId")),
+                toLong(artifactLink.get("turnId"))
+        );
+        long currentUserTurnId = firstPositive(
+                toLong(currentContext.get("userTurnId")),
+                toLong(current.get("userTurnId")),
+                toLong(artifactLink.get("userTurnId"))
+        );
+        long currentTurnNo = firstPositive(toLong(current.get("turnNo")), toLong(artifactLink.get("turnNo")));
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("currentHistoryId", historyId);
+        response.put("currentTurnId", currentTurnId > 0 ? currentTurnId : null);
+        response.put("currentUserTurnId", currentUserTurnId > 0 ? currentUserTurnId : null);
+        response.put("currentTurnNo", currentTurnNo > 0 ? currentTurnNo : null);
+        response.put("fallbackMode", true);
+        response.put("fallbackReason", "该历史记录暂无可关联的会话上下文");
+        response.put("conversation", Map.of());
+        response.put("turns", buildSingleHistoryContextTurns(current));
+        response.put("totalTurns", 1);
+        response.put("visibleTurns", 1);
+        response.put("contextLimit", ADMIN_CONTEXT_MAX_TURNS);
+        response.put("hasEarlierContext", false);
+        response.put("hasLaterTurns", false);
+
+        if (conversationId <= 0 || !tableExists("is_chat_conversation_turn")) {
+            return response;
+        }
+
+        Map<String, Object> conversation = loadAdminConversation(conversationId);
+        List<Map<String, Object>> turns = loadAdminConversationTurns(conversationId);
+        if (turns.isEmpty()) {
+            return response;
+        }
+        int currentTurnIndex = resolveAdminCurrentTurnIndex(turns, currentTurnId, currentTurnNo);
+        if (currentTurnIndex < 0) {
+            return response;
+        }
+        int contextEndExclusive = currentTurnIndex + 1;
+        int contextStartIndex = Math.max(0, contextEndExclusive - ADMIN_CONTEXT_MAX_TURNS);
+        List<Map<String, Object>> contextTurns = new ArrayList<>(turns.subList(contextStartIndex, contextEndExclusive));
+        Map<Long, List<Map<String, Object>>> artifactsByTurn = loadAdminArtifactsByTurn(
+                contextTurns.stream()
+                        .map(turn -> toLong(turn.get("id")))
+                        .filter(id -> id > 0)
+                        .toList()
+        );
+        List<Map<String, Object>> hydratedTurns = new ArrayList<>();
+        for (Map<String, Object> turn : contextTurns) {
+            Map<String, Object> item = new LinkedHashMap<>(turn);
+            long turnId = toLong(turn.get("id"));
+            long turnNo = toLong(turn.get("turnNo"));
+            List<Map<String, Object>> artifacts = artifactsByTurn.getOrDefault(turnId, List.of());
+            artifacts = hydrateCurrentArtifactChartSnapshot(artifacts, historyId, current);
+            boolean artifactMatchesCurrent = artifacts.stream()
+                    .anyMatch(artifact -> toLong(artifact.get("historyId")) == toLong(historyId));
+            boolean turnMatchesCurrent = currentTurnId > 0
+                    ? turnId == currentTurnId
+                    : currentTurnNo > 0 && turnNo == currentTurnNo;
+            boolean promptMatchesCurrent = currentUserTurnId > 0
+                    ? turnId == currentUserTurnId
+                    : currentTurnNo > 1 && turnNo == currentTurnNo - 1
+                    && "USER".equalsIgnoreCase(Objects.toString(turn.get("role"), ""));
+            item.put("context", parseJsonMap(turn.get("contextJson")));
+            item.put("roleLabel", conversationRoleLabel(turn.get("role")));
+            item.put("artifacts", artifacts);
+            item.put("isCurrent", artifactMatchesCurrent || turnMatchesCurrent);
+            item.put("isCurrentPrompt", promptMatchesCurrent);
+            hydratedTurns.add(item);
+        }
+
+        response.put("conversation", conversation);
+        response.put("turns", hydratedTurns);
+        response.put("totalTurns", turns.size());
+        response.put("visibleTurns", hydratedTurns.size());
+        response.put("contextLimit", ADMIN_CONTEXT_MAX_TURNS);
+        response.put("hasEarlierContext", contextStartIndex > 0);
+        response.put("hasLaterTurns", currentTurnIndex < turns.size() - 1);
+        response.put("fallbackMode", false);
+        response.put("fallbackReason", "");
+        return response;
+    }
+
     public Map<String, Object> adminHistoryAnalytics(String keyword, String userId, String tableName, String sourceType,
                                                      String chartType, String riskLevel, String executionStatus,
                                                      String modelType, String dateFrom, String dateTo,
@@ -584,6 +845,7 @@ public class ChatQueryHistoryService {
         performance.put("cacheMissGroups", queryAdminCacheMissGroups(whereSql, whereArgs, 8));
         response.put("trends", trends);
         response.put("performance", performance);
+        response.put("routeAudit", buildAdminRouteAuditAnalytics(whereSql, whereArgs));
         return response;
     }
 
@@ -848,6 +1110,313 @@ public class ChatQueryHistoryService {
         }
     }
 
+    private Map<String, Object> loadArtifactLinkByHistoryId(Long historyId) {
+        if (historyId == null || !tableExists("is_chat_conversation_artifact")) {
+            return Map.of();
+        }
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT a.conversation_id AS conversationId,
+                       a.turn_id AS turnId,
+                       JSON_UNQUOTE(JSON_EXTRACT(a.artifact_json, '$.userTurnId')) AS userTurnId,
+                       t.turn_no AS turnNo
+                  FROM is_chat_conversation_artifact a
+                  LEFT JOIN is_chat_conversation_turn t ON t.id = a.turn_id
+                 WHERE a.history_id = ?
+                 ORDER BY a.id DESC
+                 LIMIT 1
+                """, historyId);
+        return rows.isEmpty() ? Map.of() : rows.get(0);
+    }
+
+    private Map<String, Object> loadAdminConversation(long conversationId) {
+        if (conversationId <= 0 || !tableExists("is_chat_conversation")) {
+            return Map.of();
+        }
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT c.id, c.user_id AS userId, c.title, c.data_source_id AS dataSourceId,
+                       c.scope_json AS scopeJson, c.business_model_id AS businessModelId,
+                       c.summary, c.last_turn_id AS lastTurnId, c.status,
+                       c.created_at AS createdAt, c.updated_at AS updatedAt,
+                       u.username AS username, u.nickname AS nickname,
+                       (SELECT COUNT(*) FROM is_chat_conversation_turn t
+                         WHERE t.conversation_id = c.id) AS turnCount
+                  FROM is_chat_conversation c
+                  LEFT JOIN is_user u ON u.user_id = c.user_id
+                 WHERE c.id = ? AND c.is_deleted = 0
+                 LIMIT 1
+                """, conversationId);
+        if (rows.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Object> row = rows.get(0);
+        Map<String, Object> conversation = new LinkedHashMap<>(row);
+        conversation.put("scope", parseJsonMap(row.get("scopeJson")));
+        conversation.put("operatorLabel", buildUserDisplayName(row));
+        conversation.put("turnCount", toNullableInt(row.get("turnCount")));
+        return conversation;
+    }
+
+    private List<Map<String, Object>> loadAdminConversationTurns(long conversationId) {
+        if (conversationId <= 0 || !tableExists("is_chat_conversation_turn")) {
+            return List.of();
+        }
+        return jdbcTemplate.queryForList("""
+                SELECT id, conversation_id AS conversationId, parent_turn_id AS parentTurnId,
+                       turn_no AS turnNo, role, message_text AS messageText,
+                       intent_type AS intentType, context_json AS contextJson,
+                       followup_mode AS followupMode, created_at AS createdAt
+                  FROM is_chat_conversation_turn
+                 WHERE conversation_id = ?
+                 ORDER BY turn_no ASC, id ASC
+                """, conversationId);
+    }
+
+    private Map<Long, List<Map<String, Object>>> loadAdminArtifactsByTurn(List<Long> turnIds) {
+        if (turnIds == null || turnIds.isEmpty() || !tableExists("is_chat_conversation_artifact")) {
+            return Map.of();
+        }
+        List<Long> limited = turnIds.stream().filter(id -> id != null && id > 0).distinct().limit(100).toList();
+        if (limited.isEmpty()) {
+            return Map.of();
+        }
+        String in = limited.stream().map(id -> "?").collect(Collectors.joining(","));
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT id, conversation_id AS conversationId, turn_id AS turnId, history_id AS historyId,
+                       artifact_type AS artifactType, artifact_json AS artifactJson,
+                       sql_text AS sqlText, chart_type AS chartType, risk_level AS riskLevel,
+                       created_at AS createdAt
+                  FROM is_chat_conversation_artifact
+                 WHERE turn_id IN (""" + in + """
+                 )
+                 ORDER BY turn_id ASC, id ASC
+                """, limited.toArray());
+        Map<Long, List<Map<String, Object>>> result = new LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            long turnId = toLong(row.get("turnId"));
+            if (turnId <= 0) {
+                continue;
+            }
+            result.computeIfAbsent(turnId, ignored -> new ArrayList<>()).add(mapAdminConversationArtifact(row));
+        }
+        return result;
+    }
+
+    private int resolveAdminCurrentTurnIndex(List<Map<String, Object>> turns, long currentTurnId, long currentTurnNo) {
+        if (turns == null || turns.isEmpty()) {
+            return -1;
+        }
+        if (currentTurnId > 0) {
+            for (int i = 0; i < turns.size(); i++) {
+                if (toLong(turns.get(i).get("id")) == currentTurnId) {
+                    return i;
+                }
+            }
+        }
+        if (currentTurnNo > 0) {
+            for (int i = 0; i < turns.size(); i++) {
+                if (toLong(turns.get(i).get("turnNo")) == currentTurnNo) {
+                    return i;
+                }
+            }
+        }
+        return -1;
+    }
+
+    private Map<String, Object> mapAdminConversationArtifact(Map<String, Object> row) {
+        Map<String, Object> item = new LinkedHashMap<>(row);
+        Map<String, Object> artifact = parseJsonMap(row.get("artifactJson"));
+        String artifactType = Objects.toString(row.get("artifactType"), "").trim();
+        item.put("artifactTypeLabel", artifactTypeLabel(artifactType));
+        item.put("artifact", artifact);
+        item.put("summary", artifactSummary(row, artifact));
+        item.put("question", firstNonBlank(artifact.get("question"), artifact.get("sourceQuestion")));
+        item.put("message", firstNonBlank(artifact.get("message"), artifact.get("summary"), artifact.get("title")));
+        item.put("tableName", firstNonBlank(artifact.get("tableName"), row.get("tableName")));
+        item.put("sqlText", Objects.toString(row.get("sqlText"), ""));
+        item.put("hasSql", !Objects.toString(row.get("sqlText"), "").trim().isBlank());
+        item.put("hasChart", "CHART".equalsIgnoreCase(artifactType) || artifact.containsKey("chartType") || artifact.containsKey("data"));
+        item.put("previewRows", extractSnapshotPreviewRows(artifact));
+        return item;
+    }
+
+    private List<Map<String, Object>> hydrateCurrentArtifactChartSnapshot(List<Map<String, Object>> artifacts,
+                                                                          Long historyId,
+                                                                          Map<String, Object> current) {
+        if (artifacts == null || artifacts.isEmpty() || historyId == null) {
+            return artifacts == null ? List.of() : artifacts;
+        }
+        Map<String, Object> snapshot = toObjectMap(current.get("chartSnapshot"));
+        if (snapshot.isEmpty() || !snapshot.containsKey("data")) {
+            return artifacts;
+        }
+        List<Map<String, Object>> result = new ArrayList<>(artifacts.size());
+        for (Map<String, Object> artifact : artifacts) {
+            if (toLong(artifact.get("historyId")) == toLong(historyId)) {
+                Map<String, Object> item = new LinkedHashMap<>(artifact);
+                item.put("chartSnapshot", snapshot);
+                if (Objects.toString(item.get("chartType"), "").trim().isBlank()) {
+                    item.put("chartType", current.get("chartType"));
+                }
+                result.add(item);
+            } else {
+                result.add(artifact);
+            }
+        }
+        return result;
+    }
+
+    private List<Map<String, Object>> buildSingleHistoryContextTurns(Map<String, Object> current) {
+        Map<String, Object> turn = new LinkedHashMap<>();
+        turn.put("id", null);
+        turn.put("conversationId", current.get("conversationId"));
+        turn.put("turnNo", current.get("turnNo"));
+        turn.put("role", "ASSISTANT");
+        turn.put("roleLabel", "助手");
+        turn.put("messageText", firstNonBlank(current.get("summaryText"), current.get("riskReason"), "该历史记录仅保留了单条查询结果"));
+        turn.put("intentType", current.get("intentType"));
+        turn.put("createdAt", current.get("createdAt"));
+        turn.put("context", current.getOrDefault("context", Map.of()));
+        turn.put("isCurrent", true);
+        Map<String, Object> snapshot = toObjectMap(current.get("chartSnapshot"));
+        String artifactType = advancedArtifactTypeFromSnapshot(snapshot, current.get("artifactType"), current.get("intentType"));
+        Map<String, Object> artifact = new LinkedHashMap<>();
+        artifact.put("id", null);
+        artifact.put("historyId", current.get("id"));
+        artifact.put("artifactType", artifactType);
+        artifact.put("artifactTypeLabel", artifactTypeLabel(artifactType));
+        artifact.put("question", current.get("question"));
+        artifact.put("message", current.get("summaryText"));
+        artifact.put("summary", firstNonBlank(current.get("question"), current.get("summaryText")));
+        artifact.put("sqlText", current.get("generatedSql"));
+        artifact.put("chartType", current.get("chartType"));
+        artifact.put("chartSnapshot", current.get("chartSnapshot"));
+        artifact.put("riskLevel", current.get("riskLevel"));
+        artifact.put("hasSql", !Objects.toString(current.get("generatedSql"), "").trim().isBlank());
+        artifact.put("hasChart", current.get("chartSnapshot") instanceof Map<?, ?> && !isAdvancedAnalysisSnapshot(snapshot));
+        if (isAdvancedAnalysisSnapshot(snapshot)) {
+            Map<String, Object> advancedArtifact = new LinkedHashMap<>(snapshot);
+            String advancedType = inferAdvancedAnalysisType(snapshot, current.get("artifactType"), current.get("intentType"));
+            if (!advancedType.isBlank()) {
+                advancedArtifact.putIfAbsent("type", advancedType);
+                advancedArtifact.putIfAbsent("advancedAnalysisType", advancedType);
+            }
+            advancedArtifact.putIfAbsent("title", firstNonBlank(current.get("summaryText"), current.get("question")));
+            advancedArtifact.putIfAbsent("summary", firstNonBlank(current.get("summaryText"), current.get("riskReason")));
+            advancedArtifact.putIfAbsent("tableName", current.get("queryTableName"));
+            artifact.put("artifact", advancedArtifact);
+        }
+        turn.put("artifacts", List.of(artifact));
+        return List.of(turn);
+    }
+
+    private String conversationRoleLabel(Object value) {
+        String role = Objects.toString(value, "").trim().toUpperCase(Locale.ROOT);
+        return switch (role) {
+            case "USER" -> "用户";
+            case "ASSISTANT" -> "助手";
+            case "SYSTEM" -> "系统";
+            default -> role.isBlank() ? "消息" : role;
+        };
+    }
+
+    private String artifactTypeLabel(String artifactType) {
+        String type = Objects.toString(artifactType, "").trim().toUpperCase(Locale.ROOT);
+        return switch (type) {
+            case "SQL" -> "SQL";
+            case "CHART" -> "图表";
+            case "TABLE" -> "表格";
+            case "TEXT" -> "文本";
+            case "REPORT" -> "报告";
+            case "ADVANCED_FORECAST" -> "时序预测";
+            case "ADVANCED_WHAT_IF" -> "What-if";
+            case "ADVANCED_ALERT" -> "智能预警";
+            default -> type.isBlank() ? "产物" : type;
+        };
+    }
+
+    private String advancedArtifactTypeFromSnapshot(Map<String, Object> snapshot, Object artifactType, Object intentType) {
+        String advancedType = inferAdvancedAnalysisType(snapshot, artifactType, intentType);
+        if ("forecast".equals(advancedType)) {
+            return "ADVANCED_FORECAST";
+        }
+        if ("whatIf".equals(advancedType)) {
+            return "ADVANCED_WHAT_IF";
+        }
+        if ("alert".equals(advancedType)) {
+            return "ADVANCED_ALERT";
+        }
+        String fallback = Objects.toString(artifactType, "").trim();
+        return fallback.isBlank() ? "CHART" : fallback;
+    }
+
+    private String inferAdvancedAnalysisType(Map<String, Object> snapshot, Object artifactType, Object intentType) {
+        Map<String, Object> fieldMapping = toObjectMap(snapshot.get("fieldMapping"));
+        Object[] candidates = {
+                artifactType,
+                intentType,
+                snapshot.get("advancedAnalysisType"),
+                snapshot.get("type"),
+                fieldMapping.get("mappingType")
+        };
+        for (Object candidate : candidates) {
+            String resolved = normalizeAdvancedAnalysisTypeValue(candidate);
+            if (!resolved.isBlank()) {
+                return resolved;
+            }
+        }
+        if (!toObjectMap(snapshot.get("forecastMeta")).isEmpty() || containsForecastRows(snapshot.get("data"))) {
+            return "forecast";
+        }
+        if (!toObjectMap(snapshot.get("whatIfMeta")).isEmpty()
+                || snapshot.get("scenarios") instanceof List<?>
+                || snapshot.get("variables") instanceof List<?>) {
+            return "whatIf";
+        }
+        if (isAlertSnapshotShape(snapshot)) {
+            return "alert";
+        }
+        return "";
+    }
+
+    private String normalizeAdvancedAnalysisTypeValue(Object value) {
+        String normalized = Objects.toString(value, "").trim().replaceAll("[-_\\s]", "").toLowerCase(Locale.ROOT);
+        if (normalized.contains("forecast")) {
+            return "forecast";
+        }
+        if (normalized.contains("whatif")) {
+            return "whatIf";
+        }
+        if (normalized.contains("alert") || normalized.contains("warning") || normalized.contains("prewarning")) {
+            return "alert";
+        }
+        return "";
+    }
+
+    private String artifactSummary(Map<String, Object> row, Map<String, Object> artifact) {
+        String text = firstNonBlank(
+                artifact.get("message"),
+                artifact.get("summary"),
+                artifact.get("title"),
+                artifact.get("sourceQuestion"),
+                artifact.get("question")
+        );
+        if (!text.isBlank()) {
+            return safeText(text, 240);
+        }
+        String type = artifactTypeLabel(Objects.toString(row.get("artifactType"), ""));
+        String chart = Objects.toString(row.get("chartType"), "").trim();
+        return chart.isBlank() ? type + " 产物" : type + " · " + chart;
+    }
+
+    private long firstPositive(long... values) {
+        for (long value : values) {
+            if (value > 0) {
+                return value;
+            }
+        }
+        return 0L;
+    }
+
     private Map<String, Object> mapHistoryRow(Map<String, Object> row) {
         Map<String, Object> item = new LinkedHashMap<>(row);
         Map<String, Object> snapshot = parseJsonMap(row.get("chartSnapshot"));
@@ -876,7 +1445,8 @@ public class ChatQueryHistoryService {
         item.put("question", row.get("queryText"));
         item.put("sql", row.get("generatedSql"));
         item.put("riskReason", row.get("auditInfo"));
-        item.put("executionStatus", toNullableInt(row.get("executionStatus")));
+        Integer executionStatus = resolveHistoryExecutionStatus(row, snapshot);
+        item.put("executionStatus", executionStatus);
         item.put("executionTimeMs", toNullableInt(row.get("executionTimeMs")));
         item.put("isHitCache", toBooleanFlag(row.get("isHitCache")));
         item.put("sourceType", toLong(row.get("dataSourceId")) > 0 ? "OFFICIAL" : "UPLOAD");
@@ -898,6 +1468,30 @@ public class ChatQueryHistoryService {
         item.put("aiParseResult", resolveAiParseResult(item));
         item.put("aiParseResultLabel", aiParseResultLabel(Objects.toString(item.get("aiParseResult"), "")));
         return item;
+    }
+
+    private Integer resolveHistoryExecutionStatus(Map<String, Object> row, Map<String, Object> snapshot) {
+        Integer status = toNullableInt(row.get("executionStatus"));
+        if (Objects.equals(status, 0) && isAlertHistoryRecord(row, snapshot)) {
+            return 1;
+        }
+        return status;
+    }
+
+    private boolean isAlertHistoryRecord(Map<String, Object> row, Map<String, Object> snapshot) {
+        String chartType = Objects.toString(row.get("chartType"), "").trim();
+        String artifactType = Objects.toString(row.get("artifactType"), "").trim();
+        String intentType = Objects.toString(row.get("intentType"), "").trim();
+        if ("alert".equals(normalizeAdvancedAnalysisTypeValue(chartType))) {
+            return true;
+        }
+        if ("alert".equals(normalizeAdvancedAnalysisTypeValue(artifactType))) {
+            return true;
+        }
+        if ("alert".equals(normalizeAdvancedAnalysisTypeValue(intentType))) {
+            return true;
+        }
+        return isAlertSnapshotShape(snapshot);
     }
 
     private Map<String, Object> buildChartSnapshot(String tableName, Map<String, Object> result) {
@@ -939,9 +1533,33 @@ public class ChatQueryHistoryService {
         if (result.get("optionTemplate") != null) {
             snapshot.put("optionTemplate", result.get("optionTemplate"));
         }
+        copySmartRouteSnapshotFields(snapshot, result);
         copyAdvancedAnalysisSnapshotFields(snapshot, result);
         attachForecastSnapshotMeta(snapshot, result);
+        attachAlertSnapshotMeta(snapshot, result);
         return snapshot;
+    }
+
+    private void copySmartRouteSnapshotFields(Map<String, Object> snapshot, Map<String, Object> result) {
+        List<String> keys = List.of(
+                "smartRouteAudit",
+                "smartRouted",
+                "smartIntent",
+                "smartConfidence",
+                "smartFallbackUsed",
+                "responseType",
+                "actionPlan",
+                "stepResults",
+                "multiStepSummary",
+                "requiresConfirmation",
+                "alertRuleDraft"
+        );
+        for (String key : keys) {
+            Object value = result.get(key);
+            if (value != null) {
+                snapshot.put(key, value);
+            }
+        }
     }
 
     private void copyAdvancedAnalysisSnapshotFields(Map<String, Object> snapshot, Map<String, Object> result) {
@@ -951,7 +1569,31 @@ public class ChatQueryHistoryService {
                 "advancedAnalysisPlanVersion",
                 "advancedAnalysisType",
                 "advancedAnalysisAction",
-                "forecastMeta"
+                "forecastMeta",
+                "params",
+                "series",
+                "insights",
+                "explanation",
+                "alertMeta",
+                "alertRule",
+                "alertRuleCreated",
+                "alertRuleDraft",
+                "event",
+                "ruleId",
+                "eventId",
+                "actualValue",
+                "threshold",
+                "baseline",
+                "baselineValue",
+                "zScore",
+                "operator",
+                "bucketName",
+                "metricField",
+                "timeField",
+                "granularity",
+                "detectionCycle",
+                "channels",
+                "reason"
         );
         for (String key : keys) {
             Object value = result.get(key);
@@ -993,6 +1635,43 @@ public class ChatQueryHistoryService {
         }
         if (!forecastMeta.isEmpty()) {
             snapshot.put("forecastMeta", forecastMeta);
+        }
+    }
+
+    private void attachAlertSnapshotMeta(Map<String, Object> snapshot, Map<String, Object> result) {
+        if (!isAlertResultShape(result) && !isAlertSnapshotShape(snapshot)) {
+            return;
+        }
+        snapshot.putIfAbsent("advancedAnalysisType", "alert");
+        Map<String, Object> params = new LinkedHashMap<>(toObjectMap(result.get("params")));
+        Map<String, Object> alertMeta = new LinkedHashMap<>(toObjectMap(result.get("alertMeta")));
+        putIfNotBlank(alertMeta, "ruleName",
+                firstNonBlank(result.get("ruleName"), params.get("ruleName"), result.get("title")));
+        putIfNotBlank(alertMeta, "metricField",
+                firstNonBlank(result.get("metricField"), params.get("metricField"), snapshot.get("metricField")));
+        putIfNotBlank(alertMeta, "timeField",
+                firstNonBlank(result.get("timeField"), params.get("timeField"), snapshot.get("timeField")));
+        putIfNotBlank(alertMeta, "operator",
+                firstNonBlank(result.get("operator"), params.get("operator"), snapshot.get("operator")));
+        putIfNotBlank(alertMeta, "detectionCycle",
+                firstNonBlank(result.get("detectionCycle"), params.get("detectionCycle"), snapshot.get("detectionCycle")));
+        putIfNotBlank(alertMeta, "status",
+                firstNonBlank(result.get("status"), params.get("status"), snapshot.get("status")));
+        Object threshold = firstPresent(result.get("threshold"), params.get("threshold"), snapshot.get("threshold"));
+        if (threshold != null) {
+            alertMeta.put("threshold", threshold);
+            params.putIfAbsent("threshold", threshold);
+        }
+        Object channels = firstPresent(result.get("channels"), params.get("channels"), snapshot.get("channels"));
+        if (channels != null) {
+            alertMeta.put("channels", channels);
+            params.putIfAbsent("channels", channels);
+        }
+        if (!params.isEmpty()) {
+            snapshot.putIfAbsent("params", params);
+        }
+        if (!alertMeta.isEmpty()) {
+            snapshot.put("alertMeta", alertMeta);
         }
     }
 
@@ -1076,6 +1755,47 @@ public class ChatQueryHistoryService {
         return containsForecastRows(result.get("data")) && textSignal.matches(".*(预测|预估|forecast|holt|prophet).*");
     }
 
+    private boolean isAlertResultShape(Map<String, Object> result) {
+        if (result == null || result.isEmpty()) {
+            return false;
+        }
+        Map<String, Object> fieldMapping = toObjectMap(result.get("fieldMapping"));
+        Map<String, Object> params = toObjectMap(result.get("params"));
+        Object[] typeCandidates = {
+                result.get("type"),
+                result.get("planType"),
+                result.get("advancedAnalysisType"),
+                fieldMapping.get("mappingType")
+        };
+        for (Object candidate : typeCandidates) {
+            if ("alert".equals(normalizeAdvancedAnalysisTypeValue(candidate))) {
+                return true;
+            }
+        }
+        String normalizedTypeText = firstNonBlank(typeCandidates).replaceAll("[-_\\s]", "").toLowerCase(Locale.ROOT);
+        if (normalizedTypeText.contains("warning") || normalizedTypeText.contains("prewarning")) {
+            return true;
+        }
+        if (!toObjectMap(result.get("alertMeta")).isEmpty()
+                || !toObjectMap(result.get("alertRule")).isEmpty()
+                || !toObjectMap(result.get("alertRuleCreated")).isEmpty()
+                || !toObjectMap(result.get("alertRuleDraft")).isEmpty()
+                || result.containsKey("ruleId")
+                || result.containsKey("eventId")) {
+            return true;
+        }
+        boolean hasCondition = !firstNonBlank(result.get("operator"), params.get("operator")).isBlank()
+                && (result.containsKey("threshold")
+                || params.containsKey("threshold")
+                || result.containsKey("actualValue")
+                || result.containsKey("zScore")
+                || result.containsKey("baseline")
+                || result.containsKey("baselineValue"));
+        boolean hasMetric = !firstNonBlank(result.get("metricField"), params.get("metricField"),
+                result.get("metric"), fieldMapping.get("metric"), fieldMapping.get("metricKey")).isBlank();
+        return hasCondition && hasMetric;
+    }
+
     private boolean containsForecastRows(Object data) {
         if (!(data instanceof List<?> rows)) {
             return false;
@@ -1125,6 +1845,30 @@ public class ChatQueryHistoryService {
         return "";
     }
 
+    private Object firstPresent(Object... values) {
+        for (Object value : values) {
+            if (value == null) {
+                continue;
+            }
+            if (value instanceof String text && text.trim().isBlank()) {
+                continue;
+            }
+            return value;
+        }
+        return null;
+    }
+
+    private Object nestedValue(Map<String, Object> source, String parentKey, String childKey) {
+        if (source == null) {
+            return null;
+        }
+        Object parent = source.get(parentKey);
+        if (parent instanceof Map<?, ?> map) {
+            return map.get(childKey);
+        }
+        return null;
+    }
+
     private void putIfNotBlank(Map<String, Object> target, String key, String value) {
         if (value != null && !value.isBlank()) {
             target.put(key, value);
@@ -1137,7 +1881,7 @@ public class ChatQueryHistoryService {
         item.put("nickname", row.get("nickname"));
         item.put("slowQuery", toBooleanFlag(row.get("slowQuery")));
         item.put("slowQueryLabel", toBooleanFlag(row.get("slowQuery")) ? "是" : "否");
-        item.put("executionStatusLabel", historyExecutionLabel(toNullableInt(row.get("executionStatus"))));
+        item.put("executionStatusLabel", historyExecutionLabel(toNullableInt(item.get("executionStatus"))));
         item.put("isHitCacheLabel", toBooleanFlag(row.get("isHitCache")) ? "命中" : "未命中");
         item.put("operatorLabel", buildUserDisplayName(row));
         Map<String, Object> snapshot = toObjectMap(item.get("chartSnapshot"));
@@ -1454,6 +2198,418 @@ public class ChatQueryHistoryService {
                 ORDER BY COUNT(*) DESC, AVG(COALESCE(h.execution_time_ms, 0)) DESC, MAX(h.created_at) DESC
                 LIMIT ?
                 """, queryArgs.toArray());
+    }
+
+    private Map<String, Object> buildAdminRouteAuditAnalytics(StringBuilder whereSql, List<Object> args) {
+        List<Object> queryArgs = new ArrayList<>(args);
+        queryArgs.add(ROUTE_AUDIT_SAMPLE_LIMIT);
+        List<Map<String, Object>> rows;
+        try {
+            rows = jdbcTemplate.queryForList("""
+                    SELECT h.id AS historyId,
+                           h.user_id AS userId,
+                           h.query_text AS question,
+                           h.query_table_name AS queryTableName,
+                           h.chart_snapshot AS chartSnapshot,
+                           h.context_json AS contextJson,
+                           (
+                               SELECT a.artifact_json
+                                 FROM is_chat_conversation_artifact a
+                                WHERE a.history_id = h.id
+                                  AND a.artifact_type IN ('CHART', 'ADVANCED_ALERT')
+                                ORDER BY a.id DESC
+                                LIMIT 1
+                           ) AS artifactJson,
+                           h.intent_type AS intentType,
+                           h.artifact_type AS artifactType,
+                           h.llm_model_used AS llmModelUsed,
+                           h.created_at AS createdAt
+                    """ + whereSql + """
+                    ORDER BY h.created_at DESC
+                    LIMIT ?
+                    """, queryArgs.toArray());
+        } catch (Exception ignored) {
+            Map<String, Object> unavailable = defaultRouteAuditAnalytics();
+            unavailable.put("available", false);
+            unavailable.put("message", "智能路由观测数据暂不可用");
+            return unavailable;
+        }
+
+        Map<String, RouteAuditGroup> intentGroups = new LinkedHashMap<>();
+        Map<String, RouteAuditGroup> executorGroups = new LinkedHashMap<>();
+        Map<String, RouteAuditGroup> actionGroups = new LinkedHashMap<>();
+        Map<String, Long> failureReasons = new LinkedHashMap<>();
+        Map<String, Long> missingSlotGroups = new LinkedHashMap<>();
+        List<Map<String, Object>> lowConfidenceExamples = new ArrayList<>();
+        List<Map<String, Object>> problemSamples = new ArrayList<>();
+
+        long total = 0;
+        long successCount = 0;
+        long failureCount = 0;
+        long fallbackCount = 0;
+        long clarificationCount = 0;
+        long confirmationCount = 0;
+        long lowConfidenceCount = 0;
+        long unknownConfidenceCount = 0;
+        long durationTotal = 0;
+        long durationCount = 0;
+        double confidenceTotal = 0D;
+        long confidenceCount = 0;
+
+        for (Map<String, Object> row : rows) {
+            Map<String, Object> audit = extractSmartRouteAudit(row);
+            if (audit.isEmpty()) {
+                continue;
+            }
+            total++;
+            String primaryIntent = firstNonBlank(audit.get("primaryIntent"), row.get("intentType"), "UNKNOWN");
+            String executor = firstNonBlank(audit.get("chosenExecutor"), row.get("llmModelUsed"), "未记录执行器");
+            String outcome = firstNonBlank(audit.get("outcome"), "UNKNOWN").toUpperCase(Locale.ROOT);
+            List<String> missingSlots = routeAuditStringList(audit.get("missingSlots"));
+            boolean fallbackUsed = toBooleanFlag(audit.get("fallbackUsed"));
+            boolean requiresConfirmation = toBooleanFlag(audit.get("requiresConfirmation"))
+                    || "NEEDS_CONFIRMATION".equals(outcome);
+            boolean clarification = "NEEDS_INPUT".equals(outcome) || !missingSlots.isEmpty();
+            boolean success = routeAuditSuccessFlag(audit, outcome);
+            boolean failed = !success;
+            double confidence = toDouble(audit.get("confidence"), Double.NaN);
+            long durationMs = Math.max(0L, toLong(audit.get("durationMs")));
+
+            if (success) {
+                successCount++;
+            }
+            if (failed) {
+                failureCount++;
+            }
+            if (fallbackUsed) {
+                fallbackCount++;
+            }
+            if (clarification) {
+                clarificationCount++;
+            }
+            if (requiresConfirmation) {
+                confirmationCount++;
+            }
+            if (durationMs > 0) {
+                durationTotal += durationMs;
+                durationCount++;
+            }
+            if (Double.isFinite(confidence) && confidence > 0D) {
+                confidenceTotal += confidence;
+                confidenceCount++;
+                if (confidence < ROUTE_AUDIT_LOW_CONFIDENCE_THRESHOLD) {
+                    lowConfidenceCount++;
+                }
+            } else {
+                unknownConfidenceCount++;
+            }
+
+            addRouteAuditGroup(intentGroups, primaryIntent, success, fallbackUsed, clarification, failed, durationMs, confidence);
+            addRouteAuditGroup(executorGroups, executor, success, fallbackUsed, clarification, failed, durationMs, confidence);
+            for (String actionType : routeAuditActionTypes(audit, primaryIntent)) {
+                addRouteAuditGroup(actionGroups, actionType, success, fallbackUsed, clarification, failed, durationMs, confidence);
+            }
+            for (String slot : missingSlots) {
+                incrementCount(missingSlotGroups, slot);
+            }
+            if (failed) {
+                incrementCount(failureReasons, firstNonBlank(audit.get("failureReason"), "未记录失败原因"));
+            }
+
+            Map<String, Object> sample = buildRouteAuditSample(row, audit, primaryIntent, executor,
+                    outcome, fallbackUsed, confidence, durationMs, missingSlots);
+            if (Double.isFinite(confidence) && confidence > 0D && confidence < ROUTE_AUDIT_LOW_CONFIDENCE_THRESHOLD
+                    && lowConfidenceExamples.size() < 8) {
+                lowConfidenceExamples.add(sample);
+            }
+            if ((failed || fallbackUsed || clarification || requiresConfirmation
+                    || (Double.isFinite(confidence) && confidence > 0D
+                    && confidence < ROUTE_AUDIT_LOW_CONFIDENCE_THRESHOLD)) && problemSamples.size() < 10) {
+                problemSamples.add(sample);
+            }
+        }
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("totalRouted", total);
+        summary.put("successCount", successCount);
+        summary.put("failureCount", failureCount);
+        summary.put("fallbackCount", fallbackCount);
+        summary.put("clarificationCount", clarificationCount);
+        summary.put("confirmationCount", confirmationCount);
+        summary.put("lowConfidenceCount", lowConfidenceCount);
+        summary.put("unknownConfidenceCount", unknownConfidenceCount);
+        summary.put("avgDurationMs", durationCount == 0 ? 0 : Math.round(durationTotal * 1.0 / durationCount));
+        summary.put("avgConfidence", confidenceCount == 0 ? 0 : roundDouble(confidenceTotal / confidenceCount, 2));
+        summary.put("successRate", rate(successCount, total));
+        summary.put("failureRate", rate(failureCount, total));
+        summary.put("fallbackRate", rate(fallbackCount, total));
+        summary.put("clarificationRate", rate(clarificationCount, total));
+        summary.put("confirmationRate", rate(confirmationCount, total));
+        summary.put("lowConfidenceRate", rate(lowConfidenceCount, total));
+        summary.put("lowConfidenceThreshold", ROUTE_AUDIT_LOW_CONFIDENCE_THRESHOLD);
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("available", true);
+        response.put("sampleLimit", ROUTE_AUDIT_SAMPLE_LIMIT);
+        response.put("sampledRows", rows.size());
+        response.put("summary", summary);
+        response.put("intentGroups", routeAuditGroupRows(intentGroups, "primaryIntent", 8));
+        response.put("executorGroups", routeAuditGroupRows(executorGroups, "chosenExecutor", 8));
+        response.put("actionGroups", routeAuditGroupRows(actionGroups, "actionType", 8));
+        response.put("failureReasons", countRows(failureReasons, "reason", 8));
+        response.put("missingSlotGroups", countRows(missingSlotGroups, "slot", 8));
+        response.put("lowConfidenceExamples", lowConfidenceExamples);
+        response.put("problemSamples", problemSamples);
+        return response;
+    }
+
+    private Map<String, Object> defaultRouteAuditAnalytics() {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("totalRouted", 0);
+        summary.put("successCount", 0);
+        summary.put("failureCount", 0);
+        summary.put("fallbackCount", 0);
+        summary.put("clarificationCount", 0);
+        summary.put("confirmationCount", 0);
+        summary.put("lowConfidenceCount", 0);
+        summary.put("unknownConfidenceCount", 0);
+        summary.put("avgDurationMs", 0);
+        summary.put("avgConfidence", 0);
+        summary.put("successRate", 0);
+        summary.put("failureRate", 0);
+        summary.put("fallbackRate", 0);
+        summary.put("clarificationRate", 0);
+        summary.put("confirmationRate", 0);
+        summary.put("lowConfidenceRate", 0);
+        summary.put("lowConfidenceThreshold", ROUTE_AUDIT_LOW_CONFIDENCE_THRESHOLD);
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("available", true);
+        response.put("sampleLimit", ROUTE_AUDIT_SAMPLE_LIMIT);
+        response.put("sampledRows", 0);
+        response.put("summary", summary);
+        response.put("intentGroups", List.of());
+        response.put("executorGroups", List.of());
+        response.put("actionGroups", List.of());
+        response.put("failureReasons", List.of());
+        response.put("missingSlotGroups", List.of());
+        response.put("lowConfidenceExamples", List.of());
+        response.put("problemSamples", List.of());
+        return response;
+    }
+
+    private Map<String, Object> extractSmartRouteAudit(Map<String, Object> row) {
+        Map<String, Object> snapshot = parseJsonMap(row.get("chartSnapshot"));
+        Map<String, Object> audit = toObjectMap(snapshot.get("smartRouteAudit"));
+        if (!audit.isEmpty()) {
+            return audit;
+        }
+        Map<String, Object> context = parseJsonMap(row.get("contextJson"));
+        audit = toObjectMap(context.get("smartRouteAudit"));
+        if (!audit.isEmpty()) {
+            return audit;
+        }
+        Map<String, Object> artifact = parseJsonMap(row.get("artifactJson"));
+        audit = toObjectMap(artifact.get("smartRouteAudit"));
+        if (!audit.isEmpty()) {
+            return audit;
+        }
+        if (looksLikeSmartRouteAudit(snapshot)) {
+            return snapshot;
+        }
+        if (looksLikeSmartRouteAudit(context)) {
+            return context;
+        }
+        if (looksLikeSmartRouteAudit(artifact)) {
+            return artifact;
+        }
+        return Map.of();
+    }
+
+    private boolean looksLikeSmartRouteAudit(Map<String, Object> value) {
+        if (value == null || value.isEmpty()) {
+            return false;
+        }
+        return value.containsKey("primaryIntent")
+                && (value.containsKey("chosenExecutor")
+                || value.containsKey("outcome")
+                || value.containsKey("confidence")
+                || value.containsKey("fallbackUsed"));
+    }
+
+    private boolean routeAuditSuccessFlag(Map<String, Object> audit, String outcome) {
+        if (audit.containsKey("success")) {
+            return toBooleanFlag(audit.get("success"));
+        }
+        String normalized = Objects.toString(outcome, "").trim().toUpperCase(Locale.ROOT);
+        return !"FAILED".equals(normalized) && !"PARTIAL_FAILED".equals(normalized);
+    }
+
+    private List<String> routeAuditActionTypes(Map<String, Object> audit, String fallbackIntent) {
+        Object rawActions = audit.get("actions");
+        List<String> result = new ArrayList<>();
+        if (rawActions instanceof List<?> actions) {
+            for (Object action : actions) {
+                if (action instanceof Map<?, ?> map) {
+                    String type = firstNonBlank(map.get("type"), map.get("actionType"), fallbackIntent);
+                    if (!type.isBlank()) {
+                        result.add(type);
+                    }
+                } else {
+                    String text = Objects.toString(action, "").trim();
+                    if (!text.isBlank()) {
+                        result.add(text);
+                    }
+                }
+            }
+        }
+        if (result.isEmpty() && !Objects.toString(fallbackIntent, "").trim().isBlank()) {
+            result.add(fallbackIntent);
+        }
+        return result.stream().distinct().toList();
+    }
+
+    private List<String> routeAuditStringList(Object value) {
+        if (value == null) {
+            return List.of();
+        }
+        if (value instanceof List<?> list) {
+            List<String> result = new ArrayList<>();
+            for (Object item : list) {
+                String text = Objects.toString(item, "").trim();
+                if (!text.isBlank()) {
+                    result.add(text);
+                }
+            }
+            return result;
+        }
+        String text = Objects.toString(value, "").trim();
+        if (text.isBlank()) {
+            return List.of();
+        }
+        if (text.startsWith("[") && text.endsWith("]")) {
+            try {
+                List<Object> raw = objectMapper.readValue(text, new TypeReference<>() {});
+                return routeAuditStringList(raw);
+            } catch (Exception ignored) {
+                // fall through to delimiter parsing
+            }
+        }
+        return List.of(text.split("[,，、]")).stream()
+                .map(String::trim)
+                .filter(item -> !item.isBlank())
+                .toList();
+    }
+
+    private void addRouteAuditGroup(Map<String, RouteAuditGroup> groups, String key,
+                                    boolean success, boolean fallbackUsed, boolean clarification,
+                                    boolean failed, long durationMs, double confidence) {
+        String resolvedKey = Objects.toString(key, "").trim();
+        if (resolvedKey.isBlank()) {
+            resolvedKey = "UNKNOWN";
+        }
+        groups.computeIfAbsent(resolvedKey, RouteAuditGroup::new)
+                .accept(success, fallbackUsed, clarification, failed, durationMs, confidence);
+    }
+
+    private List<Map<String, Object>> routeAuditGroupRows(Map<String, RouteAuditGroup> groups,
+                                                          String labelKey, int limit) {
+        return groups.values().stream()
+                .sorted((left, right) -> Long.compare(right.count, left.count))
+                .limit(limit)
+                .map(group -> routeAuditGroupRow(group, labelKey))
+                .toList();
+    }
+
+    private Map<String, Object> routeAuditGroupRow(RouteAuditGroup group, String labelKey) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put(labelKey, group.key);
+        row.put("count", group.count);
+        row.put("successCount", group.successCount);
+        row.put("failureCount", group.failureCount);
+        row.put("fallbackCount", group.fallbackCount);
+        row.put("clarificationCount", group.clarificationCount);
+        row.put("successRate", rate(group.successCount, group.count));
+        row.put("failureRate", rate(group.failureCount, group.count));
+        row.put("fallbackRate", rate(group.fallbackCount, group.count));
+        row.put("clarificationRate", rate(group.clarificationCount, group.count));
+        row.put("avgDurationMs", group.durationCount == 0 ? 0 : Math.round(group.durationTotal * 1.0 / group.durationCount));
+        row.put("avgConfidence", group.confidenceCount == 0 ? 0 : roundDouble(group.confidenceTotal / group.confidenceCount, 2));
+        return row;
+    }
+
+    private List<Map<String, Object>> countRows(Map<String, Long> counts, String labelKey, int limit) {
+        return counts.entrySet().stream()
+                .sorted((left, right) -> Long.compare(right.getValue(), left.getValue()))
+                .limit(limit)
+                .map(entry -> {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put(labelKey, entry.getKey());
+                    row.put("count", entry.getValue());
+                    return row;
+                })
+                .toList();
+    }
+
+    private void incrementCount(Map<String, Long> counts, String key) {
+        String resolvedKey = Objects.toString(key, "").trim();
+        if (resolvedKey.isBlank()) {
+            resolvedKey = "未记录";
+        }
+        counts.put(resolvedKey, counts.getOrDefault(resolvedKey, 0L) + 1L);
+    }
+
+    private Map<String, Object> buildRouteAuditSample(Map<String, Object> row,
+                                                      Map<String, Object> audit,
+                                                      String primaryIntent,
+                                                      String executor,
+                                                      String outcome,
+                                                      boolean fallbackUsed,
+                                                      double confidence,
+                                                      long durationMs,
+                                                      List<String> missingSlots) {
+        Map<String, Object> sample = new LinkedHashMap<>();
+        sample.put("historyId", row.get("historyId"));
+        sample.put("userId", row.get("userId"));
+        sample.put("question", firstNonBlank(audit.get("question"), row.get("question")));
+        sample.put("queryTableName", firstNonBlank(audit.get("tableName"), row.get("queryTableName")));
+        sample.put("primaryIntent", primaryIntent);
+        sample.put("chosenExecutor", executor);
+        sample.put("outcome", outcome);
+        sample.put("fallbackUsed", fallbackUsed);
+        sample.put("confidence", Double.isFinite(confidence) && confidence > 0D ? roundDouble(confidence, 2) : null);
+        sample.put("durationMs", durationMs > 0 ? durationMs : null);
+        sample.put("missingSlots", missingSlots);
+        sample.put("failureReason", firstNonBlank(audit.get("failureReason")));
+        sample.put("createdAt", row.get("createdAt"));
+        return sample;
+    }
+
+    private double rate(long part, long total) {
+        return total == 0 ? 0 : Math.round(part * 1000.0 / total) / 10.0;
+    }
+
+    private double roundDouble(double value, int scale) {
+        if (!Double.isFinite(value)) {
+            return 0D;
+        }
+        double factor = Math.pow(10, Math.max(0, scale));
+        return Math.round(value * factor) / factor;
+    }
+
+    private double toDouble(Object value, double fallback) {
+        if (value instanceof Number number) {
+            return number.doubleValue();
+        }
+        String text = Objects.toString(value, "").trim();
+        if (text.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Double.parseDouble(text);
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
     }
 
     private String slowQueryExistsClause(String historyAlias) {
@@ -1943,7 +3099,32 @@ public class ChatQueryHistoryService {
                 || snapshot.get("variables") instanceof List<?>
                 || !toObjectMap(snapshot.get("alertMeta")).isEmpty()
                 || snapshot.containsKey("alertRule")
-                || snapshot.containsKey("ruleId");
+                || snapshot.containsKey("ruleId")
+                || isAlertSnapshotShape(snapshot);
+    }
+
+    private boolean isAlertSnapshotShape(Map<String, Object> snapshot) {
+        if (snapshot == null || snapshot.isEmpty()) {
+            return false;
+        }
+        boolean hasAlertObject = !toObjectMap(snapshot.get("alertMeta")).isEmpty()
+                || !toObjectMap(snapshot.get("alertRule")).isEmpty()
+                || !toObjectMap(snapshot.get("alertRuleCreated")).isEmpty()
+                || !toObjectMap(snapshot.get("alertRuleDraft")).isEmpty()
+                || snapshot.containsKey("ruleId")
+                || snapshot.containsKey("eventId");
+        if (hasAlertObject) {
+            return true;
+        }
+        boolean hasCondition = !Objects.toString(snapshot.get("operator"), "").trim().isBlank()
+                && (snapshot.containsKey("threshold")
+                || snapshot.containsKey("actualValue")
+                || snapshot.containsKey("zScore")
+                || snapshot.containsKey("baseline")
+                || snapshot.containsKey("baselineValue"));
+        boolean hasMetric = !Objects.toString(snapshot.get("metricField"), "").trim().isBlank()
+                || !Objects.toString(snapshot.get("metric"), "").trim().isBlank();
+        return hasCondition && hasMetric;
     }
 
     private boolean isForecastSnapshot(Map<String, Object> snapshot) {
@@ -2434,14 +3615,13 @@ public class ChatQueryHistoryService {
     }
 
     private String resolveModelName(Map<String, Object> result) {
-        String model = Objects.toString(result.getOrDefault("llmModelUsed", ""), "").trim();
-        if (!model.isBlank()) {
-            return model;
+        for (String key : List.of("llmModelUsed", "modelName", "model", "modelId")) {
+            String model = Objects.toString(result.getOrDefault(key, ""), "").trim();
+            if (!model.isBlank()) {
+                return model;
+            }
         }
         String engine = Objects.toString(result.getOrDefault("engine", "unknown"), "unknown").trim();
-        if ("python-ai-service".equalsIgnoreCase(engine)) {
-            return "GPT-4";
-        }
         if ("java-fallback".equalsIgnoreCase(engine)) {
             return "RULE_BASED";
         }
@@ -2791,6 +3971,48 @@ public class ChatQueryHistoryService {
                 """, Integer.class, tableName, indexName);
         if (count == null || count == 0) {
             jdbcTemplate.execute(ddl);
+        }
+    }
+
+    private static final class RouteAuditGroup {
+        private final String key;
+        private long count;
+        private long successCount;
+        private long failureCount;
+        private long fallbackCount;
+        private long clarificationCount;
+        private long durationTotal;
+        private long durationCount;
+        private double confidenceTotal;
+        private long confidenceCount;
+
+        private RouteAuditGroup(String key) {
+            this.key = key;
+        }
+
+        private void accept(boolean success, boolean fallbackUsed, boolean clarification,
+                            boolean failed, long durationMs, double confidence) {
+            count++;
+            if (success) {
+                successCount++;
+            }
+            if (failed) {
+                failureCount++;
+            }
+            if (fallbackUsed) {
+                fallbackCount++;
+            }
+            if (clarification) {
+                clarificationCount++;
+            }
+            if (durationMs > 0) {
+                durationTotal += durationMs;
+                durationCount++;
+            }
+            if (Double.isFinite(confidence) && confidence > 0D) {
+                confidenceTotal += confidence;
+                confidenceCount++;
+            }
         }
     }
 }

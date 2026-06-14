@@ -1,6 +1,8 @@
 package com.insightspark.service;
 
 import com.insightspark.c.service.StackCDashboardService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
@@ -14,6 +16,8 @@ import java.util.Optional;
 
 @Service
 public class SmartChatService {
+
+    private static final Logger log = LoggerFactory.getLogger(SmartChatService.class);
 
     @Autowired
     private ChatBiService chatBiService;
@@ -54,15 +58,17 @@ public class SmartChatService {
     }
 
     public Map<String, Object> executeSmart(ChatBiService.ChatQueryRequest request, ThinkingEmitter emitter) {
+        long startedAt = System.currentTimeMillis();
         ThinkingEmitter trace = emitter == null ? ThinkingEmitter.noop() : emitter;
         ChatBiService.ChatQueryRequest safeRequest = request == null ? new ChatBiService.ChatQueryRequest() : request;
         String question = text(safeRequest.getQuestion());
         String rawQuestion = text(safeRequest.getFilters() == null ? null : safeRequest.getFilters().get("rawQuestion"));
-        String actionQuestion = rawQuestion.isBlank() ? question : rawQuestion;
+        String userQuestion = rawQuestion.isBlank() ? question : rawQuestion;
+        String actionQuestion = question;
         String tableName = resolveTableName(safeRequest);
-        emit(trace, "INPUT_RECEIVED", "收到问题", actionQuestion.isBlank()
+        emit(trace, "INPUT_RECEIVED", "收到问题", userQuestion.isBlank()
                 ? "已进入智能对话处理"
-                : "正在处理：" + trimTo(actionQuestion, 80), Map.of("tableName", tableName));
+                : "正在处理：" + trimTo(userQuestion, 80), Map.of("tableName", tableName));
         emit(trace, "CONTEXT_READY", "读取上下文", tableName.isBlank()
                 ? "未指定数据源，将结合会话上下文和默认数据源判断"
                 : "已选择数据源 " + tableName, Map.of("tableName", tableName));
@@ -78,15 +84,23 @@ public class SmartChatService {
             attachSmartMetadata(result, intent, actionQuestion, tableName);
             result.put("actionPlan", actionPlan.toMap(castRows(result.get("stepResults"))));
             result.put("thinkingLogs", multiStepThinkingLogs(actionPlan, castRows(result.get("stepResults"))));
+            attachSmartRouteAudit(result, safeRequest, actionQuestion, tableName, "multi-step-orchestrator", startedAt);
             return result;
         }
-        SmartIntent intent = route(actionQuestion, tableName, trace).withContext(safeRequest.getFilters());
+        SmartIntent intent = route(actionQuestion, tableName, trace, safeRequest.getFilters()).withContext(safeRequest.getFilters());
         emit(trace, "ROUTE_DECIDED", "识别意图", describeIntent(intent),
                 Map.of("intent", intent.primaryIntent(), "confidence", intent.confidence(), "fallbackUsed", intent.fallbackUsed()));
         Map<String, Object> result;
         switch (intent.primaryIntent()) {
             case "FORECAST" -> result = executeForecast(actionQuestion, tableName, intent, trace);
             case "ALERT_RULE_CREATE" -> result = buildAlertRuleDraft(actionQuestion, tableName, intent, trace);
+            case "ALERT_EVENT_QUERY" -> result = executeAlertEventQuery(actionQuestion, tableName, intent, trace);
+            case "ALERT_EVENT_EXPLAIN" -> result = executeAlertEventExplain(actionQuestion, tableName, intent, trace);
+            case "ALERT_EVENT_ACK", "ALERT_EVENT_CLOSE", "ALERT_EVENT_REOPEN" ->
+                    result = executeAlertEventLifecycleAction(actionQuestion, tableName, intent, trace);
+            case "ALERT_RULE_DETECT" -> result = executeAlertRuleDetectAction(actionQuestion, tableName, intent, trace);
+            case "ALERT_RULE_UPDATE", "ALERT_RULE_DISABLE", "ALERT_RULE_ENABLE", "ALERT_RULE_DELETE" ->
+                    result = executeAlertRuleLifecycleAction(actionQuestion, tableName, intent, trace);
             case "WHAT_IF" -> result = buildWhatIfDraft(actionQuestion, tableName, intent);
             case "BUSINESS_MODEL_CREATE", "BUSINESS_MODEL_PATCH", "BUSINESS_MODEL_APPLY", "BUSINESS_MODEL_PUBLISH" ->
                     result = executeBusinessModelAgent(actionQuestion, tableName, intent, trace);
@@ -97,9 +111,10 @@ public class SmartChatService {
                     result = buildClarificationResult(actionQuestion, tableName, intent);
             default -> result = executeQuery(safeRequest, question, tableName, intent, trace);
         }
-        attachSmartMetadata(result, intent, actionQuestion, tableName);
+        attachSmartMetadata(result, intent, userQuestion, tableName);
         emit(trace, "RESULT_READY", "整理结果", trimTo(firstText(result.get("message"), "智能处理完成"), 120),
                 Map.of("responseType", firstText(result.get("responseType"), intent.primaryIntent())));
+        attachSmartRouteAudit(result, safeRequest, actionQuestion, tableName, chosenExecutor(intent.primaryIntent()), startedAt);
         return result;
     }
 
@@ -108,11 +123,15 @@ public class SmartChatService {
     }
 
     private SmartIntent route(String question, String tableName, ThinkingEmitter trace) {
+        return route(question, tableName, trace, Map.of());
+    }
+
+    private SmartIntent route(String question, String tableName, ThinkingEmitter trace, Map<String, Object> requestContext) {
         String q = text(question);
         String lower = q.toLowerCase(Locale.ROOT);
         emit(trace, "ROUTE_CONTEXT_PREPARE", "准备语义路由", "正在读取字段类型、时间字段和数值指标，用于判断用户意图",
                 Map.of("tableName", tableName));
-        Map<String, Object> context = buildAdvancedContext(tableName);
+        Map<String, Object> context = withModelContext(buildAdvancedContext(tableName), requestContext);
         emit(trace, "ROUTE_MODEL_CALL", "调用语义路由", "正在判断是否为查询、预测、预警、看板或业务模型操作",
                 Map.of("fieldCount", collectionSize(context.get("fields")),
                         "timeFieldCount", collectionSize(context.get("timeFields")),
@@ -122,6 +141,25 @@ public class SmartChatService {
             Map<String, Object> routed = smartRoute.get();
             String primaryIntent = normalizeSmartIntent(routed.get("primaryIntent"));
             double confidence = readDouble(routed.get("confidence"), 0.0D);
+            String alertLifecycleIntent = inferAlertLifecycleIntent(q, lower);
+            if (!alertLifecycleIntent.isBlank() && !alertLifecycleIntent.equals(primaryIntent)) {
+                emit(trace, "ROUTE_MODEL_RESULT_ADJUSTED", "修正语义路由",
+                        "用户表达的是预警事件或规则处置，不应进入" + intentLabel(primaryIntent) + "，已切换为" + intentLabel(alertLifecycleIntent),
+                        Map.of("originalIntent", primaryIntent, "adjustedIntent", alertLifecycleIntent));
+                return new SmartIntent(alertLifecycleIntent, Math.max(confidence, 0.72D),
+                        alertIntentRequiresConfirmation(alertLifecycleIntent),
+                        alertLifecycleReason(alertLifecycleIntent), inferAlertLifecycleSlots(q, tableName),
+                        readBoolean(routed.get("fallbackUsed")));
+            }
+            String alertRuleCreateIntent = inferAlertRuleCreateIntent(q, lower);
+            if ("QUERY_SQL".equals(primaryIntent) && !alertRuleCreateIntent.isBlank()) {
+                emit(trace, "ROUTE_MODEL_RESULT_ADJUSTED", "修正语义路由",
+                        "用户表达的是预警规则创建，不应进入普通 SQL 查询，已切换为预警规则草稿",
+                        Map.of("originalIntent", primaryIntent, "adjustedIntent", alertRuleCreateIntent));
+                return new SmartIntent(alertRuleCreateIntent, Math.max(confidence, 0.72D), true,
+                        "识别到预警规则创建语义", mapValue(routed.get("slots")),
+                        readBoolean(routed.get("fallbackUsed")));
+            }
             if ("FORECAST".equals(primaryIntent) && isHistoricalTrendQuery(q) && !hasForecastIntent(q, lower)) {
                 emit(trace, "ROUTE_MODEL_RESULT_ADJUSTED", "修正语义路由",
                         "用户表达的是历史时间范围内的趋势查看，不包含未来外推语义，已按普通查询处理",
@@ -153,6 +191,23 @@ public class SmartChatService {
         if (isDashboardIntent(q)) {
             return new SmartIntent(q.contains("新建") ? "DASHBOARD_CREATE" : "DASHBOARD_PIN", 0.6D, true,
                     "AI 总路由不可用，保守兜底识别到看板资产操作", Map.of(), true);
+        }
+        String alertLifecycleIntent = inferAlertLifecycleIntent(q, lower);
+        if (!alertLifecycleIntent.isBlank()) {
+            return new SmartIntent(alertLifecycleIntent, 0.72D, alertIntentRequiresConfirmation(alertLifecycleIntent),
+                    alertLifecycleReason(alertLifecycleIntent), inferAlertLifecycleSlots(q, tableName), true);
+        }
+        if (containsAny(q, "权限", "只能看", "开放给", "角色", "授权")) {
+            return new SmartIntent("PERMISSION_POLICY_CREATE", 0.65D, true,
+                    "识别到权限配置语义，必须确认后执行", Map.of(), true);
+        }
+        if (containsAny(q, "审计", "危险查询", "慢查询", "为什么被拦截")) {
+            return new SmartIntent("AUDIT_QUERY", 0.68D, false,
+                    "识别到审计/安全治理语义，当前阶段生成澄清入口", Map.of(), true);
+        }
+        if (containsAny(q, "诊断", "报告", "原因分析", "下降原因")) {
+            return new SmartIntent("REPORT_GENERATE", 0.66D, true,
+                    "识别到诊断报告语义，当前阶段生成待确认动作", Map.of(), true);
         }
         if (isExplicitQueryIntent(q)) {
             return new SmartIntent("QUERY_SQL", 0.62D, false,
@@ -201,17 +256,10 @@ public class SmartChatService {
             return new SmartIntent("WHAT_IF", 0.68D, true,
                     "规则兜底识别到情景推演语义", Map.of(), true);
         }
-        if (containsAny(q, "权限", "只能看", "开放给", "角色", "授权")) {
-            return new SmartIntent("PERMISSION_POLICY_CREATE", 0.65D, true,
-                    "识别到权限配置语义，必须确认后执行", Map.of(), true);
-        }
-        if (containsAny(q, "审计", "危险查询", "慢查询", "为什么被拦截")) {
-            return new SmartIntent("AUDIT_QUERY", 0.68D, false,
-                    "识别到审计/安全治理语义，当前阶段生成澄清入口", Map.of(), true);
-        }
-        if (containsAny(q, "诊断", "报告", "原因分析", "下降原因")) {
-            return new SmartIntent("REPORT_GENERATE", 0.66D, true,
-                    "识别到诊断报告语义，当前阶段生成待确认动作", Map.of(), true);
+        String lateAlertLifecycleIntent = inferAlertLifecycleIntent(q, lower);
+        if (!lateAlertLifecycleIntent.isBlank()) {
+            return new SmartIntent(lateAlertLifecycleIntent, 0.68D, alertIntentRequiresConfirmation(lateAlertLifecycleIntent),
+                    alertLifecycleReason(lateAlertLifecycleIntent), inferAlertLifecycleSlots(q, tableName), true);
         }
         return new SmartIntent("QUERY_SQL", 0.86D, false,
                 "默认进入 Text-to-SQL 查询", Map.of(), true);
@@ -381,6 +429,231 @@ public class SmartChatService {
         return result;
     }
 
+    private Map<String, Object> executeAlertEventQuery(String question, String tableName, SmartIntent intent, ThinkingEmitter trace) {
+        Map<String, Object> request = new LinkedHashMap<>();
+        Long ruleId = alertRuleId(question, intent.slots());
+        if (ruleId != null && ruleId > 0) {
+            request.put("ruleId", ruleId);
+        }
+        emit(trace, "ALERT_EVENT_QUERY", "查询预警事件",
+                ruleId == null ? "正在查询最近触发的预警事件" : "正在查询规则 #" + ruleId + " 的预警事件",
+                metadataOf("ruleId", ruleId));
+        List<Map<String, Object>> events = advancedAnalysisService.listAlertEvents(request);
+        List<Map<String, Object>> rows = events.stream()
+                .map(this::compactAlertEventRow)
+                .toList();
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("responseType", "ALERT_EVENT_QUERY");
+        result.put("message", rows.isEmpty() ? "暂未查询到已触发的预警事件。" : "已查询到 " + rows.size() + " 条预警事件。");
+        result.put("chartType", "table");
+        result.put("data", rows);
+        result.put("dimensions", List.of("id", "ruleName", "ruleId", "status", "metricField", "actualValue", "threshold", "bucketName", "createdAt"));
+        result.put("tableColumns", alertEventTableColumns());
+        result.put("alertEvents", events);
+        result.put("alertEventSummary", Map.of(
+                "total", rows.size(),
+                "open", rows.stream().filter(row -> "OPEN".equals(text(row.get("status")))).count(),
+                "ack", rows.stream().filter(row -> "ACK".equals(text(row.get("status")))).count(),
+                "closed", rows.stream().filter(row -> "CLOSED".equals(text(row.get("status")))).count()
+        ));
+        result.put("smartRouted", true);
+        result.put("requiresConfirmation", false);
+        return result;
+    }
+
+    private List<Map<String, Object>> alertEventTableColumns() {
+        return List.of(
+                Map.of("prop", "id", "label", "ID"),
+                Map.of("prop", "ruleName", "label", "规则名"),
+                Map.of("prop", "status", "label", "状态"),
+                Map.of("prop", "bucketName", "label", "触发周期"),
+                Map.of("prop", "createdAt", "label", "触发时间")
+        );
+    }
+
+    private List<Map<String, Object>> alertRuleDetectionTableColumns() {
+        return List.of(
+                Map.of("prop", "ruleId", "label", "规则ID"),
+                Map.of("prop", "ruleName", "label", "规则名"),
+                Map.of("prop", "checkedRules", "label", "检查规则数"),
+                Map.of("prop", "createdEvents", "label", "新增事件"),
+                Map.of("prop", "refreshedEvents", "label", "刷新快照"),
+                Map.of("prop", "skippedRules", "label", "跳过规则数"),
+                Map.of("prop", "status", "label", "规则状态")
+        );
+    }
+
+    private Map<String, Object> alertRuleDetectionSummaryRow(Long ruleId, Map<String, Object> rule, Map<String, Object> detection) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        putIfMeaningful(row, "ruleId", ruleId);
+        putIfMeaningful(row, "ruleName", firstText(rule.get("ruleName"), rule.get("name"), rule.get("title")));
+        putIfMeaningful(row, "status", rule.get("status"));
+        putIfMeaningful(row, "tableName", rule.get("tableName"));
+        putIfMeaningful(row, "metricField", rule.get("metricField"));
+        putIfMeaningful(row, "checkedRules", detection.getOrDefault("checkedRules", 0));
+        putIfMeaningful(row, "createdEvents", detection.getOrDefault("createdEvents", 0));
+        putIfMeaningful(row, "refreshedEvents", detection.getOrDefault("refreshedEvents", 0));
+        putIfMeaningful(row, "skippedRules", detection.getOrDefault("skippedRules", 0));
+        putIfMeaningful(row, "scope", detection.get("scope"));
+        return row;
+    }
+
+    private String alertRuleDetectionMessage(Long ruleId, Map<String, Object> rule, Map<String, Object> detection) {
+        int checked = (int) Math.round(readDouble(detection.get("checkedRules"), 0D));
+        int skipped = (int) Math.round(readDouble(detection.get("skippedRules"), 0D));
+        int created = (int) Math.round(readDouble(detection.get("createdEvents"), 0D));
+        int refreshed = (int) Math.round(readDouble(detection.get("refreshedEvents"), 0D));
+        String ruleName = firstText(rule.get("ruleName"), "预警规则 #" + ruleId);
+        String status = firstText(rule.get("status"));
+        if (checked <= 0 && !status.isBlank() && !"ACTIVE".equalsIgnoreCase(status)) {
+            return ruleName + " 当前状态为 " + status + "，本次未执行检测；请先启用规则后再检测。";
+        }
+        return ruleName + " 检测完成：检查 " + checked + " 条规则，新增 " + created
+                + " 条预警事件，刷新 " + refreshed + " 条快照，跳过 " + skipped + " 条规则。";
+    }
+
+    private Map<String, Object> executeAlertEventExplain(String question, String tableName, SmartIntent intent, ThinkingEmitter trace) {
+        Long eventId = alertEventId(question, intent.slots());
+        if (eventId == null || eventId <= 0) {
+            return buildClarificationResult(question, tableName,
+                    intent.withMissing(List.of("eventId"), "解释预警事件需要明确事件 ID，或从当前上下文带入最近一条预警事件。"));
+        }
+        emit(trace, "ALERT_EVENT_EXPLAIN", "解释预警原因", "正在读取预警事件 #" + eventId + " 的触发证据",
+                metadataOf("eventId", eventId));
+        Map<String, Object> event = advancedAnalysisService.getAlertEvent(eventId);
+        Map<String, Object> explanation = alertEventExplanation(event);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("responseType", "ALERT_EVENT_EXPLAIN");
+        result.put("message", firstText(explanation.get("summary"), "已生成预警事件触发原因说明。"));
+        result.put("chartType", "alert");
+        result.put("data", List.of(compactAlertEventRow(event)));
+        result.put("dimensions", List.of("id", "ruleId", "status", "metricField", "actualValue", "threshold", "bucketName", "createdAt"));
+        result.put("alertEvent", event);
+        result.put("alertExplanation", explanation);
+        result.put("smartRouted", true);
+        result.put("requiresConfirmation", false);
+        return result;
+    }
+
+    private Map<String, Object> executeAlertEventLifecycleAction(String question, String tableName, SmartIntent intent, ThinkingEmitter trace) {
+        Long eventId = alertEventId(question, intent.slots());
+        if (eventId == null || eventId <= 0) {
+            return buildClarificationResult(question, tableName,
+                    intent.withMissing(List.of("eventId"), "确认或关闭预警事件需要明确事件 ID。"));
+        }
+        String status = switch (intent.primaryIntent()) {
+            case "ALERT_EVENT_CLOSE" -> "CLOSED";
+            case "ALERT_EVENT_REOPEN" -> "OPEN";
+            default -> "ACK";
+        };
+        Map<String, Object> draft = new LinkedHashMap<>();
+        draft.put("eventId", eventId);
+        draft.put("status", status);
+        draft.put("sourceQuestion", question);
+        draft.put("handleNote", alertHandleNote(question));
+        draft.put("sideEffect", "UPDATE_ALERT_EVENT_STATUS");
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("status", status);
+        request.put("handleNote", draft.get("handleNote"));
+        emit(trace, "ALERT_EVENT_STATUS_UPDATE", "更新预警事件状态",
+                "正在将预警事件 #" + eventId + " 更新为 " + status, metadataOf("eventId", eventId, "status", status));
+        Map<String, Object> event = advancedAnalysisService.updateAlertEventStatus(eventId, request);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("responseType", intent.primaryIntent());
+        result.put("message", switch (status) {
+            case "CLOSED" -> "预警事件已关闭。";
+            case "OPEN" -> "预警事件已重开。";
+            default -> "预警事件已确认。";
+        });
+        result.put("chartType", "alert");
+        result.put("data", List.of(compactAlertEventRow(event)));
+        result.put("dimensions", List.of("id", "ruleId", "status", "metricField", "actualValue", "threshold", "bucketName", "createdAt"));
+        result.put("alertEvent", event);
+        result.put("userConfirmed", true);
+        result.put("smartRouted", true);
+        result.put("requiresConfirmation", false);
+        return result;
+    }
+
+    private Map<String, Object> executeAlertRuleLifecycleAction(String question, String tableName, SmartIntent intent, ThinkingEmitter trace) {
+        Long ruleId = alertRuleId(question, intent.slots());
+        if (ruleId == null || ruleId <= 0) {
+            return buildClarificationResult(question, tableName,
+                    intent.withMissing(List.of("ruleId"), "修改、停用或删除预警规则需要明确规则 ID。"));
+        }
+        Map<String, Object> draft = alertRuleActionDraft(question, tableName, intent, ruleId);
+        if ("ALERT_RULE_DELETE".equals(intent.primaryIntent()) && !userConfirmed(intent)) {
+            return alertActionDraft("ALERT_RULE_ACTION_DRAFT",
+                    alertRuleDraftMessage(intent.primaryIntent(), ruleId),
+                    draft);
+        }
+        emit(trace, "ALERT_RULE_ACTION_EXECUTE", "执行预警规则操作",
+                alertRuleExecuteMessage(intent.primaryIntent(), ruleId), metadataOf("ruleId", ruleId, "intent", intent.primaryIntent()));
+        Map<String, Object> rule;
+        if ("ALERT_RULE_DELETE".equals(intent.primaryIntent())) {
+            rule = advancedAnalysisService.deleteAlertRule(ruleId);
+        } else if ("ALERT_RULE_DISABLE".equals(intent.primaryIntent())) {
+            rule = advancedAnalysisService.updateAlertRuleStatus(ruleId, Map.of("status", "DISABLED"));
+        } else if ("ALERT_RULE_ENABLE".equals(intent.primaryIntent())) {
+            rule = advancedAnalysisService.updateAlertRuleStatus(ruleId, Map.of("status", "ACTIVE"));
+        } else {
+            Map<String, Object> request = new LinkedHashMap<>(mapValue(draft.get("patch")));
+            request.put("id", ruleId);
+            rule = advancedAnalysisService.updateAlertRule(ruleId, request);
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("responseType", intent.primaryIntent());
+        result.put("message", alertRuleDoneMessage(intent.primaryIntent()));
+        result.put("chartType", "alert");
+        result.put("data", List.of(compactAlertRuleRow(rule)));
+        result.put("dimensions", List.of("id", "ruleName", "status", "metricField", "threshold", "detectionCycle"));
+        result.put("alertRule", rule);
+        result.put("userConfirmed", true);
+        result.put("smartRouted", true);
+        result.put("requiresConfirmation", false);
+        return result;
+    }
+
+    private Map<String, Object> executeAlertRuleDetectAction(String question, String tableName, SmartIntent intent, ThinkingEmitter trace) {
+        Long ruleId = alertRuleId(question, intent.slots());
+        if (ruleId == null || ruleId <= 0) {
+            return buildClarificationResult(question, tableName,
+                    intent.withMissing(List.of("ruleId"), "检测预警规则需要明确规则 ID。"));
+        }
+        emit(trace, "ALERT_RULE_DETECT", "执行预警检测",
+                "正在对预警规则 #" + ruleId + " 执行一次手动检测",
+                metadataOf("ruleId", ruleId));
+        Map<String, Object> rule = advancedAnalysisService.getAlertRule(ruleId);
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("ruleId", ruleId);
+        request.put("force", true);
+        Map<String, Object> detection = advancedAnalysisService.runAlertRuleDetection(request);
+        List<Map<String, Object>> events = castRows(detection.get("events"));
+        List<Map<String, Object>> eventRows = events.stream()
+                .map(this::compactAlertEventRow)
+                .toList();
+        Map<String, Object> summary = alertRuleDetectionSummaryRow(ruleId, rule, detection);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("responseType", "ALERT_RULE_DETECT");
+        result.put("message", alertRuleDetectionMessage(ruleId, rule, detection));
+        result.put("chartType", "table");
+        result.put("data", eventRows.isEmpty() ? List.of(summary) : eventRows);
+        result.put("dimensions", eventRows.isEmpty()
+                ? List.of("ruleId", "ruleName", "checkedRules", "createdEvents", "refreshedEvents", "skippedRules", "status")
+                : List.of("id", "ruleName", "ruleId", "status", "metricField", "actualValue", "threshold", "bucketName", "createdAt"));
+        result.put("tableColumns", eventRows.isEmpty() ? alertRuleDetectionTableColumns() : alertEventTableColumns());
+        result.put("alertRule", rule);
+        result.put("alertEvents", events);
+        result.put("alertDetectionSummary", summary);
+        result.put("checkedRules", detection.getOrDefault("checkedRules", 0));
+        result.put("skippedRules", detection.getOrDefault("skippedRules", 0));
+        result.put("createdEvents", detection.getOrDefault("createdEvents", 0));
+        result.put("refreshedEvents", detection.getOrDefault("refreshedEvents", 0));
+        result.put("smartRouted", true);
+        result.put("requiresConfirmation", false);
+        return result;
+    }
+
     private Map<String, Object> buildWhatIfDraft(String question, String tableName, SmartIntent intent) {
         Map<String, Object> draft = new LinkedHashMap<>();
         draft.put("tableName", tableName);
@@ -407,6 +680,9 @@ public class SmartChatService {
         putIfPresent(payload, "lastCreatedBusinessModelId", slots.get("lastCreatedBusinessModelId"));
         putIfPresent(payload, "lastAppliedBusinessModelId", slots.get("lastAppliedBusinessModelId"));
         putIfPresent(payload, "selectedTableName", slots.get("selectedTableName"));
+        putIfPresent(payload, "modelId", slots.get("modelId"));
+        putIfPresent(payload, "modelName", slots.get("modelName"));
+        putIfPresent(payload, "modelCategory", slots.get("modelCategory"));
         emit(trace, "MODEL_CONTEXT_READY", "定位业务模型",
                 tableName.isBlank() ? "正在结合当前会话模型上下文执行维护指令" : "正在基于 " + tableName + " 执行业务模型维护",
                 Map.of("intent", intent.primaryIntent(), "tableName", tableName));
@@ -539,7 +815,8 @@ public class SmartChatService {
         }
         emit(trace, "PLAN_CONTEXT_PREPARE", "准备编排上下文", "检测到复合语义，正在读取字段信息并准备动作编排",
                 Map.of("tableName", tableName));
-        Map<String, Object> context = buildAdvancedContext(tableName);
+        Map<String, Object> context = withModelContext(buildAdvancedContext(tableName),
+                request == null ? Map.of() : request.getFilters());
         emit(trace, "PLAN_MODEL_CALL", "调用编排模型", "正在生成多步骤动作计划和依赖顺序",
                 Map.of("fieldCount", collectionSize(context.get("fields"))));
         Optional<Map<String, Object>> smartRoute = pythonAiService.smartChatRoute(question, tableName, context);
@@ -589,7 +866,8 @@ public class SmartChatService {
         if (actions.size() <= 1) {
             return SmartActionPlan.empty();
         }
-        return new SmartActionPlan("MULTI_STEP", actions, slots, 0.74D, true,
+        boolean requiresConfirmation = alertTask || dashboardPinTask || actions.stream().anyMatch(SmartActionStep::requiresConfirmation);
+        return new SmartActionPlan("MULTI_STEP", actions, slots, 0.74D, requiresConfirmation,
                 "识别到复合 BI 任务，按动作依赖顺序编排执行", true);
     }
 
@@ -610,7 +888,8 @@ public class SmartChatService {
                     action.dependsOn(),
                     stepQuestionForPlan(action.type(), question, action.question()),
                     mergeCanonicalSlots(action.slots(), canonicalSlots),
-                    action.requiresConfirmation()
+                    action.requiresConfirmation(),
+                    action.confidence()
             ));
         }
 
@@ -678,7 +957,7 @@ public class SmartChatService {
                 }
             }
             normalized.add(new SmartActionStep(action.id(), action.type(), dependsOn,
-                    action.question(), action.slots(), action.requiresConfirmation()));
+                    action.question(), action.slots(), action.requiresConfirmation(), action.confidence()));
         }
         return normalized;
     }
@@ -714,24 +993,28 @@ public class SmartChatService {
             String id;
             List<String> dependsOn = stringList(action.get("dependsOn"));
             boolean requiresConfirmation = readBoolean(action.get("requiresConfirmation"));
+            double actionConfidence = readDouble(action.get("confidence"), 0D);
             if ("QUERY_SQL".equals(type)) {
                 id = firstText(action.get("id"), "query_" + queryIndex++);
                 actions.add(new SmartActionStep(id, type, dependsOn,
-                        queryQuestionForPlan(firstText(action.get("question"), question)), slots, requiresConfirmation));
+                        queryQuestionForPlan(firstText(action.get("question"), question)), slots, requiresConfirmation,
+                        actionConfidence));
             } else if ("FORECAST".equals(type)) {
                 id = firstText(action.get("id"), "forecast_" + forecastIndex++);
                 if (dependsOn.isEmpty() && actions.stream().anyMatch(step -> "QUERY_SQL".equals(step.type()))) {
                     dependsOn = actions.stream().filter(step -> "QUERY_SQL".equals(step.type())).map(SmartActionStep::id).toList();
                 }
                 actions.add(new SmartActionStep(id, type, dependsOn,
-                        forecastQuestionForPlan(firstText(action.get("question"), question)), slots, requiresConfirmation));
+                        forecastQuestionForPlan(firstText(action.get("question"), question)), slots, requiresConfirmation,
+                        actionConfidence));
             } else {
                 id = firstText(action.get("id"), "alert_" + alertIndex++);
                 if (dependsOn.isEmpty() && actions.stream().anyMatch(step -> "FORECAST".equals(step.type()))) {
                     dependsOn = actions.stream().filter(step -> "FORECAST".equals(step.type())).map(SmartActionStep::id).toList();
                 }
                 actions.add(new SmartActionStep(id, type, dependsOn,
-                        alertQuestionForPlan(firstText(action.get("question"), question)), slots, true));
+                        alertQuestionForPlan(firstText(action.get("question"), question)), slots, true,
+                        actionConfidence));
             }
         }
         boolean hasForecast = actions.stream().anyMatch(action -> "FORECAST".equals(action.type()));
@@ -740,11 +1023,15 @@ public class SmartChatService {
         if (actions.size() <= 1 || !hasForecast || !hasQueryOrAlert) {
             return SmartActionPlan.empty();
         }
+        List<String> missingSlots = stringList(routed.get("missingSlots"));
+        boolean needClarification = readBoolean(routed.get("needClarification")) || !missingSlots.isEmpty();
         return new SmartActionPlan("MULTI_STEP", actions, planSlots,
                 readDouble(routed.get("confidence"), 0.78D),
-                actions.stream().anyMatch(SmartActionStep::requiresConfirmation),
+                actions.stream().anyMatch(SmartActionStep::requiresConfirmation) || needClarification,
                 firstText(routed.get("reasoning"), "AI 生成多步骤动作编排"),
-                readBoolean(routed.get("fallbackUsed")));
+                readBoolean(routed.get("fallbackUsed")),
+                needClarification,
+                missingSlots);
     }
 
     private Map<String, Object> executeMultiStepPlan(SmartActionPlan plan,
@@ -926,6 +1213,7 @@ public class SmartChatService {
         result.put("dependsOn", action.dependsOn());
         result.put("status", status);
         result.put("message", message);
+        result.put("confidence", action.confidence());
         result.put("requiresConfirmation", action.requiresConfirmation()
                 || (payload != null && readBoolean(payload.get("requiresConfirmation"))));
         if (payload != null) {
@@ -1211,6 +1499,206 @@ public class SmartChatService {
         return compact;
     }
 
+    private Map<String, Object> compactAlertEventRow(Map<String, Object> event) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        putIfMeaningful(row, "id", event.get("id"));
+        putIfMeaningful(row, "ruleId", event.get("ruleId"));
+        putIfMeaningful(row, "ruleName", firstText(event.get("ruleName"), event.get("name"), event.get("title")));
+        putIfMeaningful(row, "status", firstText(event.get("status"), "OPEN"));
+        putIfMeaningful(row, "tableName", event.get("tableName"));
+        putIfMeaningful(row, "metricField", event.get("metricField"));
+        putIfMeaningful(row, "timeField", event.get("timeField"));
+        putIfMeaningful(row, "bucketName", event.get("bucketName"));
+        putIfMeaningful(row, "actualValue", event.get("actualValue"));
+        putIfMeaningful(row, "threshold", event.get("threshold"));
+        putIfMeaningful(row, "operator", event.get("operator"));
+        putIfMeaningful(row, "reason", event.get("reason"));
+        putIfMeaningful(row, "chartSnapshot", event.get("chartSnapshot"));
+        putIfMeaningful(row, "chartSnapshotJson", event.get("chartSnapshotJson"));
+        putIfMeaningful(row, "createdAt", event.get("createdAt"));
+        putIfMeaningful(row, "ackAt", event.get("ackAt"));
+        putIfMeaningful(row, "closedAt", event.get("closedAt"));
+        return row;
+    }
+
+    private Map<String, Object> compactAlertRuleRow(Map<String, Object> rule) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        putIfMeaningful(row, "id", rule.get("id"));
+        putIfMeaningful(row, "ruleName", firstText(rule.get("ruleName"), rule.get("name"), rule.get("title")));
+        putIfMeaningful(row, "status", rule.get("status"));
+        putIfMeaningful(row, "tableName", rule.get("tableName"));
+        putIfMeaningful(row, "metricField", rule.get("metricField"));
+        putIfMeaningful(row, "timeField", rule.get("timeField"));
+        putIfMeaningful(row, "operator", rule.get("operator"));
+        putIfMeaningful(row, "threshold", firstPresent(rule.get("threshold"), rule.get("thresholdValue")));
+        putIfMeaningful(row, "detectionCycle", rule.get("detectionCycle"));
+        putIfMeaningful(row, "channels", rule.get("channels"));
+        return row;
+    }
+
+    private Map<String, Object> alertEventExplanation(Map<String, Object> event) {
+        Map<String, Object> stored = mapValue(event.get("llmExplanation"));
+        if (!stored.isEmpty()) {
+            return stored;
+        }
+        String operator = operatorLabel(firstText(event.get("operator")));
+        String metric = firstText(event.get("metricField"), "指标");
+        String actual = firstText(event.get("actualValue"), "当前值");
+        String threshold = firstText(event.get("threshold"), "阈值");
+        String bucket = firstText(event.get("bucketName"), "当前检测周期");
+        String reason = firstText(event.get("reason"));
+        Map<String, Object> explanation = new LinkedHashMap<>();
+        explanation.put("source", "rule");
+        explanation.put("sourceLabel", "规则解释");
+        explanation.put("title", "预警触发原因");
+        explanation.put("summary", reason.isBlank()
+                ? bucket + " 的 " + metric + " 为 " + actual + "，已满足" + operator + " " + threshold + " 的触发条件。"
+                : reason);
+        explanation.put("evidence", List.of(
+                "指标：" + metric,
+                "实际值：" + actual,
+                "阈值：" + threshold,
+                "比较关系：" + operator,
+                "检测周期：" + bucket
+        ));
+        return explanation;
+    }
+
+    private Map<String, Object> alertActionDraft(String responseType, String message, Map<String, Object> draft) {
+        Map<String, Object> result = draftCard(responseType, message, draft);
+        result.put("chartType", "alert");
+        result.put("requiresConfirmation", true);
+        result.put("sideEffectMode", "DRAFT_ONLY");
+        result.put("actionPreview", draft);
+        return result;
+    }
+
+    private Map<String, Object> alertRuleActionDraft(String question, String tableName, SmartIntent intent, Long ruleId) {
+        Map<String, Object> patch = new LinkedHashMap<>();
+        if ("ALERT_RULE_UPDATE".equals(intent.primaryIntent())) {
+            Object threshold = firstPresent(intent.slots().get("threshold"), inferThreshold(question));
+            if (threshold != null) {
+                patch.put("threshold", threshold);
+            }
+            if (containsAny(question, "高于", "超过", "大于", "突破", "低于", "小于", "跌破", "异常", "波动", "zscore", "Z-Score")) {
+                patch.put("operator", inferOperator(question));
+            }
+            String channel = inferChannel(question);
+            if (!"both".equals(channel) || containsAny(question, "通知", "渠道", "邮件", "邮箱", "钉钉", "email", "dingtalk")) {
+                patch.put("channels", "both".equals(channel) ? List.of("email", "dingtalk") : List.of(channel));
+            }
+            if (containsAny(question, "每天", "每日", "日度")) {
+                patch.put("detectionCycle", "daily");
+            } else if (containsAny(question, "每周", "周度")) {
+                patch.put("detectionCycle", "weekly");
+            } else if (containsAny(question, "每月", "月度")) {
+                patch.put("detectionCycle", "monthly");
+            } else if (containsAny(question, "每小时", "小时")) {
+                patch.put("detectionCycle", "hourly");
+            }
+        } else if ("ALERT_RULE_DISABLE".equals(intent.primaryIntent())) {
+            patch.put("status", "DISABLED");
+        } else if ("ALERT_RULE_ENABLE".equals(intent.primaryIntent())) {
+            patch.put("status", "ACTIVE");
+        } else if ("ALERT_RULE_DELETE".equals(intent.primaryIntent())) {
+            patch.put("status", "DELETED");
+        }
+        Map<String, Object> draft = new LinkedHashMap<>();
+        draft.put("ruleId", ruleId);
+        draft.put("action", intent.primaryIntent());
+        draft.put("patch", patch);
+        draft.put("sourceQuestion", question);
+        draft.put("sideEffect", "UPDATE_ALERT_RULE");
+        return draft;
+    }
+
+    private String alertRuleDraftMessage(String intent, Long ruleId) {
+        return switch (text(intent)) {
+            case "ALERT_RULE_DELETE" -> "已生成删除预警规则草稿，确认后会删除规则 #" + ruleId + "。";
+            case "ALERT_RULE_DISABLE" -> "已生成停用预警规则草稿，确认后会停用规则 #" + ruleId + "。";
+            case "ALERT_RULE_ENABLE" -> "已生成启用预警规则草稿，确认后会启用规则 #" + ruleId + "。";
+            default -> "已生成修改预警规则草稿，确认后会更新规则 #" + ruleId + "。";
+        };
+    }
+
+    private String alertRuleExecuteMessage(String intent, Long ruleId) {
+        return switch (text(intent)) {
+            case "ALERT_RULE_DELETE" -> "正在删除预警规则 #" + ruleId;
+            case "ALERT_RULE_DISABLE" -> "正在停用预警规则 #" + ruleId;
+            case "ALERT_RULE_ENABLE" -> "正在启用预警规则 #" + ruleId;
+            default -> "正在更新预警规则 #" + ruleId;
+        };
+    }
+
+    private String alertRuleDoneMessage(String intent) {
+        return switch (text(intent)) {
+            case "ALERT_RULE_DELETE" -> "预警规则已删除。";
+            case "ALERT_RULE_DISABLE" -> "预警规则已停用。";
+            case "ALERT_RULE_ENABLE" -> "预警规则已启用。";
+            default -> "预警规则已更新。";
+        };
+    }
+
+    private Long alertEventId(String question, Map<String, Object> slots) {
+        Long fromSlots = toLong(firstPresent(
+                slots.get("alertEventId"),
+                slots.get("eventId"),
+                slots.get("currentAlertEventId"),
+                slots.get("lastAlertEventId")
+        ));
+        if (fromSlots != null && fromSlots > 0) {
+            return fromSlots;
+        }
+        return extractLabeledId(question, List.of("预警事件", "报警事件", "告警事件", "事件", "报警", "告警", "预警"));
+    }
+
+    private Long alertRuleId(String question, Map<String, Object> slots) {
+        Long fromSlots = toLong(firstPresent(
+                slots.get("alertRuleId"),
+                slots.get("ruleId"),
+                slots.get("currentAlertRuleId"),
+                slots.get("lastAlertRuleId")
+        ));
+        if (fromSlots != null && fromSlots > 0) {
+            return fromSlots;
+        }
+        return extractLabeledId(question, List.of("预警规则", "报警规则", "告警规则", "规则"));
+    }
+
+    private Long extractLabeledId(String question, List<String> labels) {
+        String compact = text(question).replaceAll("\\s+", "");
+        if (compact.isBlank()) {
+            return null;
+        }
+        List<String> escaped = labels.stream()
+                .map(java.util.regex.Pattern::quote)
+                .toList();
+        String labelPattern = String.join("|", escaped);
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+                .compile("(?:" + labelPattern + "|#|ID|id|编号)[#：:=]?(\\d+)")
+                .matcher(compact);
+        if (matcher.find()) {
+            return toLong(matcher.group(1));
+        }
+        java.util.regex.Matcher leadingMatcher = java.util.regex.Pattern
+                .compile("(\\d+)(?:" + labelPattern + ")")
+                .matcher(compact);
+        if (leadingMatcher.find()) {
+            return toLong(leadingMatcher.group(1));
+        }
+        return null;
+    }
+
+    private boolean userConfirmed(SmartIntent intent) {
+        Map<String, Object> slots = intent == null ? Map.of() : intent.slots();
+        return readBoolean(firstPresent(slots.get("userConfirmed"), slots.get("confirmed"), slots.get("confirmationAccepted")));
+    }
+
+    private String alertHandleNote(String question) {
+        String note = text(question);
+        return note.length() > 120 ? note.substring(0, 120) : note;
+    }
+
     private String operatorLabel(String operator) {
         return switch (text(operator)) {
             case "lt", "<", "below" -> "低于";
@@ -1248,6 +1736,16 @@ public class SmartChatService {
             case "QUERY_SQL" -> "数据查询";
             case "FORECAST" -> "时序预测";
             case "ALERT_RULE_CREATE", "ALERT_RULE_CREATE_DRAFT" -> "预警规则";
+            case "ALERT_RULE_UPDATE" -> "修改预警规则";
+            case "ALERT_RULE_DISABLE" -> "停用预警规则";
+            case "ALERT_RULE_ENABLE" -> "启用预警规则";
+            case "ALERT_RULE_DETECT" -> "检测预警规则";
+            case "ALERT_RULE_DELETE" -> "删除预警规则";
+            case "ALERT_EVENT_QUERY" -> "预警事件查询";
+            case "ALERT_EVENT_EXPLAIN" -> "预警原因解释";
+            case "ALERT_EVENT_ACK" -> "确认预警事件";
+            case "ALERT_EVENT_CLOSE" -> "关闭预警事件";
+            case "ALERT_EVENT_REOPEN" -> "重开预警事件";
             case "WHAT_IF" -> "情景推演";
             case "DASHBOARD_PIN" -> "钉入看板";
             case "DASHBOARD_CREATE" -> "创建看板";
@@ -1389,6 +1887,12 @@ public class SmartChatService {
     }
 
     private void attachSmartMetadata(Map<String, Object> result, SmartIntent intent, String question, String tableName) {
+        boolean effectiveRequiresConfirmation = result.containsKey("requiresConfirmation")
+                ? readBoolean(result.get("requiresConfirmation"))
+                : intent.requiresConfirmation();
+        List<String> effectiveMissingSlots = intent.missingSlots().isEmpty()
+                ? stringList(mapValue(result.get("draft")).get("missingSlots"))
+                : intent.missingSlots();
         result.put("smartIntent", intent.primaryIntent());
         result.put("smartConfidence", intent.confidence());
         result.put("smartReasoning", intent.reasoning());
@@ -1397,16 +1901,154 @@ public class SmartChatService {
         result.put("queryTableName", tableName);
         result.put("thinkingLogs", List.of(
                 "统一语义路由：识别意图 " + intent.primaryIntent(),
-                "动作计划校验：" + (intent.missingSlots().isEmpty() ? "参数完整或已生成草稿" : "缺少 " + String.join(", ", intent.missingSlots())),
-                "执行策略：" + (Boolean.TRUE.equals(result.get("requiresConfirmation")) ? "生成草稿/等待确认" : "直接调用现有业务服务")
+                "动作计划校验：" + (effectiveMissingSlots.isEmpty() ? "参数完整或已生成草稿" : "缺少 " + String.join(", ", effectiveMissingSlots)),
+                "执行策略：" + (effectiveRequiresConfirmation ? "生成草稿/等待确认" : "直接调用现有业务服务")
         ));
         result.put("actionPlan", Map.of(
                 "primaryIntent", intent.primaryIntent(),
                 "confidence", intent.confidence(),
-                "requiresConfirmation", intent.requiresConfirmation(),
-                "missingSlots", intent.missingSlots(),
-                "slots", intent.slots()
+                "needClarification", !effectiveMissingSlots.isEmpty(),
+                "requiresConfirmation", effectiveRequiresConfirmation,
+                "missingSlots", effectiveMissingSlots,
+                "reasoning", intent.reasoning(),
+                "slots", intent.slots(),
+                "actions", List.of(Map.of(
+                        "id", "action_1",
+                        "type", intent.primaryIntent(),
+                        "dependsOn", List.of(),
+                        "slots", intent.slots(),
+                        "confidence", normalizeConfidenceStatic(intent.confidence(), 0.7D),
+                        "requiresConfirmation", effectiveRequiresConfirmation
+                ))
         ));
+    }
+
+    private void attachSmartRouteAudit(Map<String, Object> result,
+                                       ChatBiService.ChatQueryRequest request,
+                                       String question,
+                                       String tableName,
+                                       String chosenExecutor,
+                                       long startedAt) {
+        if (result == null) {
+            return;
+        }
+        Map<String, Object> actionPlan = mapValue(result.get("actionPlan"));
+        List<String> missingSlots = stringList(actionPlan.get("missingSlots"));
+        String primaryIntent = firstText(actionPlan.get("primaryIntent"), result.get("smartIntent"), result.get("responseType"));
+        String outcome = routeAuditOutcome(result);
+        boolean success = routeAuditSuccess(outcome);
+        Map<String, Object> filters = request == null || request.getFilters() == null ? Map.of() : request.getFilters();
+        Map<String, Object> audit = new LinkedHashMap<>();
+        audit.put("question", question);
+        audit.put("conversationId", request == null ? null : request.getConversationId());
+        audit.put("parentTurnId", request == null ? null : request.getParentTurnId());
+        audit.put("tableName", tableName);
+        audit.put("primaryIntent", primaryIntent);
+        audit.put("actions", compactRouteAuditActions(actionPlan, primaryIntent));
+        audit.put("confidence", readDouble(firstPresent(actionPlan.get("confidence"), result.get("smartConfidence")), 0D));
+        audit.put("fallbackUsed", readBoolean(firstPresent(result.get("smartFallbackUsed"), result.get("fallbackUsed"))));
+        audit.put("missingSlots", missingSlots);
+        audit.put("requiresConfirmation", readBoolean(firstPresent(actionPlan.get("requiresConfirmation"), result.get("requiresConfirmation"))));
+        audit.put("chosenExecutor", firstText(chosenExecutor, chosenExecutor(primaryIntent)));
+        audit.put("success", success);
+        audit.put("failureReason", success ? "" : routeAuditFailureReason(result));
+        audit.put("userConfirmed", readBoolean(firstPresent(filters.get("userConfirmed"), filters.get("confirmed"), filters.get("confirmationAccepted"))));
+        audit.put("outcome", outcome);
+        audit.put("responseType", firstText(result.get("responseType"), primaryIntent));
+        audit.put("durationMs", Math.max(0L, System.currentTimeMillis() - startedAt));
+        result.put("smartRouteAudit", audit);
+        log.info("smartRouteAudit={}", audit);
+    }
+
+    private List<Map<String, Object>> compactRouteAuditActions(Map<String, Object> actionPlan, String primaryIntent) {
+        List<Map<String, Object>> actions = castRows(actionPlan.get("actions"));
+        if (actions.isEmpty()) {
+            Map<String, Object> fallback = new LinkedHashMap<>();
+            fallback.put("id", "action_1");
+            fallback.put("type", firstText(primaryIntent, "QUERY_SQL"));
+            fallback.put("dependsOn", List.of());
+            return List.of(fallback);
+        }
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Map<String, Object> action : actions) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", firstText(action.get("id")));
+            item.put("type", firstText(action.get("type")));
+            item.put("dependsOn", stringList(action.get("dependsOn")));
+            item.put("confidence", readDouble(action.get("confidence"), 0D));
+            item.put("requiresConfirmation", readBoolean(action.get("requiresConfirmation")));
+            putIfPresent(item, "status", action.get("status"));
+            putIfPresent(item, "message", action.get("message"));
+            result.add(item);
+        }
+        return result;
+    }
+
+    private String routeAuditOutcome(Map<String, Object> result) {
+        List<Map<String, Object>> steps = castRows(result.get("stepResults"));
+        if (!steps.isEmpty()) {
+            long completed = steps.stream().filter(step -> "COMPLETED".equals(text(step.get("status")))).count();
+            boolean failed = steps.stream().anyMatch(step -> "FAILED".equals(text(step.get("status"))));
+            boolean skipped = steps.stream().anyMatch(step -> "SKIPPED".equals(text(step.get("status"))));
+            boolean needsInput = steps.stream().anyMatch(step -> "NEEDS_INPUT".equals(text(step.get("status"))));
+            boolean needsConfirmation = steps.stream().anyMatch(step -> "NEEDS_CONFIRMATION".equals(text(step.get("status"))));
+            if (failed) {
+                return completed > 0 || skipped ? "PARTIAL_FAILED" : "FAILED";
+            }
+            if (needsInput) {
+                return "NEEDS_INPUT";
+            }
+            if (needsConfirmation) {
+                return "NEEDS_CONFIRMATION";
+            }
+            if (skipped) {
+                return "PARTIAL";
+            }
+            return "COMPLETED";
+        }
+        String responseType = text(result.get("responseType")).toUpperCase(Locale.ROOT);
+        if ("CLARIFICATION".equals(responseType) || "CLARIFY".equals(responseType)) {
+            return "NEEDS_INPUT";
+        }
+        if ("0".equals(text(result.get("executionStatus"))) || "FAILED".equals(text(result.get("status")).toUpperCase(Locale.ROOT))) {
+            return "FAILED";
+        }
+        if (readBoolean(result.get("requiresConfirmation"))) {
+            return "NEEDS_CONFIRMATION";
+        }
+        return "COMPLETED";
+    }
+
+    private boolean routeAuditSuccess(String outcome) {
+        String normalized = text(outcome);
+        return !"FAILED".equals(normalized) && !"PARTIAL_FAILED".equals(normalized);
+    }
+
+    private String routeAuditFailureReason(Map<String, Object> result) {
+        for (Map<String, Object> step : castRows(result.get("stepResults"))) {
+            if ("FAILED".equals(text(step.get("status")))) {
+                return firstText(step.get("error"), step.get("message"), "步骤执行失败");
+            }
+        }
+        return firstText(result.get("failureReason"), result.get("error"), result.get("message"), "智能路由执行失败");
+    }
+
+    private String chosenExecutor(String intent) {
+        return switch (text(intent).toUpperCase(Locale.ROOT)) {
+            case "MULTI_STEP" -> "multi-step-orchestrator";
+            case "QUERY_SQL" -> "chat-bi-sql";
+            case "FORECAST", "ADVANCED_FORECAST" -> "advanced-analysis-forecast";
+            case "ALERT_RULE_CREATE", "ALERT_RULE_CREATE_DRAFT", "ALERT_RULE_DRAFT" -> "alert-rule-draft";
+            case "ALERT_RULE_UPDATE", "ALERT_RULE_DISABLE", "ALERT_RULE_ENABLE", "ALERT_RULE_DELETE" -> "alert-rule-governance";
+            case "ALERT_RULE_DETECT" -> "alert-rule-detection";
+            case "ALERT_EVENT_QUERY", "ALERT_EVENT_EXPLAIN" -> "advanced-alert-event";
+            case "ALERT_EVENT_ACK", "ALERT_EVENT_CLOSE", "ALERT_EVENT_REOPEN" -> "advanced-alert-event-lifecycle";
+            case "WHAT_IF", "WHAT_IF_DRAFT" -> "what-if-draft";
+            case "BUSINESS_MODEL_CREATE", "BUSINESS_MODEL_PATCH", "BUSINESS_MODEL_APPLY", "BUSINESS_MODEL_PUBLISH" -> "business-model-agent";
+            case "DASHBOARD_PIN", "DASHBOARD_CREATE" -> "dashboard-service";
+            case "CLARIFY", "CLARIFICATION" -> "clarification";
+            default -> "smart-chat-router";
+        };
     }
 
     private Map<String, Object> buildAdvancedContext(String tableName) {
@@ -1534,15 +2176,25 @@ public class SmartChatService {
     private String normalizeSmartIntent(Object value) {
         String intent = text(value).trim().toUpperCase(Locale.ROOT).replace('-', '_');
         return switch (intent) {
-            case "QUERY", "SQL", "TEXT_TO_SQL" -> "QUERY_SQL";
+            case "QUERY", "SQL", "TEXT_TO_SQL", "QUERY_SQL" -> "QUERY_SQL";
             case "FORECAST", "PREDICTION", "TIME_SERIES_FORECAST" -> "FORECAST";
             case "ALERT", "WARNING", "ALERT_CREATE" -> "ALERT_RULE_CREATE";
+            case "ALERT_EVENT_QUERY", "ALERT_EVENT_SEARCH", "ALERT_QUERY", "ALARM_QUERY" -> "ALERT_EVENT_QUERY";
+            case "ALERT_EVENT_EXPLAIN", "ALERT_EXPLAIN", "ALARM_EXPLAIN" -> "ALERT_EVENT_EXPLAIN";
+            case "ALERT_EVENT_ACK", "ALERT_ACK", "ALARM_ACK", "ALERT_EVENT_CONFIRM" -> "ALERT_EVENT_ACK";
+            case "ALERT_EVENT_CLOSE", "ALERT_CLOSE", "ALARM_CLOSE", "ALERT_EVENT_RESOLVE" -> "ALERT_EVENT_CLOSE";
+            case "ALERT_EVENT_REOPEN", "ALERT_REOPEN", "ALARM_REOPEN", "ALERT_EVENT_OPEN" -> "ALERT_EVENT_REOPEN";
+            case "ALERT_RULE_UPDATE", "ALERT_RULE_EDIT" -> "ALERT_RULE_UPDATE";
+            case "ALERT_RULE_DISABLE", "ALERT_RULE_STOP" -> "ALERT_RULE_DISABLE";
+            case "ALERT_RULE_ENABLE", "ALERT_RULE_REOPEN", "ALERT_RULE_START" -> "ALERT_RULE_ENABLE";
+            case "ALERT_RULE_DETECT", "ALERT_RULE_RUN", "ALERT_RULE_CHECK", "ALERT_RULE_TEST" -> "ALERT_RULE_DETECT";
+            case "ALERT_RULE_DELETE", "ALERT_RULE_REMOVE" -> "ALERT_RULE_DELETE";
             case "WHATIF", "WHAT_IF", "SCENARIO", "SIMULATION" -> "WHAT_IF";
             case "BUSINESS_MODEL_CREATE", "BUSINESS_MODEL_PATCH", "BUSINESS_MODEL_APPLY",
                     "BUSINESS_MODEL_PUBLISH", "DASHBOARD_PIN", "DASHBOARD_CREATE",
                     "CHART_RULE_UPDATE", "FIELD_SEMANTIC_FIX", "FEDERATED_QUERY",
                     "PERMISSION_POLICY_CREATE", "AUDIT_QUERY", "REPORT_GENERATE",
-                    "TASK_STATUS_QUERY", "COLLABORATION_INVITE", "QUERY_SQL" -> intent;
+                    "TASK_STATUS_QUERY", "COLLABORATION_INVITE" -> intent;
             default -> "CLARIFY";
         };
     }
@@ -1550,7 +2202,7 @@ public class SmartChatService {
     private String normalizeActionType(String value) {
         String action = text(value).trim().toUpperCase(Locale.ROOT).replace('-', '_');
         return switch (action) {
-            case "QUERY", "SQL", "TEXT_TO_SQL" -> "QUERY_SQL";
+            case "QUERY", "SQL", "TEXT_TO_SQL", "QUERY_SQL" -> "QUERY_SQL";
             case "FORECAST", "PREDICTION", "TIME_SERIES_FORECAST" -> "FORECAST";
             case "ALERT", "WARNING", "ALERT_RULE_CREATE", "ALERT_CREATE", "ALERT_RULE_DRAFT",
                     "ALERT_RULE_CREATE_DRAFT" -> "ALERT_RULE_CREATE_DRAFT";
@@ -1683,7 +2335,9 @@ public class SmartChatService {
                 plan.confidence(),
                 plan.requiresConfirmation(),
                 plan.reasoning(),
-                plan.fallbackUsed()
+                plan.fallbackUsed(),
+                plan.needClarification(),
+                plan.missingSlots()
         );
     }
 
@@ -2217,15 +2871,33 @@ public class SmartChatService {
 
     private Object inferThreshold(String question) {
         String normalized = text(question).replace(",", "");
-        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("(\\d+(?:\\.\\d+)?)(\\s*)(万|千|k|K)?").matcher(normalized);
+        java.util.regex.Matcher contextualMatcher = java.util.regex.Pattern
+                .compile("(?:阈值|门槛|报警线|预警线|改成|改为|调整为|设置为|设为|变成|降到|升到|提高到|低于|高于|超过|跌破)[^\\d]{0,12}(\\d+(?:\\.\\d+)?)(\\s*)(亿|万|千|k|K)?")
+                .matcher(normalized);
+        if (contextualMatcher.find()) {
+            return parseAmount(contextualMatcher.group(1), contextualMatcher.group(3));
+        }
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("(\\d+(?:\\.\\d+)?)(\\s*)(亿|万|千|k|K)?").matcher(normalized);
         while (matcher.find()) {
-            double value = Double.parseDouble(matcher.group(1));
-            String unit = matcher.group(3);
-            if ("万".equals(unit)) value *= 10000D;
-            else if ("千".equals(unit) || "k".equals(unit) || "K".equals(unit)) value *= 1000D;
-            return value;
+            String prefix = normalized.substring(0, matcher.start());
+            if (prefix.endsWith("预警规则") || prefix.endsWith("报警规则") || prefix.endsWith("告警规则")
+                    || prefix.endsWith("规则") || prefix.endsWith("预警事件") || prefix.endsWith("报警事件")
+                    || prefix.endsWith("告警事件") || prefix.endsWith("事件") || prefix.endsWith("报警")
+                    || prefix.endsWith("告警") || prefix.endsWith("预警") || prefix.endsWith("#")
+                    || prefix.endsWith("ID") || prefix.endsWith("id") || prefix.endsWith("编号")) {
+                continue;
+            }
+            return parseAmount(matcher.group(1), matcher.group(3));
         }
         return null;
+    }
+
+    private double parseAmount(String number, String unit) {
+        double value = Double.parseDouble(number);
+        if ("亿".equals(unit)) value *= 100000000D;
+        else if ("万".equals(unit)) value *= 10000D;
+        else if ("千".equals(unit) || "k".equals(unit) || "K".equals(unit)) value *= 1000D;
+        return value;
     }
 
     private String inferChannel(String question) {
@@ -2247,7 +2919,7 @@ public class SmartChatService {
 
     private boolean isExplicitQueryIntent(String q) {
         return containsAny(q, "排名", "排行", "排行榜", "Top", "top", "明细", "列表", "分布", "占比", "对比", "各省", "各市", "各区域")
-                || (containsAny(q, "看一下", "查看", "查询", "统计") && !containsAny(q, "预测", "预警", "告警", "推演", "模拟"));
+                || (containsAny(q, "看一下", "查看", "查询", "统计") && !containsAny(q, "预测", "预警", "告警", "报警", "警报", "推演", "模拟"));
     }
 
     private boolean isHistoricalTrendQuery(String q) {
@@ -2270,8 +2942,118 @@ public class SmartChatService {
     }
 
     private boolean isAlertIntent(String q, String lower) {
-        return containsAny(q, "预警", "告警", "警报", "提醒", "通知", "低于", "高于", "超过", "跌破", "阈值", "异常")
+        return containsAny(q, "预警", "告警", "报警", "警报", "提醒", "通知", "低于", "高于", "超过", "跌破", "阈值", "异常")
                 || lower.contains("alert") || lower.contains("warning");
+    }
+
+    private String inferAlertLifecycleIntent(String q, String lower) {
+        String text = text(q);
+        boolean ruleDetectAction = containsAny(text, "检测", "手动检测", "立即检测", "执行检测", "跑一下", "跑一次", "触发检测", "重新检测");
+        boolean ruleDetectExecution = ruleDetectAction && (!text.contains("检测周期")
+                || containsAny(text, "手动检测", "立即检测", "执行检测", "跑一下", "跑一次", "触发检测", "重新检测")
+                || text.startsWith("检测"));
+        boolean ruleDetectText = containsAny(text, "规则") && ruleDetectExecution;
+        if (!isAlertIntent(text, lower) && !containsAny(text, "报警", "告警", "警报") && !ruleDetectText) {
+            return "";
+        }
+        boolean ruleText = containsAny(text, "规则", "阈值", "检测周期", "通知渠道", "渠道");
+        boolean createRuleText = containsAny(text, "提醒我", "通知我", "创建", "新建", "新增", "建一个")
+                || (containsAny(text, "低于", "高于", "超过", "跌破") && containsAny(text, "提醒", "通知", "预警", "告警"));
+        boolean eventActionText = containsAny(text, "预警事件", "报警事件", "告警事件", "这个报警", "这条报警", "该报警",
+                "报警", "告警", "警报", "事件");
+        if (ruleText && containsAny(text, "删除", "删掉", "移除")) {
+            return "ALERT_RULE_DELETE";
+        }
+        if (ruleText && containsAny(text, "停用", "禁用", "暂停", "关闭", "关闭规则")) {
+            return "ALERT_RULE_DISABLE";
+        }
+        if (ruleText && containsAny(text, "启用", "开启", "重开", "重新开启", "恢复", "恢复启用")) {
+            return "ALERT_RULE_ENABLE";
+        }
+        if (ruleText && containsAny(text, "修改", "调整", "改成", "改为", "更新", "设置")) {
+            return "ALERT_RULE_UPDATE";
+        }
+        if (ruleText && ruleDetectExecution) {
+            return "ALERT_RULE_DETECT";
+        }
+        if (eventActionText && containsAny(text, "重开", "重新打开", "重新开启", "恢复待处理", "恢复为待处理", "恢复处理")) {
+            return "ALERT_EVENT_REOPEN";
+        }
+        if (eventActionText && containsAny(text, "关闭", "处理完成", "已处理", "解决", "关闭这个报警", "关闭这条报警")) {
+            return "ALERT_EVENT_CLOSE";
+        }
+        if (eventActionText && containsAny(text, "确认", "认领", "ack", "ACK")) {
+            return "ALERT_EVENT_ACK";
+        }
+        if (createRuleText) {
+            return "";
+        }
+        if (containsAny(text, "为什么", "原因", "解释", "怎么触发", "为何触发")) {
+            return "ALERT_EVENT_EXPLAIN";
+        }
+        if (containsAny(text, "最近", "哪些", "列表", "记录", "事件", "已触发", "触发过", "查看", "查询", "报警", "告警", "警报")) {
+            return "ALERT_EVENT_QUERY";
+        }
+        return "";
+    }
+
+    private String inferAlertRuleCreateIntent(String q, String lower) {
+        String text = text(q);
+        if (!isAlertIntent(text, lower)) {
+            return "";
+        }
+        boolean explicitRuleCreate = containsAny(text, "提醒我", "通知我", "帮我提醒", "邮件提醒", "钉钉提醒")
+                || (containsAny(text, "创建", "新建", "新增", "建一个", "配置", "设置")
+                && containsAny(text, "预警", "告警", "报警", "警报", "规则"))
+                || (containsAny(text, "低于", "高于", "超过", "跌破", "阈值")
+                && containsAny(text, "提醒", "通知", "预警", "告警", "报警", "警报"));
+        return explicitRuleCreate ? "ALERT_RULE_CREATE" : "";
+    }
+
+    private boolean alertIntentRequiresConfirmation(String intent) {
+        return switch (text(intent)) {
+            case "ALERT_RULE_DELETE" -> true;
+            default -> false;
+        };
+    }
+
+    private String alertLifecycleReason(String intent) {
+        return switch (text(intent)) {
+            case "ALERT_EVENT_QUERY" -> "识别到已触发预警事件查询语义";
+            case "ALERT_EVENT_EXPLAIN" -> "识别到预警事件原因解释语义";
+            case "ALERT_EVENT_ACK" -> "识别到预警事件确认语义，执行前需要确认事件 ID";
+            case "ALERT_EVENT_CLOSE" -> "识别到预警事件关闭语义，执行前需要确认事件 ID";
+            case "ALERT_EVENT_REOPEN" -> "识别到预警事件重开语义，执行前需要确认事件 ID";
+            case "ALERT_RULE_UPDATE" -> "识别到预警规则修改语义，直接执行规则参数更新";
+            case "ALERT_RULE_DISABLE" -> "识别到预警规则停用语义，直接停用指定规则";
+            case "ALERT_RULE_ENABLE" -> "识别到预警规则启用语义，直接启用指定规则";
+            case "ALERT_RULE_DELETE" -> "识别到预警规则删除语义，执行前需要确认规则 ID";
+            case "ALERT_RULE_DETECT" -> "识别到预警规则手动检测语义，直接执行一次规则检测";
+            default -> "识别到预警相关语义";
+        };
+    }
+
+    private Map<String, Object> inferAlertLifecycleSlots(String question, String tableName) {
+        Map<String, Object> slots = new LinkedHashMap<>();
+        if (!text(tableName).isBlank()) {
+            slots.put("tableName", tableName);
+        }
+        Long eventId = alertEventId(question, Map.of());
+        if (eventId != null && eventId > 0) {
+            slots.put("eventId", eventId);
+        }
+        Long ruleId = alertRuleId(question, Map.of());
+        if (ruleId != null && ruleId > 0) {
+            slots.put("ruleId", ruleId);
+        }
+        Object threshold = inferThreshold(question);
+        if (threshold != null) {
+            slots.put("threshold", threshold);
+        }
+        if (containsAny(question, "低于", "高于", "超过", "跌破", "异常", "波动")) {
+            slots.put("operator", inferOperator(question));
+        }
+        return slots;
     }
 
     private boolean isDashboardIntent(String q) {
@@ -2365,6 +3147,26 @@ public class SmartChatService {
         }
     }
 
+    private Map<String, Object> withModelContext(Map<String, Object> context, Map<String, Object> requestContext) {
+        Map<String, Object> merged = new LinkedHashMap<>(context == null ? Map.of() : context);
+        if (requestContext == null || requestContext.isEmpty()) {
+            return merged;
+        }
+        for (String key : List.of("modelId", "modelName", "modelCategory", "temperature", "timeoutSeconds")) {
+            Object value = requestContext.get(key);
+            if (value != null && !text(value).isBlank()) {
+                merged.put(key, value);
+            }
+        }
+        return merged;
+    }
+
+    private void putIfMeaningful(Map<String, Object> target, String key, Object value) {
+        if (value != null && !text(value).isBlank()) {
+            target.put(key, value);
+        }
+    }
+
     private Map<String, Object> metadataOf(Object... keyValues) {
         if (keyValues == null || keyValues.length < 2) {
             return Map.of();
@@ -2385,13 +3187,24 @@ public class SmartChatService {
                                    List<String> dependsOn,
                                    String question,
                                    Map<String, Object> slots,
-                                   boolean requiresConfirmation) {
+                                   boolean requiresConfirmation,
+                                   double confidence) {
+        private SmartActionStep(String id,
+                                String type,
+                                List<String> dependsOn,
+                                String question,
+                                Map<String, Object> slots,
+                                boolean requiresConfirmation) {
+            this(id, type, dependsOn, question, slots, requiresConfirmation, 0D);
+        }
+
         private SmartActionStep {
             id = textStatic(id).isBlank() ? type + "_1" : id;
             type = textStatic(type);
             dependsOn = dependsOn == null ? List.of() : List.copyOf(dependsOn);
             question = textStatic(question);
             slots = copyNonNullMap(slots);
+            confidence = normalizeConfidenceStatic(confidence, defaultActionConfidenceStatic(type));
         }
 
         private Map<String, Object> toMap(Map<String, Object> stepResult) {
@@ -2401,6 +3214,7 @@ public class SmartChatService {
             map.put("dependsOn", dependsOn);
             map.put("question", question);
             map.put("slots", slots);
+            map.put("confidence", confidence);
             map.put("requiresConfirmation", requiresConfirmation);
             if (stepResult != null && !stepResult.isEmpty()) {
                 map.put("status", stepResult.get("status"));
@@ -2416,16 +3230,33 @@ public class SmartChatService {
                                    double confidence,
                                    boolean requiresConfirmation,
                                    String reasoning,
-                                   boolean fallbackUsed) {
+                                   boolean fallbackUsed,
+                                   boolean needClarification,
+                                   List<String> missingSlots) {
+        private SmartActionPlan(String primaryIntent,
+                                List<SmartActionStep> actions,
+                                Map<String, Object> slots,
+                                double confidence,
+                                boolean requiresConfirmation,
+                                String reasoning,
+                                boolean fallbackUsed) {
+            this(primaryIntent, actions, slots, confidence, requiresConfirmation, reasoning,
+                    fallbackUsed, false, List.of());
+        }
+
         private static SmartActionPlan empty() {
-            return new SmartActionPlan("", List.of(), Map.of(), 0D, false, "", false);
+            return new SmartActionPlan("", List.of(), Map.of(), 0D, false, "", false, false, List.of());
         }
 
         private SmartActionPlan {
             primaryIntent = textStatic(primaryIntent);
             actions = actions == null ? List.of() : List.copyOf(actions);
             slots = copyNonNullMap(slots);
+            confidence = normalizeConfidenceStatic(confidence, actions.isEmpty() ? 0D : 0.78D);
             reasoning = textStatic(reasoning);
+            missingSlots = missingSlots == null ? List.of() : List.copyOf(missingSlots);
+            needClarification = needClarification || !missingSlots.isEmpty();
+            requiresConfirmation = requiresConfirmation || needClarification;
         }
 
         private boolean isMultiStep() {
@@ -2442,7 +3273,9 @@ public class SmartChatService {
             Map<String, Object> map = new LinkedHashMap<>();
             map.put("primaryIntent", primaryIntent);
             map.put("confidence", confidence);
+            map.put("needClarification", needClarification);
             map.put("requiresConfirmation", requiresConfirmation);
+            map.put("missingSlots", missingSlots);
             map.put("reasoning", reasoning);
             map.put("slots", slots);
             map.put("actions", actions.stream()
@@ -2460,6 +3293,27 @@ public class SmartChatService {
         if (value instanceof Boolean bool) return bool;
         String text = textStatic(value).toLowerCase(Locale.ROOT);
         return "true".equals(text) || "1".equals(text) || "yes".equals(text);
+    }
+
+    private static double normalizeConfidenceStatic(double value, double fallback) {
+        double normalized = value > 0D ? value : fallback;
+        if (normalized <= 0D) {
+            return 0D;
+        }
+        return Math.max(0D, Math.min(1D, Math.round(normalized * 100.0D) / 100.0D));
+    }
+
+    private static double defaultActionConfidenceStatic(String type) {
+        return switch (textStatic(type).toUpperCase(Locale.ROOT)) {
+            case "QUERY_SQL" -> 0.82D;
+            case "FORECAST" -> 0.78D;
+            case "ALERT_RULE_CREATE_DRAFT" -> 0.74D;
+            case "ALERT_EVENT_QUERY", "ALERT_EVENT_EXPLAIN" -> 0.76D;
+            case "ALERT_EVENT_ACK", "ALERT_EVENT_CLOSE", "ALERT_EVENT_REOPEN",
+                    "ALERT_RULE_UPDATE", "ALERT_RULE_DISABLE", "ALERT_RULE_ENABLE", "ALERT_RULE_DELETE",
+                    "ALERT_RULE_DETECT" -> 0.72D;
+            default -> 0.7D;
+        };
     }
 
     private record ForecastRange(int value, String unit) {
@@ -2509,7 +3363,12 @@ public class SmartChatService {
                 return this;
             }
             Map<String, Object> merged = new LinkedHashMap<>(slots == null ? Map.of() : slots);
-            for (String key : List.of("selectedTableName", "activeBusinessModelId", "lastCreatedBusinessModelId", "lastAppliedBusinessModelId")) {
+            for (String key : List.of(
+                    "selectedTableName", "activeBusinessModelId", "lastCreatedBusinessModelId", "lastAppliedBusinessModelId",
+                    "modelId", "modelName", "modelCategory",
+                    "userConfirmed", "confirmed", "confirmationAccepted",
+                    "eventId", "alertEventId", "currentAlertEventId", "lastAlertEventId",
+                    "ruleId", "alertRuleId", "currentAlertRuleId", "lastAlertRuleId")) {
                 Object value = context.get(key);
                 if (value != null && !Objects.toString(value, "").trim().isBlank()) {
                     merged.put(key, value);

@@ -2,6 +2,7 @@ package com.insightspark.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.insightspark.common.ApiResponse;
+import com.insightspark.service.ChatBiService;
 import com.insightspark.service.AdminChatQueryService;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -23,6 +24,7 @@ import java.io.PrintWriter;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 @RestController
 @RequestMapping("/api/admin/chat-query")
@@ -126,18 +128,28 @@ public class AdminChatQueryController {
         response.setHeader("X-Accel-Buffering", "no");
         PrintWriter writer = response.getWriter();
         try {
-            writeSse(writer, "SESSION_CREATED", Map.of("sessionId", sessionId));
-            pause();
-            writeSse(writer, "QUESTION_PARSED", Map.of("question", question == null ? "" : question));
-            pause();
-            writeSse(writer, "KG_MATCHING", Map.of("tableName", tableName == null ? "" : tableName));
-            pause();
-            writeSse(writer, "MODEL_REASONING", Map.of("message", "正在复用 Text-to-SQL 与 GraphRAG 编排链路"));
-            Map<String, Object> result = adminChatQueryService.execute(Map.of("sessionId", sessionId));
-            writeSse(writer, "SQL_GENERATED", Map.of("sql", result.get("finalSql")));
-            writeSse(writer, "FINISHED", result);
+            writeThinking(writer, "SESSION_CREATED", "测试会话创建",
+                    "已创建管理员测试会话，正在进入与用户端一致的查询链路",
+                    Map.of("sessionId", sessionId));
+            writeThinking(writer, "QUESTION_PARSED", "自然语言解析",
+                    question == null || question.isBlank()
+                            ? "正在读取测试指令和数据源上下文"
+                            : "已接收测试指令：" + question,
+                    Map.of("question", question == null ? "" : question));
+            ChatBiService.ProgressListener progressListener = (eventType, title, detail, metadata) -> {
+                try {
+                    writeThinking(writer, eventType, title, detail, metadata);
+                } catch (IOException e) {
+                    throw new IllegalStateException(e);
+                }
+            };
+            Map<String, Object> result = adminChatQueryService.execute(
+                    Map.of("sessionId", sessionId),
+                    Map.of("progressListener", progressListener)
+            );
+            writeSse(writer, "result", result);
         } catch (Exception e) {
-            writeSse(writer, "ERROR", Map.of("message", e.getMessage()));
+            writeSse(writer, "error", Map.of("message", rootMessage(e)));
         }
     }
 
@@ -172,11 +184,26 @@ public class AdminChatQueryController {
         }
     }
 
-    private void pause() {
-        try {
-            Thread.sleep(160);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+    private void writeThinking(PrintWriter writer,
+                               String eventType,
+                               String title,
+                               String detail,
+                               Map<String, Object> metadata) throws IOException {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("eventType", Objects.toString(eventType, "STEP"));
+        payload.put("title", Objects.toString(title, "处理中"));
+        payload.put("detail", Objects.toString(detail, ""));
+        payload.put("metadata", metadata == null ? Map.of() : metadata);
+        payload.put("ts", System.currentTimeMillis());
+        writeSse(writer, "thinking", payload);
+    }
+
+    private String rootMessage(Exception e) {
+        Throwable current = e;
+        while (current.getCause() != null) {
+            current = current.getCause();
         }
+        String message = current.getMessage();
+        return message == null || message.isBlank() ? current.getClass().getSimpleName() : message;
     }
 }

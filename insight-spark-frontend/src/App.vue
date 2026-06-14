@@ -179,6 +179,7 @@ import {
   hasForecastSeriesRows,
   normalizeInteractiveDataZoom
 } from './utils/chartOptionFromSnapshot'
+import { isAlertOperationQuestion } from './utils/alertOperationQuestion'
 
 const API_BASE = 'http://localhost:8080'
 const LAST_SELECTED_TABLE_KEY = 'insight:lastSelectedTableName'
@@ -969,6 +970,38 @@ const normalizeSensitiveFields = (value) => {
   return text.split(/[,，、;；|]/).map(item => item.trim()).filter(Boolean)
 }
 
+const normalizeAdvancedAnalysisHistoryType = (type) => {
+  const value = String(type || '').trim()
+  const lower = value.replace(/[-_\s]/g, '').toLowerCase()
+  if (lower.includes('whatif')) return 'whatIf'
+  if (lower.includes('alert') || lower.includes('warning') || lower.includes('prewarning')) return 'alert'
+  if (lower.includes('forecast') || lower.includes('predict')) return 'forecast'
+  return ''
+}
+
+const hasAlertHistoryPayload = (snapshot = {}, item = {}) => {
+  if (!snapshot || typeof snapshot !== 'object') return false
+  const type = normalizeAdvancedAnalysisHistoryType(
+    item?.advancedAnalysisType
+      || snapshot?.advancedAnalysisType
+      || snapshot?.type
+      || snapshot?.responseType
+      || item?.artifactType
+      || item?.intentType
+      || item?.chartType
+      || snapshot?.chartType
+  )
+  if (type === 'alert') return true
+  return Boolean(
+    snapshot?.alertMeta
+      || snapshot?.alertRule
+      || snapshot?.alertRuleCreated
+      || snapshot?.alertRuleDraft
+      || snapshot?.ruleId
+      || snapshot?.eventId
+  )
+}
+
 const normalizeChatHistoryItem = (item) => {
   const rawSnapshot = parseMaybeJson(item?.chartSnapshot)
   const snapshot = rawSnapshot && typeof rawSnapshot === 'object' ? rawSnapshot : {}
@@ -1017,6 +1050,16 @@ const normalizeChatHistoryItem = (item) => {
     || snapshot?.chartType
     || ''
   ).trim()
+  const advancedAnalysisType = normalizeAdvancedAnalysisHistoryType(
+    item?.advancedAnalysisType
+      || snapshot?.advancedAnalysisType
+      || snapshot?.responseType
+      || snapshot?.type
+      || item?.artifactType
+      || item?.intentType
+      || chartType
+  )
+  const alertHistory = advancedAnalysisType === 'alert' || hasAlertHistoryPayload(snapshot, item)
   const chartData = Array.isArray(snapshot?.data) ? snapshot.data : []
   const graphContext = Array.isArray(snapshot?.graphContext) ? snapshot.graphContext : []
   const semanticEvidence = Array.isArray(snapshot?.semanticEvidence) ? snapshot.semanticEvidence : []
@@ -1025,11 +1068,20 @@ const normalizeChatHistoryItem = (item) => {
   const rawExecutionStatus = Number(item?.executionStatus ?? snapshot?.executionStatus)
   const rawExecutionTimeMs = Number(item?.executionTimeMs ?? snapshot?.executionTimeMs)
   const rawCacheFlag = item?.isHitCache ?? snapshot?.isHitCache
+  const executionStatus = Number.isFinite(rawExecutionStatus)
+    ? (alertHistory && rawExecutionStatus === 0 ? 1 : rawExecutionStatus)
+    : (alertHistory ? 1 : null)
   return {
     id: String(item?.id || `${tableName}::${question}`),
     question,
     tableName,
-    chartType,
+    chartType: alertHistory ? 'alert' : chartType,
+    advancedAnalysisType: alertHistory ? 'alert' : advancedAnalysisType,
+    isAlertHistory: alertHistory,
+    alertMeta: snapshot?.alertMeta && typeof snapshot.alertMeta === 'object' ? snapshot.alertMeta : {},
+    alertRule: snapshot?.alertRule && typeof snapshot.alertRule === 'object' ? snapshot.alertRule : {},
+    alertRuleCreated: snapshot?.alertRuleCreated && typeof snapshot.alertRuleCreated === 'object' ? snapshot.alertRuleCreated : null,
+    alertRuleDraft: snapshot?.alertRuleDraft && typeof snapshot.alertRuleDraft === 'object' ? snapshot.alertRuleDraft : null,
     riskLevel: String(item?.riskLevel || snapshot?.riskLevel || 'SAFE').trim().toUpperCase(),
     riskReason: String(item?.riskReason || item?.auditInfo || snapshot?.riskReason || '').trim(),
     sensitiveFields,
@@ -1057,12 +1109,12 @@ const normalizeChatHistoryItem = (item) => {
       : (Array.isArray(snapshot?.reasoningProcess)
         ? snapshot.reasoningProcess.map(step => String(step || '').trim()).filter(Boolean)
         : []),
-    executionStatus: Number.isFinite(rawExecutionStatus) ? rawExecutionStatus : null,
-    executionTimeMs: Number.isFinite(rawExecutionTimeMs) && rawExecutionTimeMs >= 0 ? rawExecutionTimeMs : null,
+    executionStatus,
+    executionTimeMs: alertHistory ? null : (Number.isFinite(rawExecutionTimeMs) && rawExecutionTimeMs >= 0 ? rawExecutionTimeMs : null),
     isHitCache: rawCacheFlag === true || Number(rawCacheFlag) === 1 || String(rawCacheFlag || '').trim().toLowerCase() === 'true',
     hasChartSnapshot: chartData.length > 0,
     chartDataCount: chartData.length,
-    snapshotStatus: chartData.length > 0 ? 'ready' : 'unknown',
+    snapshotStatus: alertHistory ? 'alert' : (chartData.length > 0 ? 'ready' : 'unknown'),
     isPinned: Boolean(item?.isPinned),
     pinnedDashboardNames: Array.isArray(item?.pinnedDashboardNames)
       ? item.pinnedDashboardNames.map(name => String(name || '').trim()).filter(Boolean)
@@ -1293,17 +1345,30 @@ const buildAlertRuleCreatedFromTurn = (turn, chartArtifact, advancedAnalysis) =>
   return null
 }
 
+const buildMultiStepPayloadFromTurn = (chartArtifact, advancedArtifact = null) => {
+  const payload = {}
+  const snapshots = [chartArtifact, advancedArtifact]
+    .map(normalizeChartArtifactSnapshot)
+    .filter(snapshot => snapshot && typeof snapshot === 'object')
+  snapshots.forEach(snapshot => {
+    if (!payload.actionPlan && snapshot.actionPlan && typeof snapshot.actionPlan === 'object') {
+      payload.actionPlan = snapshot.actionPlan
+    }
+    if (!payload.stepResults && Array.isArray(snapshot.stepResults)) {
+      payload.stepResults = snapshot.stepResults
+    }
+    if (!payload.multiStepSummary && snapshot.multiStepSummary && typeof snapshot.multiStepSummary === 'object') {
+      payload.multiStepSummary = snapshot.multiStepSummary
+    }
+    if (payload.requiresConfirmation === undefined && snapshot.requiresConfirmation !== undefined) {
+      payload.requiresConfirmation = Boolean(snapshot.requiresConfirmation)
+    }
+  })
+  return payload
+}
+
 const isAdvancedAnalysisArtifact = (artifact) =>
   String(artifact?.artifactType || '').toUpperCase().startsWith('ADVANCED_')
-
-const normalizeAdvancedAnalysisHistoryType = (type) => {
-  const value = String(type || '').trim()
-  const lower = value.toLowerCase()
-  if (lower.includes('what')) return 'whatIf'
-  if (lower.includes('alert')) return 'alert'
-  if (lower.includes('forecast') || lower.includes('predict')) return 'forecast'
-  return ''
-}
 
 const hasExplicitAdvancedAnalysisSnapshot = (snapshot, artifact = null) => {
   if (!snapshot || typeof snapshot !== 'object') return false
@@ -1490,6 +1555,21 @@ const fetchHistoryChartSnapshot = async (historyId) => {
 
 const ensureHistoryEntrySnapshot = async (entry) => {
   if (!entry?.id) return entry
+  if (entry?.isAlertHistory || String(entry?.advancedAnalysisType || '').trim() === 'alert' || String(entry?.chartType || '').trim() === 'alert') {
+    const alertEntry = {
+      ...entry,
+      isAlertHistory: true,
+      advancedAnalysisType: 'alert',
+      chartType: 'alert',
+      hasChartSnapshot: false,
+      chartDataCount: 0,
+      snapshotStatus: 'alert',
+      executionStatus: Number(entry?.executionStatus) === 0 ? 1 : (Number.isFinite(Number(entry?.executionStatus)) ? Number(entry.executionStatus) : 1),
+      executionTimeMs: null
+    }
+    updateRecentChatHistoryEntry(entry.id, alertEntry)
+    return alertEntry
+  }
   const localSnapshot = entry?.chartSnapshot && typeof entry.chartSnapshot === 'object' ? entry.chartSnapshot : {}
   if (Array.isArray(localSnapshot.data) && localSnapshot.data.length) {
     const readyEntry = {
@@ -1747,6 +1827,9 @@ const selectChatSession = async (sessionId) => {
       const alertRuleDraft = role === 'system' && !alertRuleCreated
         ? buildAlertRuleDraftFromTurn(chartArtifact)
         : null
+      const multiStepPayload = role === 'system'
+        ? buildMultiStepPayloadFromTurn(chartArtifact, advancedArtifact)
+        : {}
       if (analysisSnapshot) {
         restoredAnalysis = analysisSnapshot
       }
@@ -1763,6 +1846,7 @@ const selectChatSession = async (sessionId) => {
         advancedAnalysis,
         alertRuleDraft,
         alertRuleCreated,
+        ...multiStepPayload,
         clickableChart: Boolean(analysisSnapshot),
         sourceQuestion: analysisSnapshot?.sourceQuestion || advancedAnalysis?.sourceQuestion || '',
         thinkingLogs: restoreThinkingLogsFromTurn(turn, chartArtifact, advancedArtifact, advancedAnalysis),
@@ -4132,7 +4216,8 @@ const handleBusinessModelAgentQuestion = async ({ question, tableName, semanticD
     selectedTableName: selectedTableName.value,
     activeBusinessModelId: activeBusinessModelId.value,
     lastCreatedBusinessModelId: lastCreatedBusinessModelId.value,
-    lastAppliedBusinessModelId: lastAppliedBusinessModelId.value
+    lastAppliedBusinessModelId: lastAppliedBusinessModelId.value,
+    ...chatModelPayload.value
   }
   if (semanticDraft) {
     payload.requirement = semanticDraft.requirement
@@ -4161,6 +4246,10 @@ const streamBusinessModelAgentQuestion = async ({ question, tableName, onThinkin
     lastCreatedBusinessModelId: lastCreatedBusinessModelId.value == null ? '' : String(lastCreatedBusinessModelId.value),
     lastAppliedBusinessModelId: lastAppliedBusinessModelId.value == null ? '' : String(lastAppliedBusinessModelId.value)
   })
+  const selectedModelPayload = chatModelPayload.value
+  if (selectedModelPayload.modelId) params.set('modelId', selectedModelPayload.modelId)
+  if (selectedModelPayload.modelName) params.set('modelName', selectedModelPayload.modelName)
+  if (selectedModelPayload.modelCategory) params.set('modelCategory', selectedModelPayload.modelCategory)
   const response = await fetch(`${API_BASE}/api/chat/business-model-agent-stream?${params.toString()}`, {
     method: 'GET',
     headers: {
@@ -4807,6 +4896,48 @@ const stopQuestionGeneration = () => {
   isStreaming.value = false
 }
 
+const isAlertEventResponse = (payload = {}) => {
+  const type = String(payload?.responseType || payload?.smartIntent || payload?.intent || '').trim().toUpperCase()
+  return ['ALERT_EVENT_QUERY', 'ALERT_EVENT_EXPLAIN', 'ALERT_EVENT_ACK', 'ALERT_EVENT_CLOSE'].includes(type)
+}
+
+const firstNonBlank = (...values) => {
+  for (const value of values) {
+    const text = String(value ?? '').trim()
+    if (text) return text
+  }
+  return ''
+}
+
+const normalizeAlertEventRows = (payload = {}) => {
+  if (!isAlertEventResponse(payload)) return []
+  const source = Array.isArray(payload?.data) && payload.data.length
+    ? payload.data
+    : (Array.isArray(payload?.alertEvents) && payload.alertEvents.length
+      ? payload.alertEvents
+      : (payload?.alertEvent ? [payload.alertEvent] : []))
+  return source
+    .filter(row => row && typeof row === 'object')
+    .map(row => ({
+      ...row,
+      id: firstNonBlank(row.id, row.eventId, row.alertEventId),
+      ruleId: firstNonBlank(row.ruleId, row.alertRuleId),
+      ruleName: firstNonBlank(row.ruleName, row.ruleTitle, row.name, row.title, row.rule?.ruleName, row.alertRule?.ruleName),
+      status: firstNonBlank(row.status, 'OPEN'),
+      bucketName: firstNonBlank(row.bucketName, row.bucket, row.period),
+      createdAt: firstNonBlank(row.createdAt, row.triggeredAt, row.statusUpdatedAt)
+    }))
+    .filter(row => row.id || row.ruleName || row.ruleId)
+}
+
+const alertEventTableColumns = [
+  { prop: 'id', label: 'ID' },
+  { prop: 'ruleName', label: '规则名' },
+  { prop: 'status', label: '状态' },
+  { prop: 'bucketName', label: '触发周期' },
+  { prop: 'createdAt', label: '触发时间' }
+]
+
 const sendQuestion = async (options = {}) => {
   const requestId = activeChatRequestId.value + 1
   activeChatRequestId.value = requestId
@@ -4817,9 +4948,10 @@ const sendQuestion = async (options = {}) => {
   const isRegenerate = Boolean(options?.regenerate)
   const branchParentTurnId = String(options?.parentTurnId || activeBranchParentTurnId.value || '').trim()
   const selectedModelPayload = chatModelPayload.value
+  const alertOperationIntent = isAlertOperationQuestion(userQuestion) && !isRegenerate
 
   if (!userQuestion) return
-  if (!queryTableName && !shouldUseBusinessModelAgent(userQuestion)) {
+  if (!queryTableName && !shouldUseBusinessModelAgent(userQuestion) && !alertOperationIntent) {
     ElMessage.warning('请先选择数据表再发起分析')
     return
   }
@@ -4971,16 +5103,24 @@ const sendQuestion = async (options = {}) => {
     const resultThinkingLogs = normalizeThinkingLogs(data?.thinkingLogs || data?.reasoningReplaySteps || [])
     const compactLogs = (resultThinkingLogs.length ? resultThinkingLogs : thinkingLogs).slice(0, CHAT_THINKING_LOG_LIMIT)
     const fieldBindingResults = normalizeFieldBindingResults(data?.fieldBindingResults)
+    const alertEventRows = normalizeAlertEventRows(data)
+    const isAlertEventTable = alertEventRows.length > 0
+    const normalizedData = isAlertEventTable ? alertEventRows : (Array.isArray(data?.data) ? data.data : [])
+    const effectiveChartType = isAlertEventTable ? 'table' : data.chartType
     const analysisSnapshot = {
       ...data,
-      recommendedChartType: data.chartType,
+      data: normalizedData,
+      chartType: effectiveChartType,
+      recommendedChartType: effectiveChartType,
       sourceQuestion: userQuestion,
       sourceSql: data.sql,
       sourceTableName,
-      parentTurnId: branchParentTurnId || null
+      parentTurnId: branchParentTurnId || null,
+      tableRows: isAlertEventTable ? alertEventRows : data?.tableRows,
+      tableColumns: isAlertEventTable ? alertEventTableColumns : data?.tableColumns
     }
     lastAnalysis.value = analysisSnapshot
-    currentChartType.value = data.chartType
+    currentChartType.value = effectiveChartType
     applyAnalysisSortMode(analysisSnapshot, 'name')
     updateStreamMessage({
       content: `${data.message}${fallbackTag}`,
@@ -5004,8 +5144,10 @@ const sendQuestion = async (options = {}) => {
       stepResults: Array.isArray(data?.stepResults) ? data.stepResults : [],
       multiStepSummary: data?.multiStepSummary || null,
       alertRuleDraft: data?.alertRuleDraft || null,
-      analysisSnapshot: Array.isArray(data?.data) && data.data.length ? analysisSnapshot : null,
-      clickableChart: Array.isArray(data?.data) && data.data.length
+      alertEventRows,
+      alertEventSummary: data?.alertEventSummary || null,
+      analysisSnapshot: normalizedData.length ? analysisSnapshot : null,
+      clickableChart: normalizedData.length > 0
     })
 
     nextTick(() => {
@@ -5013,8 +5155,12 @@ const sendQuestion = async (options = {}) => {
       if (chatDom) chatDom.scrollTop = chatDom.scrollHeight
     })
 
-    if (data.data?.length) {
-      renderChart(data.data, data.chartType)
+    if (normalizedData.length) {
+      if (effectiveChartType === 'table') {
+        ensureChatChartInstance()?.clear()
+      } else {
+        renderChart(normalizedData, effectiveChartType)
+      }
     } else {
       ensureChatChartInstance()?.clear()
       ElMessage.warning('查询成功，但没有符合条件的数据')

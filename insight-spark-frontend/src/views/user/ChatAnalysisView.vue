@@ -342,6 +342,107 @@
                       </div>
                       <el-tag size="small" type="success" effect="light">已保存</el-tag>
                     </div>
+                    <div v-if="alertEventRowsForMessage(msg).length" class="alert-event-table-card">
+                      <div class="alert-event-table-card__header">
+                        <div>
+                          <div class="alert-event-table-card__eyebrow">预警事件</div>
+                          <div class="alert-event-table-card__title">最近触发的报警记录</div>
+                        </div>
+                        <el-tag size="small" type="warning" effect="light">
+                          {{ alertEventRowsForMessage(msg).length }} 条
+                        </el-tag>
+                      </div>
+                      <el-table
+                          class="alert-event-table"
+                          :data="visibleAlertEventRows(msg)"
+                          size="small"
+                          max-height="260"
+                          border
+                      >
+                        <el-table-column prop="id" label="ID" width="86" />
+                        <el-table-column label="规则名" min-width="170">
+                          <template #default="{ row }">
+                            <span class="alert-event-table__rule">{{ alertEventRuleName(row) }}</span>
+                          </template>
+                        </el-table-column>
+                        <el-table-column label="状态" width="84">
+                          <template #default="{ row }">
+                            <el-tag size="small" :type="alertEventStatusTagType(row.status)" effect="light">
+                              {{ alertEventStatusLabel(row.status) }}
+                            </el-tag>
+                          </template>
+                        </el-table-column>
+                        <el-table-column label="触发时间" min-width="132">
+                          <template #default="{ row }">
+                            {{ row.createdAt || row.bucketName || '-' }}
+                          </template>
+                        </el-table-column>
+                        <el-table-column label="快照" width="96" fixed="right">
+                          <template #default="{ row }">
+                            <el-button
+                                class="alert-event-table__snapshot-btn"
+                                size="small"
+                                type="primary"
+                                link
+                                @click="openAlertEventSnapshot(row, msg)"
+                            >
+                              <el-icon><View /></el-icon>
+                              查看
+                            </el-button>
+                          </template>
+                        </el-table-column>
+                      </el-table>
+                      <div v-if="alertEventRowsForMessage(msg).length > 10" class="alert-event-table-card__footer">
+                        已显示最近 10 条，可使用表格中的 ID 继续追问触发原因或处理状态。
+                      </div>
+                    </div>
+                    <div v-if="hasMultiStepPlan(msg)" class="multi-step-card">
+                      <div class="multi-step-card__header">
+                        <div>
+                          <div class="multi-step-card__eyebrow">多步骤任务编排</div>
+                          <div class="multi-step-card__title">{{ multiStepActionChain(msg) }}</div>
+                        </div>
+                        <el-tag size="small" :type="multiStepSummaryTagType(msg)" effect="light">
+                          {{ multiStepSummaryLabel(msg) }}
+                        </el-tag>
+                      </div>
+                      <div v-if="multiStepMissingSlots(msg).length" class="multi-step-card__clarify">
+                        需要补充：{{ multiStepMissingSlots(msg).join('、') }}
+                      </div>
+                      <div class="multi-step-card__summary">
+                        <span>共 {{ multiStepSummaryValue(msg, 'total') }} 步</span>
+                        <span>完成 {{ multiStepSummaryValue(msg, 'completed') }}</span>
+                        <span v-if="multiStepSummaryValue(msg, 'needsConfirmation')">待确认 {{ multiStepSummaryValue(msg, 'needsConfirmation') }}</span>
+                        <span v-if="multiStepSummaryValue(msg, 'failed')">失败 {{ multiStepSummaryValue(msg, 'failed') }}</span>
+                        <span v-if="multiStepSummaryValue(msg, 'skipped')">跳过 {{ multiStepSummaryValue(msg, 'skipped') }}</span>
+                      </div>
+                      <div class="multi-step-card__steps">
+                        <div
+                          v-for="(step, stepIndex) in normalizedMultiStepActions(msg)"
+                          :key="step.id || `${index}-multi-step-${stepIndex}`"
+                          class="multi-step-card__step"
+                          :class="`multi-step-card__step--${multiStepStatusClass(step.status)}`"
+                        >
+                          <div class="multi-step-card__step-index">{{ stepIndex + 1 }}</div>
+                          <div class="multi-step-card__step-main">
+                            <div class="multi-step-card__step-head">
+                              <strong>{{ multiStepActionTypeLabel(step.type) }}</strong>
+                              <span v-if="formatMultiStepConfidence(step.confidence)" class="multi-step-card__confidence">
+                                置信度 {{ formatMultiStepConfidence(step.confidence) }}
+                              </span>
+                              <el-tag size="small" :type="multiStepStatusTagType(step.status)" effect="light">
+                                {{ multiStepStatusLabel(step.status) }}
+                              </el-tag>
+                            </div>
+                            <div v-if="step.question" class="multi-step-card__question">{{ step.question }}</div>
+                            <div v-if="step.dependsOn?.length" class="multi-step-card__dependency">
+                              依赖步骤：{{ step.dependsOn.join('、') }}
+                            </div>
+                            <div v-if="step.message" class="multi-step-card__message">{{ step.message }}</div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
                     <details v-if="msg.thinkingLogs?.length" class="thinking-details" :open="msg.thinkingCollapsed === false">
                       <summary>查看思考过程（{{ msg.thinkingLogs.length }}步）</summary>
                       <ol class="thinking-list">
@@ -1010,6 +1111,7 @@
                     <el-option label="折线图" value="line" />
                     <el-option label="饼图" value="pie" />
                     <el-option label="表格" value="table" />
+                    <el-option label="智能预警" value="alert" />
                   </el-select>
                   <el-select
                       v-model="recentChatQueryRiskLevel"
@@ -1103,7 +1205,7 @@
                       <span class="history-card__meta-item">{{ entry.tableName || '未指定数据源' }}</span>
                       <span class="history-card__meta-item">{{ historyChartTypeLabel(entry.chartType) }}</span>
                       <span class="history-card__meta-item">{{ historyExecutionStatusLabel(entry) }}</span>
-                      <span class="history-card__meta-item">{{ formatHistoryExecutionTime(entry.executionTimeMs) }}</span>
+                      <span class="history-card__meta-item">{{ formatHistoryExecutionTime(entry.executionTimeMs, entry) }}</span>
                       <span class="history-card__meta-item">{{ formatChatHistoryTime(entry.createdAt) }}</span>
                     </div>
                     <div class="history-card__status">
@@ -1166,11 +1268,11 @@
                         </div>
                         <div class="history-detail__status-item">
                           <span class="history-detail__status-label">执行耗时</span>
-                          <span class="history-detail__status-value">{{ formatHistoryExecutionTime(selectedHistoryEntry.executionTimeMs) }}</span>
+                          <span class="history-detail__status-value">{{ formatHistoryExecutionTime(selectedHistoryEntry.executionTimeMs, selectedHistoryEntry) }}</span>
                         </div>
                         <div class="history-detail__status-item">
-                          <span class="history-detail__status-label">图表行数</span>
-                          <span class="history-detail__status-value">{{ selectedHistoryEntry.chartDataCount || 0 }}</span>
+                          <span class="history-detail__status-label">{{ isHistoryAlertEntry(selectedHistoryEntry) ? '产物类型' : '图表行数' }}</span>
+                          <span class="history-detail__status-value">{{ isHistoryAlertEntry(selectedHistoryEntry) ? '智能预警' : (selectedHistoryEntry.chartDataCount || 0) }}</span>
                         </div>
                         <div class="history-detail__status-item">
                           <span class="history-detail__status-label">缓存命中</span>
@@ -1362,7 +1464,7 @@
                         <div v-else class="history-detail__hint">当前历史产物为表格结果，已使用上方表格快照展示，不生成图表缩略图。</div>
                       </div>
                       <div v-else class="history-detail__placeholder">
-                        暂无可预览的图表快照
+                        {{ isHistoryAlertEntry(selectedHistoryEntry) ? '预警历史记录不生成普通图表快照，可在上方查看规则详情。' : '暂无可预览的图表快照' }}
                       </div>
                     </div>
 
@@ -1974,6 +2076,7 @@ import {
   updateAdvancedAlertRule,
   updateAdvancedAlertRuleStatus
 } from '../../api/advancedAnalysis'
+import { isAlertOperationQuestion } from '../../utils/alertOperationQuestion'
 
 const localVoiceGenderOptions = [
   { label: '男声', value: 'male' },
@@ -2219,6 +2322,15 @@ const formatChatModelLabel = (model) => {
   const name = String(model?.name || model?.model || model?.id || '').trim()
   return name || '默认模型'
 }
+
+const selectedChatModelPayload = computed(() => {
+  const model = selectedChatModel?.value || selectedChatModel || {}
+  return {
+    modelId: model?.id || '',
+    modelName: model?.name || model?.model || '',
+    modelCategory: model?.category || ''
+  }
+})
 
 const currentChatModelShortLabel = computed(() => {
   const raw = formatChatModelLabel(selectedChatModel?.value || selectedChatModel || {})
@@ -2501,6 +2613,203 @@ const alertConfirmForm = ref({
 })
 let alertConfirmResolver = null
 const savingAlertDraftKey = ref('')
+
+const normalizeMultiStepList = (value) => Array.isArray(value) ? value.filter(item => item && typeof item === 'object') : []
+
+const isAlertRuleMultiStepAction = (step = {}) => {
+  const type = String(step?.type || step?.intent || step?.smartIntent || '').trim().toUpperCase()
+  return ['ALERT_RULE_CREATE_DRAFT', 'ALERT_RULE_CREATE', 'ALERT_RULE_DRAFT'].includes(type)
+}
+
+const buildCreatedAlertStepPatch = (analysis = {}, savedRule = {}) => ({
+  status: 'COMPLETED',
+  message: savedRule?.id
+    ? `预警规则已创建，规则 #${savedRule.id} 已进入离线检测。`
+    : '预警规则已创建，后续将按检测周期离线检测。',
+  requiresConfirmation: false,
+  ruleId: savedRule?.id || analysis?.ruleId || analysis?.params?.ruleId || null,
+  alertRuleCreated: {
+    id: savedRule?.id || analysis?.ruleId || null,
+    title: analysis?.title || savedRule?.ruleName || '预警规则',
+    metricField: analysis?.params?.metricField || savedRule?.metricField || '',
+    timeField: analysis?.params?.timeField || savedRule?.timeField || '',
+    operator: analysis?.params?.operator || savedRule?.operator || '',
+    threshold: analysis?.params?.threshold ?? savedRule?.threshold,
+    channels: analysis?.params?.channels || savedRule?.channels || []
+  }
+})
+
+const markAlertStepsCreated = (steps = [], analysis = {}, savedRule = {}) => {
+  const patch = buildCreatedAlertStepPatch(analysis, savedRule)
+  return normalizeMultiStepList(steps).map(step => {
+    if (!isAlertRuleMultiStepAction(step)) return step
+    return {
+      ...step,
+      ...patch
+    }
+  })
+}
+
+const rebuildMultiStepSummary = (message = {}, nextStepResults = [], nextActions = []) => {
+  const base = message?.multiStepSummary && typeof message.multiStepSummary === 'object' ? message.multiStepSummary : {}
+  const steps = normalizeMultiStepList(nextStepResults).length ? normalizeMultiStepList(nextStepResults) : normalizeMultiStepList(nextActions)
+  const countByStatus = (status) => steps.filter(step => String(step.status || '').trim().toUpperCase() === status).length
+  const total = Number(base.total ?? steps.length ?? 0)
+  return {
+    ...base,
+    total,
+    completed: countByStatus('COMPLETED'),
+    needsConfirmation: countByStatus('NEEDS_CONFIRMATION'),
+    failed: countByStatus('FAILED'),
+    skipped: countByStatus('SKIPPED')
+  }
+}
+
+const buildAlertCreatedMultiStepPatch = (message = {}, analysis = {}, savedRule = {}) => {
+  const nextStepResults = markAlertStepsCreated(message?.stepResults, analysis, savedRule)
+  const rawActionPlan = message?.actionPlan && typeof message.actionPlan === 'object' ? message.actionPlan : null
+  const nextActions = rawActionPlan?.actions
+    ? markAlertStepsCreated(rawActionPlan.actions, analysis, savedRule)
+    : []
+  const summary = rebuildMultiStepSummary(message, nextStepResults, nextActions)
+  const hasPendingConfirmation = [...nextStepResults, ...nextActions]
+    .some(step => String(step?.status || '').trim().toUpperCase() === 'NEEDS_CONFIRMATION')
+  const patch = {
+    multiStepSummary: summary,
+    requiresConfirmation: hasPendingConfirmation
+  }
+  if (nextStepResults.length) {
+    patch.stepResults = nextStepResults
+  }
+  if (rawActionPlan) {
+    patch.actionPlan = {
+      ...rawActionPlan,
+      requiresConfirmation: hasPendingConfirmation,
+      actions: nextActions.length ? nextActions : rawActionPlan.actions
+    }
+  }
+  return patch
+}
+
+const normalizedMultiStepActions = (msg = {}) => {
+  const planActions = normalizeMultiStepList(msg?.actionPlan?.actions)
+  const stepResults = normalizeMultiStepList(msg?.stepResults)
+  const stepById = new Map(stepResults.map(step => [String(step.id || ''), step]))
+  const source = planActions.length ? planActions : stepResults
+  return source.map((action, index) => {
+    const id = String(action.id || action.stepId || `step_${index + 1}`)
+    const matched = stepById.get(id) || {}
+    const dependsOn = Array.isArray(action.dependsOn)
+      ? action.dependsOn
+      : (Array.isArray(matched.dependsOn) ? matched.dependsOn : [])
+    return {
+      ...action,
+      ...matched,
+      id,
+      type: String(matched.type || action.type || action.intent || '').trim(),
+      question: String(action.question || matched.question || '').trim(),
+      message: String(matched.message || action.message || '').trim(),
+      status: String(matched.status || action.status || '').trim(),
+      dependsOn: dependsOn.map(item => String(item || '').trim()).filter(Boolean),
+      confidence: matched.confidence ?? action.confidence
+    }
+  }).filter(step => step.type || step.status || step.message)
+}
+
+const hasMultiStepPlan = (msg = {}) => {
+  const primaryIntent = String(msg?.actionPlan?.primaryIntent || msg?.smartIntent || msg?.responseType || '').toUpperCase()
+  return primaryIntent === 'MULTI_STEP' || normalizedMultiStepActions(msg).length > 1 || Boolean(msg?.multiStepSummary)
+}
+
+const multiStepActionTypeLabel = (type) => {
+  const value = String(type || '').trim().toUpperCase()
+  if (value === 'QUERY_SQL') return '数据查询'
+  if (value === 'FORECAST' || value === 'ADVANCED_FORECAST') return '时序预测'
+  if (value === 'ALERT_RULE_CREATE_DRAFT' || value === 'ALERT_RULE_CREATE') return '预警草稿'
+  if (value === 'DASHBOARD_PIN') return '钉入看板'
+  if (value === 'CLARIFY' || value === 'CLARIFICATION') return '补充确认'
+  return value || '智能动作'
+}
+
+const multiStepStatusLabel = (status) => {
+  const value = String(status || '').trim().toUpperCase()
+  if (value === 'COMPLETED') return '已完成'
+  if (value === 'NEEDS_CONFIRMATION') return '待确认'
+  if (value === 'NEEDS_INPUT') return '待补充'
+  if (value === 'FAILED') return '失败'
+  if (value === 'SKIPPED') return '已跳过'
+  return value || '处理中'
+}
+
+const multiStepStatusTagType = (status) => {
+  const value = String(status || '').trim().toUpperCase()
+  if (value === 'COMPLETED') return 'success'
+  if (value === 'NEEDS_CONFIRMATION' || value === 'NEEDS_INPUT') return 'warning'
+  if (value === 'FAILED') return 'danger'
+  if (value === 'SKIPPED') return 'info'
+  return 'primary'
+}
+
+const multiStepStatusClass = (status) => {
+  const value = String(status || '').trim().toUpperCase()
+  if (value === 'COMPLETED') return 'completed'
+  if (value === 'NEEDS_CONFIRMATION' || value === 'NEEDS_INPUT') return 'pending'
+  if (value === 'FAILED') return 'failed'
+  if (value === 'SKIPPED') return 'skipped'
+  return 'running'
+}
+
+const formatMultiStepConfidence = (value) => {
+  if (value == null || value === '') return ''
+  if (typeof value === 'string' && value.includes('%')) return value
+  const number = Number(value)
+  if (!Number.isFinite(number) || number <= 0) return ''
+  return `${Math.round((number <= 1 ? number * 100 : number))}%`
+}
+
+const multiStepComputedSummary = (msg = {}) => {
+  const actions = normalizedMultiStepActions(msg)
+  const summary = msg?.multiStepSummary && typeof msg.multiStepSummary === 'object' ? msg.multiStepSummary : {}
+  const countByStatus = (status) => actions.filter(step => String(step.status || '').toUpperCase() === status).length
+  return {
+    total: Number(summary.total ?? actions.length ?? 0),
+    completed: Number(summary.completed ?? countByStatus('COMPLETED')),
+    needsConfirmation: Number(summary.needsConfirmation ?? countByStatus('NEEDS_CONFIRMATION')),
+    failed: Number(summary.failed ?? countByStatus('FAILED')),
+    skipped: Number(summary.skipped ?? countByStatus('SKIPPED'))
+  }
+}
+
+const multiStepSummaryValue = (msg, key) => {
+  const value = Number(multiStepComputedSummary(msg)[key] || 0)
+  return Number.isFinite(value) ? value : 0
+}
+
+const multiStepSummaryLabel = (msg = {}) => {
+  const summary = multiStepComputedSummary(msg)
+  if (summary.failed || summary.skipped) return '部分完成'
+  if (summary.needsConfirmation) return '待确认'
+  if (summary.total && summary.completed >= summary.total) return '已完成'
+  return '执行中'
+}
+
+const multiStepSummaryTagType = (msg = {}) => {
+  const label = multiStepSummaryLabel(msg)
+  if (label === '已完成') return 'success'
+  if (label === '待确认') return 'warning'
+  if (label === '部分完成') return 'danger'
+  return 'primary'
+}
+
+const multiStepActionChain = (msg = {}) => {
+  const labels = normalizedMultiStepActions(msg).map(step => multiStepActionTypeLabel(step.type)).filter(Boolean)
+  return labels.length ? labels.join(' → ') : '复合任务'
+}
+
+const multiStepMissingSlots = (msg = {}) => {
+  const slots = Array.isArray(msg?.actionPlan?.missingSlots) ? msg.actionPlan.missingSlots : []
+  return slots.map(item => String(item || '').trim()).filter(Boolean)
+}
 
 const advancedAnalysisTypeLabel = (type) => {
   if (type === 'forecast') return '时序预测'
@@ -4156,6 +4465,7 @@ const scrollChatToBottom = () => {
 
 const buildAdvancedIntentPayload = async (text, signal) => {
   const tableName = selectedTableName?.value || lastAnalysis?.value?.tableName || ''
+  const selectedModelPayload = selectedChatModelPayload.value
   let fieldMeta = null
   if (tableName) {
     try {
@@ -4178,6 +4488,7 @@ const buildAdvancedIntentPayload = async (text, signal) => {
       activeBusinessModelId: activeBusinessModelId?.value ?? selectedChatBusinessModelId?.value ?? '',
       lastCreatedBusinessModelId: lastCreatedBusinessModelId?.value ?? '',
       lastAppliedBusinessModelId: lastAppliedBusinessModelId?.value ?? '',
+      ...selectedModelPayload,
       fields: fieldMeta?.fields || [],
       timeFields: fieldMeta?.timeFields || [],
       numericFields: fieldMeta?.numericFields || []
@@ -4306,8 +4617,10 @@ const pushAdvancedAnalysisMessage = (analysis, userText = '') => {
 const replaceAlertDraftMessageWithCreatedRule = (message, analysis, savedRule) => {
   if (!message || !analysis) return
   const index = (messages.value || []).indexOf(message)
+  const multiStepPatch = buildAlertCreatedMultiStepPatch(message, analysis, savedRule)
   const nextMessage = {
     ...message,
+    ...multiStepPatch,
     content: '预警规则已创建，可在预警规则管理中查看和维护。',
     alertRuleDraft: null,
     alertRuleCreated: {
@@ -4329,6 +4642,7 @@ const replaceAlertDraftMessageWithCreatedRule = (message, analysis, savedRule) =
   } else {
     Object.assign(message, nextMessage)
   }
+  return nextMessage
 }
 
 const persistAlertDraftCreatedState = async (message, analysis, savedRule) => {
@@ -4346,13 +4660,17 @@ const persistAlertDraftCreatedState = async (message, analysis, savedRule) => {
     threshold: analysis.params?.threshold ?? savedRule?.threshold,
     channels: analysis.params?.channels || savedRule?.channels || []
   }
+  const multiStepPatch = buildAlertCreatedMultiStepPatch(message, analysis, savedRule)
   return axios.post(`${API_BASE}/api/chat/alert-rule-created`, {
     conversationId,
     assistantTurnId,
     artifactId: message?.artifactId || null,
     message: '预警规则已创建，可在预警规则管理中查看和维护。',
     alertRuleCreated,
-    advancedAnalysis: withAdvancedChartRecommendation(analysis)
+    advancedAnalysis: withAdvancedChartRecommendation(analysis),
+    stepResults: multiStepPatch.stepResults || [],
+    actionPlan: multiStepPatch.actionPlan || {},
+    multiStepSummary: multiStepPatch.multiStepSummary || {}
   }).then(unwrap)
 }
 
@@ -4361,6 +4679,104 @@ const alertEventStatusLabel = (status) => {
   if (value === 'ACK') return '已确认'
   if (value === 'CLOSED') return '已关闭'
   return '待处理'
+}
+
+const alertEventStatusTagType = (status) => {
+  const value = String(status || 'OPEN').toUpperCase()
+  if (value === 'ACK') return 'primary'
+  if (value === 'CLOSED') return 'success'
+  return 'warning'
+}
+
+const alertEventRowsForMessage = (msg = {}) => Array.isArray(msg?.alertEventRows)
+  ? msg.alertEventRows.filter(row => row && typeof row === 'object')
+  : []
+
+const visibleAlertEventRows = (msg = {}) => alertEventRowsForMessage(msg).slice(0, 10)
+
+const alertEventRuleName = (row = {}) => {
+  const name = String(row.ruleName || row.ruleTitle || row.title || row.name || '').trim()
+  if (name) return name
+  const ruleId = String(row.ruleId || row.alertRuleId || '').trim()
+  return ruleId ? `规则 #${ruleId}` : '-'
+}
+
+const parseAlertEventSnapshot = (value) => {
+  if (!value) return {}
+  if (typeof value === 'object' && !Array.isArray(value)) return value
+  try {
+    const parsed = JSON.parse(String(value))
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch (error) {
+    return {}
+  }
+}
+
+const alertEventIdentity = (row = {}) => String(row.id || row.eventId || row.alertEventId || '').trim()
+
+const alertEventSnapshotSources = (row = {}, msg = {}) => {
+  const analysis = msg?.analysisSnapshot || {}
+  const sources = [row]
+  if (analysis.alertEvent) sources.push(analysis.alertEvent)
+  if (msg.alertEvent) sources.push(msg.alertEvent)
+  ;[analysis.alertEvents, msg.alertEvents, analysis.data, msg.alertEventRows].forEach(list => {
+    if (Array.isArray(list)) sources.push(...list)
+  })
+  return sources.filter(item => item && typeof item === 'object')
+}
+
+const resolveAlertEventSnapshotSource = (row = {}, msg = {}) => {
+  const id = alertEventIdentity(row)
+  const sources = alertEventSnapshotSources(row, msg)
+  if (!id) return sources[0] || row
+  return sources.find(item => alertEventIdentity(item) === id && Object.keys(parseAlertEventSnapshot(item.chartSnapshot || item.chartSnapshotJson)).length)
+      || sources.find(item => alertEventIdentity(item) === id)
+      || row
+}
+
+const openAlertEventSnapshot = (row = {}, msg = {}) => {
+  const source = resolveAlertEventSnapshotSource(row, msg)
+  const snapshot = parseAlertEventSnapshot(source.chartSnapshot || source.chartSnapshotJson)
+  const rows = Array.isArray(snapshot.data) ? snapshot.data.filter(item => item && typeof item === 'object') : []
+  if (!rows.length) {
+    ElMessage.warning('该预警事件暂无可查看快照')
+    return
+  }
+  const eventId = alertEventIdentity(source) || alertEventIdentity(row) || '-'
+  const chartType = String(snapshot.chartType || snapshot.type || snapshot.chartOption?.series?.[0]?.type || 'line').toLowerCase()
+  const tableName = String(snapshot.tableName || source.tableName || row.tableName || msg.sourceTableName || selectedTableName?.value || '').trim()
+  const metric = String(snapshot.metricField || source.metricField || row.metricField || '预警指标').trim()
+  const timeField = String(snapshot.timeField || source.timeField || row.timeField || '时间').trim()
+  const analysis = {
+    ...snapshot,
+    responseType: 'ALERT_EVENT_SNAPSHOT',
+    smartIntent: 'ALERT_EVENT_SNAPSHOT',
+    chartType,
+    recommendedChartType: chartType,
+    tableName,
+    sourceTableName: tableName,
+    sourceQuestion: `查看预警事件 #${eventId} 快照`,
+    message: `预警事件 #${eventId} 触发快照`,
+    data: rows,
+    fieldMapping: snapshot.fieldMapping || {
+      mappingType: 'alert',
+      metric,
+      metricField: metric,
+      metricKey: metric,
+      dimension: timeField,
+      dimensionKey: 'name'
+    },
+    optionTemplate: snapshot.optionTemplate || snapshot.chartOption || {}
+  }
+  lastAnalysis.value = analysis
+  currentChartType.value = chartType
+  if (tableName && selectedTableName?.value !== tableName) {
+    selectedTableName.value = tableName
+  }
+  nextTick(() => {
+    renderChart(rows, chartType)
+  })
+  ElMessage.success(`已打开预警事件 #${eventId} 快照`)
 }
 
 const alertPushStatusLabel = (status) => {
@@ -4530,6 +4946,10 @@ const openAdvancedAnalysisDialog = (analysis) => {
 
 const sendChatQuestion = async () => {
   const text = String(question?.value || '').trim()
+  if (isAlertOperationQuestion(text)) {
+    await sendQuestion()
+    return
+  }
   if (shouldUseSmartMultiStepOrchestration(text)) {
     await sendQuestion()
     return
@@ -4740,7 +5160,8 @@ const explainAdvancedAnalysis = async (analysis) => {
       context: {
         tableName: analysis.tableName || analysis.params?.tableName || selectedTableName?.value || '',
         metric: analysis.metric || '',
-        source: 'chat-analysis-card'
+        source: 'chat-analysis-card',
+        ...selectedChatModelPayload.value
       }
     })
   const nextAnalysis = {
@@ -5258,6 +5679,7 @@ const historyChartTypeLabel = (type) => {
   if (text === 'line') return '折线图'
   if (text === 'pie') return '饼图'
   if (text === 'table') return '表格'
+  if (text === 'alert' || text === 'ADVANCED_ALERT') return '智能预警'
   return text || '图表'
 }
 
@@ -5306,7 +5728,85 @@ const summarizeGraphContext = (entry) => {
 
 const historySensitiveFields = (entry) => normalizeAuditList(entry?.sensitiveFields || entry?.chartSnapshot?.sensitiveFields)
 
+const firstHistoryText = (...values) => {
+  for (const value of values) {
+    const text = String(value ?? '').trim()
+    if (text) return text
+  }
+  return ''
+}
+
+const historyAlertObject = (entry, key) => {
+  const direct = entry?.[key]
+  if (direct && typeof direct === 'object' && !Array.isArray(direct)) return direct
+  const snap = entry?.chartSnapshot || {}
+  const nested = snap?.[key]
+  return nested && typeof nested === 'object' && !Array.isArray(nested) ? nested : {}
+}
+
+const isHistoryAlertEntry = (entry) => {
+  if (!entry) return false
+  if (entry?.isAlertHistory) return true
+  const signals = [
+    entry?.advancedAnalysisType,
+    entry?.chartType,
+    entry?.artifactType,
+    entry?.intentType,
+    entry?.chartSnapshot?.advancedAnalysisType,
+    entry?.chartSnapshot?.type,
+    entry?.chartSnapshot?.chartType
+  ].map(value => String(value || '').replace(/[-_\s]/g, '').toLowerCase())
+  if (signals.some(value => value.includes('alert') || value.includes('warning') || value.includes('prewarning'))) {
+    return true
+  }
+  const snap = entry?.chartSnapshot || {}
+  return Boolean(
+    Object.keys(historyAlertObject(entry, 'alertMeta')).length
+      || Object.keys(historyAlertObject(entry, 'alertRule')).length
+      || Object.keys(historyAlertObject(entry, 'alertRuleCreated')).length
+      || Object.keys(historyAlertObject(entry, 'alertRuleDraft')).length
+      || snap.ruleId
+      || snap.eventId
+  )
+}
+
+const historyAlertStatusLabel = (status) => {
+  const text = String(status || '').trim()
+  const upper = text.toUpperCase()
+  if (['ACTIVE', 'ENABLED', '已启用'].includes(upper) || text === '已启用') return '已启用'
+  if (['DISABLED', 'PAUSED', '停用', '已停用'].includes(upper) || text === '已停用') return '已停用'
+  if (['CREATED', 'SAVED', 'SUCCESS', '已创建', '已保存'].includes(upper) || text === '已创建' || text === '已保存') return '已创建'
+  if (['DRAFT', 'PENDING', '待确认'].includes(upper) || text === '待确认') return '待确认'
+  return text || '已生成'
+}
+
+const historyAlertInfo = (entry) => {
+  const snap = entry?.chartSnapshot || {}
+  const meta = historyAlertObject(entry, 'alertMeta')
+  const rule = historyAlertObject(entry, 'alertRule')
+  const created = historyAlertObject(entry, 'alertRuleCreated')
+  const draft = historyAlertObject(entry, 'alertRuleDraft')
+  const params = snap?.params && typeof snap.params === 'object' ? snap.params : {}
+  const threshold = created.threshold ?? rule.threshold ?? draft.threshold ?? meta.threshold ?? params.threshold ?? snap.threshold
+  const channels = created.channels ?? rule.channels ?? draft.channels ?? meta.channels ?? params.channels ?? params.channel ?? snap.channels
+  return {
+    created,
+    draft,
+    ruleName: firstHistoryText(created.title, created.ruleName, rule.title, rule.ruleName, draft.title, draft.ruleName, meta.ruleName, snap.title, entry?.question),
+    ruleId: firstHistoryText(created.id, created.ruleId, rule.id, rule.ruleId, meta.ruleId, params.ruleId, snap.ruleId),
+    metricField: firstHistoryText(created.metricField, rule.metricField, draft.metricField, meta.metricField, params.metricField, snap.metricField),
+    timeField: firstHistoryText(created.timeField, rule.timeField, draft.timeField, meta.timeField, params.timeField, snap.timeField),
+    operator: firstHistoryText(created.operator, rule.operator, draft.operator, meta.operator, params.operator, snap.operator),
+    threshold,
+    detectionCycle: firstHistoryText(created.detectionCycle, rule.detectionCycle, draft.detectionCycle, meta.detectionCycle, params.detectionCycle, snap.detectionCycle),
+    channels,
+    status: firstHistoryText(created.status, rule.status, draft.status, meta.status, params.status, snap.status),
+    triggerResult: firstHistoryText(meta.triggerResult, snap.triggerResult, snap.reason, entry?.riskReason)
+  }
+}
+
 const historySnapshotStatusLabel = (entry) => {
+  if (isHistoryAlertEntry(entry)) return '预警记录'
   const status = String(entry?.snapshotStatus || '').trim()
   if (status === 'ready') return '可恢复'
   if (status === 'missing') return '缺失'
@@ -5315,6 +5815,7 @@ const historySnapshotStatusLabel = (entry) => {
 }
 
 const historySnapshotStatusType = (entry) => {
+  if (isHistoryAlertEntry(entry)) return 'warning'
   const status = String(entry?.snapshotStatus || '').trim()
   if (status === 'ready') return 'primary'
   if (status === 'missing') return 'info'
@@ -5323,6 +5824,12 @@ const historySnapshotStatusType = (entry) => {
 }
 
 const historyExecutionStatusLabel = (entry) => {
+  if (isHistoryAlertEntry(entry)) {
+    const info = historyAlertInfo(entry)
+    if (Object.keys(info.created || {}).length || info.ruleId) return `规则${historyAlertStatusLabel(info.status || 'CREATED')}`
+    if (Object.keys(info.draft || {}).length) return '规则待确认'
+    return '预警已生成'
+  }
   const status = Number(entry?.executionStatus)
   if (status === 1) return '执行成功'
   if (status === 0) return '执行失败'
@@ -5331,6 +5838,10 @@ const historyExecutionStatusLabel = (entry) => {
 }
 
 const historyExecutionStatusType = (entry) => {
+  if (isHistoryAlertEntry(entry)) {
+    const info = historyAlertInfo(entry)
+    return Object.keys(info.draft || {}).length && !Object.keys(info.created || {}).length ? 'warning' : 'success'
+  }
   const status = Number(entry?.executionStatus)
   if (status === 1) return 'success'
   if (status === 0) return 'danger'
@@ -5338,8 +5849,8 @@ const historyExecutionStatusType = (entry) => {
   return 'info'
 }
 
-const historyCacheLabel = (entry) => entry?.isHitCache ? '命中缓存' : '未命中缓存'
-const historyCacheTagType = (entry) => entry?.isHitCache ? 'primary' : 'info'
+const historyCacheLabel = (entry) => isHistoryAlertEntry(entry) ? '无需缓存' : (entry?.isHitCache ? '命中缓存' : '未命中缓存')
+const historyCacheTagType = (entry) => entry?.isHitCache && !isHistoryAlertEntry(entry) ? 'primary' : 'info'
 const isHistoryEntryRestorable = (entry) => Boolean(entry?.hasChartSnapshot)
 const isHistoryTableEntry = (entry) => String(entry?.chartType || entry?.chartSnapshot?.chartType || '').toLowerCase() === 'table'
 
@@ -5351,7 +5862,8 @@ const formatHistoryValue = (value) => {
   return String(value)
 }
 
-const formatHistoryExecutionTime = (value) => {
+const formatHistoryExecutionTime = (value, entry = null) => {
+  if (isHistoryAlertEntry(entry)) return '不适用'
   const duration = Number(value)
   if (!Number.isFinite(duration) || duration < 0) return '未知'
   if (duration < 1000) return `${duration} ms`
@@ -5431,6 +5943,27 @@ const historySnapshotTableMinWidth = (entry) => {
 
 const summarizeHistoryRule = (entry) => {
   const snap = entry?.chartSnapshot || {}
+  if (isHistoryAlertEntry(entry)) {
+    const info = historyAlertInfo(entry)
+    const hasChannels = Array.isArray(info.channels)
+      ? info.channels.length > 0
+      : firstHistoryText(info.channels)
+    const condition = [
+      info.operator ? alertOperatorLabel(info.operator) : '',
+      info.threshold != null && info.threshold !== '' ? formatAdvancedNumber(info.threshold) : ''
+    ].filter(Boolean).join(' ')
+    return [
+      { label: '规则名称', value: info.ruleName },
+      { label: '规则ID', value: info.ruleId },
+      { label: '指标字段', value: info.metricField },
+      { label: '时间字段', value: info.timeField },
+      { label: '触发条件', value: condition },
+      { label: '检测周期', value: info.detectionCycle ? alertCycleLabel(info.detectionCycle) : '' },
+      { label: '通知渠道', value: hasChannels ? formatAlertChannel(info.channels) : '' },
+      { label: '状态', value: historyAlertStatusLabel(info.status) },
+      { label: '触发结果', value: info.triggerResult }
+    ].filter(item => item.value)
+  }
   return [
     { label: '命中规则', value: String(entry?.chartRuleName || snap.chartRuleName || entry?.chartRuleCode || snap.chartRuleCode || '').trim() },
     { label: '规则编码', value: String(entry?.chartRuleCode || snap.chartRuleCode || '').trim() },
@@ -5464,6 +5997,7 @@ const historySnapshotPreviewCards = (entry) => {
 }
 
 const historyRestoreHint = (entry) => {
+  if (isHistoryAlertEntry(entry)) return '预警历史记录用于查看规则详情，不作为普通图表恢复'
   const status = String(entry?.snapshotStatus || '').trim()
   if (status === 'missing') return '该历史记录暂无可恢复的图表快照'
   if (status === 'error') return '图表快照加载异常，可稍后重试'
@@ -8005,6 +8539,125 @@ onBeforeUnmount(() => {
   font-family: Consolas, 'Courier New', monospace;
   word-break: break-word;
 }
+.multi-step-card {
+  width: min(680px, 100%);
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #f8fbff 0%, #eef6ff 100%);
+  box-shadow: 0 10px 28px rgba(37, 99, 235, 0.08);
+}
+.multi-step-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.multi-step-card__eyebrow {
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 700;
+}
+.multi-step-card__title {
+  margin-top: 3px;
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.45;
+  word-break: break-word;
+}
+.multi-step-card__clarify {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.multi-step-card__summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.multi-step-card__summary span {
+  padding: 4px 8px;
+  border: 1px solid rgba(37, 99, 235, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.86);
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+}
+.multi-step-card__steps {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.multi-step-card__step {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.94);
+}
+.multi-step-card__step--completed {
+  border-color: #bbf7d0;
+}
+.multi-step-card__step--pending {
+  border-color: #fde68a;
+}
+.multi-step-card__step--failed {
+  border-color: #fecaca;
+}
+.multi-step-card__step--skipped {
+  border-color: #e5e7eb;
+  background: rgba(248, 250, 252, 0.92);
+}
+.multi-step-card__step-index {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+  background: #e0f2fe;
+  color: #0369a1;
+  font-size: 12px;
+  font-weight: 800;
+}
+.multi-step-card__step-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.multi-step-card__step-head strong {
+  color: #0f172a;
+  font-size: 13px;
+}
+.multi-step-card__confidence {
+  color: #64748b;
+  font-size: 12px;
+}
+.multi-step-card__question,
+.multi-step-card__dependency,
+.multi-step-card__message {
+  margin-top: 5px;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+.multi-step-card__message {
+  color: #334155;
+}
 .alert-draft-card {
   width: min(620px, 100%);
   margin-top: 10px;
@@ -8122,6 +8775,63 @@ onBeforeUnmount(() => {
   font-weight: 700;
   line-height: 1.45;
   word-break: break-word;
+}
+.alert-event-table-card {
+  width: min(620px, 100%);
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+.alert-event-table-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.alert-event-table-card__eyebrow {
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 700;
+}
+.alert-event-table-card__title {
+  margin-top: 2px;
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+.alert-event-table {
+  border-radius: 8px;
+  overflow: hidden;
+}
+.alert-event-table :deep(.el-table__header th) {
+  background: #eff6ff;
+  color: #1e3a8a;
+  font-size: 12px;
+  font-weight: 700;
+}
+.alert-event-table :deep(.el-table__cell) {
+  padding: 7px 0;
+}
+.alert-event-table__rule {
+  color: #0f172a;
+  font-weight: 650;
+  line-height: 1.45;
+}
+.alert-event-table__snapshot-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 650;
+}
+.alert-event-table-card__footer {
+  margin-top: 8px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
 }
 .advanced-dialog-entry {
   display: flex;
@@ -8504,6 +9214,18 @@ onBeforeUnmount(() => {
   .advanced-dialog-entry {
     align-items: stretch;
     grid-template-columns: 1fr;
+  }
+  .multi-step-card__header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .multi-step-card__step {
+    grid-template-columns: 22px minmax(0, 1fr);
+    padding: 9px;
+  }
+  .multi-step-card__step-index {
+    width: 22px;
+    height: 22px;
   }
   .alert-draft-card__footer {
     align-items: flex-start;

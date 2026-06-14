@@ -1,0 +1,198 @@
+[
+  {
+    "id": "multi_query_forecast",
+    "question": "查最近6个月销售额趋势并预测下个月",
+    "expectedPrimaryIntent": "MULTI_STEP",
+    "expectedActions": ["QUERY_SQL", "FORECAST"],
+    "expectedResponseType": "MULTI_STEP",
+    "expectedOutcome": "COMPLETED",
+    "requiresConfirmation": false
+  },
+  {
+    "id": "multi_query_forecast_alert_draft",
+    "question": "查最近半年销售额走势，预测下个月，如果低于100万就提醒我",
+    "expectedPrimaryIntent": "MULTI_STEP",
+    "expectedActions": ["QUERY_SQL", "FORECAST", "ALERT_RULE_CREATE_DRAFT"],
+    "expectedResponseType": "MULTI_STEP",
+    "expectedOutcome": "NEEDS_CONFIRMATION",
+    "requiresConfirmation": true,
+    "sideEffectMode": "DRAFT_ONLY"
+  },
+  {
+    "id": "query_trend_no_forecast",
+    "question": "今年每个月销售额走势给我看一下",
+    "expectedPrimaryIntent": "QUERY_SQL",
+    "expectedActions": ["QUERY_SQL"],
+    "expectedResponseType": "QUERY_SQL",
+    "expectedOutcome": "COMPLETED",
+    "requiresConfirmation": false
+  },
+  {
+    "id": "query_topn_city",
+    "question": "销售额最高的前13个城市是哪些",
+    "expectedPrimaryIntent": "QUERY_SQL",
+    "expectedActions": ["QUERY_SQL"],
+    "expectedResponseType": "QUERY_SQL",
+    "expectedOutcome": "COMPLETED",
+    "requiresConfirmation": false
+  },
+  {
+    "id": "query_region_compare",
+    "question": "对比一下华东和华南最近的销售表现",
+    "expectedPrimaryIntent": "QUERY_SQL",
+    "expectedActions": ["QUERY_SQL"],
+    "expectedResponseType": "QUERY_SQL",
+    "expectedOutcome": "COMPLETED",
+    "requiresConfirmation": false
+  },
+  {
+    "id": "forecast_direct",
+    "question": "预测下个月销售额",
+    "expectedPrimaryIntent": "FORECAST",
+    "expectedActions": ["FORECAST"],
+    "expectedResponseType": "FORECAST",
+    "expectedOutcome": "COMPLETED",
+    "requiresConfirmation": false
+  },
+  {
+    "id": "alert_rule_draft",
+    "question": "如果销售额低于80万提醒我",
+    "expectedPrimaryIntent": "ALERT_RULE_CREATE",
+    "expectedActions": ["ALERT_RULE_CREATE"],
+    "expectedResponseType": "ALERT_RULE_DRAFT",
+    "expectedOutcome": "NEEDS_CONFIRMATION",
+    "requiresConfirmation": true,
+    "sideEffectMode": "DRAFT_ONLY"
+  },
+  {
+    "id": "alert_event_query",
+    "question": "最近有哪些报警",
+    "expectedPrimaryIntent": "ALERT_EVENT_QUERY",
+    "expectedActions": ["ALERT_EVENT_QUERY"],
+    "expectedResponseType": "ALERT_EVENT_QUERY",
+    "expectedOutcome": "COMPLETED",
+    "requiresConfirmation": false
+  },
+  {
+    "id": "alert_event_explain_needs_event",
+    "question": "这个报警为什么触发",
+    "expectedPrimaryIntent": "ALERT_EVENT_EXPLAIN",
+    "expectedActions": ["ALERT_EVENT_EXPLAIN"],
+    "expectedResponseType": "CLARIFICATION",
+    "expectedOutcome": "NEEDS_INPUT",
+    "requiresConfirmation": true
+  },
+  {
+    "id": "alert_event_ack_needs_event",
+    "question": "确认这个报警",
+    "expectedPrimaryIntent": "ALERT_EVENT_ACK",
+    "expectedActions": ["ALERT_EVENT_ACK"],
+    "expectedResponseType": "CLARIFICATION",
+    "expectedOutcome": "NEEDS_INPUT",
+    "requiresConfirmation": true
+  },
+  {
+    "id": "alert_rule_disable_execute",
+    "question": "停用预警规则12",
+    "expectedPrimaryIntent": "ALERT_RULE_DISABLE",
+    "expectedActions": ["ALERT_RULE_DISABLE"],
+    "expectedResponseType": "ALERT_RULE_DISABLE",
+    "expectedOutcome": "COMPLETED",
+    "requiresConfirmation": false
+  },
+  {
+    "id": "alert_rule_update_execute",
+    "question": "把预警规则12阈值改成90万",
+    "expectedPrimaryIntent": "ALERT_RULE_UPDATE",
+    "expectedActions": ["ALERT_RULE_UPDATE"],
+    "expectedResponseType": "ALERT_RULE_UPDATE",
+    "expectedOutcome": "COMPLETED",
+    "requiresConfirmation": false
+  },
+  {
+    "id": "business_model_patch",
+    "question": "把销售额绑定到 sales_amt",
+    "expectedPrimaryIntent": "BUSINESS_MODEL_PATCH",
+    "expectedActions": ["BUSINESS_MODEL_PATCH"],
+    "expectedResponseType": "BUSINESS_MODEL_PATCH",
+    "expectedOutcome": "COMPLETED",
+    "requiresConfirmation": false,
+    "routeMock": true
+  },
+  {
+    "id": "dashboard_pin_context",
+    "question": "把刚才这个图钉到销售看板",
+    "expectedPrimaryIntent": "DASHBOARD_PIN",
+    "expectedActions": ["DASHBOARD_PIN"],
+    "expectedResponseType": "CLARIFICATION",
+    "expectedOutcome": "NEEDS_INPUT",
+    "requiresConfirmation": true
+  },
+  {
+    "id": "chart_rule_update",
+    "question": "以后趋势类问题默认用折线图",
+    "expectedPrimaryIntent": "CHART_RULE_UPDATE",
+    "expectedActions": ["CHART_RULE_UPDATE"],
+    "expectedResponseType": "CLARIFICATION",
+    "expectedOutcome": "NEEDS_INPUT",
+    "requiresConfirmation": true,
+    "routeMock": true
+  },
+  {
+    "id": "field_semantic_fix",
+    "question": "把订单日期识别成时间字段",
+    "expectedPrimaryIntent": "FIELD_SEMANTIC_FIX",
+    "expectedActions": ["FIELD_SEMANTIC_FIX"],
+    "expectedResponseType": "CLARIFICATION",
+    "expectedOutcome": "NEEDS_INPUT",
+    "requiresConfirmation": true,
+    "routeMock": true
+  },
+  {
+    "id": "federated_query",
+    "question": "把我上传的销售表和官方客户表关联分析",
+    "expectedPrimaryIntent": "FEDERATED_QUERY",
+    "expectedActions": ["FEDERATED_QUERY"],
+    "expectedResponseType": "CLARIFICATION",
+    "expectedOutcome": "NEEDS_INPUT",
+    "requiresConfirmation": true,
+    "routeMock": true
+  },
+  {
+    "id": "permission_policy_create",
+    "question": "让华东销售经理只能看华东数据",
+    "expectedPrimaryIntent": "PERMISSION_POLICY_CREATE",
+    "expectedActions": ["PERMISSION_POLICY_CREATE"],
+    "expectedResponseType": "CLARIFICATION",
+    "expectedOutcome": "NEEDS_INPUT",
+    "requiresConfirmation": true
+  },
+  {
+    "id": "audit_query",
+    "question": "最近有哪些危险查询",
+    "expectedPrimaryIntent": "AUDIT_QUERY",
+    "expectedActions": ["AUDIT_QUERY"],
+    "expectedResponseType": "CLARIFICATION",
+    "expectedOutcome": "NEEDS_INPUT",
+    "requiresConfirmation": false
+  },
+  {
+    "id": "report_generate",
+    "question": "帮我诊断销售额下降原因",
+    "expectedPrimaryIntent": "REPORT_GENERATE",
+    "expectedActions": ["REPORT_GENERATE"],
+    "expectedResponseType": "CLARIFICATION",
+    "expectedOutcome": "NEEDS_INPUT",
+    "requiresConfirmation": true
+  },
+  {
+    "id": "task_status_query",
+    "question": "刚才上传处理到哪了",
+    "expectedPrimaryIntent": "TASK_STATUS_QUERY",
+    "expectedActions": ["TASK_STATUS_QUERY"],
+    "expectedResponseType": "CLARIFICATION",
+    "expectedOutcome": "NEEDS_INPUT",
+    "requiresConfirmation": false,
+    "routeMock": true
+  }
+]

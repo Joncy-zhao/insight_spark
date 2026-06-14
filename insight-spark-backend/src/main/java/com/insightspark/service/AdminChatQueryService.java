@@ -182,7 +182,7 @@ public class AdminChatQueryService {
         request.put("question", source.get("question"));
         request.put("selectedTables", extractSelectedTables(source));
         request.put("tableName", extractPrimaryTable(source));
-        request.put("modelId", modelValue(source, "modelId", "default"));
+        request.put("modelId", resolveModelId(text(modelValue(source, "modelId", ""))));
         request.put("temperature", modelValue(source, "temperature", 0.2D));
         request.put("timeoutSeconds", modelValue(source, "timeoutSeconds", 30));
         request.put("simulatedUserId", permissionValue(source, "simulatedUserId", ""));
@@ -223,10 +223,15 @@ public class AdminChatQueryService {
     }
 
     public Map<String, Object> execute(Map<String, Object> request) {
+        return execute(request, Map.of());
+    }
+
+    public Map<String, Object> execute(Map<String, Object> request, Map<String, Object> executionOptions) {
         Long sessionId = toLong(request.get("sessionId"));
         if (sessionId == null) {
             sessionId = toLong(createSession(request).get("id"));
         }
+        Map<String, Object> safeExecutionOptions = executionOptions == null ? Map.of() : executionOptions;
         long startedAt = System.currentTimeMillis();
         jdbcTemplate.update("UPDATE is_admin_chat_test_session SET status = 'RUNNING' WHERE id = ?", sessionId);
         try {
@@ -239,7 +244,7 @@ public class AdminChatQueryService {
                             (target, entry) -> target.put(text(entry.getKey()), entry.getValue()),
                             LinkedHashMap::putAll)
                     : Map.of();
-            String modelId = textOr(modelConfig.get("modelId"), "default");
+            String modelId = resolveModelId(text(modelConfig.get("modelId")));
             Map<String, Object> selectedModel = findModel(modelId);
             recordStep(sessionId, "QUESTION_PARSED", "自然语言解析", "SUCCESS", Map.of(
                     "question", question,
@@ -262,6 +267,10 @@ public class AdminChatQueryService {
             filters.put("modelCategory", selectedModel.get("category"));
             filters.put("temperature", modelConfig.getOrDefault("temperature", 0.2D));
             filters.put("timeoutSeconds", modelConfig.getOrDefault("timeoutSeconds", 30));
+            Object progressListener = safeExecutionOptions.get("progressListener");
+            if (progressListener != null) {
+                filters.put("progressListener", progressListener);
+            }
             chatRequest.setFilters(filters);
             chatRequest.setMode("ADMIN_TEST");
             Map<String, Object> result = chatBiService.executeChat(chatRequest);
@@ -917,7 +926,7 @@ public class AdminChatQueryService {
 
     private Map<String, Object> modelConfig(Map<String, Object> request) {
         Map<String, Object> config = new LinkedHashMap<>();
-        config.put("modelId", textOr(request.get("modelId"), "default"));
+        config.put("modelId", resolveModelId(text(request.get("modelId"))));
         config.put("temperature", numberOr(request.get("temperature"), 0.2D));
         config.put("maxTokens", numberOr(request.get("maxTokens"), 2048));
         config.put("timeoutSeconds", numberOr(request.get("timeoutSeconds"), 30));
@@ -1025,11 +1034,35 @@ public class AdminChatQueryService {
         return item;
     }
 
-    private Map<String, Object> findModel(String modelId) {
-        return listModels().stream()
-                .filter(item -> modelId.equals(text(item.get("id"))))
+    private String resolveModelId(String modelId) {
+        String requestedId = text(modelId);
+        List<Map<String, Object>> modelRows = listModels();
+        if (!requestedId.isBlank()) {
+            for (Map<String, Object> item : modelRows) {
+                if (requestedId.equals(text(item.get("id"))) && !"false".equalsIgnoreCase(text(item.get("available")))) {
+                    return requestedId;
+                }
+            }
+        }
+        return modelRows.stream()
+                .filter(item -> !"false".equalsIgnoreCase(text(item.get("available"))))
                 .findFirst()
-                .orElseGet(() -> model("default", "qwen-plus", "CONFIGURED_DEFAULT", true));
+                .or(() -> modelRows.stream().findFirst())
+                .map(item -> text(item.get("id")))
+                .filter(id -> !id.isBlank())
+                .orElse("default");
+    }
+
+    private Map<String, Object> findModel(String modelId) {
+        List<Map<String, Object>> modelRows = listModels();
+        String resolvedModelId = resolveModelId(modelId);
+        return modelRows.stream()
+                .filter(item -> resolvedModelId.equals(text(item.get("id"))))
+                .findFirst()
+                .orElseGet(() -> modelRows.stream()
+                        .filter(item -> !"false".equalsIgnoreCase(text(item.get("available"))))
+                        .findFirst()
+                        .orElseGet(() -> model("default", "qwen-plus", "CONFIGURED_DEFAULT", true)));
     }
 
     private String buildListWhere(String keyword, String status, List<Object> args) {

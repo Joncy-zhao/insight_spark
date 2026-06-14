@@ -284,7 +284,7 @@
       </el-button>
       <el-button size="small" plain @click="exportImage">导出图表</el-button>
       <el-button size="small" plain @click="emitRecalculate">重新计算</el-button>
-      <el-button v-if="analysis.type === 'alert'" size="small" plain type="warning" @click="$emit('manage-alerts')">规则管理</el-button>
+      <el-button v-if="props.showManageAlertsAction && analysis.type === 'alert'" size="small" plain type="warning" @click="$emit('manage-alerts')">规则管理</el-button>
     </footer>
   </article>
 </template>
@@ -306,6 +306,10 @@ const props = defineProps({
     default: true
   },
   showPinAction: {
+    type: Boolean,
+    default: true
+  },
+  showManageAlertsAction: {
     type: Boolean,
     default: true
   },

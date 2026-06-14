@@ -169,7 +169,7 @@
               <template #default="{ row }">
                 <div class="query-cell">
                   <strong>{{ row.question || '未记录问题' }}</strong>
-                  <small>{{ chartTypeLabel(row.chartType) }} / {{ row.executionTimeMs ?? '-' }} ms / {{ row.isHitCacheLabel || '缓存未知' }}</small>
+                  <small>{{ historyResultTypeLabel(row) }} / {{ row.executionTimeMs ?? '-' }} ms / {{ row.isHitCacheLabel || '缓存未知' }}</small>
                 </div>
               </template>
             </el-table-column>
@@ -184,9 +184,9 @@
                 <el-tag size="small" :type="sqlStatusTagType(row.sqlStatus)">{{ row.sqlStatusLabel }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="AI 分析" width="92">
+            <el-table-column label="智能分析" width="92">
               <template #default="{ row }">
-                <el-tag size="small" :type="aiParseTagType(row.aiParseResult)">{{ row.aiParseResultLabel }}</el-tag>
+                <el-tag size="small" :type="aiParseTagType(row.aiParseResult)">{{ aiParseResultText(row.aiParseResult, row.aiParseResultLabel) }}</el-tag>
               </template>
             </el-table-column>
             <el-table-column label="风险" width="70">
@@ -252,6 +252,86 @@
               <strong>{{ analytics.performance?.summary?.riskCount || 0 }}</strong>
             </div>
           </div>
+        </section>
+
+        <section class="history-panel side-panel route-audit-panel">
+          <div class="panel-head panel-head--compact">
+            <div>
+              <h2>智能路由观测</h2>
+              <p>低置信度、兜底、澄清与执行器健康情况</p>
+            </div>
+          </div>
+          <template v-if="hasRouteAuditData">
+            <div class="route-audit-stat-grid">
+              <div
+                v-for="card in routeAuditOverviewCards"
+                :key="card.label"
+                class="route-audit-stat"
+                :class="`route-audit-stat--${card.tone}`"
+              >
+                <span>{{ card.label }}</span>
+                <strong>{{ card.value }}</strong>
+                <small>{{ card.hint }}</small>
+              </div>
+            </div>
+
+            <div class="route-audit-section" v-if="routeIntentGroups.length">
+              <div class="route-audit-section-head">
+                <span>高频意图</span>
+                <small>成功 / 兜底</small>
+              </div>
+              <div class="route-audit-list">
+                <div v-for="item in routeIntentGroups" :key="item.primaryIntent" class="route-audit-row">
+                  <div class="route-audit-main">
+                    <strong>{{ routeAuditIntentLabel(item.primaryIntent) }}</strong>
+                    <small>{{ item.count || 0 }} 次 · 平均置信度 {{ formatRouteConfidence(item.avgConfidence) }}</small>
+                  </div>
+                  <div class="route-audit-meta">
+                    <span>{{ formatPercent(item.successRate) }}</span>
+                    <strong>{{ formatPercent(item.fallbackRate) }}</strong>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="route-audit-section" v-if="routeExecutorGroups.length">
+              <div class="route-audit-section-head">
+                <span>执行器耗时</span>
+                <small>平均耗时</small>
+              </div>
+              <div class="route-audit-list">
+                <div v-for="item in routeExecutorGroups" :key="item.chosenExecutor" class="route-audit-row">
+                  <div class="route-audit-main">
+                    <strong>{{ routeAuditExecutorLabel(item.chosenExecutor) }}</strong>
+                    <small>{{ item.count || 0 }} 次 · 失败率 {{ formatPercent(item.failureRate) }}</small>
+                  </div>
+                  <div class="route-audit-meta">
+                    <strong>{{ item.avgDurationMs || 0 }} ms</strong>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="route-audit-section" v-if="routeProblemSamples.length">
+              <div class="route-audit-section-head">
+                <span>排查样本</span>
+                <small>失败 / 兜底 / 低置信度</small>
+              </div>
+              <div class="route-audit-list route-audit-list--samples">
+                <div v-for="item in routeProblemSamples" :key="item.historyId || item.question" class="route-audit-sample">
+                  <strong>{{ item.question || '未记录问题' }}</strong>
+                  <small>{{ formatRouteProblemHint(item) }}</small>
+                  <div class="route-audit-tags">
+                    <el-tag size="small" effect="plain">{{ routeAuditIntentLabel(item.primaryIntent) }}</el-tag>
+                    <el-tag size="small" :type="routeOutcomeTagType(item.outcome)" effect="light">
+                      {{ routeAuditOutcomeLabel(item.outcome) }}
+                    </el-tag>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+          <p v-else class="detail-empty">暂无智能路由观测样本。</p>
         </section>
 
         <section class="history-panel side-panel">
@@ -362,18 +442,21 @@
               <section class="detail-overview">
                 <div class="detail-panel detail-panel--muted detail-overview-shell">
                   <div class="detail-overview-main">
-                    <div class="detail-badges">
+                    <div class="detail-badges" aria-label="当前记录状态">
                       <el-tag :type="statusTagType(detail.executionStatus)">{{ detail.executionStatusLabel }}</el-tag>
                       <el-tag :type="riskTagType(detail.riskLevel)">{{ detail.riskLevel }}</el-tag>
                       <el-tag type="info">{{ sourceTypeLabel(detail.sourceType) }}</el-tag>
-                      <el-tag type="info">{{ chartTypeLabel(detail.chartType) }}</el-tag>
+                      <el-tag type="info">{{ historyResultTypeLabel(detail) }}</el-tag>
                       <el-tag v-if="shouldShowDetailSql" :type="sqlStatusTagType(detail.sqlStatus)">{{ detail.sqlStatusLabel || '无 SQL' }}</el-tag>
-                      <el-tag :type="aiParseTagType(detail.aiParseResult)">{{ detail.aiParseResultLabel || '解析信息缺失' }}</el-tag>
+                      <el-tag :type="aiParseTagType(detail.aiParseResult)">{{ aiParseResultText(detail.aiParseResult, detail.aiParseResultLabel) }}</el-tag>
                       <el-tag :type="detail.isHitCache ? 'success' : 'info'">{{ detail.isHitCacheLabel || '缓存未知' }}</el-tag>
                       <el-tag :type="detail.slowQuery ? 'warning' : 'info'">{{ detail.slowQuery ? '慢查询' : '非慢查询' }}</el-tag>
                     </div>
-                    <h2>{{ detail.question || '未记录原始问题' }}</h2>
-                    <p>{{ detailHeroSummary }}</p>
+                    <div class="detail-question-card">
+                      <span>原始问题</span>
+                      <h2>{{ detail.question || '未记录原始问题' }}</h2>
+                      <p>{{ detailHeroSummary }}</p>
+                    </div>
                   </div>
                   <div class="detail-overview-grid detail-overview-grid--compact">
                     <div class="detail-overview-group">
@@ -417,14 +500,14 @@
                           <span>解析引擎</span>
                           <div class="detail-overview-value">
                             <strong>{{ detailParseEngineText }}</strong>
-                            <small>{{ detail.aiParseResultLabel || '解析信息缺失' }}</small>
+                            <small>{{ aiParseResultText(detail.aiParseResult, detail.aiParseResultLabel) }}</small>
                           </div>
                         </div>
                         <div class="detail-overview-row">
                           <span>图表类型</span>
                           <div class="detail-overview-value">
-                            <strong>{{ chartTypeLabel(detail.chartType) }}</strong>
-                            <small>{{ detail.intentType || '数据分析' }}</small>
+                            <strong>{{ historyResultTypeLabel(detail) }}</strong>
+                            <small>{{ intentTypeLabel(detail.intentType) }}</small>
                           </div>
                         </div>
                         <div class="detail-overview-row">
@@ -454,22 +537,19 @@
                     <p>快速查看风险、拦截与慢查询情况</p>
                   </div>
                 </div>
-                <div class="detail-grid detail-grid--audit detail-grid--sidebar">
-                  <div class="detail-card detail-card--blue">
-                    <span>审计记录</span>
-                    <strong>{{ detail.auditSummary.count || 0 }}</strong>
-                  </div>
-                  <div class="detail-card detail-card--red">
-                    <span>拦截</span>
-                    <strong>{{ detail.auditSummary.blockedCount || 0 }}</strong>
-                  </div>
-                  <div class="detail-card detail-card--amber">
-                    <span>告警</span>
-                    <strong>{{ detail.auditSummary.warnCount || 0 }}</strong>
-                  </div>
-                  <div class="detail-card detail-card--green">
-                    <span>慢查询</span>
-                    <strong>{{ detail.auditSummary.slowCount || 0 }}</strong>
+                <div class="audit-summary-grid">
+                  <div
+                    v-for="card in auditSummaryCards"
+                    :key="card.label"
+                    class="audit-summary-item"
+                    :class="`audit-summary-item--${card.tone}`"
+                  >
+                    <div class="audit-summary-head">
+                      <span>{{ card.label }}</span>
+                      <em>{{ card.status }}</em>
+                    </div>
+                    <strong>{{ card.value }}</strong>
+                    <p>{{ card.hint }}</p>
                   </div>
                 </div>
               </section>
@@ -480,70 +560,121 @@
               <el-tabs v-model="detailActiveTab" class="detail-tabs">
                 <el-tab-pane label="查询与结果" name="query">
                   <div class="detail-tab-stack">
-                    <section class="detail-section detail-panel">
-                      <div class="detail-section-head">
+                    <section class="detail-section detail-panel detail-query-section">
+                      <div class="detail-section-head detail-query-head">
                         <div class="detail-section-title">
                           <h3>查询内容</h3>
                           <p>{{ detailQueryContentSubtitle }}</p>
                         </div>
-                        <div class="detail-actions">
-                          <el-button type="primary" :loading="rerunning" @click="rerun(detail)">重新执行</el-button>
+                        <div class="detail-actions detail-query-actions">
+                          <el-button type="primary" :icon="RefreshRight" :loading="rerunning" @click="rerun(detail)">重新执行</el-button>
                           <el-button v-if="shouldShowDetailSql" :disabled="!detailRealSql" @click="copySql(detailRealSql)">复制 SQL</el-button>
                         </div>
                       </div>
                       <div class="detail-query-grid" :class="{ 'detail-query-grid--single': !shouldShowDetailSql }">
-                        <article class="detail-subpanel">
+                        <article class="detail-subpanel detail-subpanel--question">
                           <div class="detail-subpanel-head">
-                            <span>原始问题</span>
+                            <div class="detail-subpanel-title">
+                              <span>原始问题</span>
+                              <small>用户输入</small>
+                            </div>
+                            <el-tag size="small" effect="plain">{{ sourceTypeLabel(detail.sourceType) }}</el-tag>
                           </div>
-                          <p class="detail-text">{{ detail.question || '未记录原始问题' }}</p>
+                          <p class="detail-text detail-text--question">{{ detail.question || '未记录原始问题' }}</p>
+                          <div class="detail-question-meta">
+                            <span>{{ detail.createdAt || '时间未记录' }}</span>
+                            <span>{{ detail.operator?.displayName || detail.operatorLabel || detail.userId || '用户未记录' }}</span>
+                          </div>
                         </article>
                         <article v-if="shouldShowDetailSql" class="detail-subpanel detail-subpanel--code">
                           <div class="detail-subpanel-head">
-                            <span>生成 SQL</span>
+                            <div class="detail-subpanel-title">
+                              <span>生成 SQL</span>
+                              <small>{{ detail.sqlStatusLabel || detail.executionStatusLabel || 'SQL 已记录' }}</small>
+                            </div>
+                            <el-tag size="small" effect="plain">{{ detailParseEngineText }}</el-tag>
                           </div>
-                          <pre class="detail-code">{{ detailSqlDisplayText }}</pre>
+                          <div class="detail-code-shell">
+                            <pre class="detail-code">{{ detailSqlDisplayText }}</pre>
+                          </div>
                         </article>
                       </div>
                     </section>
 
-                    <section class="detail-section detail-panel">
-                      <div class="detail-section-head">
+                    <section class="detail-section detail-panel detail-summary-section">
+                      <div class="detail-section-head detail-summary-head">
                         <div class="detail-section-title">
                           <h3>对话摘要</h3>
                           <p>帮助管理员快速判断这次查询是如何被解析、生成和执行的</p>
                         </div>
                       </div>
-                      <div class="context-grid">
-                        <article class="context-card context-card--wide">
-                          <div class="context-card-head">
-                            <span>摘要说明</span>
-                            <el-tag effect="plain">{{ detail.intentType || '数据分析' }}</el-tag>
+                      <div class="context-grid detail-summary-grid">
+                        <article class="context-card context-card--wide summary-card summary-card--primary">
+                          <div class="context-card-head summary-card-head">
+                            <div class="summary-card-title">
+                              <span>摘要说明</span>
+                              <small>本轮查询结论</small>
+                            </div>
+                            <el-tag effect="plain">{{ intentTypeLabel(detail.intentType) }}</el-tag>
                           </div>
-                          <strong>{{ detailQuerySummaryText }}</strong>
-                          <p>{{ detail.riskReason || '未记录额外执行说明。' }}</p>
-                        </article>
-                        <article class="context-card">
-                          <div class="context-card-head">
-                            <span>解析结果</span>
-                            <el-tag :type="aiParseTagType(detail.aiParseResult)">{{ detail.aiParseResultLabel || '解析信息缺失' }}</el-tag>
+                          <div class="summary-card-body">
+                            <strong>{{ detailQuerySummaryText }}</strong>
+                            <p>{{ detail.riskReason || '未记录额外执行说明。' }}</p>
                           </div>
-                          <strong>{{ detailParseEngineText }}</strong>
-                          <p>{{ detailParseDescription }}</p>
                         </article>
-                        <article v-if="shouldShowDetailSql" class="context-card">
-                          <div class="context-card-head">
-                            <span>SQL 生成状态</span>
+                        <article class="context-card summary-card summary-card--parse">
+                          <div class="context-card-head summary-card-head">
+                            <div class="summary-card-title">
+                              <span>解析结果</span>
+                              <small>模型理解链路</small>
+                            </div>
+                            <el-tag :type="aiParseTagType(detail.aiParseResult)">{{ aiParseResultText(detail.aiParseResult, detail.aiParseResultLabel) }}</el-tag>
+                          </div>
+                          <div class="summary-card-body">
+                            <strong>{{ detailParseEngineText }}</strong>
+                            <p>{{ detailParseDescription }}</p>
+                          </div>
+                        </article>
+                        <article v-if="shouldShowDetailSql" class="context-card summary-card summary-card--sql">
+                          <div class="context-card-head summary-card-head">
+                            <div class="summary-card-title">
+                              <span>SQL 生成状态</span>
+                              <small>执行链路状态</small>
+                            </div>
                             <el-tag :type="sqlStatusTagType(detail.sqlStatus)">{{ detail.sqlStatusLabel || '无 SQL' }}</el-tag>
                           </div>
-                          <strong>{{ detail.executionStatusLabel || '-' }}</strong>
-                          <p>{{ detailSqlStatusDescription }}</p>
+                          <div class="summary-card-body">
+                            <strong>{{ detail.executionStatusLabel || '-' }}</strong>
+                            <p>{{ detailSqlStatusDescription }}</p>
+                          </div>
+                        </article>
+                        <article v-if="detailAlertInfo" class="context-card context-card--wide summary-card summary-card--alert">
+                          <div class="context-card-head summary-card-head">
+                            <div class="summary-card-title">
+                              <span>智能预警</span>
+                              <small>规则、阈值与触发结果</small>
+                            </div>
+                            <el-tag :type="alertStatusTagType(detailAlertInfo.status)" effect="light">
+                              {{ detailAlertInfo.statusLabel }}
+                            </el-tag>
+                          </div>
+                          <div class="alert-summary-grid">
+                            <div
+                              v-for="item in detailAlertInfoItems"
+                              :key="item.label"
+                              class="alert-summary-item"
+                              :class="{ 'alert-summary-item--wide': item.wide }"
+                            >
+                              <span>{{ item.label }}</span>
+                              <strong>{{ item.value }}</strong>
+                            </div>
+                          </div>
                         </article>
                       </div>
                     </section>
 
-                    <section v-if="detailHasResultPreview" class="detail-section detail-panel">
-                      <div class="detail-section-head">
+                    <section v-if="detailHasResultPreview" class="detail-section detail-panel detail-result-section">
+                      <div class="detail-section-head detail-result-head">
                         <div class="detail-section-title">
                           <h3>结果预览</h3>
                           <p>图表缩略图、结果概览与保留样例</p>
@@ -551,8 +682,11 @@
                       </div>
                       <div class="result-preview-stack">
                         <article class="context-card result-preview-summary-card">
-                          <div class="context-card-head">
-                            <span>结果概览</span>
+                          <div class="context-card-head result-preview-card-head">
+                            <div class="result-preview-card-title">
+                              <span>结果概览</span>
+                              <small>快照结构与数据来源</small>
+                            </div>
                             <el-tag type="info" effect="plain">{{ detail.snapshotPreviewRows?.length || 0 }} 行样例</el-tag>
                           </div>
                           <div class="result-preview-summary-grid">
@@ -569,8 +703,11 @@
                         </article>
 
                         <article class="context-card result-preview-card result-preview-card--chart">
-                          <div class="context-card-head">
-                            <span>图表缩略图</span>
+                          <div class="context-card-head result-preview-card-head">
+                            <div class="result-preview-card-title">
+                              <span>图表缩略图</span>
+                              <small>保存的可视化结果</small>
+                            </div>
                             <el-tag effect="plain">{{ chartTypeLabel(detail.chartType) }}</el-tag>
                           </div>
                           <div class="result-preview-chart-shell">
@@ -583,7 +720,7 @@
                             />
                             <p v-else class="detail-empty">当前记录没有可恢复的图表快照。</p>
                           </div>
-                          <div v-if="detailFieldMappingSummary.length" class="trace-tags">
+                          <div v-if="detailFieldMappingSummary.length" class="trace-tags result-preview-field-tags">
                             <el-tag
                               v-for="item in detailFieldMappingSummary"
                               :key="`mapping-${item.label}`"
@@ -595,8 +732,15 @@
                           </div>
                         </article>
                       </div>
-                      <div v-if="detail.snapshotPreviewRows?.length" class="detail-table-wrap">
-                        <el-table :data="detail.snapshotPreviewRows" size="small" border>
+                      <div v-if="detail.snapshotPreviewRows?.length" class="detail-table-wrap result-preview-table-card">
+                        <div class="result-preview-table-head">
+                          <div class="result-preview-card-title">
+                            <span>结果样例</span>
+                            <small>用于回溯本次图表生成的保留数据</small>
+                          </div>
+                          <el-tag effect="plain">{{ previewColumns.length }} 列</el-tag>
+                        </div>
+                        <el-table :data="detail.snapshotPreviewRows" size="small" border class="result-preview-table">
                           <el-table-column
                             v-for="column in previewColumns"
                             :key="column"
@@ -625,9 +769,20 @@
                           <p>补充查看权限校验、缓存命中和脱敏处理等执行保护上下文</p>
                         </div>
                       </div>
-                      <div class="context-grid">
-                        <article class="context-card">
-                          <div class="context-card-head">
+                      <div class="audit-context-summary">
+                        <div
+                          v-for="card in auditContextOverviewCards"
+                          :key="card.label"
+                          class="reasoning-mini-item audit-context-summary-item"
+                        >
+                          <span>{{ card.label }}</span>
+                          <strong>{{ card.value }}</strong>
+                          <p>{{ card.hint }}</p>
+                        </div>
+                      </div>
+                      <div class="context-grid audit-context-grid">
+                        <article class="context-card audit-context-card audit-context-card--permission">
+                          <div class="context-card-head audit-context-card-head">
                             <span>权限校验结果</span>
                             <el-tag :type="permissionStatusTagType(detail.permissionCheck?.status)">
                               {{ detail.permissionCheck?.label || '未记录' }}
@@ -635,13 +790,13 @@
                           </div>
                           <strong>{{ detail.permissionCheck?.message || '未记录独立权限校验结果' }}</strong>
                           <p>{{ detail.permissionCheck?.detail || '当前详情仍沿用查询主链路的权限控制，但历史中没有保留更细粒度的校验快照。' }}</p>
-                          <div class="context-meta">
+                          <div class="context-meta audit-context-meta">
                             <span>授权作用域表</span>
                             <strong>{{ detail.permissionCheck?.scopeTableName || detail.queryTableName || '-' }}</strong>
                           </div>
                         </article>
-                        <article class="context-card">
-                          <div class="context-card-head">
+                        <article class="context-card audit-context-card audit-context-card--cache">
+                          <div class="context-card-head audit-context-card-head">
                             <span>缓存上下文</span>
                             <el-tag :type="detail.cacheContext?.cacheHit ? 'success' : 'info'">
                               {{ detail.cacheContext?.cacheHitLabel || '未命中缓存' }}
@@ -649,17 +804,17 @@
                           </div>
                           <strong>{{ detail.cacheContext?.cacheAuditStatus || '未记录缓存审计结论' }}</strong>
                           <p>{{ detail.cacheContext?.redisStatusText || '当前审计日志未返回 Redis 侧状态。' }}</p>
-                          <div class="context-meta">
+                          <div class="context-meta audit-context-meta">
                             <span>缓存 Key</span>
                             <strong>{{ detail.cacheContext?.cacheKey || '未记录缓存 Key' }}</strong>
                           </div>
-                          <div class="context-meta">
+                          <div class="context-meta audit-context-meta">
                             <span>执行保护动作</span>
                             <strong>{{ detail.cacheContext?.queryGuardActionLabel || '未触发执行保护' }}</strong>
                           </div>
                         </article>
-                        <article class="context-card context-card--wide">
-                          <div class="context-card-head">
+                        <article class="context-card context-card--wide audit-context-card audit-context-card--mask">
+                          <div class="context-card-head audit-context-card-head">
                             <span>脱敏明细</span>
                             <el-tag type="warning" effect="plain">
                               {{ detail.latestAuditLog?.sensitiveFieldItems?.length ? `敏感字段 ${detail.latestAuditLog.sensitiveFieldItems.length}` : '未发现敏感字段' }}
@@ -678,12 +833,14 @@
                             </el-tag>
                           </div>
                         </article>
-                        <article v-if="shouldShowDetailSql && detail.cacheContext?.cacheSql" class="context-card context-card--wide context-card--code">
-                          <div class="context-card-head">
+                        <article v-if="shouldShowDetailSql && detail.cacheContext?.cacheSql" class="context-card context-card--wide context-card--code audit-context-card audit-context-card--sql">
+                          <div class="context-card-head audit-context-card-head">
                             <span>缓存复用 SQL</span>
                             <el-tag effect="plain">缓存回放</el-tag>
                           </div>
-                          <pre class="detail-code detail-code--light">{{ detail.cacheContext.cacheSql }}</pre>
+                          <div class="audit-sql-preview">
+                            <pre class="detail-code detail-code--light">{{ detail.cacheContext.cacheSql }}</pre>
+                          </div>
                         </article>
                       </div>
                     </section>
@@ -699,11 +856,15 @@
                         <div v-for="log in detail.auditLogs" :key="log.id" class="audit-log-card">
                           <div class="audit-log-summary">
                             <div class="audit-log-head">
-                              <el-tag :type="riskTagType(log.riskLevel)">{{ log.riskLevel }}</el-tag>
-                              <el-tag :type="statusTextType(log.executeStatus)">{{ log.executeStatus }}</el-tag>
-                              <span>{{ log.createdAt }}</span>
+                              <div class="audit-log-title">
+                                <strong>{{ log.riskReason || '通过基础安全检测' }}</strong>
+                                <span>{{ log.createdAt || '时间未记录' }}</span>
+                              </div>
+                              <div class="audit-log-tags">
+                                <el-tag :type="riskTagType(log.riskLevel)" effect="plain">{{ log.riskLevel || 'SAFE' }}</el-tag>
+                                <el-tag :type="statusTextType(log.executeStatus)" effect="plain">{{ formatTraceValue(log.executeStatus || 'SUCCESS') }}</el-tag>
+                              </div>
                             </div>
-                            <p class="audit-log-reason">{{ log.riskReason || '通过基础安全检测' }}</p>
                           </div>
                           <div class="audit-log-grid">
                             <div class="audit-log-metric">
@@ -757,10 +918,13 @@
                               <strong v-else>{{ log.queryGuardActionLabel || '未触发执行保护' }}</strong>
                             </div>
                           </div>
-                          <div class="trace-panel">
+                          <div class="trace-panel audit-trace-panel">
                             <div class="trace-panel-head">
-                              <h4>SQL 生成轨迹</h4>
-                              <small>缓存命中、SQL 生成引擎与执行结果</small>
+                              <div>
+                                <h4>SQL 生成轨迹</h4>
+                                <small>缓存命中、SQL 生成引擎与执行结果</small>
+                              </div>
+                              <el-tag effect="plain">{{ log.generationTraceItems?.length || 0 }} 项</el-tag>
                             </div>
                             <div v-if="log.generationTraceItems?.length" class="trace-grid trace-grid--compact">
                               <div
@@ -780,40 +944,17 @@
                                     {{ token }}
                                   </el-tag>
                                 </div>
+                                <ul v-else-if="item.valueLines?.length > 1" class="trace-value-list">
+                                  <li v-for="(line, lineIndex) in item.valueLines" :key="`${item.id}-line-${lineIndex}`">
+                                    {{ line }}
+                                  </li>
+                                </ul>
                                 <strong v-else>{{ item.value }}</strong>
                               </div>
                             </div>
                             <p v-else class="detail-empty">无生成轨迹</p>
                           </div>
 
-                          <div class="trace-panel">
-                            <div class="trace-panel-head">
-                              <h4>知识图谱匹配摘要</h4>
-                              <small>命中节点、字段标签与映射提示来源</small>
-                            </div>
-                            <div v-if="log.kgMatchLogItems?.length" class="trace-grid trace-grid--compact">
-                              <div
-                                v-for="item in log.kgMatchLogItems"
-                                :key="item.id"
-                                class="trace-item"
-                                :class="{ 'trace-item--wide': item.wide }"
-                              >
-                                <span>{{ item.label }}</span>
-                                <div v-if="item.tokens?.length" class="trace-tags">
-                                  <el-tag
-                                    v-for="(token, tokenIndex) in item.tokens"
-                                    :key="`${item.id}-${tokenIndex}`"
-                                    size="small"
-                                    effect="plain"
-                                  >
-                                    {{ token }}
-                                  </el-tag>
-                                </div>
-                                <strong v-else>{{ item.value }}</strong>
-                              </div>
-                            </div>
-                            <p v-else class="detail-empty">无知识图谱匹配日志</p>
-                          </div>
                         </div>
                       </div>
                     </section>
@@ -838,33 +979,36 @@
                           >
                             <span>{{ card.label }}</span>
                             <strong>{{ card.value }}</strong>
+                            <p v-if="card.hint">{{ card.hint }}</p>
                           </div>
                         </div>
-                        <ol class="reasoning-timeline">
-                          <li
-                            v-for="(step, index) in reasoningDisplaySteps"
-                            :key="step.id"
-                            class="reasoning-timeline-item"
-                          >
-                            <div class="reasoning-timeline-marker">
-                              <span class="reasoning-timeline-dot"></span>
-                              <span v-if="index < reasoningDisplaySteps.length - 1" class="reasoning-timeline-line"></span>
-                            </div>
-                            <article class="reasoning-timeline-card">
-                              <div class="reasoning-timeline-head">
-                                <span class="reasoning-stepno">STEP {{ index + 1 }}</span>
-                                <strong>{{ step.title }}</strong>
-                                <el-tag size="small" :type="step.stage.type" effect="plain">{{ step.stage.label }}</el-tag>
+                        <div class="reasoning-timeline-scroll">
+                          <ol class="reasoning-timeline">
+                            <li
+                              v-for="(step, index) in reasoningDisplaySteps"
+                              :key="step.id"
+                              class="reasoning-timeline-item"
+                            >
+                              <div class="reasoning-timeline-marker">
+                                <span class="reasoning-timeline-dot"></span>
+                                <span v-if="index < reasoningDisplaySteps.length - 1" class="reasoning-timeline-line"></span>
                               </div>
-                              <p>{{ step.mainDetail }}</p>
-                              <ul v-if="step.extraDetails.length" class="reasoning-detail-list">
-                                <li v-for="(item, itemIndex) in step.extraDetails" :key="`${step.id}-${itemIndex}`">
-                                  {{ item }}
-                                </li>
-                              </ul>
-                            </article>
-                          </li>
-                        </ol>
+                              <article class="reasoning-timeline-card">
+                                <div class="reasoning-timeline-head">
+                                  <span class="reasoning-stepno">第 {{ index + 1 }} 步</span>
+                                  <strong>{{ step.title }}</strong>
+                                  <el-tag size="small" :type="step.stage.type" effect="plain">{{ step.stage.label }}</el-tag>
+                                </div>
+                                <p>{{ step.mainDetail }}</p>
+                                <ul v-if="step.extraDetails.length" class="reasoning-detail-list">
+                                  <li v-for="(item, itemIndex) in step.extraDetails" :key="`${step.id}-${itemIndex}`">
+                                    {{ item }}
+                                  </li>
+                                </ul>
+                              </article>
+                            </li>
+                          </ol>
+                        </div>
                       </section>
 
                       <section class="detail-section detail-panel" v-if="detail.graphContext?.length">
@@ -873,6 +1017,58 @@
                             <h3>知识图谱上下文</h3>
                             <p>本次查询引用的图谱节点与字段内容</p>
                           </div>
+                        </div>
+                        <div v-if="graphVisualNodes.length" class="graph-visual">
+                          <div class="graph-visual-head">
+                            <strong>图谱关系</strong>
+                            <div class="graph-visual-actions">
+                              <span>{{ graphVisualNodes.length }} 个节点 · {{ graphVisualEdges.length }} 条关系</span>
+                              <el-button size="small" text type="primary" @click="openFullGraphDialog">查看完整图谱关系</el-button>
+                            </div>
+                          </div>
+                          <svg class="graph-visual-canvas" viewBox="0 0 720 360" role="img" aria-label="知识图谱节点关系图">
+                            <defs>
+                              <marker id="graph-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                                <path d="M0,0 L8,4 L0,8 Z" fill="#93a4bc" />
+                              </marker>
+                            </defs>
+                            <g class="graph-visual-edges">
+                              <g v-for="edge in graphVisualEdges" :key="edge.id">
+                                <line
+                                  :x1="edge.from.x"
+                                  :y1="edge.from.y"
+                                  :x2="edge.to.x"
+                                  :y2="edge.to.y"
+                                  stroke="#c8d7ea"
+                                  stroke-width="2"
+                                  marker-end="url(#graph-arrow)"
+                                />
+                                <text
+                                  :x="edge.labelX"
+                                  :y="edge.labelY"
+                                  class="graph-visual-edge-label"
+                                >
+                                  {{ edge.label }}
+                                </text>
+                              </g>
+                            </g>
+                            <g class="graph-visual-nodes">
+                              <g
+                                v-for="node in graphVisualNodes"
+                                :key="node.id"
+                                class="graph-visual-node"
+                                :class="`graph-visual-node--${node.kind}`"
+                              >
+                                <circle :cx="node.x" :cy="node.y" :r="node.radius" />
+                                <text :x="node.x" :y="node.y - 4" text-anchor="middle" class="graph-visual-node-title">
+                                  {{ node.shortLabel }}
+                                </text>
+                                <text :x="node.x" :y="node.y + 13" text-anchor="middle" class="graph-visual-node-type">
+                                  {{ node.typeLabel }}
+                                </text>
+                              </g>
+                            </g>
+                          </svg>
                         </div>
                         <div class="graph-list">
                           <article v-for="(node, index) in detail.graphContext" :key="`${detail.id}-graph-${index}`" class="graph-card">
@@ -889,12 +1085,234 @@
                     <p v-else class="detail-empty">当前记录没有保留推理过程或知识图谱上下文。</p>
                   </div>
                 </el-tab-pane>
+
+                <el-tab-pane label="对话上下文" name="conversation">
+                  <div class="detail-tab-stack">
+                    <div v-if="conversationMessages.length" class="chat-conversation-shell conversation-replay-shell">
+                      <div class="chat-conversation-main">
+                        <div v-if="conversationContextNotice" class="conversation-context-notice">
+                          {{ conversationContextNotice }}
+                        </div>
+                        <div class="message-list">
+                          <div
+                            v-for="(turn, index) in conversationTurns"
+                            :key="turn.id || `fallback-turn-${index}`"
+                            :class="[
+                              'message-wrapper',
+                              conversationMessageRole(turn),
+                              {
+                                'is-current': isCurrentConversationTurn(turn),
+                                'is-current-prompt': isCurrentConversationPrompt(turn)
+                              }
+                            ]"
+                          >
+                            <div class="avatar">
+                              <img
+                                :src="conversationMessageRole(turn) === 'system' ? chatQueryAvatar : chatPeopleAvatar"
+                                alt=""
+                                aria-hidden="true"
+                              />
+                            </div>
+                            <div class="msg-content">
+                              <div
+                                v-if="conversationTurnMarkerLabel(turn)"
+                                class="conversation-current-marker"
+                                :class="{ 'is-prompt': isCurrentConversationPrompt(turn) && !isCurrentConversationTurn(turn) }"
+                              >
+                                {{ conversationTurnMarkerLabel(turn) }}
+                              </div>
+                              <div class="bubble">
+                                <span>{{ turn.messageText || '该轮消息未保留正文。' }}</span>
+                              </div>
+                              <details v-if="conversationThinkingLogs(turn).length" class="thinking-details">
+                                <summary>查看思考过程（{{ conversationThinkingLogs(turn).length }}步）</summary>
+                                <ol class="thinking-list">
+                                  <li
+                                    v-for="(line, lineIndex) in conversationThinkingLogs(turn)"
+                                    :key="`${turn.id || index}-thinking-${lineIndex}`"
+                                  >
+                                    {{ line }}
+                                  </li>
+                                </ol>
+                              </details>
+                              <div v-if="turn.artifacts?.length" class="conversation-artifact-list">
+                                <div
+                                  v-for="artifact in turn.artifacts"
+                                  :key="artifact.id || `${turn.id || index}-${artifact.historyId || artifact.artifactType}`"
+                                  class="advanced-dialog-entry"
+                                  :class="{ 'is-current': isCurrentConversationArtifact(artifact) }"
+                                >
+                                  <div class="advanced-dialog-entry__head">
+                                    <div class="advanced-dialog-entry__main">
+                                      <div class="advanced-dialog-entry__type">{{ artifactTypeDisplay(artifact) }}</div>
+                                      <div class="advanced-dialog-entry__title">
+                                        {{ conversationArtifactTitle(artifact) }}
+                                      </div>
+                                      <div v-if="conversationArtifactSubtitle(artifact)" class="advanced-dialog-entry__summary">
+                                        {{ conversationArtifactSubtitle(artifact) }}
+                                      </div>
+                                      <div v-if="conversationAdvancedRuleInfo(artifact).has" class="advanced-dialog-entry__rule">
+                                        <div>
+                                          <span>命中规则</span>
+                                          <strong>{{ conversationAdvancedRuleInfo(artifact).ruleName || conversationAdvancedRuleInfo(artifact).ruleCode }}</strong>
+                                        </div>
+                                        <div v-if="conversationAdvancedRuleInfo(artifact).ruleCode">
+                                          <span>规则编码</span>
+                                          <strong>{{ conversationAdvancedRuleInfo(artifact).ruleCode }}</strong>
+                                        </div>
+                                        <div v-if="conversationAdvancedRuleInfo(artifact).scenarioType">
+                                          <span>推荐场景</span>
+                                          <strong>{{ conversationAdvancedRuleInfo(artifact).scenarioLabel }}</strong>
+                                        </div>
+                                        <div v-if="conversationAdvancedRuleInfo(artifact).explain" class="advanced-dialog-entry__rule-explain">
+                                          <span>推荐说明</span>
+                                          <strong>{{ conversationAdvancedRuleInfo(artifact).explain }}</strong>
+                                        </div>
+                                      </div>
+                                    </div>
+                                    <div v-if="!isConversationSqlArtifact(artifact)" class="advanced-dialog-entry__actions">
+                                      <template v-if="conversationAdvancedAnalysisPayload(artifact)">
+                                        <el-tag
+                                          size="small"
+                                          effect="light"
+                                          :type="conversationAdvancedAnalysisPayload(artifact).status === '模拟生成' ? 'warning' : 'success'"
+                                        >
+                                          {{ conversationAdvancedAnalysisPayload(artifact).status || '已生成' }}
+                                        </el-tag>
+                                        <el-button size="small" type="primary" plain @click="openConversationAdvancedAnalysisDialog(artifact)">
+                                          查看详情
+                                        </el-button>
+                                      </template>
+                                      <template v-else>
+                                        <el-tag v-if="artifact.historyId" size="small" effect="plain">#{{ artifact.historyId }}</el-tag>
+                                        <el-tag v-if="artifact.riskLevel" size="small" :type="riskTagType(artifact.riskLevel)" effect="light">{{ artifact.riskLevel }}</el-tag>
+                                        <el-tag v-if="artifact.chartType" size="small" effect="plain">{{ chartTypeLabel(artifact.chartType) }}</el-tag>
+                                        <el-tag v-if="isCurrentConversationArtifact(artifact)" size="small" type="primary" effect="light">当前记录</el-tag>
+                                      </template>
+                                    </div>
+                                  </div>
+                                  <div v-if="!isConversationSqlArtifact(artifact) && !conversationAdvancedAnalysisPayload(artifact) && conversationArtifactChartPayload(artifact)" class="conversation-chart-preview">
+                                    <DashboardChart
+                                      :payload="conversationArtifactChartPayload(artifact)"
+                                      :display-title="artifact.summary || artifact.message || artifact.question || '图表结果'"
+                                      hide-title
+                                    />
+                                  </div>
+                                  <div
+                                    v-if="artifact.sqlText && (isConversationSqlArtifact(artifact) || (!isConversationChartArtifact(artifact) && !conversationAdvancedAnalysisPayload(artifact) && !conversationArtifactChartPayload(artifact)))"
+                                    class="sql-block"
+                                  >
+                                    <div class="sql-head">
+                                      <div class="sql-title">生成的 SQL</div>
+                                      <el-button size="small" text type="primary" @click="copySql(artifact.sqlText)">复制</el-button>
+                                    </div>
+                                    <pre class="sql-code">{{ artifact.sqlText }}</pre>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <p v-else class="detail-empty">当前记录没有可展示的对话上下文。</p>
+                  </div>
+                </el-tab-pane>
               </el-tabs>
             </main>
           </div>
         </div>
       </div>
     </el-drawer>
+
+    <el-dialog
+      v-model="conversationAdvancedAnalysisVisible"
+      :title="conversationAdvancedAnalysisActive ? advancedAnalysisTypeLabel(conversationAdvancedAnalysisActive.type) : '高级分析'"
+      width="860px"
+      destroy-on-close
+      append-to-body
+      class="advanced-analysis-dialog admin-advanced-analysis-dialog"
+    >
+      <AdvancedAnalysisCard
+        v-if="conversationAdvancedAnalysisActive"
+        :analysis="conversationAdvancedAnalysisActive"
+        :show-save-action="false"
+        :show-pin-action="false"
+        :show-manage-alerts-action="false"
+        @recalculate="notifyAdminAdvancedReplayOnly"
+      />
+    </el-dialog>
+
+    <el-dialog
+      v-model="fullGraphVisible"
+      title="完整图谱关系"
+      width="min(1120px, 92vw)"
+      class="graph-full-dialog"
+      append-to-body
+    >
+      <div v-if="fullGraphVisual.nodes.length" class="graph-full-layout">
+        <section class="graph-full-panel graph-full-panel--canvas">
+          <div class="graph-full-head">
+            <strong>{{ fullGraphVisual.nodes.length }} 个节点 · {{ fullGraphVisual.edges.length }} 条关系</strong>
+            <span>展示当前历史记录命中的知识图谱节点与关系</span>
+          </div>
+          <svg class="graph-full-canvas" viewBox="0 0 1120 620" role="img" aria-label="完整知识图谱关系图">
+            <defs>
+              <marker id="graph-full-arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+                <path d="M0,0 L9,4.5 L0,9 Z" fill="#7c8da5" />
+              </marker>
+            </defs>
+            <g class="graph-visual-edges">
+              <g v-for="edge in fullGraphVisual.edges" :key="edge.id">
+                <line
+                  :x1="edge.from.x"
+                  :y1="edge.from.y"
+                  :x2="edge.to.x"
+                  :y2="edge.to.y"
+                  stroke="#b7c7dc"
+                  stroke-width="2"
+                  marker-end="url(#graph-full-arrow)"
+                />
+                <text :x="edge.labelX" :y="edge.labelY" class="graph-visual-edge-label">
+                  {{ edge.label }}
+                </text>
+              </g>
+            </g>
+            <g class="graph-visual-nodes">
+              <g
+                v-for="node in fullGraphVisual.nodes"
+                :key="node.id"
+                class="graph-visual-node"
+                :class="`graph-visual-node--${node.kind}`"
+              >
+                <circle :cx="node.x" :cy="node.y" :r="node.radius" />
+                <text :x="node.x" :y="node.y - 4" text-anchor="middle" class="graph-visual-node-title">
+                  {{ node.shortLabel }}
+                </text>
+                <text :x="node.x" :y="node.y + 13" text-anchor="middle" class="graph-visual-node-type">
+                  {{ node.typeLabel }}
+                </text>
+              </g>
+            </g>
+          </svg>
+        </section>
+        <section class="graph-full-panel graph-full-panel--list">
+          <div class="graph-full-head">
+            <strong>关系明细</strong>
+            <span>按图谱关系边展开</span>
+          </div>
+          <div v-if="fullGraphRelations.length" class="graph-relation-list">
+            <article v-for="item in fullGraphRelations" :key="item.id" class="graph-relation-item">
+              <strong>{{ item.fromLabel }}</strong>
+              <span>{{ item.label }}</span>
+              <strong>{{ item.toLabel }}</strong>
+            </article>
+          </div>
+          <p v-else class="detail-empty">当前图谱节点之间没有可展示的关系边。</p>
+        </section>
+      </div>
+      <p v-else class="detail-empty">当前记录没有可展示的完整图谱关系。</p>
+    </el-dialog>
   </section>
 </template>
 
@@ -903,12 +1321,16 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, RefreshRight, View } from '@element-plus/icons-vue'
 import { API_BASE, http } from '../../api/http'
+import AdvancedAnalysisCard from '../../components/AdvancedAnalysisCard.vue'
 import DashboardChart from '../../components/dashboard/DashboardChart.vue'
 import LegacyInlineChart from '../../components/dashboard/LegacyInlineChart.vue'
+import chatPeopleAvatar from '../../assets/chat-people.png'
+import chatQueryAvatar from '../../assets/chat-query-avatar.png'
 import {
   deleteAdminChatHistoryBatch,
   fetchAdminChatHistory,
   fetchAdminChatHistoryAnalytics,
+  fetchAdminChatHistoryContext,
   fetchAdminChatHistoryDetail,
   rerunAdminChatHistory
 } from '../../api/adminChatHistory'
@@ -917,6 +1339,9 @@ const loading = ref(false)
 const exporting = ref(false)
 const rerunning = ref(false)
 const detailVisible = ref(false)
+const fullGraphVisible = ref(false)
+const conversationAdvancedAnalysisVisible = ref(false)
+const conversationAdvancedAnalysisActive = ref(null)
 const detail = ref(null)
 const detailActiveTab = ref('query')
 const rows = ref([])
@@ -925,10 +1350,11 @@ const summary = ref({})
 const governance = ref({})
 const analytics = ref({
   trends: {},
-  performance: {}
+  performance: {},
+  routeAudit: {}
 })
 const page = ref(1)
-const pageSize = ref(10)
+const pageSize = ref(20)
 const total = ref(0)
 const dateRange = ref([])
 const filters = reactive({
@@ -964,6 +1390,540 @@ const getDetailChartSnapshot = (entry = detail.value) => {
   return {}
 }
 
+const normalizeChartSnapshot = (snapshot) => {
+  if (snapshot && typeof snapshot === 'object') return snapshot
+  if (typeof snapshot === 'string') {
+    try {
+      const parsed = JSON.parse(snapshot)
+      return parsed && typeof parsed === 'object' ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+  return {}
+}
+
+const conversationArtifactChartPayload = (artifact) => {
+  if (!artifact || typeof artifact !== 'object') return null
+  const nestedArtifact = artifact.artifact && typeof artifact.artifact === 'object' ? artifact.artifact : {}
+  let snapshot = normalizeChartSnapshot(
+    artifact.chartSnapshot ||
+    nestedArtifact.chartSnapshot ||
+    (Array.isArray(nestedArtifact.data) ? nestedArtifact : null) ||
+    (Array.isArray(artifact.data) ? artifact : null)
+  )
+  if ((!Array.isArray(snapshot.data) || !snapshot.data.length) && String(artifact.historyId || '') === String(detail.value?.id || '')) {
+    const detailSnapshot = getDetailChartSnapshot(detail.value)
+    if (Array.isArray(detailSnapshot.data) && detailSnapshot.data.length) {
+      snapshot = detailSnapshot
+    }
+  }
+  if (!Array.isArray(snapshot.data) || !snapshot.data.length) return null
+  return {
+    id: artifact.historyId || artifact.id,
+    queryText: artifact.question || artifact.summary || artifact.message || '',
+    chartType: artifact.chartType || snapshot.chartType || nestedArtifact.chartType,
+    chartSnapshot: {
+      ...snapshot,
+      chartType: snapshot.chartType || artifact.chartType || nestedArtifact.chartType,
+      message: snapshot.message || artifact.summary || artifact.message || artifact.question
+    }
+  }
+}
+
+const isConversationSqlArtifact = (artifact) => {
+  const type = String(artifact?.artifactType || artifact?.artifactTypeLabel || '').trim().toUpperCase()
+  return type === 'SQL'
+}
+
+const isConversationChartArtifact = (artifact) => {
+  if (isConversationSqlArtifact(artifact)) return false
+  const type = String(artifact?.artifactType || artifact?.artifactTypeLabel || '').trim().toUpperCase()
+  return type === 'CHART' || artifact?.hasChart === true
+}
+
+const asObject = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : {})
+
+const firstText = (...values) => values
+  .map(value => String(value ?? '').trim())
+  .find(Boolean) || ''
+
+const scalarText = (value) => {
+  if (value === null || value === undefined) return ''
+  if (Array.isArray(value) || typeof value === 'object') return ''
+  const text = String(value).trim()
+  return text && !['null', 'undefined', 'nan'].includes(text.toLowerCase()) ? text : ''
+}
+
+const firstScalar = (sources, keys) => {
+  for (const source of sources) {
+    for (const key of keys) {
+      const text = scalarText(source?.[key])
+      if (text) return text
+    }
+  }
+  return ''
+}
+
+const firstRaw = (sources, keys) => {
+  for (const source of sources) {
+    for (const key of keys) {
+      const value = source?.[key]
+      if (value !== null && value !== undefined && value !== '') return value
+    }
+  }
+  return undefined
+}
+
+const collectAlertSources = (...values) => {
+  const queue = values.flat().filter(Boolean)
+  const sources = []
+  const seen = new Set()
+  const nestedKeys = [
+    'params',
+    'fieldMapping',
+    'alertMeta',
+    'alertRule',
+    'alertRuleCreated',
+    'alertRuleDraft',
+    'rule',
+    'event',
+    'alertEvent',
+    'triggerResult',
+    'advancedAnalysis',
+    'chartSnapshot',
+    'snapshot'
+  ]
+  while (queue.length && sources.length < 80) {
+    const value = queue.shift()
+    if (!value || typeof value !== 'object' || Array.isArray(value) || seen.has(value)) continue
+    seen.add(value)
+    sources.push(value)
+    nestedKeys.forEach((key) => {
+      const nested = value[key]
+      if (nested && typeof nested === 'object' && !Array.isArray(nested)) queue.push(nested)
+    })
+  }
+  return sources
+}
+
+const normalizeAdvancedAnalysisType = (value) => {
+  const normalized = String(value || '').trim().replace(/[-_\s]/g, '').toLowerCase()
+  if (normalized.includes('forecast')) return 'forecast'
+  if (normalized.includes('whatif')) return 'whatIf'
+  if (normalized.includes('alert') || normalized.includes('warning') || normalized.includes('prewarning')) return 'alert'
+  return ''
+}
+
+const firstAdvancedAnalysisType = (...values) => values
+  .map(value => normalizeAdvancedAnalysisType(value))
+  .find(Boolean) || ''
+
+const advancedAnalysisTypeLabel = (type) => {
+  if (type === 'forecast') return '时序预测'
+  if (type === 'whatIf') return 'What-if 推演'
+  if (type === 'alert') return '智能预警'
+  return '高级分析'
+}
+
+const advancedScenarioLabel = (scenarioType) => {
+  const value = String(scenarioType || '').trim().toUpperCase()
+  if (value === 'TIME_SERIES') return '时序趋势'
+  if (value === 'GROUP_COMPARE') return '分组对比'
+  if (value === 'RATIO') return '占比分析'
+  if (value === 'DETAIL') return '明细数据'
+  if (value === 'SCENARIO_SIMULATION') return '情景推演'
+  if (value === 'ADVANCED_ALERT') return '智能预警'
+  if (value === 'CUSTOM') return '自定义规则'
+  return value || '自动推荐'
+}
+
+const formatAdvancedNumber = (value, fallback = '未记录') => {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return scalarText(value) || fallback
+  if (Math.abs(number) >= 10000) return `${(number / 10000).toFixed(1)}万`
+  return Number.isInteger(number) ? String(number) : number.toFixed(2)
+}
+
+const alertOperatorLabel = (operator) => {
+  const value = String(operator || '').trim().toLowerCase()
+  if (value === 'gt') return '高于阈值'
+  if (value === 'zscore') return 'Z-Score 异常波动'
+  if (value === 'lt') return '低于阈值'
+  return value || '未记录判断条件'
+}
+
+const alertCycleLabel = (cycle) => {
+  const value = String(cycle || '').trim()
+  const normalized = value.toLowerCase()
+  const labels = {
+    hourly: '每小时检测',
+    hour: '每小时检测',
+    daily: '每日检测',
+    day: '每日检测',
+    weekly: '每周检测',
+    week: '每周检测',
+    monthly: '每月检测',
+    month: '每月检测'
+  }
+  return labels[normalized] || value || '未记录检测周期'
+}
+
+const parseAlertChannelValue = (value) => {
+  if (Array.isArray(value)) return value
+  if (value === null || value === undefined || value === '') return []
+  if (typeof value === 'string') {
+    const text = value.trim()
+    if (!text) return []
+    if (text.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(text)
+        if (Array.isArray(parsed)) return parsed
+      } catch {
+        // fall through to delimiter parsing
+      }
+    }
+    return text.split(/[,+，、/]/).map(item => item.trim()).filter(Boolean)
+  }
+  return [value]
+}
+
+const formatAlertChannel = (channels) => {
+  const values = parseAlertChannelValue(channels)
+  const labels = values.map((item) => {
+    const value = String(item || '').trim()
+    const normalized = value.toLowerCase()
+    if (normalized === 'email' || value === '邮件') return '邮件'
+    if (normalized === 'dingtalk' || value === '钉钉') return '钉钉'
+    if (normalized === 'both' || value === '邮件 + 钉钉') return '邮件 + 钉钉'
+    if (normalized === 'webhook') return 'Webhook'
+    return value
+  }).filter(Boolean)
+  const unique = [...new Set(labels)]
+  if (unique.includes('邮件 + 钉钉')) return '邮件 + 钉钉'
+  return unique.length ? unique.join(' + ') : '未记录通知渠道'
+}
+
+const formatAlertStatusLabel = (status) => {
+  const text = String(status || '').trim()
+  const value = text.toUpperCase()
+  const labels = {
+    ACTIVE: '已启用',
+    ENABLED: '已启用',
+    SAVED: '已保存',
+    CREATED: '已创建',
+    DRAFT: '待确认',
+    PENDING: '待处理',
+    OPEN: '待处理',
+    ACK: '已确认',
+    ACKED: '已确认',
+    CLOSED: '已关闭',
+    DISABLED: '已停用',
+    SUCCESS: '推送成功',
+    FAILED: '推送失败',
+    WARNING: '已触发',
+    TRIGGERED: '已触发'
+  }
+  return labels[value] || text || '未记录状态'
+}
+
+const alertStatusTagType = (status) => {
+  const raw = String(status || '').trim()
+  const value = raw.toUpperCase()
+  if (['推送失败', '已停用', '已关闭'].includes(raw)) return 'danger'
+  if (['待确认', '待处理', '已触发'].includes(raw)) return 'warning'
+  if (['已启用', '已保存', '已创建', '推送成功', '已确认'].includes(raw)) return 'success'
+  if (['FAILED', 'DISABLED', 'CLOSED'].includes(value)) return 'danger'
+  if (['DRAFT', 'PENDING', 'OPEN', 'WARNING', 'TRIGGERED'].includes(value)) return 'warning'
+  if (['ACTIVE', 'ENABLED', 'SAVED', 'CREATED', 'SUCCESS', 'ACK', 'ACKED'].includes(value)) return 'success'
+  return 'info'
+}
+
+const buildAlertTriggerResult = (info) => {
+  if (info.triggerResult) return info.triggerResult
+  if (info.actualValue || info.baselineValue || info.zScore) {
+    const parts = []
+    if (info.bucketName) parts.push(`检测窗口：${info.bucketName}`)
+    if (info.actualValue) parts.push(`实际值：${info.actualValue}`)
+    if (info.thresholdText && info.thresholdText !== '未记录阈值') parts.push(`阈值：${info.thresholdText}`)
+    if (info.baselineValue) parts.push(`历史基线：${info.baselineValue}`)
+    if (info.zScore) parts.push(`Z-Score：${info.zScore}`)
+    return parts.join('，')
+  }
+  const status = String(info.status || '').trim().toUpperCase()
+  if (['ACTIVE', 'ENABLED', 'SAVED', 'CREATED'].includes(status)) return '规则已创建，等待离线检测触发。'
+  if (['DRAFT', 'PENDING'].includes(status)) return '规则待确认，尚未进入离线检测。'
+  return '未记录触发结果'
+}
+
+const buildAlertInfo = (...sourceValues) => {
+  const sources = collectAlertSources(...sourceValues)
+  if (!sources.length) return null
+  const operator = firstScalar(sources, ['operator', 'compareOperator', 'condition'])
+  const thresholdRaw = firstRaw(sources, ['threshold', 'thresholdValue', 'threshold_value'])
+  const rawChannels = firstRaw(sources, ['channels', 'notificationChannels', 'notifyChannels', 'channel', 'notifyChannel', 'pushChannel'])
+  const actualValueRaw = firstRaw(sources, ['actualValue', 'actual', 'value', 'currentValue'])
+  const baselineRaw = firstRaw(sources, ['baselineValue', 'baseline'])
+  const zScoreRaw = firstRaw(sources, ['zScore', 'z_score'])
+  const status = firstScalar(sources, ['status', 'ruleStatus', 'eventStatus', 'pushStatus']) || 'SAVED'
+  const info = {
+    title: firstScalar(sources, ['title', 'ruleName', 'name']) || '智能预警规则',
+    ruleName: firstScalar(sources, ['ruleName', 'name', 'title']),
+    ruleCode: firstScalar(sources, ['ruleCode', 'code']),
+    ruleId: firstScalar(sources, ['ruleId']),
+    eventId: firstScalar(sources, ['eventId']),
+    metric: firstScalar(sources, ['metric', 'metricField', 'targetMetric', 'metricKey']),
+    metricField: firstScalar(sources, ['metricField', 'targetMetric', 'metricKey']),
+    timeField: firstScalar(sources, ['timeField', 'timeKey']),
+    tableName: firstScalar(sources, ['tableName', 'queryTableName']),
+    operator,
+    threshold: thresholdRaw,
+    thresholdText: operator === 'zscore' && (thresholdRaw === null || thresholdRaw === undefined || thresholdRaw === '')
+      ? 'Z-Score >= 3'
+      : formatAdvancedNumber(thresholdRaw, '未记录阈值'),
+    detectionCycle: firstScalar(sources, ['detectionCycle', 'cycle', 'schedule']),
+    channelLabel: formatAlertChannel(rawChannels),
+    channels: parseAlertChannelValue(rawChannels),
+    status,
+    statusLabel: formatAlertStatusLabel(status),
+    triggerResult: firstScalar(sources, ['triggerResult', 'alertResult', 'reason', 'resultReason', 'message']),
+    bucketName: firstScalar(sources, ['bucketName', 'period', 'window']),
+    actualValue: formatAdvancedNumber(actualValueRaw, ''),
+    baselineValue: formatAdvancedNumber(baselineRaw, ''),
+    zScore: formatAdvancedNumber(zScoreRaw, '')
+  }
+  info.conditionText = info.operator
+    ? `${alertOperatorLabel(info.operator)} ${info.thresholdText}`
+    : info.thresholdText
+  info.detectionCycleLabel = alertCycleLabel(info.detectionCycle)
+  info.triggerResult = buildAlertTriggerResult(info)
+  return info
+}
+
+const alertInfoItems = (info) => {
+  if (!info) return []
+  return [
+    { label: '规则名称', value: info.ruleName || info.title || info.ruleCode || '未记录规则名称' },
+    { label: '指标', value: info.metric || info.metricField || '未记录指标' },
+    { label: '阈值', value: info.conditionText || info.thresholdText || '未记录阈值' },
+    { label: '检测周期', value: info.detectionCycleLabel || '未记录检测周期' },
+    { label: '通知渠道', value: info.channelLabel || '未记录通知渠道' },
+    { label: '状态', value: info.statusLabel || '未记录状态' },
+    { label: '触发结果', value: info.triggerResult || '未记录触发结果', wide: true }
+  ]
+}
+
+const conversationAdvancedAnalysisPayload = (artifact) => {
+  if (!artifact || typeof artifact !== 'object') return null
+  const nested = asObject(artifact.artifact)
+  const embedded = asObject(nested.advancedAnalysis || artifact.advancedAnalysis)
+  const snapshot = normalizeChartSnapshot(
+    artifact.chartSnapshot ||
+    nested.chartSnapshot ||
+    embedded.chartSnapshot ||
+    (Array.isArray(nested.data) ? nested : null) ||
+    (Array.isArray(embedded.data) ? embedded : null)
+  )
+  const type = firstAdvancedAnalysisType(
+    artifact.artifactType,
+    artifact.intentType,
+    artifact.type,
+    nested.type,
+    embedded.type,
+    snapshot.type,
+    snapshot.advancedAnalysisType,
+    snapshot.fieldMapping?.mappingType
+  )
+  const fieldMapping = {
+    ...asObject(snapshot.fieldMapping),
+    ...asObject(nested.fieldMapping),
+    ...asObject(embedded.fieldMapping)
+  }
+  const forecastMeta = {
+    ...asObject(snapshot.forecastMeta),
+    ...asObject(nested.forecastMeta),
+    ...asObject(embedded.forecastMeta)
+  }
+  const params = {
+    ...asObject(snapshot.params),
+    ...asObject(artifact.params),
+    ...asObject(embedded.params),
+    ...asObject(nested.params)
+  }
+  const alertInfo = buildAlertInfo(
+    artifact,
+    nested,
+    embedded,
+    snapshot,
+    params,
+    snapshot.alertMeta,
+    snapshot.alertRule,
+    snapshot.alertRuleCreated,
+    snapshot.alertRuleDraft,
+    nested.alertRuleCreated,
+    nested.alertRuleDraft,
+    embedded.alertRuleCreated,
+    embedded.alertRuleDraft
+  )
+  const hasAlertSignal = Boolean(alertInfo && (
+    alertInfo.operator ||
+    alertInfo.threshold !== undefined ||
+    alertInfo.actualValue ||
+    alertInfo.zScore ||
+    alertInfo.eventId ||
+    alertInfo.ruleId ||
+    Object.keys(asObject(snapshot.alertMeta)).length ||
+    Object.keys(asObject(snapshot.alertRule)).length ||
+    Object.keys(asObject(snapshot.alertRuleCreated)).length ||
+    Object.keys(asObject(snapshot.alertRuleDraft)).length ||
+    Object.keys(asObject(nested.alertRuleCreated)).length ||
+    Object.keys(asObject(nested.alertRuleDraft)).length ||
+    Object.keys(asObject(embedded.alertRuleCreated)).length ||
+    Object.keys(asObject(embedded.alertRuleDraft)).length
+  ))
+  const resolvedType = type || (hasAlertSignal ? 'alert' : '')
+  if (!resolvedType) return null
+  const series = Array.isArray(embedded.series) && embedded.series.length
+    ? embedded.series
+    : Array.isArray(nested.series) && nested.series.length
+      ? nested.series
+      : Array.isArray(snapshot.data) ? snapshot.data : []
+  const forecastRows = series.filter(item => item && typeof item === 'object' && item.forecast != null)
+  if (!params.algorithm && forecastMeta.algorithm) params.algorithm = forecastMeta.algorithm
+  if (!params.confidence && forecastMeta.confidence) params.confidence = forecastMeta.confidence
+  if (!params.horizon && forecastRows.length) params.horizon = forecastRows.length
+  if (!params.metricField) params.metricField = firstText(
+    embedded.metricField,
+    nested.metricField,
+    forecastMeta.metricField,
+    alertInfo?.metricField,
+    fieldMapping.metric,
+    fieldMapping.metricKey
+  )
+  if (resolvedType === 'alert' && alertInfo) {
+    if (!params.operator && alertInfo.operator) params.operator = alertInfo.operator
+    if ((params.threshold === undefined || params.threshold === null || params.threshold === '') && alertInfo.threshold !== undefined) {
+      params.threshold = alertInfo.threshold
+    }
+    if (!params.detectionCycle && alertInfo.detectionCycle) params.detectionCycle = alertInfo.detectionCycle
+    if (!params.channel && alertInfo.channelLabel) params.channel = alertInfo.channelLabel
+    if ((!Array.isArray(params.channels) || !params.channels.length) && alertInfo.channels.length) {
+      params.channels = alertInfo.channels
+    }
+    if (!params.metricField && alertInfo.metricField) params.metricField = alertInfo.metricField
+    if (!params.timeField && alertInfo.timeField) params.timeField = alertInfo.timeField
+  }
+  const fallbackTitle = resolvedType === 'alert'
+    ? `${alertInfo?.metric || alertInfo?.metricField || firstText(fieldMapping.metric, fieldMapping.metricKey, params.metricField, '指标')}预警规则`
+    : `${firstText(fieldMapping.metric, fieldMapping.metricKey, params.metricField, '指标')}趋势预测`
+  const fallbackSummary = resolvedType === 'forecast'
+    ? '已基于真实历史数据生成预测结果，预测值与置信区间由后端算法计算。'
+    : resolvedType === 'alert'
+      ? '智能预警规则或预警事件已生成，可回放规则配置、阈值条件与触发结果。'
+      : '高级分析结果已生成。'
+  const chartRecommendation = asObject(embedded.chartRecommendation || nested.chartRecommendation || snapshot.chartRecommendation)
+  const alertRuleRecommendation = alertInfo
+    ? {
+      ruleCode: alertInfo.ruleCode || alertInfo.ruleId,
+      ruleName: alertInfo.ruleName || alertInfo.title,
+      scenarioType: 'ADVANCED_ALERT',
+      status: alertInfo.status,
+      explain: alertInfo.triggerResult
+    }
+    : {}
+  return {
+    ...embedded,
+    id: embedded.id || artifact.id || artifact.historyId,
+    type: resolvedType,
+    title: firstText(embedded.title, nested.title, alertInfo?.title, artifact.message, artifact.summary, fallbackTitle),
+    summary: firstText(embedded.summary, nested.summary, artifact.summary, artifact.message, fallbackSummary),
+    status: firstText(embedded.status, nested.status, artifact.status, alertInfo?.statusLabel, '已生成'),
+    tableName: firstText(embedded.tableName, nested.tableName, artifact.tableName, snapshot.tableName, '当前对话上下文'),
+    metric: firstText(embedded.metric, alertInfo?.metric, fieldMapping.metric, fieldMapping.metricKey, params.metricField, forecastMeta.metricField, '自动推断'),
+    metricField: firstText(embedded.metricField, alertInfo?.metricField, params.metricField, forecastMeta.metricField, fieldMapping.metricKey),
+    timeRange: firstText(embedded.timeRange, nested.timeRange, resolvedType === 'alert' ? alertInfo?.detectionCycleLabel : '', forecastRows.length ? `未来 ${forecastRows.length} 期` : ''),
+    params,
+    fieldMapping,
+    forecastMeta,
+    series,
+    data: Array.isArray(embedded.data) && embedded.data.length ? embedded.data : series,
+    insights: Array.isArray(embedded.insights) ? embedded.insights : Array.isArray(nested.insights) ? nested.insights : [],
+    explanation: asObject(embedded.explanation || nested.explanation),
+    optionTemplate: asObject(embedded.optionTemplate || nested.optionTemplate || snapshot.optionTemplate),
+    chartRecommendation: Object.keys(chartRecommendation).length ? chartRecommendation : alertRuleRecommendation,
+    ruleRecommendation: asObject(embedded.ruleRecommendation || nested.ruleRecommendation || alertRuleRecommendation),
+    alertRuleCreated: asObject(embedded.alertRuleCreated || nested.alertRuleCreated || snapshot.alertRuleCreated),
+    alertRuleDraft: asObject(embedded.alertRuleDraft || nested.alertRuleDraft || snapshot.alertRuleDraft),
+    alertMeta: asObject(embedded.alertMeta || nested.alertMeta || snapshot.alertMeta),
+    alertInfo
+  }
+}
+
+const conversationArtifactTitle = (artifact) => {
+  const analysis = conversationAdvancedAnalysisPayload(artifact)
+  return analysis?.title || artifact.summary || artifact.message || artifact.question || '未记录产物摘要'
+}
+
+const conversationArtifactSubtitle = (artifact) => {
+  const analysis = conversationAdvancedAnalysisPayload(artifact)
+  return analysis?.summary || artifact.tableName || ''
+}
+
+const conversationAlertInfo = (artifact) => {
+  const analysis = conversationAdvancedAnalysisPayload(artifact)
+  if (analysis?.type !== 'alert') return null
+  const info = analysis.alertInfo || buildAlertInfo(
+    analysis,
+    analysis.params,
+    analysis.alertMeta,
+    analysis.alertRuleCreated,
+    analysis.alertRuleDraft,
+    analysis.chartRecommendation,
+    analysis.ruleRecommendation
+  )
+  if (!info) return null
+  return {
+    ...info,
+    title: info.title || analysis.title || '智能预警规则',
+    statusLabel: info.statusLabel || formatAlertStatusLabel(info.status)
+  }
+}
+
+const conversationAdvancedRuleInfo = (artifact) => {
+  const analysis = conversationAdvancedAnalysisPayload(artifact)
+  const alertInfo = analysis?.type === 'alert' ? conversationAlertInfo(artifact) : null
+  const recommendation = asObject(analysis?.chartRecommendation || analysis?.ruleRecommendation)
+  const optionTemplate = asObject(analysis?.optionTemplate)
+  const raw = asObject(
+    recommendation.ruleCode || recommendation.ruleName || recommendation.scenarioType
+      ? recommendation
+      : optionTemplate.recommendation || optionTemplate.rule || {}
+  )
+  const ruleCode = firstText(raw.ruleCode, raw.code)
+  const ruleName = firstText(raw.ruleName, raw.name)
+  const scenarioType = firstText(raw.scenarioType, raw.scenario, alertInfo ? 'ADVANCED_ALERT' : '')
+  const explain = firstText(raw.explain, raw.description, raw.reason)
+  return {
+    has: Boolean(ruleCode || ruleName || scenarioType || explain || alertInfo?.ruleCode || alertInfo?.ruleName),
+    ruleCode: ruleCode || alertInfo?.ruleCode || alertInfo?.ruleId || '',
+    ruleName: ruleName || alertInfo?.ruleName || alertInfo?.title || '',
+    scenarioType,
+    scenarioLabel: advancedScenarioLabel(scenarioType),
+    explain: explain || alertInfo?.triggerResult || ''
+  }
+}
+
+const openConversationAdvancedAnalysisDialog = (artifact) => {
+  const analysis = conversationAdvancedAnalysisPayload(artifact)
+  if (!analysis) return
+  conversationAdvancedAnalysisActive.value = analysis
+  conversationAdvancedAnalysisVisible.value = true
+}
+
+const notifyAdminAdvancedReplayOnly = () => {
+  ElMessage.info('管理员对话上下文仅用于回放查看，请在用户端高级分析中重新计算或保存方案。')
+}
+
 const isForecastDetailSnapshot = (entry = detail.value) => {
   const snapshot = getDetailChartSnapshot(entry)
   const type = String(snapshot.advancedAnalysisType || snapshot.fieldMapping?.mappingType || '').trim()
@@ -983,26 +1943,43 @@ const isForecastDetailSnapshot = (entry = detail.value) => {
 const normalizeModelCategoryText = (value) => {
   const text = String(value || '').trim()
   const upper = text.toUpperCase()
+  const lower = text.toLowerCase()
   if (!text || upper === 'UNKNOWN' || upper === 'UNKONWN') return ''
   if (['预测算法', '情景推演', '智能预警'].includes(text)) return ''
+  if (text === 'AI 解析成功') return '大模型解析成功'
+  if (text === 'What-if' || text === 'WHAT_IF') return '情景推演'
+  if (lower === 'python-ai-service') return '大模型解析服务'
+  if (lower === 'redis-semantic-cache') return '语义缓存复用'
+  if (lower === 'java-fallback') return '规则兜底解析'
+  if (lower === 'java-federal-join') return '联邦关联直连'
+  if (upper === 'AI_SUCCESS') return '大模型解析成功'
+  if (upper === 'CACHE_REUSED') return '命中语义缓存'
+  if (upper === 'RULE_FALLBACK') return '规则兜底'
+  if (upper === 'FEDERAL_JOIN') return '联邦关联直连'
+  if (upper === 'PARSE_FAILED') return '解析失败'
+  if (upper === 'PARSED') return '已完成解析'
   return text
 }
 
 const advancedAnalysisKind = (entry = detail.value) => {
   const snapshot = getDetailChartSnapshot(entry)
-  const rawType = String(
+  const resolvedType = firstAdvancedAnalysisType(
+    entry?.artifactType ||
+    '',
+    entry?.intentType ||
+    '',
     snapshot.advancedAnalysisType ||
+    '',
     snapshot.type ||
+    '',
     snapshot.fieldMapping?.mappingType ||
     ''
-  ).trim()
-  const normalized = rawType.replace(/[-_\s]/g, '').toLowerCase()
-  if (normalized.includes('whatif')) return 'whatIf'
-  if (normalized.includes('alert') || normalized.includes('warning') || normalized.includes('prewarning')) return 'alert'
-  if (normalized.includes('forecast')) return 'forecast'
+  )
+  if (resolvedType) return resolvedType
   if (snapshot.forecastMeta || isForecastDetailSnapshot(entry)) return 'forecast'
   if (snapshot.whatIfMeta || snapshot.scenarioMeta || Array.isArray(snapshot.scenarios) || Array.isArray(snapshot.variables)) return 'whatIf'
   if (snapshot.alertMeta || snapshot.alertRule || snapshot.ruleId) return 'alert'
+  if (snapshot.operator && (snapshot.threshold !== undefined || snapshot.actualValue !== undefined || snapshot.zScore !== undefined)) return 'alert'
   return ''
 }
 
@@ -1038,6 +2015,7 @@ const detailChartPayload = computed(() => {
   const current = detail.value
   const snapshot = getDetailChartSnapshot(current)
   if (!current || !snapshot || typeof snapshot !== 'object') return null
+  if (advancedAnalysisKind(current) === 'alert') return null
   if (!Array.isArray(snapshot.data) || !snapshot.data.length) return null
   return {
     chartType: current.chartType || snapshot.chartType,
@@ -1045,11 +2023,50 @@ const detailChartPayload = computed(() => {
   }
 })
 
-const detailHasResultPreview = computed(() => Boolean(detailChartPayload.value || detail.value?.snapshotPreviewRows?.length))
+const detailHasResultPreview = computed(() => (
+  advancedAnalysisKind(detail.value) !== 'alert' &&
+  Boolean(detailChartPayload.value || detail.value?.snapshotPreviewRows?.length)
+))
 
 const detailFieldMappingSummary = computed(() => summarizeFieldMapping(
   detail.value?.snapshotMetrics?.fieldMapping || getDetailChartSnapshot(detail.value)?.fieldMapping
 ))
+
+const detailAlertInfo = computed(() => {
+  const current = detail.value
+  if (!current || advancedAnalysisKind(current) !== 'alert') return null
+  const snapshot = getDetailChartSnapshot(current)
+  const context = asObject(current.context)
+  const turns = Array.isArray(current.conversationContext?.turns) ? current.conversationContext.turns : []
+  const currentTurn = turns.find(turn => turn?.isCurrent) || {}
+  const currentArtifact = turns
+    .flatMap(turn => Array.isArray(turn.artifacts) ? turn.artifacts : [])
+    .find(artifact => String(artifact?.historyId || '') === String(current.id || '')) || {}
+  const currentArtifactPayload = conversationAdvancedAnalysisPayload(currentArtifact) || {}
+  const info = buildAlertInfo(
+    current,
+    context,
+    snapshot,
+    snapshot.params,
+    snapshot.alertMeta,
+    snapshot.alertRule,
+    snapshot.alertRuleCreated,
+    snapshot.alertRuleDraft,
+    currentTurn.context,
+    currentArtifact,
+    currentArtifact.artifact,
+    currentArtifactPayload,
+    currentArtifactPayload.alertInfo
+  )
+  if (!info) return null
+  return {
+    ...info,
+    title: info.title || current.question || '智能预警规则',
+    statusLabel: info.statusLabel || formatAlertStatusLabel(info.status)
+  }
+})
+
+const detailAlertInfoItems = computed(() => alertInfoItems(detailAlertInfo.value))
 
 const detailForecastMeta = computed(() => {
   const snapshot = getDetailChartSnapshot(detail.value)
@@ -1061,11 +2078,40 @@ const detailParseEngineText = computed(() => {
   const kind = advancedAnalysisKind(detail.value)
   if (kind === 'forecast') return detailForecastMeta.value.algorithm || '时序预测算法'
   if (kind === 'whatIf') return '拟合推演算法'
-  if (kind === 'alert') return 'Z-Score 异常检测'
+  if (kind === 'alert') return detailAlertInfo.value?.operator === 'zscore' ? 'Z-Score 异常检测' : '阈值预警检测'
   return normalizeModelCategoryText(detail.value?.engine) ||
     normalizeModelCategoryText(detail.value?.modelCategory) ||
     '未记录解析引擎'
 })
+
+const intentTypeLabel = (value) => {
+  const text = String(value || '').trim()
+  const upper = text.toUpperCase()
+  if (!text) return '数据分析'
+  const labelMap = {
+    QUERY: '对话查询',
+    QUERY_SQL: '数据查询',
+    FOLLOWUP: '追问分析',
+    COMPARE: '对比分析',
+    DRILLDOWN: '下钻分析',
+    EXPLAIN: '结果解释',
+    FORECAST: '时序预测',
+    ADVANCED_FORECAST: '时序预测',
+    ADVANCED_WHAT_IF: '情景推演',
+    ADVANCED_ALERT: '智能预警',
+    ADVANCED_ANALYSIS: '高级分析',
+    REPORT_GENERATE: '报告生成',
+    AUDIT_QUERY: '审计查询',
+    CLARIFY: '需求澄清'
+  }
+  return labelMap[upper] || text
+}
+
+const aiParseResultText = (status, fallback = '') => {
+  const fromStatus = normalizeModelCategoryText(status)
+  if (fromStatus) return fromStatus
+  return normalizeModelCategoryText(fallback) || fallback || '解析信息缺失'
+}
 
 const detailQueryContentSubtitle = computed(() => (
   shouldShowDetailSql.value ? '原始问句与生成 SQL' : '原始问句与算法结果'
@@ -1083,6 +2129,13 @@ const detailSqlDisplayText = computed(() => {
 
 const detailQuerySummaryText = computed(() => {
   const current = detail.value || {}
+  if (advancedAnalysisKind(current) === 'alert') {
+    const info = detailAlertInfo.value
+    const parts = ['本次记录为智能预警产物']
+    if (info?.ruleName) parts.push(`规则：${info.ruleName}`)
+    if (info?.metric) parts.push(`指标：${info.metric}`)
+    return `${parts.join('，')}。管理员可在摘要卡片中查看阈值、周期、通知渠道与触发结果。`
+  }
   if (current.summaryText) return current.summaryText
   if (isForecastDetailSnapshot(current)) {
     const meta = detailForecastMeta.value
@@ -1102,7 +2155,7 @@ const detailParseDescription = computed(() => {
     return '本次请求命中预测流程，由时序算法基于历史序列直接产出预测快照，因此详情中不展示 SQL。'
   }
   if (kind === 'whatIf') {
-    return '本次请求命中 What-if 推演流程，由拟合算法或业务公式直接计算情景结果，因此详情中不展示 SQL。'
+    return '本次请求命中情景推演流程，由拟合算法或业务公式直接计算情景结果，因此详情中不展示 SQL。'
   }
   if (kind === 'alert') {
     return '本次请求命中智能预警流程，由阈值规则与异常检测生成预警配置或事件，因此详情中不展示 SQL。'
@@ -1202,7 +2255,7 @@ const reasoningOverviewCards = computed(() => {
   return [
     {
       label: '分析目标',
-      value: current.intentType || '数据分析',
+      value: intentTypeLabel(current.intentType),
       hint: '模型对本次问句识别出的主要任务类型'
     },
     {
@@ -1211,9 +2264,9 @@ const reasoningOverviewCards = computed(() => {
       hint: '本次生成过程中主要引用的数据表或数据源'
     },
     {
-      label: isAdvanced ? '算法策略' : '生成策略',
+      label: isAdvanced ? '算法策略' : '解析引擎',
       value: detailParseEngineText.value,
-      hint: current.aiParseResultLabel || '未记录解析结果'
+      hint: aiParseResultText(current.aiParseResult, current.aiParseResultLabel)
     },
     {
       label: '结果产物',
@@ -1222,6 +2275,359 @@ const reasoningOverviewCards = computed(() => {
     }
   ]
 })
+
+const auditSummaryCards = computed(() => {
+  const summary = detail.value?.auditSummary || {}
+  const auditCount = Number(summary.count || 0)
+  const blockedCount = Number(summary.blockedCount || 0)
+  const warnCount = Number(summary.warnCount || 0)
+  const slowCount = Number(summary.slowCount || 0)
+  return [
+    {
+      label: '审计记录',
+      value: auditCount.toLocaleString('zh-CN'),
+      status: auditCount > 0 ? '已记录' : '未记录',
+      hint: '本轮查询保留的安全审计日志数量',
+      tone: 'blue'
+    },
+    {
+      label: '拦截',
+      value: blockedCount.toLocaleString('zh-CN'),
+      status: blockedCount > 0 ? '已拦截' : '未触发',
+      hint: blockedCount > 0 ? '存在被权限或安全规则拦截的执行' : '未发现需要拦截的高风险操作',
+      tone: blockedCount > 0 ? 'red' : 'neutral'
+    },
+    {
+      label: '告警',
+      value: warnCount.toLocaleString('zh-CN'),
+      status: warnCount > 0 ? '需关注' : '无告警',
+      hint: warnCount > 0 ? '存在安全或性能告警，建议查看审计明细' : '当前审计没有产生告警记录',
+      tone: warnCount > 0 ? 'amber' : 'neutral'
+    },
+    {
+      label: '慢查询',
+      value: slowCount.toLocaleString('zh-CN'),
+      status: slowCount > 0 ? '需优化' : '正常',
+      hint: slowCount > 0 ? '执行耗时触发慢查询规则，可结合 SQL 与图谱定位' : '本轮查询未触发慢查询规则',
+      tone: slowCount > 0 ? 'green' : 'neutral'
+    }
+  ]
+})
+
+const auditContextOverviewCards = computed(() => {
+  const current = detail.value || {}
+  const permission = current.permissionCheck || {}
+  const cache = current.cacheContext || {}
+  const latestLog = current.latestAuditLog || {}
+  const sensitiveCount = Array.isArray(latestLog.sensitiveFieldItems) ? latestLog.sensitiveFieldItems.length : 0
+  return [
+    {
+      label: '权限校验',
+      value: permission.label || '未记录',
+      hint: permission.scopeTableName || current.queryTableName
+        ? `作用域：${permission.scopeTableName || current.queryTableName}`
+        : '未记录授权作用域'
+    },
+    {
+      label: '缓存状态',
+      value: cache.cacheHitLabel || '未命中缓存',
+      hint: cache.redisStatusText || '未记录缓存侧状态'
+    },
+    {
+      label: '脱敏字段',
+      value: sensitiveCount ? `${sensitiveCount} 个` : '未发现',
+      hint: sensitiveCount ? '审计命中了敏感字段并保留明细' : '当前审计未发现敏感字段'
+    },
+    {
+      label: '执行保护',
+      value: cache.queryGuardActionLabel || '未触发',
+      hint: cache.queryGuardActionLabel ? '执行前安全与性能保护动作' : '未记录执行保护动作'
+    }
+  ]
+})
+
+const conversationContext = computed(() => detail.value?.conversationContext || {})
+
+const conversationTurns = computed(() => (
+  Array.isArray(conversationContext.value.turns) ? conversationContext.value.turns : []
+))
+
+const conversationMessages = computed(() => conversationTurns.value)
+
+const conversationContextNotice = computed(() => {
+  const visible = Number(conversationContext.value.visibleTurns || conversationTurns.value.length || 0)
+  const total = Number(conversationContext.value.totalTurns || visible)
+  const limit = Number(conversationContext.value.contextLimit || visible)
+  const parts = []
+  if (conversationContext.value.hasEarlierContext) {
+    parts.push(`已隐藏更早上下文，当前仅展示最近 ${visible || limit} 条消息`)
+  }
+  if (conversationContext.value.hasLaterTurns) {
+    parts.push('当前记录之后的对话未参与本次生成，已不展示')
+  }
+  if (!parts.length) return ''
+  return `${parts.join('；')}。会话共 ${total || visible} 条消息。`
+})
+
+const conversationRoleLabel = (role) => {
+  const text = String(role || '').trim().toUpperCase()
+  if (text === 'USER') return '用户'
+  if (text === 'ASSISTANT') return '助手'
+  if (text === 'SYSTEM') return '系统'
+  return text || '消息'
+}
+
+const conversationMessageRole = (turn) => {
+  const role = String(turn?.role || '').trim().toUpperCase()
+  return role === 'USER' ? 'user' : 'system'
+}
+
+const isCurrentConversationTurn = (turn) => (
+  Boolean(turn?.isCurrent) ||
+  (Array.isArray(turn?.artifacts) && turn.artifacts.some(isCurrentConversationArtifact))
+)
+
+const isCurrentConversationPrompt = (turn) => Boolean(turn?.isCurrentPrompt)
+
+const conversationTurnMarkerLabel = (turn) => {
+  if (isCurrentConversationTurn(turn)) return '当前记录'
+  if (isCurrentConversationPrompt(turn)) return '生成提问'
+  return ''
+}
+
+const isCurrentConversationArtifact = (artifact) => (
+  String(artifact?.historyId || '').trim() &&
+  String(artifact?.historyId) === String(detail.value?.id)
+)
+
+const artifactTypeDisplay = (artifact) => {
+  const type = String(artifact?.artifactType || '').trim().toUpperCase()
+  if (type === 'SQL') return 'SQL'
+  if (type === 'CHART') return '图表'
+  if (type === 'ADVANCED_FORECAST') return '时序预测'
+  if (type === 'ADVANCED_WHAT_IF') return '情景推演'
+  if (type === 'ADVANCED_ALERT') return '智能预警'
+  return artifact?.artifactTypeLabel || artifact?.artifactType || '产物'
+}
+
+const conversationThinkingLogs = (turn) => {
+  const context = turn?.context && typeof turn.context === 'object' ? turn.context : {}
+  const raw = context.reasoningReplaySteps || context.reasoningLogs || turn.reasoningReplaySteps || []
+  if (!Array.isArray(raw)) return []
+  return raw.map((item, index) => {
+    if (typeof item === 'string') return item.trim()
+    const title = String(item?.title || `步骤 ${index + 1}`).trim()
+    const detailText = String(item?.detail || item?.text || item?.message || '').trim()
+    return [title, detailText].filter(Boolean).join('：')
+  }).filter(Boolean)
+}
+
+const graphVisual = computed(() => buildGraphVisual(detail.value))
+const graphVisualNodes = computed(() => graphVisual.value.nodes)
+const graphVisualEdges = computed(() => graphVisual.value.edges)
+const fullGraphVisual = computed(() => buildGraphVisual(detail.value, {
+  maxNodes: 32,
+  maxEdges: 60,
+  width: 1120,
+  height: 620,
+  radiusX: 430,
+  radiusY: 230,
+  labelMax: 12
+}))
+const fullGraphRelations = computed(() => fullGraphVisual.value.edges.map(edge => ({
+  id: edge.id,
+  fromLabel: edge.from.label,
+  toLabel: edge.to.label,
+  label: edge.label
+})))
+
+const openFullGraphDialog = () => {
+  fullGraphVisible.value = true
+}
+
+const graphNodeId = (node, index = 0) => {
+  if (!node || typeof node === 'string') return `node-${index}-${String(node || '').slice(0, 24)}`
+  return String(node.nodeKey || node.id || node.sourceId || node.field || node.fieldName || node.label || node.name || `node-${index}`).trim()
+}
+
+const normalizeGraphType = (node) => {
+  const type = String(node?.nodeType || node?.type || '').trim().toUpperCase()
+  if (['UPLOAD_TABLE', 'OFFICIAL_TABLE', 'TABLE', 'DATASOURCE'].includes(type)) return 'table'
+  if (type === 'FIELD') return 'field'
+  if (type === 'BUSINESS_METRIC') return 'metric'
+  if (type.includes('FOREIGN_KEY') || type.includes('RELATION')) return 'relation'
+  return 'context'
+}
+
+const graphRelationLabel = (value) => {
+  const type = String(value || '').trim().toUpperCase()
+  if (type === 'HAS_FIELD') return '包含字段'
+  if (type === 'HAS_METRIC') return '定义指标'
+  if (type === 'USES_FIELD') return '使用字段'
+  if (type === 'REFERENCES_FIELD') return '引用字段'
+  if (type === 'REFERENCES_TABLE') return '关联表'
+  if (type === 'MARKED_AS') return '标记为'
+  if (type === 'FOREIGN_KEY_FROM') return '外键来源'
+  if (type === 'FOREIGN_KEY_TO') return '外键指向'
+  return type || '关联'
+}
+
+const graphNodeTypeRank = (node) => {
+  const kind = normalizeGraphType(node)
+  if (kind === 'table') return 0
+  if (kind === 'metric') return 1
+  if (kind === 'field') return 2
+  if (kind === 'relation') return 3
+  return 4
+}
+
+const shortGraphLabel = (text, max = 10) => {
+  const value = String(text || '').trim()
+  return value.length > max ? `${value.slice(0, max)}...` : value
+}
+
+const buildGraphFallbackEdges = (nodes) => {
+  const tableNodes = nodes.filter(node => normalizeGraphType(node) === 'table')
+  const fieldNodes = nodes.filter(node => normalizeGraphType(node) === 'field')
+  const metricNodes = nodes.filter(node => normalizeGraphType(node) === 'metric')
+  const edges = []
+  const tableBySource = new Map()
+  tableNodes.forEach(node => {
+    const key = String(node.tableName || node.sourceId || node.nodeKey || '').split('.')[0]
+    if (key) tableBySource.set(key, node)
+  })
+  const firstTable = tableNodes[0]
+  fieldNodes.forEach(node => {
+    const source = String(node.tableName || node.sourceId || '').split('.')[0]
+    const table = tableBySource.get(source) || firstTable
+    if (table) {
+      edges.push({
+        fromKey: graphNodeId(table),
+        toKey: graphNodeId(node),
+        relationType: 'HAS_FIELD',
+        inferred: true
+      })
+    }
+  })
+  metricNodes.forEach(node => {
+    const source = String(node.tableName || node.sourceId || '').split('.')[0]
+    const table = tableBySource.get(source) || firstTable
+    if (table) {
+      edges.push({
+        fromKey: graphNodeId(table),
+        toKey: graphNodeId(node),
+        relationType: 'HAS_METRIC',
+        inferred: true
+      })
+    }
+    const field = String(node.field || node.fieldName || '').trim()
+    if (field) {
+      const matchedField = fieldNodes.find(item => {
+        const id = String(item.sourceId || item.field || item.fieldName || item.nodeKey || '').toLowerCase()
+        return id.endsWith(`.${field.toLowerCase()}`) || id.includes(`:field:${field.toLowerCase()}`)
+      })
+      if (matchedField) {
+        edges.push({
+          fromKey: graphNodeId(node),
+          toKey: graphNodeId(matchedField),
+          relationType: 'USES_FIELD',
+          inferred: true
+        })
+      }
+    }
+  })
+  return edges
+}
+
+const buildGraphVisual = (currentDetail, options = {}) => {
+  const maxNodes = Number(options.maxNodes || 12)
+  const maxEdges = Number(options.maxEdges || 18)
+  const width = Number(options.width || 720)
+  const height = Number(options.height || 360)
+  const centerX = Math.round(width / 2)
+  const centerY = Math.round(height / 2)
+  const graphPath = currentDetail?.graphPath && typeof currentDetail.graphPath === 'object' ? currentDetail.graphPath : {}
+  const rawNodes = Array.isArray(graphPath.nodes) && graphPath.nodes.length
+    ? graphPath.nodes
+    : (Array.isArray(currentDetail?.graphContext) ? currentDetail.graphContext : [])
+  const normalizedNodes = rawNodes
+    .filter(node => node && typeof node === 'object')
+    .map((node, index) => ({
+      ...node,
+      _id: graphNodeId(node, index)
+    }))
+  const seen = new Set()
+  const nodes = normalizedNodes.filter(node => {
+    if (seen.has(node._id)) return false
+    seen.add(node._id)
+    return true
+  }).sort((a, b) => graphNodeTypeRank(a) - graphNodeTypeRank(b))
+  const limitedNodes = nodes.slice(0, maxNodes)
+  const nodeIdSet = new Set(limitedNodes.map(node => node._id))
+  let rawEdges = Array.isArray(graphPath.edges) && graphPath.edges.length
+    ? graphPath.edges
+    : buildGraphFallbackEdges(limitedNodes)
+  const nodeCount = limitedNodes.length
+  const radiusX = Number(options.radiusX || (nodeCount <= 4 ? 190 : 260))
+  const radiusY = Number(options.radiusY || (nodeCount <= 4 ? 92 : 125))
+  const labelMax = Number(options.labelMax || 8)
+  const visualNodes = limitedNodes.map((node, index) => {
+    const angle = nodeCount <= 1 ? -Math.PI / 2 : (-Math.PI / 2) + (Math.PI * 2 * index / nodeCount)
+    const kind = normalizeGraphType(node)
+    return {
+      id: node._id,
+      x: Math.round(centerX + Math.cos(angle) * radiusX),
+      y: Math.round(centerY + Math.sin(angle) * radiusY),
+      radius: kind === 'table' ? 42 : kind === 'metric' ? 38 : 34,
+      kind,
+      label: formatGraphNodeTitle(node, index),
+      shortLabel: shortGraphLabel(formatGraphNodeTitle(node, index), kind === 'table' ? Math.max(9, labelMax) : labelMax),
+      typeLabel: formatGraphNodeType(node)
+    }
+  })
+  const visualNodeMap = new Map(visualNodes.map(node => [node.id, node]))
+  let visualEdges = rawEdges
+    .map((edge, index) => {
+      const fromKey = String(edge.fromKey || edge.source || edge.sourceKey || edge.from || '').trim()
+      const toKey = String(edge.toKey || edge.target || edge.targetKey || edge.to || '').trim()
+      if (!nodeIdSet.has(fromKey) || !nodeIdSet.has(toKey) || fromKey === toKey) return null
+      const from = visualNodeMap.get(fromKey)
+      const to = visualNodeMap.get(toKey)
+      if (!from || !to) return null
+      return {
+        id: `${fromKey}-${toKey}-${edge.relationType || index}`,
+        from,
+        to,
+        label: graphRelationLabel(edge.relationType),
+        labelX: Math.round((from.x + to.x) / 2),
+        labelY: Math.round((from.y + to.y) / 2 - 6)
+      }
+    })
+    .filter(Boolean)
+    .slice(0, maxEdges)
+  if (!visualEdges.length && limitedNodes.length > 1) {
+    rawEdges = buildGraphFallbackEdges(limitedNodes)
+    visualEdges = rawEdges
+      .map((edge, index) => {
+        const fromKey = String(edge.fromKey || '').trim()
+        const toKey = String(edge.toKey || '').trim()
+        const from = visualNodeMap.get(fromKey)
+        const to = visualNodeMap.get(toKey)
+        if (!from || !to || fromKey === toKey) return null
+        return {
+          id: `${fromKey}-${toKey}-fallback-${index}`,
+          from,
+          to,
+          label: graphRelationLabel(edge.relationType),
+          labelX: Math.round((from.x + to.x) / 2),
+          labelY: Math.round((from.y + to.y) / 2 - 6)
+        }
+      })
+      .filter(Boolean)
+      .slice(0, maxEdges)
+  }
+  return { nodes: visualNodes, edges: visualEdges }
+}
 
 const formatGraphNodeTitle = (item, index = 0) => {
   if (typeof item === 'string') return item
@@ -1289,6 +2695,126 @@ const formatGraphNodeContent = (item) => {
   return '暂无详细内容'
 }
 
+const routeAudit = computed(() => analytics.value?.routeAudit || {})
+
+const routeAuditSummary = computed(() => routeAudit.value?.summary || {})
+
+const hasRouteAuditData = computed(() => Number(routeAuditSummary.value.totalRouted || 0) > 0)
+
+const routeAuditOverviewCards = computed(() => {
+  const summary = routeAuditSummary.value
+  const total = Number(summary.totalRouted || 0)
+  return [
+    {
+      label: '路由样本',
+      value: total.toLocaleString('zh-CN'),
+      hint: `采样 ${Number(routeAudit.value.sampledRows || 0).toLocaleString('zh-CN')} 条历史`,
+      tone: 'blue'
+    },
+    {
+      label: '兜底率',
+      value: formatPercent(summary.fallbackRate),
+      hint: `${Number(summary.fallbackCount || 0).toLocaleString('zh-CN')} 次使用规则兜底`,
+      tone: Number(summary.fallbackRate || 0) > 20 ? 'amber' : 'green'
+    },
+    {
+      label: '澄清率',
+      value: formatPercent(summary.clarificationRate),
+      hint: `${Number(summary.clarificationCount || 0).toLocaleString('zh-CN')} 次需要补充参数`,
+      tone: Number(summary.clarificationRate || 0) > 20 ? 'amber' : 'blue'
+    },
+    {
+      label: '失败率',
+      value: formatPercent(summary.failureRate),
+      hint: `平均耗时 ${summary.avgDurationMs || 0} ms`,
+      tone: Number(summary.failureRate || 0) > 0 ? 'red' : 'green'
+    }
+  ]
+})
+
+const routeIntentGroups = computed(() => (
+  Array.isArray(routeAudit.value.intentGroups) ? routeAudit.value.intentGroups.slice(0, 5) : []
+))
+
+const routeExecutorGroups = computed(() => (
+  Array.isArray(routeAudit.value.executorGroups) ? routeAudit.value.executorGroups.slice(0, 5) : []
+))
+
+const routeProblemSamples = computed(() => {
+  const samples = Array.isArray(routeAudit.value.problemSamples) ? routeAudit.value.problemSamples : []
+  if (samples.length) return samples.slice(0, 6)
+  return Array.isArray(routeAudit.value.lowConfidenceExamples)
+    ? routeAudit.value.lowConfidenceExamples.slice(0, 6)
+    : []
+})
+
+const routeAuditIntentLabel = (value) => intentTypeLabel(value)
+
+const routeAuditExecutorLabel = (value) => {
+  const text = String(value || '').trim()
+  const normalized = text.toLowerCase()
+  const labels = {
+    'multi-step-orchestrator': '多步骤任务编排器',
+    'chat-bi-sql': '数据查询执行器',
+    'advanced-analysis-forecast': '时序预测执行器',
+    'alert-rule-draft': '预警规则生成器',
+    'what-if-draft': '情景推演生成器',
+    'business-model-agent': '业务模型代理',
+    'dashboard-service': '看板服务',
+    clarification: '需求澄清',
+    'smart-chat-router': '智能路由器',
+    'python-ai-service': '大模型解析服务',
+    'redis-semantic-cache': '语义缓存复用',
+    'java-fallback': '规则兜底解析',
+    'java-fallback-ai-parse': '大模型失败后规则兜底',
+    'java-fallback-exec-retry': '执行失败后规则重试',
+    'java-federal-join': '联邦关联直连'
+  }
+  return labels[normalized] || normalizeModelCategoryText(text) || text || '未记录执行器'
+}
+
+const routeAuditOutcomeLabel = (value) => {
+  const text = String(value || '').trim().toUpperCase()
+  const labels = {
+    COMPLETED: '已完成',
+    FAILED: '执行失败',
+    PARTIAL_FAILED: '部分失败',
+    NEEDS_INPUT: '待补充参数',
+    NEEDS_CONFIRMATION: '待确认',
+    PARTIAL: '部分完成',
+    UNKNOWN: '未记录状态'
+  }
+  return labels[text] || text || '未记录状态'
+}
+
+const routeOutcomeTagType = (value) => {
+  const text = String(value || '').trim().toUpperCase()
+  if (['FAILED', 'PARTIAL_FAILED'].includes(text)) return 'danger'
+  if (['NEEDS_INPUT', 'NEEDS_CONFIRMATION', 'PARTIAL'].includes(text)) return 'warning'
+  if (text === 'COMPLETED') return 'success'
+  return 'info'
+}
+
+const formatRouteConfidence = (value) => {
+  const number = Number(value)
+  if (!Number.isFinite(number) || number <= 0) return '未知'
+  return number <= 1 ? `${Math.round(number * 100)}%` : `${number.toFixed(1)}%`
+}
+
+const formatRouteProblemHint = (item) => {
+  const parts = []
+  if (item.fallbackUsed) parts.push('已兜底')
+  if (item.confidence !== null && item.confidence !== undefined) {
+    parts.push(`置信度 ${formatRouteConfidence(item.confidence)}`)
+  }
+  if (Array.isArray(item.missingSlots) && item.missingSlots.length) {
+    parts.push(`缺少 ${item.missingSlots.join('、')}`)
+  }
+  if (item.failureReason) parts.push(item.failureReason)
+  if (!parts.length) parts.push(routeAuditExecutorLabel(item.chosenExecutor))
+  return parts.join(' · ')
+}
+
 const queryTrendPoints = computed(() => asTrendPoints(analytics.value?.trends?.queryVolume, 'totalCount'))
 const riskTrendPoints = computed(() => asTrendPoints(analytics.value?.trends?.riskVolume, 'riskCount'))
 const cacheTrendPoints = computed(() => asTrendPoints(analytics.value?.trends?.cacheVolume, 'hitCount'))
@@ -1316,6 +2842,40 @@ const heroDescription = computed(() => {
 
 const traceLabelMap = {
   activeTable: '当前数据表',
+  selectedModel: '模型选择',
+  modelId: '业务模型编号',
+  modelName: '业务模型',
+  modelVersion: '模型版本',
+  source: '来源',
+  businessModel: '业务模型',
+  businessSemanticContext: '业务语义上下文',
+  businessSemanticPlan: '业务语义匹配',
+  businessSemanticGuard: '业务语义校验',
+  businessSemanticGuardRetry: '业务语义重试校验',
+  semanticSqlGuard: '语义 SQL 保护',
+  fieldMappingAligned: '字段映射对齐',
+  detailTableRequery: '明细表格重查',
+  autoForecast: '自动预测',
+  federalJoin: '联邦关联',
+  sourceType: '数据源类型',
+  tableName: '数据表',
+  notExecuted: '是否未执行',
+  changed: '是否调整',
+  explicit: '是否显式指定',
+  mode: '排序方式',
+  direction: '排序方向',
+  dimensionExpr: '维度表达式',
+  metricExpr: '指标表达式',
+  limit: '返回条数',
+  points: '数据点数',
+  algorithm: '预测算法',
+  from: '调整前',
+  to: '调整后',
+  filter: '过滤字段',
+  values: '过滤值',
+  bindings: '绑定关系',
+  fromFilter: '来源过滤',
+  version: '模型版本',
   semanticCache: '语义缓存',
   cacheAudit: '缓存审计',
   kgContextNodes: '图谱上下文节点数',
@@ -1342,12 +2902,67 @@ const traceValueMap = {
   HIT: '命中',
   MISS: '未命中',
   REJECTED: '拒绝使用',
+  LOADED: '已加载',
+  EMPTY: '未加载',
+  MATCHED: '已匹配',
+  NO_MATCH: '未匹配',
+  APPLIED: '已应用',
   SAFE: '安全',
   WARN: '告警',
   BLOCKED: '拦截',
   ALLOW: '允许',
   SUCCESS: '成功',
   FAILED: '失败',
+  CANCELLED: '已取消',
+  EMPTY_RESULT: '空结果',
+  SKIPPED: '已跳过',
+  BUSINESS_MODEL_SQL_VALIDATED: '业务模型 SQL 已校验',
+  BUSINESS_MODEL_SQL_REBUILD: '已按业务模型重建 SQL',
+  SORT_INTENT: '排序意图',
+  TOP_N_INTENT: '前 N 名意图',
+  GEO_VALUE_DATA_PROFILE: '地理值数据画像',
+  VALUE_FILTER_DIMENSION_CONSISTENCY: '筛选值与维度一致性',
+  MACRO_REGION_FIELD_CORRECTION: '大区字段修正',
+  MACRO_REGION_FILTER_WITH_PROVINCE_DIMENSION: '按大区过滤并使用省份维度',
+  NAME_ASC: '名称升序',
+  NAME_DESC: '名称降序',
+  VALUE_ASC: '数值升序',
+  VALUE_DESC: '数值降序',
+  ASC: '升序',
+  DESC: '降序',
+  ORDER_LIMIT_REWRITE: '重写排序和条数限制',
+  REBUILD_AGGREGATION: '重建聚合查询',
+  DETAIL_INTENT: '明细查询意图',
+  NO_EXPLICIT_FORECAST_INTENT: '未明确要求预测',
+  PREFER_REAL_SOURCE_FORECAST: '建议基于原始数据重新预测',
+  NON_TEMPORAL_SERIES: '结果不是时序序列',
+  INSUFFICIENT_POINTS: '数据点不足',
+  ALL_ZERO_SERIES: '序列全为 0',
+  UNKNOWN_METRIC: '未识别指标',
+  ADVANCED_SERVICE_UNAVAILABLE: '高级分析服务不可用',
+  EMPTY_FORECAST_SERIES: '预测序列为空',
+  NO_FORECAST_VALUES: '没有可用预测值',
+  SMART_QUERY_INTENT: '智能查询意图',
+  AI_RESPONSE_INVALID: '大模型返回内容不可用',
+  AI_UNAVAILABLE: '大模型服务不可用',
+  AI_SQL_EXEC_FAILED: '大模型 SQL 执行失败',
+  default: '默认模型',
+  activeBusinessModel: '当前业务模型',
+  tableDefaultModel: '数据表默认模型',
+  dimensionSystem: '维度识别系统',
+  'python-ai-service': '大模型解析服务',
+  'redis-semantic-cache': '语义缓存复用',
+  'java-fallback': '规则兜底解析',
+  'java-fallback-ai-parse': '大模型解析失败后规则兜底',
+  'java-fallback-exec-retry': '执行失败后规则重试',
+  'java-federal-join': '联邦关联直连',
+  triggered: '已触发',
+  direct: '直接执行',
+  FEDERAL_JOIN: '联邦关联数据源',
+  bar: '柱状图',
+  line: '折线图',
+  pie: '饼图',
+  table: '表格',
   true: '是',
   false: '否',
   LOCAL: '本地',
@@ -1371,12 +2986,101 @@ const auditRuleLabelMap = {
 }
 
 const tokenKeys = new Set(['labels', 'hintKeys'])
-const wideKeys = new Set(['activeTable', 'queryGuard', 'error', 'labels', 'hintKeys'])
+const wideKeys = new Set(['activeTable', 'queryGuard', 'error', 'labels', 'hintKeys', 'metricExpr', 'bindings'])
 
-const formatTraceValue = (value) => {
+const traceTokenMap = {
+  dictionaryMatches: '词典匹配',
+  recommendedMapping: '推荐映射',
+  ambiguities: '歧义字段',
+  formulaCandidates: '公式候选',
+  graphReasoning: '图谱推理',
+  fieldCandidates: '字段候选',
+  businessSemanticTrace: '业务语义轨迹'
+}
+
+const traceUnitKeys = {
+  timeoutMs: 'ms',
+  maxRows: '行',
+  maxScanRows: '行',
+  explainRows: '行',
+  durationMs: 'ms',
+  kgContextNodes: '个',
+  nodes: '个',
+  limit: '行',
+  points: '个'
+}
+
+const traceObjectLabelMap = {
+  enabled: '启用状态',
+  modelId: '模型编号',
+  modelName: '模型名称',
+  modelVersion: '模型版本',
+  source: '来源',
+  matchedMetric: '匹配指标',
+  resolvedMetricField: '指标字段',
+  metricColumn: '指标列',
+  formulaApplied: '是否套用公式',
+  metricSource: '指标来源',
+  dictionaryMatched: '词典命中',
+  dictionaryHitTerm: '命中词条',
+  matchedDimension: '匹配维度',
+  resolvedDimensionField: '解析维度字段',
+  dimensionColumn: '维度字段',
+  dimensionSource: '维度来源',
+  finalSqlValidated: 'SQL 终检',
+  sqlRebuilt: '是否重建 SQL',
+  analysisSemanticValidated: '分析语义校验',
+  analysisMetricField: '分析指标字段',
+  analysisMetricLabel: '分析指标名称',
+  analysisMetricExpression: '分析指标表达式',
+  analysisFormula: '分析公式'
+}
+
+const formatTraceLabel = (key) => traceLabelMap[key] || traceObjectLabelMap[key] || '补充信息'
+
+const formatTraceToken = (token) => traceTokenMap[token] || token
+
+const formatTraceValue = (value, key = '') => {
   const text = String(value ?? '').trim()
   if (!text) return '-'
-  return traceValueMap[text] || text
+  const mapped = traceValueMap[text] || traceValueMap[text.toUpperCase()] || traceValueMap[text.toLowerCase()]
+  const normalized = mapped || text
+  const unit = traceUnitKeys[key]
+  if (unit && /^-?\d+(\.\d+)?$/.test(text)) {
+    return `${Number(text).toLocaleString('zh-CN')} ${unit}`
+  }
+  if (key === 'modelId' && /^-?\d+$/.test(text)) {
+    return `#${text}`
+  }
+  if (key === 'selectedModel' && /^-?\d+$/.test(text)) {
+    return `业务模型 #${text}`
+  }
+  if (key === 'bindings' && text.includes('->')) {
+    return text.split(',').map(item => item.trim().replace('->', ' → ')).filter(Boolean).join('，')
+  }
+  if (key === 'values') {
+    return text.split(',').map(item => item.trim()).filter(Boolean).join('，') || '-'
+  }
+  return normalized
+}
+
+const splitTraceValueLines = (value) => String(value || '')
+  .split('；')
+  .map(item => item.trim())
+  .filter(Boolean)
+
+const createTraceItem = ({ id, key, label, value, tokens = [], wide = false }) => {
+  const normalizedValue = String(value ?? '').trim() || '-'
+  const valueLines = tokens.length ? [] : splitTraceValueLines(normalizedValue)
+  return {
+    id,
+    key,
+    label,
+    value: normalizedValue,
+    tokens,
+    valueLines,
+    wide: wide || valueLines.length > 2 || normalizedValue.length > 56
+  }
 }
 
 const splitTraceTokens = (key, value) => {
@@ -1384,6 +3088,7 @@ const splitTraceTokens = (key, value) => {
   return String(value || '')
     .split(key === 'labels' ? '|' : ',')
     .map(item => item.trim())
+    .map(formatTraceToken)
     .filter(Boolean)
 }
 
@@ -1397,35 +3102,103 @@ const formatCompoundValue = (value) => {
     const [rawKey, ...rest] = part.split('=')
     const nestedKey = rawKey?.trim()
     const nestedValue = rest.join('=').trim()
-    if (!nestedKey) return formatTraceValue(part)
-    return `${traceLabelMap[nestedKey] || nestedKey}：${formatTraceValue(nestedValue)}`
+    if (!nestedKey || !rest.length) return formatTraceValue(part)
+    return `${formatTraceLabel(nestedKey)}：${formatTraceValue(nestedValue, nestedKey)}`
   }).join('；')
+}
+
+const parseTraceObjectText = (text) => {
+  const body = String(text || '').trim().replace(/^\{/, '').replace(/\}$/, '')
+  if (!body) return {}
+  return body.split(',')
+    .map(item => item.trim())
+    .filter(Boolean)
+    .reduce((acc, part) => {
+      const [rawKey, ...rest] = part.split('=')
+      const key = rawKey?.trim()
+      const value = rest.join('=').trim()
+      if (key) acc[key] = value
+      return acc
+    }, {})
+}
+
+const summarizeTraceObject = (text) => {
+  const payload = parseTraceObjectText(text)
+  const preferredKeys = [
+    'enabled',
+    'modelName',
+    'modelId',
+    'matchedMetric',
+    'resolvedMetricField',
+    'metricColumn',
+    'formulaApplied',
+    'matchedDimension',
+    'resolvedDimensionField',
+    'dimensionColumn',
+    'dictionaryMatched',
+    'dictionaryHitTerm',
+    'source',
+    'modelVersion',
+    'finalSqlValidated',
+    'sqlRebuilt'
+  ]
+  const orderedKeys = [
+    ...preferredKeys,
+    ...Object.keys(payload).filter(key => !preferredKeys.includes(key))
+  ]
+  const parts = orderedKeys
+    .filter(key => payload[key] !== undefined && payload[key] !== '')
+    .map(key => `${formatTraceLabel(key)}：${formatTraceValue(payload[key], key)}`)
+  return parts.length ? parts.join('；') : '已保留业务语义明细'
 }
 
 const parseTraceLine = (line, prefix) => {
   const trimmed = String(line || '').trim()
   if (!trimmed) return []
-  return trimmed
+  const parts = trimmed
     .split(';')
     .map(part => part.trim())
     .filter(Boolean)
-    .map((part, index) => {
+  const items = []
+  parts.forEach((part, index) => {
+      if (part.startsWith('{')) {
+        items.push(createTraceItem({
+          id: `${prefix}-trace-object-${index}`,
+          key: 'traceObject',
+          label: '业务语义明细',
+          value: summarizeTraceObject(part),
+          tokens: [],
+          wide: true
+        }))
+        return
+      }
       const [rawKey, ...rest] = part.split('=')
       const key = rawKey?.trim()
       const value = rest.join('=').trim()
-      if (!key) return null
+      if (!key) return
+      if (!rest.length) {
+        items.push(createTraceItem({
+          id: `${prefix}-note-${index}`,
+          key: 'traceNote',
+          label: '补充说明',
+          value: formatTraceValue(part),
+          tokens: [],
+          wide: true
+        }))
+        return
+      }
       const tokens = splitTraceTokens(key, value)
       const compoundValue = tokens.length ? '' : formatCompoundValue(value)
-      return {
+      items.push(createTraceItem({
         id: `${prefix}-${key}-${index}`,
         key,
-        label: traceLabelMap[key] || key,
-        value: compoundValue || formatTraceValue(value),
+        label: formatTraceLabel(key),
+        value: compoundValue || formatTraceValue(value, key),
         tokens,
         wide: wideKeys.has(key) || tokens.length > 4
-      }
+      }))
     })
-    .filter(Boolean)
+  return items
 }
 
 const parseTraceText = (text, prefix) => String(text || '')
@@ -1449,8 +3222,28 @@ const chartTypeLabel = (value) => ({
   bar: '柱状图',
   line: '折线图',
   pie: '饼图',
-  table: '表格'
+  table: '表格',
+  alert: '智能预警',
+  advancedalert: '智能预警',
+  advanced_alert: '智能预警',
+  advancedanalysis: '高级分析',
+  advanced_analysis: '高级分析',
+  advancedforecast: '时序预测',
+  advanced_forecast: '时序预测',
+  advancedwhatif: '情景推演',
+  advanced_what_if: '情景推演'
 })[String(value || '').toLowerCase()] || (value || '未识别图表')
+
+const historyResultTypeLabel = (entry = {}) => {
+  const advancedKind = advancedAnalysisKind(entry) || firstAdvancedAnalysisType(entry?.artifactType, entry?.intentType, entry?.chartType)
+  if (advancedKind) return advancedAnalysisTypeLabel(advancedKind)
+  const artifactType = String(entry?.artifactType || '').trim().toUpperCase()
+  if (artifactType === 'SQL') return 'SQL'
+  if (artifactType === 'TABLE') return '表格'
+  if (artifactType === 'TEXT') return '文本'
+  if (artifactType === 'REPORT') return '报告'
+  return chartTypeLabel(entry?.chartType)
+}
 
 const formatDuration = (value) => {
   if (value === null || value === undefined || value === '') return '-'
@@ -1779,20 +3572,7 @@ const buildReasoningDisplaySteps = (currentDetail) => {
   })
 }
 
-const normalizeGuardItem = (item) => {
-  if (!item) return null
-  return {
-    ...item,
-    value: item.key === 'timeoutMs'
-      ? `${item.value} ms`
-      : item.key === 'maxRows' || item.key === 'maxScanRows' || item.key === 'explainRows'
-        ? `${item.value} 行`
-        : item.value
-  }
-}
-
 const parseExecutionGuard = (text, prefix) => parseTraceLine(text, prefix)
-  .map(normalizeGuardItem)
   .filter(Boolean)
 
 const normalizeAuditLog = (log, index = 'log') => {
@@ -1805,8 +3585,73 @@ const normalizeAuditLog = (log, index = 'log') => {
     sensitiveFieldItems,
     queryGuardActionLabel: formatTraceValue(log.queryGuardAction),
     executionGuardItems: parseExecutionGuard(log.executionGuard, `guard-${log.id || index}`),
-    generationTraceItems: parseTraceText(log.generationTrace, `gen-${log.id || index}`),
-    kgMatchLogItems: parseTraceText(log.kgMatchLog, `kg-${log.id || index}`)
+    generationTraceItems: parseTraceText(log.generationTrace, `gen-${log.id || index}`)
+  }
+}
+
+const normalizeConversationContext = (payload, fallbackDetail = detail.value) => {
+  const context = payload && typeof payload === 'object' ? payload : {}
+  const turns = Array.isArray(context.turns)
+    ? context.turns.map((turn, index) => ({
+      ...turn,
+      roleLabel: turn.roleLabel || conversationRoleLabel(turn.role),
+      messageText: String(turn.messageText || '').trim(),
+      artifacts: Array.isArray(turn.artifacts)
+        ? turn.artifacts.map(artifact => ({
+          ...artifact,
+          sqlText: String(
+            artifact?.sqlText ||
+            artifact?.generatedSql ||
+            artifact?.sql ||
+            artifact?.artifact?.sqlText ||
+            artifact?.artifact?.generatedSql ||
+            artifact?.artifact?.sql ||
+            ''
+          ).trim(),
+          summary: String(artifact?.summary || '').trim(),
+          message: String(artifact?.message || '').trim(),
+          question: String(artifact?.question || '').trim()
+        }))
+        : [],
+      isCurrent: Boolean(turn.isCurrent),
+      isCurrentPrompt: Boolean(turn.isCurrentPrompt),
+      _index: index
+    }))
+    : []
+  if (turns.length) {
+    return {
+      ...context,
+      conversation: context.conversation || {},
+      turns,
+      totalTurns: Number(context.totalTurns || turns.length)
+    }
+  }
+  const current = fallbackDetail || {}
+  return {
+    currentHistoryId: current.id,
+    currentTurnNo: current.turnNo,
+    fallbackMode: true,
+    fallbackReason: context.fallbackReason || '该历史记录暂无可关联的会话上下文',
+    conversation: context.conversation || {},
+    turns: [{
+      role: 'ASSISTANT',
+      roleLabel: '助手',
+      turnNo: current.turnNo,
+      messageText: current.summaryText || current.riskReason || '该历史记录仅保留了单条查询结果。',
+      createdAt: current.createdAt,
+      isCurrent: true,
+      artifacts: [{
+        historyId: current.id,
+        artifactType: current.artifactType || 'CHART',
+        artifactTypeLabel: current.artifactType || '图表',
+        summary: current.question || current.summaryText || '历史查询结果',
+        sqlText: current.generatedSql || current.sql || '',
+        chartType: current.chartType,
+        riskLevel: current.riskLevel
+      }]
+    }],
+    totalTurns: 1,
+    contextError: context.contextError || ''
   }
 }
 
@@ -1899,7 +3744,7 @@ const loadList = async (targetPage = page.value) => {
     total.value = Number(data.total || 0)
     summary.value = data.summary || {}
     governance.value = data.governance || {}
-    analytics.value = analyticsData || { trends: {}, performance: {} }
+    analytics.value = analyticsData || { trends: {}, performance: {}, routeAudit: {} }
   } catch (error) {
     ElMessage.error(error.message || '加载失败')
   } finally {
@@ -1913,7 +3758,16 @@ const openDetail = async (row) => {
   detailActiveTab.value = 'query'
   detail.value = null
   try {
-    detail.value = normalizeDetail(await fetchAdminChatHistoryDetail(row.id))
+    const [detailPayload, contextPayload] = await Promise.all([
+      fetchAdminChatHistoryDetail(row.id),
+      fetchAdminChatHistoryContext(row.id).catch(error => ({
+        fallbackMode: true,
+        contextError: error.message || '对话上下文加载失败'
+      }))
+    ])
+    const normalizedDetail = normalizeDetail(detailPayload)
+    normalizedDetail.conversationContext = normalizeConversationContext(contextPayload, normalizedDetail)
+    detail.value = normalizedDetail
   } catch (error) {
     detailVisible.value = false
     ElMessage.error(error.message || '详情加载失败')
@@ -1929,7 +3783,16 @@ const rerun = async (row) => {
     ElMessage.success(`${result.message || '复跑完成'}${newHistoryText}`)
     await loadList(page.value)
     if (detailVisible.value && detail.value?.id === row.id) {
-      detail.value = normalizeDetail(await fetchAdminChatHistoryDetail(row.id))
+      const [detailPayload, contextPayload] = await Promise.all([
+        fetchAdminChatHistoryDetail(row.id),
+        fetchAdminChatHistoryContext(row.id).catch(error => ({
+          fallbackMode: true,
+          contextError: error.message || '对话上下文加载失败'
+        }))
+      ])
+      const normalizedDetail = normalizeDetail(detailPayload)
+      normalizedDetail.conversationContext = normalizeConversationContext(contextPayload, normalizedDetail)
+      detail.value = normalizedDetail
     }
   } catch (error) {
     ElMessage.error(error.message || '复跑失败')
@@ -2351,6 +4214,160 @@ onMounted(() => {
   font-size: 11px;
 }
 
+.route-audit-panel {
+  border-color: #dce8f7;
+  /* background:
+    linear-gradient(180deg, rgba(248, 251, 255, 0.92), rgba(255, 255, 255, 0.98)),
+    #ffffff; */
+}
+
+.route-audit-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.route-audit-stat {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid #e5edf8;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.route-audit-stat span,
+.route-audit-section-head span {
+  color: #66758e;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.route-audit-stat strong {
+  color: #13213c;
+  font-size: 16px;
+  line-height: 1.15;
+}
+
+.route-audit-stat small,
+.route-audit-section-head small {
+  color: #8a98ad;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.route-audit-stat--blue {
+  border-color: #dbeafe;
+  background: #f8fbff;
+}
+
+.route-audit-stat--green {
+  border-color: #d9f0e7;
+  background: #f7fffb;
+}
+
+.route-audit-stat--amber {
+  border-color: #fde6bf;
+  background: #fffaf1;
+}
+
+.route-audit-stat--red {
+  border-color: #ffd8d8;
+  background: #fff7f7;
+}
+
+.route-audit-section {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.route-audit-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.route-audit-list {
+  display: grid;
+  gap: 7px;
+}
+
+.route-audit-list--samples {
+  max-height: 280px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.route-audit-row,
+.route-audit-sample {
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid #edf2fa;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.route-audit-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.route-audit-main {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.route-audit-main strong,
+.route-audit-sample strong {
+  color: #13213c;
+  font-size: 11px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.route-audit-main small,
+.route-audit-sample small {
+  color: #74829a;
+  font-size: 10px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.route-audit-meta {
+  display: grid;
+  gap: 3px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.route-audit-meta span {
+  color: #16a34a;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.route-audit-meta strong {
+  color: #d97706;
+  font-size: 11px;
+}
+
+.route-audit-sample {
+  display: grid;
+  gap: 5px;
+}
+
+.route-audit-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
 .panel-head {
   display: flex;
   align-items: flex-start;
@@ -2554,7 +4571,7 @@ onMounted(() => {
 
 .detail-layout {
   display: grid;
-  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  grid-template-columns: minmax(320px, 390px) minmax(0, 1fr);
   gap: 12px;
   align-items: start;
   overflow: hidden;
@@ -2573,7 +4590,7 @@ onMounted(() => {
   position: sticky;
   top: 10px;
   overflow: visible;
-  max-width: 340px;
+  max-width: 390px;
 }
 
 .detail-overview {
@@ -2592,43 +4609,86 @@ onMounted(() => {
 }
 
 .detail-panel--muted {
-  background: #f8fbff;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
 }
 
 .detail-overview-shell {
-  gap: 12px;
+  gap: 14px;
+  border-color: #dbeafe;
+  box-shadow: 0 10px 26px rgba(44, 74, 124, 0.08);
 }
 
 .detail-overview-main {
+  display: grid;
   align-content: start;
-  gap: 8px;
-}
-
-.detail-panel--muted .detail-overview-main h2 {
-  font-size: 18px;
+  gap: 10px;
 }
 
 .detail-badges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
   overflow: visible;
-  padding-bottom: 2px;
-  scrollbar-width: thin;
+}
+
+.detail-badges :deep(.el-tag) {
+  min-width: 0;
+  height: 28px;
+  justify-content: center;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail-question-card {
+  position: relative;
+  display: grid;
+  gap: 7px;
+  padding: 12px 13px 12px 15px;
+  border: 1px solid #e8eef8;
+  border-radius: 8px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.detail-question-card::before {
+  content: "";
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 0;
+  width: 3px;
+  border-radius: 0 999px 999px 0;
+  background: #2563eb;
+}
+
+.detail-question-card > span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
 }
 
 .detail-overview-main h2 {
   margin: 0;
   color: #0f172a;
-  font-size: 20px;
+  font-size: 18px;
   line-height: 1.35;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .detail-overview-main p {
   margin: 0;
   color: #52637f;
-  line-height: 1.7;
+  line-height: 1.55;
   font-size: 13px;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .detail-overview-grid {
@@ -2643,45 +4703,50 @@ onMounted(() => {
 
 .detail-overview-group {
   display: grid;
-  gap: 8px;
-  padding: 10px 12px;
+  gap: 10px;
+  padding: 12px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.88);
-  border: 1px solid #edf2f7;
+  background: #ffffff;
+  border: 1px solid #e8eef8;
 }
 
 .detail-overview-group-title {
-  color: #5b6c86;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #334155;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 800;
   line-height: 1.4;
+}
+
+.detail-overview-group-title::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #2563eb;
+  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.1);
 }
 
 .detail-overview-list {
   display: grid;
-  gap: 0;
+  gap: 8px;
 }
 
 .detail-overview-row {
   display: grid;
-  grid-template-columns: 76px minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: 82px minmax(0, 1fr);
+  gap: 12px;
   align-items: start;
-  padding: 9px 0;
-  border-top: 1px dashed #e5edf7;
-}
-
-.detail-overview-row:first-child {
-  border-top: none;
-  padding-top: 0;
-}
-
-.detail-overview-row:last-child {
-  padding-bottom: 0;
+  padding: 9px 10px;
+  border: 1px solid #eef4fb;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #fbfdff 0%, #f8fbff 100%);
 }
 
 .detail-overview-row > span {
-  color: #74829a;
+  color: #64748b;
   font-size: 12px;
   line-height: 1.6;
 }
@@ -2693,17 +4758,17 @@ onMounted(() => {
 }
 
 .detail-overview-value strong {
-  color: #13213c;
-  font-size: 13px;
-  line-height: 1.5;
+  color: #0f172a;
+  font-size: 14px;
+  line-height: 1.45;
   word-break: break-word;
   overflow-wrap: anywhere;
 }
 
 .detail-overview-value small {
-  color: #74829a;
+  color: #64748b;
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.45;
   word-break: break-word;
   overflow-wrap: anywhere;
 }
@@ -2803,18 +4868,289 @@ onMounted(() => {
   color: #cbd5e1;
 }
 
+.detail-query-section {
+  gap: 14px;
+  border-color: #dbeafe;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+}
+
+.detail-query-head {
+  align-items: center;
+}
+
+.detail-query-actions :deep(.el-button) {
+  height: 36px;
+  border-radius: 8px;
+  font-weight: 700;
+}
+
+.detail-query-section .detail-query-grid {
+  grid-template-columns: 1fr;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.detail-query-section .detail-query-grid--single {
+  grid-template-columns: 1fr;
+}
+
+.detail-query-section .detail-subpanel {
+  min-width: 0;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+  border-color: #dbeafe;
+  background: #ffffff;
+  box-shadow: 0 10px 22px rgba(44, 74, 124, 0.06);
+}
+
+.detail-query-section .detail-subpanel-head {
+  align-items: flex-start;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid #e8eef8;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+}
+
+.detail-subpanel-title {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.detail-subpanel-title span {
+  color: #1e3a8a;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.4;
+}
+
+.detail-subpanel-title small {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.detail-subpanel--question {
+  position: relative;
+  min-height: 0;
+}
+
+.detail-subpanel--question::before {
+  content: "";
+  position: absolute;
+  inset: 54px auto 14px 0;
+  width: 3px;
+  border-radius: 999px;
+  background: #2563eb;
+}
+
+.detail-text--question {
+  min-height: 0;
+  padding: 16px 18px 14px;
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.75;
+}
+
+.detail-question-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  border-top: 1px solid #e8eef8;
+  background: #fbfdff;
+}
+
+.detail-question-meta span {
+  max-width: 100%;
+  padding: 3px 8px;
+  border: 1px solid #e8eef8;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.detail-query-section .detail-subpanel--code {
+  min-height: 0;
+  border-color: #bfdbfe;
+  background: #0f172a;
+  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.14);
+}
+
+.detail-query-section .detail-subpanel--code .detail-subpanel-head {
+  border-bottom-color: rgba(147, 197, 253, 0.18);
+  background: linear-gradient(180deg, #13213c 0%, #0f172a 100%);
+}
+
+.detail-query-section .detail-subpanel--code .detail-subpanel-title span {
+  color: #dbeafe;
+}
+
+.detail-query-section .detail-subpanel--code .detail-subpanel-title small {
+  color: #93c5fd;
+}
+
+.detail-query-section .detail-subpanel--code :deep(.el-tag) {
+  max-width: 180px;
+  border-color: rgba(147, 197, 253, 0.35);
+  background: rgba(37, 99, 235, 0.14);
+  color: #bfdbfe;
+  font-weight: 700;
+}
+
+.detail-code-shell {
+  min-height: 172px;
+  display: flex;
+  background:
+    radial-gradient(circle at top right, rgba(37, 99, 235, 0.18), transparent 42%),
+    #0f172a;
+}
+
+.detail-code-shell .detail-code {
+  flex: 1;
+  max-height: 260px;
+  padding: 16px;
+  color: #dbeafe;
+  font-size: 12.5px;
+  line-height: 1.75;
+  scrollbar-width: thin;
+  scrollbar-color: #3b82f6 rgba(15, 23, 42, 0.3);
+}
+
+.detail-code-shell .detail-code::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.detail-code-shell .detail-code::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: #3b82f6;
+}
+
+.detail-code-shell .detail-code::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.3);
+}
+
 .detail-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 
-.detail-grid--audit {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+.audit-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
-.detail-grid--sidebar {
-  grid-template-columns: 1fr;
+.audit-summary-item {
+  position: relative;
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+  align-content: start;
+  min-height: 112px;
+  padding: 11px 12px 11px 14px;
+  border: 1px solid #e8eef8;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #fbfdff 0%, #f8fbff 100%);
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.audit-summary-item::before {
+  content: "";
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 0;
+  width: 3px;
+  border-radius: 0 999px 999px 0;
+  background: #93c5fd;
+}
+
+.audit-summary-head {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.audit-summary-head span {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.audit-summary-head em {
+  max-width: 84px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #2563eb;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 700;
+  line-height: 1.35;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.audit-summary-item strong {
+  color: #13213c;
+  font-size: 18px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.audit-summary-item p {
+  margin: 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.audit-summary-item--red::before {
+  background: #ef4444;
+}
+
+.audit-summary-item--red .audit-summary-head em {
+  background: #fef2f2;
+  color: #dc2626;
+}
+
+.audit-summary-item--amber::before {
+  background: #f59e0b;
+}
+
+.audit-summary-item--amber .audit-summary-head em {
+  background: #fffbeb;
+  color: #b45309;
+}
+
+.audit-summary-item--green::before {
+  background: #10b981;
+}
+
+.audit-summary-item--green .audit-summary-head em {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.audit-summary-item--neutral::before {
+  background: #cbd5e1;
+}
+
+.audit-summary-item--neutral .audit-summary-head em {
+  background: #f1f5f9;
+  color: #64748b;
 }
 
 .context-grid {
@@ -2868,6 +5204,178 @@ onMounted(() => {
   line-height: 1.7;
 }
 
+.detail-summary-section {
+  gap: 14px;
+  border-color: #dbeafe;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+}
+
+.detail-summary-head {
+  padding-bottom: 2px;
+}
+
+.detail-summary-grid {
+  gap: 12px;
+}
+
+.summary-card {
+  position: relative;
+  gap: 12px;
+  min-width: 0;
+  min-height: 132px;
+  padding: 14px;
+  overflow: hidden;
+  border-color: #dbeafe;
+  background: #ffffff;
+  box-shadow: 0 10px 22px rgba(44, 74, 124, 0.06);
+}
+
+.summary-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  background: #2563eb;
+}
+
+.summary-card::after {
+  content: "";
+  position: absolute;
+  right: -28px;
+  top: -34px;
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  background: rgba(37, 99, 235, 0.08);
+}
+
+.summary-card--primary {
+  min-height: 128px;
+  padding: 16px 16px 16px 18px;
+  background:
+    linear-gradient(135deg, rgba(239, 246, 255, 0.95) 0%, #ffffff 58%),
+    #ffffff;
+}
+
+.summary-card--parse::before {
+  background: #0ea5e9;
+}
+
+.summary-card--parse::after {
+  background: rgba(14, 165, 233, 0.08);
+}
+
+.summary-card--sql::before {
+  background: #22c55e;
+}
+
+.summary-card--sql::after {
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.summary-card--alert::before {
+  background: #f97316;
+}
+
+.summary-card--alert::after {
+  background: rgba(249, 115, 22, 0.1);
+}
+
+.summary-card-head {
+  position: relative;
+  z-index: 1;
+  align-items: flex-start;
+}
+
+.summary-card-head :deep(.el-tag) {
+  max-width: 220px;
+  border-radius: 7px;
+  font-weight: 700;
+}
+
+.summary-card-title {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.summary-card-title span {
+  color: #1e3a8a;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.4;
+}
+
+.summary-card-title small {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.summary-card-body {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.summary-card-body strong {
+  color: #0f172a;
+  font-size: 15px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+.summary-card--primary .summary-card-body strong {
+  font-size: 17px;
+  line-height: 1.5;
+}
+
+.summary-card-body p {
+  margin: 0;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.7;
+  word-break: break-word;
+}
+
+.alert-summary-grid {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.alert-summary-item {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  background: #fffaf3;
+}
+
+.alert-summary-item--wide {
+  grid-column: 1 / -1;
+}
+
+.alert-summary-item span {
+  color: #92400e;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.alert-summary-item strong {
+  color: #1f2937;
+  font-size: 13px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
 .context-meta {
   display: grid;
   gap: 4px;
@@ -2884,47 +5392,138 @@ onMounted(() => {
   font-size: 13px;
 }
 
-.detail-card {
+.audit-context-summary {
   display: grid;
-  gap: 6px;
-  padding: 11px;
-  border: 1px solid #e8eef8;
-  border-radius: 8px;
-  background: #fbfdff;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
-.detail-card span {
+.audit-context-summary-item {
+  position: relative;
+  min-height: 110px;
+  border-color: #dbeafe;
+  background: linear-gradient(180deg, #fbfdff 0%, #f8fbff 100%);
+  overflow: hidden;
+}
+
+.audit-context-summary-item::before {
+  content: "";
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 0;
+  width: 3px;
+  border-radius: 0 999px 999px 0;
+  background: #2563eb;
+}
+
+.audit-context-summary-item span,
+.audit-context-summary-item p {
   color: #64748b;
-  font-size: 12px;
 }
 
-.detail-card strong {
+.audit-context-summary-item strong {
   color: #13213c;
-  font-size: 13px;
-  line-height: 1.5;
-  word-break: break-word;
 }
 
-.detail-card small {
-  color: #74829a;
+.audit-context-grid {
+  gap: 10px;
+  align-items: start;
+}
+
+.audit-context-card {
+  gap: 9px;
+  min-height: 0;
+  padding: 12px;
+  border-color: #dbeafe;
+  background: linear-gradient(180deg, #fbfdff 0%, #f8fbff 100%);
+  box-shadow: none;
+  overflow: hidden;
+}
+
+.audit-context-card-head {
+  align-items: center;
+  padding-bottom: 0;
+}
+
+.audit-context-card-head span {
+  color: #2563eb;
   font-size: 12px;
-  word-break: break-word;
+  font-weight: 700;
+  line-height: 1.4;
 }
 
-.detail-card--blue {
-  background: #f5f9ff;
+.audit-context-card-head :deep(.el-tag) {
+  max-width: 148px;
+  min-height: 24px;
+  justify-content: center;
+  border-radius: 6px;
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: #2563eb;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
-.detail-card--red {
-  background: #fff3f2;
+.audit-context-card > strong {
+  color: #13213c;
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
-.detail-card--amber {
-  background: #fff8eb;
+.audit-context-card > p {
+  color: #52637f;
+  font-size: 12px;
+  line-height: 1.65;
 }
 
-.detail-card--green {
-  background: #f1fbf5;
+.audit-context-meta {
+  gap: 6px;
+  padding: 8px 0 0;
+  border-top: 1px dashed #dbeafe;
+  border-radius: 0;
+  background: transparent;
+}
+
+.audit-context-meta + .audit-context-meta {
+  margin-top: 0;
+}
+
+.audit-context-meta span {
+  color: #64748b;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.audit-context-meta strong {
+  color: #13213c;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.audit-context-card--mask,
+.audit-context-card--sql {
+  min-height: 0;
+}
+
+.audit-sql-preview {
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.audit-sql-preview .detail-code--light {
+  max-height: 148px;
+  border: 0;
+  border-radius: 0;
+  background: #ffffff;
+  color: #1e3a8a;
+  white-space: pre;
+  overflow: auto;
 }
 
 .detail-text {
@@ -2980,37 +5579,63 @@ onMounted(() => {
 
 .audit-log-card {
   display: grid;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid #e5edf7;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #dbeafe;
   border-radius: 8px;
-  background: #fbfdff;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
 }
 
 .audit-log-list {
   display: grid;
-  gap: 10px;
+  gap: 12px;
 }
 
 .audit-log-summary {
   display: grid;
-  gap: 5px;
+  gap: 8px;
 }
 
 .audit-log-head {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  color: #64748b;
-  font-size: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 2px;
 }
 
-.audit-log-reason {
-  margin: 0;
-  color: #42546f;
-  font-size: 13px;
-  line-height: 1.5;
+.audit-log-title {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.audit-log-title strong {
+  color: #0f172a;
+  font-size: 15px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.audit-log-title span {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.audit-log-tags {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.audit-log-tags :deep(.el-tag) {
+  min-height: 26px;
+  border-radius: 6px;
+  font-weight: 700;
 }
 
 .audit-log-grid {
@@ -3022,12 +5647,12 @@ onMounted(() => {
 
 .audit-log-metric {
   display: grid;
-  gap: 4px;
-  min-height: 72px;
-  padding: 9px 10px;
+  gap: 6px;
+  min-height: 74px;
+  padding: 10px 11px;
   border-radius: 8px;
   background: #f8fbff;
-  border: 1px solid #edf2f7;
+  border: 1px solid #e8eef8;
 }
 
 .audit-log-metric--wide {
@@ -3038,11 +5663,12 @@ onMounted(() => {
 .audit-log-grid span {
   color: #64748b;
   font-size: 12px;
+  line-height: 1.4;
 }
 
 .audit-log-grid strong {
   color: #13213c;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.5;
   word-break: break-word;
 }
@@ -3090,6 +5716,41 @@ onMounted(() => {
   font-size: 15px;
   line-height: 1.5;
   word-break: break-word;
+}
+
+.reasoning-mini-item p {
+  margin: 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.reasoning-timeline-scroll {
+  max-height: min(107vh, 736px);
+  min-height: 220px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px 8px 2px 0;
+  scrollbar-width: thin;
+  scrollbar-color: #bfdbfe transparent;
+}
+
+.reasoning-timeline-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.reasoning-timeline-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.reasoning-timeline-scroll::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: #bfdbfe;
+}
+
+.reasoning-timeline-scroll::-webkit-scrollbar-thumb:hover {
+  background: #93c5fd;
 }
 
 .reasoning-timeline {
@@ -3186,6 +5847,192 @@ onMounted(() => {
   line-height: 1.6;
 }
 
+.graph-visual {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+}
+
+.graph-visual-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.graph-visual-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.graph-visual-head strong {
+  color: #0f172a;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.graph-visual-head span {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.graph-visual-canvas {
+  width: 100%;
+  height: 260px;
+  display: block;
+  border-radius: 8px;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(219, 234, 254, 0.72), transparent 58%),
+    #ffffff;
+}
+
+.graph-visual-edge-label {
+  paint-order: stroke;
+  stroke: #ffffff;
+  stroke-width: 4px;
+  fill: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.graph-visual-node circle {
+  stroke-width: 2px;
+}
+
+.graph-visual-node--table circle {
+  fill: #eff6ff;
+  stroke: #2563eb;
+}
+
+.graph-visual-node--field circle {
+  fill: #ecfeff;
+  stroke: #0891b2;
+}
+
+.graph-visual-node--metric circle {
+  fill: #f0fdf4;
+  stroke: #16a34a;
+}
+
+.graph-visual-node--relation circle {
+  fill: #fff7ed;
+  stroke: #f97316;
+}
+
+.graph-visual-node--context circle {
+  fill: #f8fafc;
+  stroke: #94a3b8;
+}
+
+.graph-visual-node-title {
+  fill: #0f172a;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.graph-visual-node-type {
+  fill: #64748b;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.graph-full-dialog :deep(.el-dialog__body) {
+  padding-top: 8px;
+}
+
+.graph-full-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
+  gap: 14px;
+  align-items: stretch;
+}
+
+.graph-full-panel {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  padding: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+.graph-full-panel--canvas {
+  overflow: hidden;
+}
+
+.graph-full-head {
+  display: grid;
+  gap: 3px;
+}
+
+.graph-full-head strong {
+  color: #0f172a;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.graph-full-head span {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.graph-full-canvas {
+  width: 100%;
+  height: min(62vh, 620px);
+  min-height: 420px;
+  display: block;
+  border-radius: 8px;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(219, 234, 254, 0.75), transparent 62%),
+    #ffffff;
+}
+
+.graph-relation-list {
+  max-height: min(62vh, 620px);
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+  padding-right: 4px;
+}
+
+.graph-relation-item {
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 1px solid #e8eef8;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.graph-relation-item strong {
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.graph-relation-item span {
+  width: fit-content;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
 .graph-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3235,6 +6082,371 @@ onMounted(() => {
   overflow: hidden;
 }
 
+.conversation-replay-shell {
+  flex: 1 1 auto;
+  min-height: 520px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #e6ebf2;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: inset 0 -1px 0 rgba(148, 163, 184, 0.08);
+}
+
+.conversation-replay-shell .chat-conversation-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0 14px 0;
+  background: #fff;
+}
+
+.conversation-replay-shell .message-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 10px 2px 12px;
+}
+
+.conversation-context-notice {
+  margin: 10px 2px 4px;
+  padding: 8px 10px;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.conversation-replay-shell .message-wrapper {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  margin-bottom: 20px;
+  padding: 8px 4px;
+  border-radius: 14px;
+}
+
+.conversation-replay-shell .message-wrapper.user {
+  flex-direction: row-reverse;
+}
+
+.conversation-replay-shell .message-wrapper.is-current {
+  background: linear-gradient(90deg, rgba(37, 99, 235, 0.1), rgba(37, 99, 235, 0));
+}
+
+.conversation-replay-shell .message-wrapper.is-current-prompt {
+  background: linear-gradient(90deg, rgba(245, 158, 11, 0.12), rgba(245, 158, 11, 0));
+}
+
+.conversation-replay-shell .message-wrapper.user.is-current-prompt {
+  background: linear-gradient(270deg, rgba(245, 158, 11, 0.14), rgba(245, 158, 11, 0));
+}
+
+.conversation-replay-shell .message-wrapper.is-current::before,
+.conversation-replay-shell .message-wrapper.is-current-prompt::before {
+  content: "";
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  left: 0;
+  width: 3px;
+  border-radius: 999px;
+  background: #2563eb;
+}
+
+.conversation-replay-shell .message-wrapper.user.is-current-prompt::before {
+  right: 0;
+  left: auto;
+  background: #f59e0b;
+}
+
+.conversation-replay-shell .message-wrapper.is-current-prompt:not(.is-current)::before {
+  background: #f59e0b;
+}
+
+.conversation-replay-shell .avatar {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow: none;
+  overflow: visible;
+  margin: 0 10px;
+}
+
+.conversation-replay-shell .avatar img {
+  width: 44px;
+  height: 44px;
+  display: block;
+  object-fit: contain;
+  border-radius: 50%;
+}
+
+.conversation-replay-shell .message-wrapper.user .avatar {
+  width: 64px;
+  height: 64px;
+  flex-basis: 64px;
+  margin: -10px 12px 0 -2px;
+}
+
+.conversation-replay-shell .message-wrapper.user .avatar img {
+  width: 64px;
+  height: 64px;
+}
+
+.conversation-replay-shell .msg-content {
+  display: flex;
+  flex-direction: column;
+  max-width: 85%;
+}
+
+.conversation-current-marker {
+  align-self: flex-start;
+  margin: 0 0 6px;
+  padding: 2px 8px;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.conversation-replay-shell .message-wrapper.user .conversation-current-marker {
+  align-self: flex-end;
+}
+
+.conversation-current-marker.is-prompt {
+  border-color: #fde68a;
+  background: #fffbeb;
+  color: #b45309;
+}
+
+.conversation-replay-shell .bubble {
+  padding: 12px 16px;
+  border-radius: 12px;
+  line-height: 1.6;
+  font-size: 14px;
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.conversation-replay-shell .user .bubble {
+  background: linear-gradient(135deg, #2f7cf6, #0e5add);
+  color: #fff;
+  border-top-right-radius: 4px;
+}
+
+.conversation-replay-shell .system .bubble {
+  background: #fff;
+  color: #1f2937;
+  border: 1px solid #e5e7eb;
+  border-top-left-radius: 4px;
+}
+
+.conversation-replay-shell .message-wrapper.is-current .bubble {
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.28), 0 10px 22px rgba(37, 99, 235, 0.12);
+}
+
+.conversation-replay-shell .message-wrapper.is-current-prompt:not(.is-current) .bubble {
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.34), 0 10px 22px rgba(245, 158, 11, 0.12);
+}
+
+.conversation-artifact-list {
+  display: grid;
+  gap: 8px;
+}
+
+.conversation-replay-shell .advanced-dialog-entry {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  width: min(620px, 100%);
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.06);
+}
+
+.conversation-replay-shell .advanced-dialog-entry.is-current {
+  border-color: #60a5fa;
+  background: #eff6ff;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12), 0 12px 26px rgba(37, 99, 235, 0.14);
+}
+
+.conversation-chart-preview {
+  width: 100%;
+  height: 260px;
+  min-height: 260px;
+  padding: 10px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.conversation-replay-shell .advanced-dialog-entry__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.conversation-replay-shell .advanced-dialog-entry__main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.conversation-replay-shell .advanced-dialog-entry__type {
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.conversation-replay-shell .advanced-dialog-entry__title {
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.conversation-replay-shell .advanced-dialog-entry__summary {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.conversation-replay-shell .advanced-dialog-entry__rule {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.conversation-replay-shell .advanced-dialog-entry__rule div {
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.conversation-replay-shell .advanced-dialog-entry__rule span {
+  display: block;
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.conversation-replay-shell .advanced-dialog-entry__rule strong {
+  display: block;
+  margin-top: 2px;
+  color: #0f172a;
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.conversation-replay-shell .advanced-dialog-entry__rule-explain {
+  grid-column: 1 / -1;
+}
+
+.conversation-replay-shell .advanced-dialog-entry__actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 46%;
+  padding-top: 0;
+}
+
+.admin-advanced-analysis-dialog :deep(.el-dialog__body) {
+  padding-top: 8px;
+}
+
+.admin-advanced-analysis-dialog :deep(.advanced-card) {
+  width: 100%;
+  margin-top: 0;
+}
+
+.conversation-replay-shell .sql-block {
+  margin-top: 10px;
+  background: #111827;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+}
+
+.conversation-replay-shell .sql-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: #1f2937;
+  border-bottom: 1px solid #374151;
+}
+
+.conversation-replay-shell .sql-head .sql-title {
+  padding: 0;
+  border: 0;
+  color: #9ca3af;
+  font-size: 12px;
+  font-family: monospace;
+}
+
+.conversation-replay-shell .sql-code {
+  max-width: 100%;
+  margin: 0;
+  padding: 12px;
+  overflow-x: auto;
+  color: #a7f3d0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.conversation-replay-shell .thinking-details {
+  width: min(620px, 100%);
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.conversation-replay-shell .thinking-details summary {
+  cursor: pointer;
+  color: #374151;
+  font-size: 13px;
+}
+
+.conversation-replay-shell .thinking-list {
+  margin: 8px 0 0 18px;
+  max-height: 140px;
+  overflow: auto;
+  color: #4b5563;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .detail-actions {
   display: flex;
   gap: 8px;
@@ -3258,6 +6470,16 @@ onMounted(() => {
   gap: 12px;
 }
 
+.detail-result-section {
+  gap: 14px;
+  border-color: #dbeafe;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+}
+
+.detail-result-head {
+  padding-bottom: 2px;
+}
+
 .result-preview-grid {
   display: grid;
   grid-template-columns: minmax(320px, 1.15fr) minmax(240px, 0.85fr);
@@ -3278,10 +6500,55 @@ onMounted(() => {
   align-content: start;
 }
 
+.result-preview-card,
 .result-preview-summary-card {
-  gap: 10px;
-  padding: 10px 12px;
+  position: relative;
+  gap: 12px;
+  padding: 14px;
+  overflow: hidden;
+  border-color: #dbeafe;
   background: #ffffff;
+  box-shadow: 0 10px 22px rgba(44, 74, 124, 0.06);
+}
+
+.result-preview-summary-card {
+  background:
+    linear-gradient(135deg, rgba(239, 246, 255, 0.96) 0%, #ffffff 62%),
+    #ffffff;
+}
+
+.result-preview-card-head {
+  position: relative;
+  z-index: 1;
+  align-items: flex-start;
+}
+
+.result-preview-card-head :deep(.el-tag),
+.result-preview-table-head :deep(.el-tag) {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: #2563eb;
+  border-radius: 7px;
+  font-weight: 700;
+}
+
+.result-preview-card-title {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.result-preview-card-title span {
+  color: #1e3a8a;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.4;
+}
+
+.result-preview-card-title small {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .result-preview-summary-grid {
@@ -3291,47 +6558,75 @@ onMounted(() => {
 }
 
 .result-preview-summary-item {
+  position: relative;
   display: grid;
-  gap: 4px;
-  padding: 10px 12px;
+  gap: 7px;
+  min-height: 112px;
+  padding: 12px 13px 12px 15px;
   border: 1px solid #e8eef8;
   border-radius: 8px;
-  background: #f8fbff;
+  background: rgba(255, 255, 255, 0.82);
   min-width: 0;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.result-preview-summary-item::before {
+  content: "";
+  position: absolute;
+  inset: 12px auto 12px 0;
+  width: 3px;
+  border-radius: 999px;
+  background: #2563eb;
+}
+
+.result-preview-summary-item:nth-child(2)::before {
+  background: #0ea5e9;
+}
+
+.result-preview-summary-item:nth-child(3)::before {
+  background: #22c55e;
+}
+
+.result-preview-summary-item:nth-child(4)::before {
+  background: #f59e0b;
 }
 
 .result-preview-summary-item span {
   color: #64748b;
   font-size: 12px;
+  line-height: 1.4;
 }
 
 .result-preview-summary-item strong {
-  color: #13213c;
-  font-size: 14px;
-  line-height: 1.4;
+  color: #0f172a;
+  font-size: 18px;
+  line-height: 1.35;
   word-break: break-word;
 }
 
 .result-preview-summary-item small {
-  color: #74829a;
+  color: #52637f;
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.6;
 }
 
 .result-preview-card--chart {
-  background: #ffffff;
+  border-color: #dbeafe;
+  background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
 }
 
 .result-preview-chart-shell {
   display: grid;
   align-items: stretch;
   width: 100%;
-  min-height: 300px;
-  height: 300px;
-  padding: 10px 12px;
-  border: 1px solid #e8eef8;
+  min-height: 360px;
+  height: 360px;
+  padding: 12px;
+  border: 1px solid #dbeafe;
   border-radius: 8px;
-  background: #ffffff;
+  background:
+    linear-gradient(180deg, rgba(248, 251, 255, 0.78) 0%, #ffffff 100%),
+    #ffffff;
   overflow: hidden;
   box-sizing: border-box;
 }
@@ -3340,6 +6635,52 @@ onMounted(() => {
   width: 100%;
   height: 100%;
   min-height: 0;
+}
+
+.result-preview-field-tags {
+  gap: 7px;
+  padding: 0 2px;
+}
+
+.result-preview-field-tags :deep(.el-tag) {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: #2563eb;
+  border-radius: 7px;
+}
+
+.result-preview-table-card {
+  border-color: #dbeafe;
+  background: #ffffff;
+  box-shadow: 0 10px 22px rgba(44, 74, 124, 0.06);
+}
+
+.result-preview-table-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid #e8eef8;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+}
+
+.result-preview-table {
+  width: 100%;
+}
+
+.result-preview-table :deep(.el-table__header th.el-table__cell) {
+  background: #f8fbff;
+  color: #1e3a8a;
+  font-weight: 800;
+}
+
+.result-preview-table :deep(.el-table__body td.el-table__cell) {
+  color: #334155;
+}
+
+.result-preview-table :deep(.el-table__row:hover > td.el-table__cell) {
+  background: #eff6ff;
 }
 
 .trace-panel {
@@ -3351,12 +6692,34 @@ onMounted(() => {
   background: #ffffff;
 }
 
+.audit-trace-panel {
+  gap: 10px;
+  border-color: #dbeafe;
+  background: #ffffff;
+}
+
 .trace-panel-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+.audit-trace-panel .trace-panel-head {
+  align-items: flex-start;
+}
+
+.audit-trace-panel .trace-panel-head > div {
+  display: grid;
+  gap: 3px;
+}
+
+.audit-trace-panel .trace-panel-head :deep(.el-tag) {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: #2563eb;
+  font-weight: 700;
 }
 
 .trace-panel-head h4 {
@@ -3381,6 +6744,27 @@ onMounted(() => {
   gap: 8px;
 }
 
+.audit-trace-panel .trace-grid--compact {
+  max-height: 420px;
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: #bfdbfe transparent;
+}
+
+.audit-trace-panel .trace-grid--compact::-webkit-scrollbar {
+  width: 8px;
+}
+
+.audit-trace-panel .trace-grid--compact::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.audit-trace-panel .trace-grid--compact::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: #bfdbfe;
+}
+
 .trace-item {
   display: grid;
   gap: 4px;
@@ -3388,6 +6772,11 @@ onMounted(() => {
   border-radius: 8px;
   background: #f8fbff;
   min-width: 0;
+}
+
+.audit-trace-panel .trace-item {
+  border: 1px solid #e8eef8;
+  background: linear-gradient(180deg, #fbfdff 0%, #f8fbff 100%);
 }
 
 .trace-item--wide {
@@ -3404,6 +6793,60 @@ onMounted(() => {
   font-size: 13px;
   line-height: 1.45;
   word-break: break-word;
+}
+
+.audit-trace-panel .trace-item strong {
+  max-height: 96px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.trace-value-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 150px;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #bfdbfe transparent;
+}
+
+.trace-value-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.trace-value-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.trace-value-list::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: #bfdbfe;
+}
+
+.trace-value-list li {
+  position: relative;
+  padding: 6px 8px 6px 18px;
+  border: 1px solid #e8eef8;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #13213c;
+  font-size: 12px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+.trace-value-list li::before {
+  content: "";
+  position: absolute;
+  top: 13px;
+  left: 8px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #2563eb;
 }
 
 .trace-tags {
@@ -3428,8 +6871,8 @@ onMounted(() => {
   gap: 3px;
   padding: 7px 9px;
   border-radius: 8px;
-  background: #f8fbff;
-  border: 1px solid #edf2f7;
+  background: #fbfdff;
+  border: 1px solid #e8eef8;
   min-width: 0;
 }
 
@@ -3551,15 +6994,16 @@ onMounted(() => {
   .detail-overview,
   .detail-query-grid,
   .context-grid,
+  .audit-summary-grid,
   .detail-grid,
-  .detail-grid--audit,
   .result-preview-grid,
   .graph-list,
   .trace-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .result-preview-summary-grid {
+  .result-preview-summary-grid,
+  .alert-summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -3569,6 +7013,10 @@ onMounted(() => {
 
   .trace-grid--compact {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .graph-full-layout {
+    grid-template-columns: 1fr;
   }
 
   .guard-detail-list {
@@ -3581,6 +7029,14 @@ onMounted(() => {
 
   .reasoning-mini-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .audit-context-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .reasoning-timeline-scroll {
+    max-height: 520px;
   }
 
   .filter-grid {
@@ -3599,13 +7055,16 @@ onMounted(() => {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .detail-overview-row {
-    grid-template-columns: 1fr;
-    gap: 4px;
-  }
-
   .reasoning-timeline-item {
     grid-template-columns: 16px minmax(0, 1fr);
+  }
+
+  .conversation-replay-shell .msg-content {
+    max-width: calc(100% - 76px);
+  }
+
+  .detail-query-section .detail-query-grid {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -3631,8 +7090,8 @@ onMounted(() => {
   .detail-overview-grid--compact,
   .detail-query-grid,
   .context-grid,
+  .audit-summary-grid,
   .detail-grid,
-  .detail-grid--audit,
   .result-preview-grid,
   .audit-log-grid,
   .graph-list,
@@ -3640,7 +7099,8 @@ onMounted(() => {
     grid-template-columns: 1fr;
   }
 
-  .result-preview-summary-grid {
+  .result-preview-summary-grid,
+  .alert-summary-grid {
     grid-template-columns: 1fr;
   }
 
@@ -3648,18 +7108,41 @@ onMounted(() => {
     align-items: stretch;
   }
 
+  .graph-full-canvas {
+    min-height: 340px;
+  }
+
   .guard-detail-list {
     grid-template-columns: 1fr;
   }
 
   .reasoning-graph-layout,
-  .reasoning-mini-summary {
+  .reasoning-mini-summary,
+  .audit-context-summary {
     grid-template-columns: 1fr;
   }
 
+  .reasoning-timeline-scroll {
+    max-height: 430px;
+  }
+
   .detail-badges {
-    flex-wrap: wrap;
-    overflow-x: visible;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .detail-overview-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+
+  .conversation-replay-shell .advanced-dialog-entry__actions {
+    justify-content: flex-start;
+    max-width: 100%;
+  }
+
+  .conversation-replay-shell .advanced-dialog-entry__head {
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .detail-overview-group {
@@ -3691,6 +7174,12 @@ onMounted(() => {
     justify-content: center;
     flex-direction: column;
     align-items: stretch;
+  }
+}
+
+@media (max-width: 480px) {
+  .detail-badges {
+    grid-template-columns: 1fr;
   }
 }
 </style>

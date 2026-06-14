@@ -279,6 +279,15 @@ public class AdvancedAnalysisController {
         return ApiResponse.success(advancedAnalysisService.updateAlertRuleStatus(id, request));
     }
 
+    @PostMapping("/alert-rules/status/batch")
+    public ApiResponse<Map<String, Object>> batchUpdateAlertRuleStatus(@RequestBody Map<String, Object> request) {
+        List<Long> ids = parseLongList(request.get("ids"));
+        if (ids.isEmpty()) {
+            return ApiResponse.badRequest("请选择需要更新的预警规则");
+        }
+        return ApiResponse.success(advancedAnalysisService.batchUpdateAlertRuleStatus(ids, request));
+    }
+
     @PostMapping("/alert-rules/delete")
     public ApiResponse<Map<String, Object>> deleteAlertRule(@RequestBody Map<String, Object> request) {
         long id = parseLong(request.get("id"));
@@ -286,6 +295,15 @@ public class AdvancedAnalysisController {
             return ApiResponse.badRequest("预警规则 ID 无效");
         }
         return ApiResponse.success(advancedAnalysisService.deleteAlertRule(id));
+    }
+
+    @PostMapping("/alert-rules/delete/batch")
+    public ApiResponse<Map<String, Object>> batchDeleteAlertRules(@RequestBody Map<String, Object> request) {
+        List<Long> ids = parseLongList(request.get("ids"));
+        if (ids.isEmpty()) {
+            return ApiResponse.badRequest("请选择需要删除的预警规则");
+        }
+        return ApiResponse.success(advancedAnalysisService.batchDeleteAlertRules(ids));
     }
 
     @PostMapping("/alert-events/run")
@@ -396,6 +414,13 @@ public class AdvancedAnalysisController {
             }
             return ApiResponse.success(advancedAnalysisService.deletePlan(id));
         }
+        if ("batchDelete".equalsIgnoreCase(action) || "batch-delete".equalsIgnoreCase(action)) {
+            List<Long> ids = parseLongList(request.get("ids"));
+            if (ids.isEmpty()) {
+                return ApiResponse.badRequest("请选择需要删除的方案");
+            }
+            return ApiResponse.success(advancedAnalysisService.batchDeletePlans(ids));
+        }
         if ("rename".equalsIgnoreCase(action)) {
             long id = parseLong(request.get("id"));
             if (id <= 0) {
@@ -502,5 +527,16 @@ public class AdvancedAnalysisController {
         } catch (Exception ignored) {
             return 0L;
         }
+    }
+
+    private List<Long> parseLongList(Object value) {
+        if (!(value instanceof Collection<?> collection)) {
+            return List.of();
+        }
+        return collection.stream()
+                .map(this::parseLong)
+                .filter(id -> id > 0)
+                .distinct()
+                .toList();
     }
 }

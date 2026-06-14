@@ -122,6 +122,10 @@ class BusinessModelSemanticRequest(BaseModel):
     tableName: str
     fields: list[FieldMeta]
     previewRows: list[dict[str, Any]] = []
+    modelId: str = ""
+    modelConfig: dict[str, Any] = {}
+    temperature: float | int | None = None
+    timeoutSeconds: int | None = None
 
 
 class BusinessModelPatchRequest(BaseModel):
@@ -134,18 +138,30 @@ class BusinessModelPatchRequest(BaseModel):
     dimensionSystem: list[dict[str, Any]] = []
     fields: list[FieldMeta]
     previewRows: list[dict[str, Any]] = []
+    modelId: str = ""
+    modelConfig: dict[str, Any] = {}
+    temperature: float | int | None = None
+    timeoutSeconds: int | None = None
 
 
 class AdvancedAnalysisParseRequest(BaseModel):
     question: str
     tableName: str = ""
     context: dict[str, Any] = {}
+    modelId: str = ""
+    modelConfig: dict[str, Any] = {}
+    temperature: float | int | None = None
+    timeoutSeconds: int | None = None
 
 
 class SmartChatRouteRequest(BaseModel):
     question: str
     tableName: str = ""
     context: dict[str, Any] = {}
+    modelId: str = ""
+    modelConfig: dict[str, Any] = {}
+    temperature: float | int | None = None
+    timeoutSeconds: int | None = None
 
 
 class AdvancedAnalysisExplainRequest(BaseModel):
@@ -153,6 +169,10 @@ class AdvancedAnalysisExplainRequest(BaseModel):
     question: str = ""
     result: dict[str, Any] = {}
     context: dict[str, Any] = {}
+    modelId: str = ""
+    modelConfig: dict[str, Any] = {}
+    temperature: float | int | None = None
+    timeoutSeconds: int | None = None
 
 
 class TtsRequest(BaseModel):
@@ -272,7 +292,7 @@ def text_to_sql(payload: TextToSqlRequest) -> dict[str, Any]:
 
     graph_plan = resolve_graph_sql_plan(payload)
 
-    if OPENAI_API_KEY:
+    if is_llm_payload_available(payload):
         ai_result = call_openai_text_to_sql(payload)
         if ai_result:
             if should_override_sql_with_graph_plan(str(ai_result.get("sql", "")), graph_plan, payload):
@@ -317,7 +337,7 @@ def business_model_semantic(payload: BusinessModelSemanticRequest) -> dict[str, 
     if not payload.fields:
         raise HTTPException(status_code=400, detail="当前数据表没有字段元信息，请先上传有效数据表。")
 
-    if OPENAI_API_KEY:
+    if is_llm_payload_available(payload):
         ai_result = call_openai_business_model_semantic(payload)
         if ai_result:
             return normalize_business_model_semantic_result(ai_result, payload)
@@ -333,7 +353,7 @@ def business_model_patch(payload: BusinessModelPatchRequest) -> dict[str, Any]:
     if not payload.fields:
         raise HTTPException(status_code=400, detail="当前数据表没有字段元信息，无法执行模型修改。")
 
-    if OPENAI_API_KEY:
+    if is_llm_payload_available(payload):
         ai_result = call_openai_business_model_patch(payload)
         if ai_result:
             return normalize_business_model_patch_result(ai_result, payload)
@@ -346,7 +366,7 @@ def advanced_analysis_parse(payload: AdvancedAnalysisParseRequest) -> dict[str, 
     question = (payload.question or "").strip()
     if not question:
         raise HTTPException(status_code=400, detail="高级分析问题不能为空。")
-    if OPENAI_API_KEY:
+    if is_llm_payload_available(payload):
         ai_result = call_openai_advanced_analysis_parse(payload)
         if ai_result:
             return normalize_advanced_analysis_parse_result(ai_result, payload)
@@ -358,7 +378,7 @@ def smart_chat_route(payload: SmartChatRouteRequest) -> dict[str, Any]:
     question = (payload.question or "").strip()
     if not question:
         raise HTTPException(status_code=400, detail="智能路由问题不能为空。")
-    if OPENAI_API_KEY:
+    if is_llm_payload_available(payload):
         ai_result = call_openai_smart_chat_route(payload)
         if ai_result:
             return normalize_smart_chat_route_result(ai_result, payload)
@@ -372,7 +392,7 @@ def advanced_analysis_explain(payload: AdvancedAnalysisExplainRequest) -> dict[s
         raise HTTPException(status_code=400, detail="高级分析类型无效。")
     if not isinstance(payload.result, dict) or not payload.result:
         raise HTTPException(status_code=400, detail="缺少后端算法结果，无法生成解释。")
-    if OPENAI_API_KEY:
+    if is_llm_payload_available(payload):
         ai_result = call_openai_advanced_analysis_explain(payload)
         if ai_result:
             return normalize_advanced_analysis_explain_result(ai_result, payload)
@@ -1256,6 +1276,8 @@ def build_report_markdown(
 def call_openai_text_to_sql(payload: TextToSqlRequest) -> dict[str, Any] | None:
     prompt = build_text_to_sql_prompt(payload)
     model_config = resolve_llm_config(payload)
+    if not is_llm_config_available(model_config):
+        return None
     body = json.dumps({
         "model": model_config["model"],
         "messages": [
@@ -1352,21 +1374,43 @@ def list_llm_models() -> list[dict[str, Any]]:
     return unique_models
 
 
-def resolve_llm_config(payload: TextToSqlRequest) -> dict[str, Any]:
-    model_config = payload.modelConfig if isinstance(payload.modelConfig, dict) else {}
-    requested_id = str(payload.modelId or model_config.get("modelId") or "default").strip()
+def resolve_llm_config(payload: Any,
+                       default_temperature: float = 0.1,
+                       default_timeout_seconds: int = 25) -> dict[str, Any]:
+    model_config = getattr(payload, "modelConfig", {})
+    model_config = model_config if isinstance(model_config, dict) else {}
+    context = getattr(payload, "context", {})
+    context = context if isinstance(context, dict) else {}
+    context_model_config = context.get("modelConfig") if isinstance(context.get("modelConfig"), dict) else {}
+    requested_id = str(
+        getattr(payload, "modelId", "")
+        or model_config.get("modelId")
+        or context.get("modelId")
+        or context_model_config.get("modelId")
+        or "default"
+    ).strip()
     if requested_id in {"gpt-4", "openai-default", "qwen-plus", ""}:
         requested_id = "default"
-    temperature = model_config.get("temperature", payload.temperature)
-    timeout_seconds = model_config.get("timeoutSeconds", payload.timeoutSeconds)
+    temperature = first_present(
+        model_config.get("temperature"),
+        getattr(payload, "temperature", None),
+        context.get("temperature"),
+        context_model_config.get("temperature"),
+    )
+    timeout_seconds = first_present(
+        model_config.get("timeoutSeconds"),
+        getattr(payload, "timeoutSeconds", None),
+        context.get("timeoutSeconds"),
+        context_model_config.get("timeoutSeconds"),
+    )
     try:
-        temperature_value = float(temperature if temperature is not None else 0.1)
+        temperature_value = float(temperature if temperature is not None else default_temperature)
     except (TypeError, ValueError):
-        temperature_value = 0.1
+        temperature_value = default_temperature
     try:
-        timeout_value = int(timeout_seconds if timeout_seconds is not None else 25)
+        timeout_value = int(timeout_seconds if timeout_seconds is not None else default_timeout_seconds)
     except (TypeError, ValueError):
-        timeout_value = 25
+        timeout_value = default_timeout_seconds
     timeout_value = max(5, min(timeout_value, 120))
     if requested_id == "commercial-default":
         return llm_config(
@@ -1385,6 +1429,25 @@ def resolve_llm_config(payload: TextToSqlRequest) -> dict[str, Any]:
         OPENAI_BASE_URL, OPENAI_API_KEY,
         temperature_value, timeout_value
     )
+
+
+def first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def is_llm_config_available(model_config: dict[str, Any]) -> bool:
+    return bool(
+        str(model_config.get("model") or "").strip()
+        and str(model_config.get("baseUrl") or "").strip()
+        and str(model_config.get("apiKey") or "").strip()
+    )
+
+
+def is_llm_payload_available(payload: Any) -> bool:
+    return is_llm_config_available(resolve_llm_config(payload))
 
 
 def llm_config(model_id: str, model: str, name: str, base_url: str, api_key: str,
@@ -1418,8 +1481,11 @@ def mask_base_url(base_url: str) -> str:
 
 def call_openai_business_model_semantic(payload: BusinessModelSemanticRequest) -> dict[str, Any] | None:
     prompt = build_business_model_semantic_prompt(payload)
+    model_config = resolve_llm_config(payload, default_temperature=0.1, default_timeout_seconds=30)
+    if not is_llm_config_available(model_config):
+        return None
     body = json.dumps({
-        "model": OPENAI_MODEL,
+        "model": model_config["model"],
         "messages": [
             {"role": "system", "content": (
                 "你是企业级零代码业务建模专家。\n"
@@ -1434,26 +1500,29 @@ def call_openai_business_model_semantic(payload: BusinessModelSemanticRequest) -
             )},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.1,
+        "temperature": model_config["temperature"],
     }).encode("utf-8")
 
     req = request.Request(
-        f"{OPENAI_BASE_URL}/chat/completions",
+        f"{model_config['baseUrl']}/chat/completions",
         data=body,
         headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Authorization": f"Bearer {model_config['apiKey']}",
             "Content-Type": "application/json",
         },
         method="POST",
     )
     try:
-        with request.urlopen(req, timeout=30) as resp:
+        with request.urlopen(req, timeout=model_config["timeoutSeconds"]) as resp:
             payload_json = json.loads(resp.read().decode("utf-8"))
         content = payload_json["choices"][0]["message"]["content"]
         parsed = json.loads(content)
         if not isinstance(parsed, dict):
             return None
-        parsed.setdefault("model", OPENAI_MODEL)
+        parsed.setdefault("model", model_config["model"])
+        parsed.setdefault("modelId", model_config["id"])
+        parsed.setdefault("modelName", model_config["name"])
+        parsed.setdefault("provider", model_config["provider"])
         parsed.setdefault("reasoning", ["由大模型完成业务模型语义拆解"])
         return parsed
     except (error.URLError, error.HTTPError, KeyError, ValueError, json.JSONDecodeError):
@@ -1462,8 +1531,11 @@ def call_openai_business_model_semantic(payload: BusinessModelSemanticRequest) -
 
 def call_openai_business_model_patch(payload: BusinessModelPatchRequest) -> dict[str, Any] | None:
     prompt = build_business_model_patch_prompt(payload)
+    model_config = resolve_llm_config(payload, default_temperature=0.1, default_timeout_seconds=30)
+    if not is_llm_config_available(model_config):
+        return None
     body = json.dumps({
-        "model": OPENAI_MODEL,
+        "model": model_config["model"],
         "messages": [
             {"role": "system", "content": (
                 "你是企业级零代码业务建模维护专家。\n"
@@ -1480,26 +1552,29 @@ def call_openai_business_model_patch(payload: BusinessModelPatchRequest) -> dict
             )},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.1,
+        "temperature": model_config["temperature"],
     }).encode("utf-8")
 
     req = request.Request(
-        f"{OPENAI_BASE_URL}/chat/completions",
+        f"{model_config['baseUrl']}/chat/completions",
         data=body,
         headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Authorization": f"Bearer {model_config['apiKey']}",
             "Content-Type": "application/json",
         },
         method="POST",
     )
     try:
-        with request.urlopen(req, timeout=30) as resp:
+        with request.urlopen(req, timeout=model_config["timeoutSeconds"]) as resp:
             payload_json = json.loads(resp.read().decode("utf-8"))
         content = payload_json["choices"][0]["message"]["content"]
         parsed = json.loads(content)
         if not isinstance(parsed, dict):
             return None
-        parsed.setdefault("model", OPENAI_MODEL)
+        parsed.setdefault("model", model_config["model"])
+        parsed.setdefault("modelId", model_config["id"])
+        parsed.setdefault("modelName", model_config["name"])
+        parsed.setdefault("provider", model_config["provider"])
         parsed.setdefault("reasoning", ["由大模型完成业务模型修改语义拆解"])
         return parsed
     except (error.URLError, error.HTTPError, KeyError, ValueError, json.JSONDecodeError):
@@ -1507,6 +1582,9 @@ def call_openai_business_model_patch(payload: BusinessModelPatchRequest) -> dict
 
 
 def call_openai_advanced_analysis_parse(payload: AdvancedAnalysisParseRequest) -> dict[str, Any] | None:
+    model_config = resolve_llm_config(payload, default_temperature=0.1, default_timeout_seconds=10)
+    if not is_llm_config_available(model_config):
+        return None
     prompt = (
         "请把用户自然语言解析为预测与情景模拟模块的前端参数。\n"
         "只输出严格 JSON，不要输出 Markdown 或解释文本。\n"
@@ -1523,31 +1601,36 @@ def call_openai_advanced_analysis_parse(payload: AdvancedAnalysisParseRequest) -
         f"上下文：{json.dumps(payload.context or {}, ensure_ascii=False)}"
     )
     body = json.dumps({
-        "model": OPENAI_MODEL,
+        "model": model_config["model"],
         "messages": [
             {"role": "system", "content": "你是企业 BI 预测、情景推演和预警意图解析器。必须输出可被 json.loads 解析的 JSON。"},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.1,
+        "temperature": model_config["temperature"],
     }).encode("utf-8")
 
     req = request.Request(
-        f"{OPENAI_BASE_URL}/chat/completions",
+        f"{model_config['baseUrl']}/chat/completions",
         data=body,
         headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Authorization": f"Bearer {model_config['apiKey']}",
             "Content-Type": "application/json",
         },
         method="POST",
     )
     try:
-        with request.urlopen(req, timeout=10) as resp:
+        with request.urlopen(req, timeout=model_config["timeoutSeconds"]) as resp:
             payload_json = json.loads(resp.read().decode("utf-8"))
         content = str(payload_json["choices"][0]["message"]["content"]).strip()
         if content.startswith("```"):
             content = re.sub(r"^```(?:json)?\s*", "", content)
             content = re.sub(r"\s*```$", "", content)
         parsed = json.loads(content)
+        if isinstance(parsed, dict):
+            parsed.setdefault("model", model_config["model"])
+            parsed.setdefault("modelId", model_config["id"])
+            parsed.setdefault("modelName", model_config["name"])
+            parsed.setdefault("provider", model_config["provider"])
         return parsed if isinstance(parsed, dict) else None
     except (error.URLError, error.HTTPError, KeyError, ValueError, json.JSONDecodeError):
         return None
@@ -1555,8 +1638,11 @@ def call_openai_advanced_analysis_parse(payload: AdvancedAnalysisParseRequest) -
 
 def call_openai_smart_chat_route(payload: SmartChatRouteRequest) -> dict[str, Any] | None:
     prompt = build_smart_chat_route_prompt(payload)
+    model_config = resolve_llm_config(payload, default_temperature=0.05, default_timeout_seconds=20)
+    if not is_llm_config_available(model_config):
+        return None
     body = json.dumps({
-        "model": OPENAI_MODEL,
+        "model": model_config["model"],
         "messages": [
             {"role": "system", "content": (
                 "你是企业 BI 对话入口的全局语义路由器。\n"
@@ -1567,21 +1653,21 @@ def call_openai_smart_chat_route(payload: SmartChatRouteRequest) -> dict[str, An
             )},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.05,
+        "temperature": model_config["temperature"],
         "max_tokens": 900,
     }).encode("utf-8")
 
     req = request.Request(
-        f"{OPENAI_BASE_URL}/chat/completions",
+        f"{model_config['baseUrl']}/chat/completions",
         data=body,
         headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Authorization": f"Bearer {model_config['apiKey']}",
             "Content-Type": "application/json",
         },
         method="POST",
     )
     try:
-        with request.urlopen(req, timeout=20) as resp:
+        with request.urlopen(req, timeout=model_config["timeoutSeconds"]) as resp:
             payload_json = json.loads(resp.read().decode("utf-8"))
         content = str(payload_json["choices"][0]["message"]["content"]).strip()
         if content.startswith("```"):
@@ -1590,7 +1676,10 @@ def call_openai_smart_chat_route(payload: SmartChatRouteRequest) -> dict[str, An
         parsed = json.loads(content)
         if not isinstance(parsed, dict):
             return None
-        parsed.setdefault("model", OPENAI_MODEL)
+        parsed.setdefault("model", model_config["model"])
+        parsed.setdefault("modelId", model_config["id"])
+        parsed.setdefault("modelName", model_config["name"])
+        parsed.setdefault("provider", model_config["provider"])
         return parsed
     except (error.URLError, error.HTTPError, KeyError, ValueError, json.JSONDecodeError):
         return None
@@ -1598,8 +1687,11 @@ def call_openai_smart_chat_route(payload: SmartChatRouteRequest) -> dict[str, An
 
 def call_openai_advanced_analysis_explain(payload: AdvancedAnalysisExplainRequest) -> dict[str, Any] | None:
     prompt = build_advanced_analysis_explain_prompt(payload)
+    model_config = resolve_llm_config(payload, default_temperature=0.2, default_timeout_seconds=75)
+    if not is_llm_config_available(model_config):
+        return None
     body = json.dumps({
-        "model": OPENAI_MODEL,
+        "model": model_config["model"],
         "messages": [
             {"role": "system", "content": (
                 "你是企业 BI 预测、情景推演和预警解释助手。"
@@ -1608,27 +1700,32 @@ def call_openai_advanced_analysis_explain(payload: AdvancedAnalysisExplainReques
             )},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.2,
+        "temperature": model_config["temperature"],
         "max_tokens": 650,
     }).encode("utf-8")
 
     req = request.Request(
-        f"{OPENAI_BASE_URL}/chat/completions",
+        f"{model_config['baseUrl']}/chat/completions",
         data=body,
         headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Authorization": f"Bearer {model_config['apiKey']}",
             "Content-Type": "application/json",
         },
         method="POST",
     )
     try:
-        with request.urlopen(req, timeout=75) as resp:
+        with request.urlopen(req, timeout=model_config["timeoutSeconds"]) as resp:
             payload_json = json.loads(resp.read().decode("utf-8"))
         content = str(payload_json["choices"][0]["message"]["content"]).strip()
         if content.startswith("```"):
             content = re.sub(r"^```(?:json)?\s*", "", content)
             content = re.sub(r"\s*```$", "", content)
         parsed = json.loads(content)
+        if isinstance(parsed, dict):
+            parsed.setdefault("model", model_config["model"])
+            parsed.setdefault("modelId", model_config["id"])
+            parsed.setdefault("modelName", model_config["name"])
+            parsed.setdefault("provider", model_config["provider"])
         return parsed if isinstance(parsed, dict) else None
     except (error.URLError, error.HTTPError, KeyError, ValueError, json.JSONDecodeError):
         return None

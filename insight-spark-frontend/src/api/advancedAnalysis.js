@@ -147,8 +147,14 @@ export const updateAdvancedAlertRule = (payload) =>
 export const updateAdvancedAlertRuleStatus = (payload) =>
   http.post('/api/advanced-analysis/alert-rules/status', payload).then(unwrap)
 
+export const batchUpdateAdvancedAlertRuleStatus = (payload) =>
+  http.post('/api/advanced-analysis/alert-rules/status/batch', payload).then(unwrap)
+
 export const deleteAdvancedAlertRule = (payload) =>
   http.post('/api/advanced-analysis/alert-rules/delete', payload).then(unwrap)
+
+export const batchDeleteAdvancedAlertRules = (payload) =>
+  http.post('/api/advanced-analysis/alert-rules/delete/batch', payload).then(unwrap)
 
 export const runAdvancedAlertDetection = (payload = {}) =>
   http.post('/api/advanced-analysis/alert-events/run', payload).then(unwrap)
@@ -188,6 +194,9 @@ export const recalculateAdvancedAnalysisPlan = (id) =>
 
 export const deleteAdvancedAnalysisPlan = (id) =>
   http.post('/api/advanced-analysis/plans', { action: 'delete', id }).then(unwrap)
+
+export const batchDeleteAdvancedAnalysisPlans = (ids) =>
+  http.post('/api/advanced-analysis/plans', { action: 'batchDelete', ids }).then(unwrap)
 
 export const renameAdvancedAnalysisPlan = (payload) =>
   http.post('/api/advanced-analysis/plans', { ...payload, action: 'rename' }).then(unwrap)

@@ -154,7 +154,7 @@
           <div v-for="(step, index) in streamSteps" :key="`${step.eventName}-${index}`" class="reasoning-item">
             <span>{{ index + 1 }}</span>
             <div>
-              <strong>{{ eventTitle(step.eventName) }}</strong>
+              <strong>{{ step.title || eventTitle(step.eventName) }}</strong>
               <small>{{ step.detail }}</small>
             </div>
           </div>
@@ -381,7 +381,11 @@ const currentDatasourceSummary = computed(() => {
   const type = String(selected.sourceType || 'UPLOAD').toUpperCase()
   return `${type} / ${Number(selected.rowCount || 0)}行`
 })
-const selectedModelName = computed(() => models.value.find((item) => item.id === form.value.modelId)?.name || '默认模型')
+const availableModelOptions = computed(() => models.value.filter((item) => item.available !== false))
+const selectedModelName = computed(() => {
+  const matched = models.value.find((item) => String(item.id) === String(form.value.modelId))
+  return matched?.name || firstAvailableModel()?.name || '未配置可用模型'
+})
 const activeSessionModelName = computed(() => resolveSessionModelName(activeSession.value))
 const safeCount = computed(() => historyItems.value.filter((item) => item.riskLevel === 'SAFE').length)
 const warnCount = computed(() => historyItems.value.filter((item) => item.riskLevel === 'WARN').length)
@@ -395,11 +399,8 @@ const loadMeta = async () => {
       fetchAdminChatQueryModels()
     ])
     datasources.value = sourceRows || []
-    models.value = modelRows || []
-    if (models.value.length && !models.value.some((item) => item.id === form.value.modelId)) {
-      const availableModel = models.value.find((item) => item.available !== false) || models.value[0]
-      form.value.modelId = availableModel.id
-    }
+    models.value = normalizeModelOptions(modelRows)
+    ensureSelectedModel()
     if (!form.value.selectedTables.length && datasources.value[0]?.tableName) {
       form.value.selectedTables = [datasources.value[0].tableName]
     }
@@ -513,7 +514,7 @@ const applyTemplate = (template) => {
   const scope = template.datasourceScope || {}
   const modelConfig = template.modelConfig || {}
   form.value.selectedTables = Array.isArray(scope.selectedTables) ? scope.selectedTables : form.value.selectedTables
-  form.value.modelId = modelConfig.modelId || form.value.modelId
+  form.value.modelId = resolveUsableModelId(modelConfig.modelId)
   form.value.temperature = Number(modelConfig.temperature ?? form.value.temperature)
   form.value.timeoutSeconds = Number(modelConfig.timeoutSeconds ?? form.value.timeoutSeconds)
   ElMessage.success('已套用模板')
@@ -570,6 +571,7 @@ const hydrateExecutedSession = async (session) => {
   await refreshActiveSession(sessionId)
   streamSteps.value = (activeSession.value?.steps || []).map((step) => ({
     eventName: step.stepType,
+    title: step.stepTitle || eventTitle(step.stepType),
     detail: summarizePayload(step.stepType, step.stepPayload || {}),
     time: step.finishedAt || step.startedAt || ''
   }))
@@ -622,6 +624,20 @@ const openHistory = async (sessionId) => {
 }
 
 const handleStreamEvent = (eventName, payload) => {
+  if (eventName === 'thinking') {
+    pushStep(payload.eventType || 'STEP', payload)
+    return
+  }
+  if (eventName === 'result') {
+    result.value = payload.result || payload
+    activeSession.value = payload
+    nextTick(renderResultChart)
+    return
+  }
+  if (eventName === 'error') {
+    pushStep('ERROR', payload)
+    return
+  }
   pushStep(eventName, payload)
   if (eventName === 'FINISHED') {
     result.value = payload.result || payload
@@ -630,9 +646,16 @@ const handleStreamEvent = (eventName, payload) => {
 }
 
 const pushStep = (eventName, payload) => {
+  const detail = summarizePayload(eventName, payload)
+  const title = payload?.title || eventTitle(eventName)
+  const signature = `${title}：${detail}`
+  const exists = streamSteps.value.some((step) => `${step.title || eventTitle(step.eventName)}：${step.detail}` === signature)
+  if (exists) return
   streamSteps.value.push({
     eventName,
-    detail: summarizePayload(eventName, payload),
+    title,
+    detail,
+    metadata: payload?.metadata || {},
     time: new Date().toLocaleTimeString()
   })
 }
@@ -641,12 +664,46 @@ const buildPayload = () => ({
   question: form.value.question,
   selectedTables: form.value.selectedTables,
   tableName: form.value.selectedTables[0],
-  modelId: form.value.modelId,
+  modelId: resolveUsableModelId(form.value.modelId),
   temperature: form.value.temperature,
   timeoutSeconds: form.value.timeoutSeconds,
   simulatedUserId: form.value.simulatedUserId,
   simulatedRole: form.value.simulatedRole
 })
+
+const normalizeModelOptions = (rows) => {
+  if (!Array.isArray(rows)) return []
+  const seen = new Set()
+  return rows
+    .map((item) => ({
+      ...item,
+      id: String(item?.id || item?.modelId || item?.model || item?.name || '').trim(),
+      name: String(item?.name || item?.model || item?.id || '').trim(),
+      available: String(item?.available ?? 'true').toLowerCase() !== 'false'
+    }))
+    .filter((item) => item.id && item.name)
+    .filter((item) => {
+      const key = item.id.toLowerCase()
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+}
+
+const firstAvailableModel = () => availableModelOptions.value[0] || models.value[0] || null
+
+const resolveUsableModelId = (modelId) => {
+  const normalizedId = String(modelId || '').trim()
+  if (normalizedId) {
+    const matched = models.value.find((item) => String(item.id) === normalizedId && item.available !== false)
+    if (matched) return matched.id
+  }
+  return firstAvailableModel()?.id || ''
+}
+
+const ensureSelectedModel = () => {
+  form.value.modelId = resolveUsableModelId(form.value.modelId)
+}
 
 const renderResultChart = () => {
   chartInstance = renderChartInto(chartRef.value, chartInstance, true)
@@ -824,15 +881,13 @@ const resolveSessionModelName = (session) => {
     if (matched?.name) {
       return matched.name
     }
-    if (modelId === 'default') {
-      return '默认模型'
-    }
-    return String(modelId)
+    return '已停用或未配置模型'
   }
   return '未记录'
 }
 
 const summarizePayload = (eventName, payload) => {
+  if (payload?.detail) return payload.detail
   if (eventName === 'SQL_GENERATED') return payload.sql || 'SQL 已生成'
   if (eventName === 'ERROR') return payload.message || '执行异常'
   if (eventName === 'FINISHED') return payload.result?.message || payload.message || '测试完成'
@@ -845,6 +900,14 @@ const eventTitle = (eventName) => ({
   QUESTION_PARSED: '自然语言解析',
   KG_MATCHING: '知识图谱导航匹配',
   MODEL_REASONING: '大模型推理',
+  DATA_SOURCE_READY: '确认数据源',
+  FIELD_META_READY: '读取字段元数据',
+  GRAPH_CONTEXT_READY: '匹配语义上下文',
+  NL2SQL_START: '生成查询语义',
+  SQL_AUDITED: '完成安全审计',
+  QUERY_EXECUTING: '执行查询',
+  CHART_POLICY_READY: '匹配图表偏好',
+  QUERY_RESULT_READY: '查询结果就绪',
   SQL_GENERATED: 'SQL 生成',
   SQL_SECURITY_CHECKED: 'SQL 安全校验',
   QUERY_EXECUTED: '查询执行',

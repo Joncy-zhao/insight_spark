@@ -55,6 +55,11 @@ public class AdminChatHistoryController {
         return ApiResponse.success(chatQueryHistoryService.getAdminHistoryDetail(historyId));
     }
 
+    @GetMapping("/{historyId}/context")
+    public ApiResponse<Map<String, Object>> getHistoryContext(@PathVariable Long historyId) {
+        return ApiResponse.success(chatQueryHistoryService.getAdminHistoryContext(historyId));
+    }
+
     @GetMapping("/analytics")
     public ApiResponse<Map<String, Object>> analytics(@RequestParam(required = false) String keyword,
                                                       @RequestParam(required = false) String userId,

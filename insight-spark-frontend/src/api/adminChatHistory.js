@@ -5,6 +5,9 @@ export const fetchAdminChatHistory = (params) => http.get('/api/admin/chat-histo
 export const fetchAdminChatHistoryDetail = (historyId) =>
   http.get(`/api/admin/chat-history/${historyId}`).then(unwrap)
 
+export const fetchAdminChatHistoryContext = (historyId) =>
+  http.get(`/api/admin/chat-history/${historyId}/context`).then(unwrap)
+
 export const fetchAdminChatHistoryAnalytics = (params) =>
   http.get('/api/admin/chat-history/analytics', { params }).then(unwrap)
 

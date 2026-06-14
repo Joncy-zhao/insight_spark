@@ -25,6 +25,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.ArrayList;
+import java.util.Objects;
 import java.util.Optional;
 
 @Service
@@ -92,10 +93,11 @@ public class PythonAiService {
         request.put("graphPath", graphPath == null ? Map.of() : graphPath);
         request.put("graphContext", graphPath == null ? List.of() : graphPath.getOrDefault("ragContext", List.of()));
         request.put("graphSqlHints", graphSqlHints == null ? Map.of() : graphSqlHints);
-        request.put("modelConfig", modelOptions == null ? Map.of() : modelOptions);
-        request.put("modelId", modelOptions == null ? "gpt-4" : modelOptions.getOrDefault("modelId", "gpt-4"));
-        request.put("temperature", modelOptions == null ? 0.2D : modelOptions.getOrDefault("temperature", 0.2D));
-        request.put("timeoutSeconds", modelOptions == null ? 30 : modelOptions.getOrDefault("timeoutSeconds", 30));
+        appendModelOptions(request, modelOptions);
+        request.putIfAbsent("modelConfig", Map.of());
+        request.putIfAbsent("modelId", "default");
+        request.putIfAbsent("temperature", 0.2D);
+        request.putIfAbsent("timeoutSeconds", 30);
 
         try {
             Map<String, Object> response = restTemplate.postForObject(
@@ -117,14 +119,22 @@ public class PythonAiService {
     }
 
     public Optional<Map<String, Object>> businessModelSemantic(String question, String requirement, String tableName,
+                                                                List<Map<String, Object>> fields,
+                                                                List<Map<String, Object>> previewRows) {
+        return businessModelSemantic(question, requirement, tableName, fields, previewRows, Map.of());
+    }
+
+    public Optional<Map<String, Object>> businessModelSemantic(String question, String requirement, String tableName,
                                                                List<Map<String, Object>> fields,
-                                                               List<Map<String, Object>> previewRows) {
+                                                               List<Map<String, Object>> previewRows,
+                                                               Map<String, Object> modelOptions) {
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("question", question);
         request.put("requirement", requirement);
         request.put("tableName", tableName);
         request.put("fields", fields);
         request.put("previewRows", previewRows == null ? List.of() : previewRows);
+        appendModelOptions(request, modelOptions);
 
         try {
             Map<String, Object> response = restTemplate.postForObject(
@@ -151,6 +161,20 @@ public class PythonAiService {
                                                             List<Map<String, Object>> dimensionSystem,
                                                             List<Map<String, Object>> fields,
                                                             List<Map<String, Object>> previewRows) {
+        return businessModelPatch(question, tableName, modelName, modelRequirement, dictionaryEntries,
+                metricDefinitions, dimensionSystem, fields, previewRows, Map.of());
+    }
+
+    public Optional<Map<String, Object>> businessModelPatch(String question,
+                                                            String tableName,
+                                                            String modelName,
+                                                            String modelRequirement,
+                                                            List<Map<String, Object>> dictionaryEntries,
+                                                            List<Map<String, Object>> metricDefinitions,
+                                                            List<Map<String, Object>> dimensionSystem,
+                                                            List<Map<String, Object>> fields,
+                                                            List<Map<String, Object>> previewRows,
+                                                            Map<String, Object> modelOptions) {
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("question", question);
         request.put("tableName", tableName);
@@ -161,6 +185,7 @@ public class PythonAiService {
         request.put("dimensionSystem", dimensionSystem == null ? List.of() : dimensionSystem);
         request.put("fields", fields == null ? List.of() : fields);
         request.put("previewRows", previewRows == null ? List.of() : previewRows);
+        appendModelOptions(request, modelOptions);
 
         try {
             Map<String, Object> response = restTemplate.postForObject(
@@ -184,6 +209,7 @@ public class PythonAiService {
         request.put("question", question);
         request.put("tableName", tableName);
         request.put("context", context == null ? Map.of() : context);
+        appendModelOptions(request, context);
 
         try {
             Map<String, Object> response = restTemplate.postForObject(
@@ -207,6 +233,7 @@ public class PythonAiService {
         request.put("question", question);
         request.put("tableName", tableName);
         request.put("context", context == null ? Map.of() : context);
+        appendModelOptions(request, context);
 
         try {
             Map<String, Object> response = restTemplate.postForObject(
@@ -233,6 +260,7 @@ public class PythonAiService {
         request.put("question", question == null ? "" : question);
         request.put("result", result == null ? Map.of() : result);
         request.put("context", context == null ? Map.of() : context);
+        appendModelOptions(request, context);
 
         try {
             Map<String, Object> response = advancedExplainRestTemplate.postForObject(
@@ -278,6 +306,50 @@ public class PythonAiService {
             log.warn("Python AI 会话命名不可用: {}", e.getMessage());
             return Optional.empty();
         }
+    }
+
+    private void appendModelOptions(Map<String, Object> request, Map<String, Object> options) {
+        if (request == null || options == null || options.isEmpty()) {
+            return;
+        }
+        Map<String, Object> modelConfig = new LinkedHashMap<>();
+        putIfPresent(modelConfig, "modelId", options.get("modelId"));
+        putIfPresent(modelConfig, "modelName", options.get("modelName"));
+        putIfPresent(modelConfig, "modelCategory", options.get("modelCategory"));
+        putIfPresent(modelConfig, "temperature", options.get("temperature"));
+        putIfPresent(modelConfig, "timeoutSeconds", options.get("timeoutSeconds"));
+        Object nestedConfig = options.get("modelConfig");
+        if (nestedConfig instanceof Map<?, ?> map) {
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                String key = Objects.toString(entry.getKey(), "").trim();
+                if (!key.isBlank()) {
+                    putIfPresent(modelConfig, key, entry.getValue());
+                }
+            }
+        }
+        if (modelConfig.isEmpty()) {
+            return;
+        }
+        request.put("modelConfig", modelConfig);
+        if (modelConfig.containsKey("modelId")) {
+            request.put("modelId", modelConfig.get("modelId"));
+        }
+        if (modelConfig.containsKey("temperature")) {
+            request.put("temperature", modelConfig.get("temperature"));
+        }
+        if (modelConfig.containsKey("timeoutSeconds")) {
+            request.put("timeoutSeconds", modelConfig.get("timeoutSeconds"));
+        }
+    }
+
+    private void putIfPresent(Map<String, Object> target, String key, Object value) {
+        if (value == null) {
+            return;
+        }
+        if (value instanceof String text && text.trim().isEmpty()) {
+            return;
+        }
+        target.put(key, value);
     }
 
     public Optional<Map<String, Object>> textToSpeech(String text, String voiceGender, String locale, String voiceLocale, Double rate) {

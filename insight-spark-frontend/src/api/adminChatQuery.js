@@ -54,9 +54,11 @@ export const streamAdminChatQuerySession = async (sessionId, params, handlers = 
   })
   const headers = {}
   attachAuthHeader({ headers })
+  headers.Accept = 'text/event-stream'
   const response = await fetch(`${API_BASE}/api/admin/chat-query/sessions/${sessionId}/stream?${search.toString()}`, {
     method: 'GET',
-    headers
+    headers,
+    cache: 'no-store'
   })
   if (!response.ok || !response.body) {
     throw new Error(`流式测试请求失败：${response.status}`)
@@ -64,25 +66,31 @@ export const streamAdminChatQuerySession = async (sessionId, params, handlers = 
   const reader = response.body.getReader()
   const decoder = new TextDecoder('utf-8')
   let buffer = ''
+  const consumeChunk = (chunk) => {
+    const lines = chunk.split('\n')
+    const eventLine = lines.find((line) => line.startsWith('event:'))
+    const dataLines = lines.filter((line) => line.startsWith('data:'))
+    const eventName = eventLine ? eventLine.replace(/^event:\s*/, '').trim() : 'message'
+    const rawData = dataLines.map((line) => line.replace(/^data:\s*/, '')).join('\n').trim() || '{}'
+    let payload = {}
+    try {
+      payload = JSON.parse(rawData)
+    } catch {
+      payload = { raw: rawData }
+    }
+    handlers.onEvent?.(eventName, payload)
+  }
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
     buffer += decoder.decode(value, { stream: true })
-    const chunks = buffer.split('\n\n')
+    const normalized = buffer.replace(/\r\n/g, '\n')
+    const chunks = normalized.split('\n\n')
     buffer = chunks.pop() || ''
-    chunks.forEach((chunk) => {
-      const eventLine = chunk.split('\n').find((line) => line.startsWith('event:'))
-      const dataLine = chunk.split('\n').find((line) => line.startsWith('data:'))
-      const eventName = eventLine ? eventLine.replace(/^event:\s*/, '').trim() : 'message'
-      const rawData = dataLine ? dataLine.replace(/^data:\s*/, '').trim() : '{}'
-      let payload = {}
-      try {
-        payload = JSON.parse(rawData)
-      } catch {
-        payload = { raw: rawData }
-      }
-      handlers.onEvent?.(eventName, payload)
-    })
+    chunks.forEach(consumeChunk)
+  }
+  if (buffer.trim()) {
+    consumeChunk(buffer.trim())
   }
   handlers.onDone?.()
 }

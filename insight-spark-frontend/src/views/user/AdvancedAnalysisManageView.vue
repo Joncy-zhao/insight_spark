@@ -41,8 +41,38 @@
               <h2>预警规则管理</h2>
               <p>支持编辑、启停、删除和手动检测；自动轮询由后端离线 Agent 执行。</p>
             </div>
+            <div class="batch-action-bar">
+              <span>已选择 {{ selectedRuleIds.length }} 条</span>
+              <el-button
+                size="small"
+                :disabled="!selectedRuleIds.length"
+                :loading="batchRuleOperating"
+                @click="batchDisableRules"
+              >
+                批量停用
+              </el-button>
+              <el-button
+                size="small"
+                type="danger"
+                plain
+                :disabled="!selectedRuleIds.length"
+                :loading="batchRuleOperating"
+                @click="batchRemoveRules"
+              >
+                批量删除
+              </el-button>
+            </div>
           </div>
-          <el-table class="manage-table" :data="paginatedRules" v-loading="loading" empty-text="暂无预警规则">
+          <el-table
+            ref="rulesTableRef"
+            class="manage-table"
+            :data="paginatedRules"
+            row-key="id"
+            v-loading="loading"
+            empty-text="暂无预警规则"
+            @selection-change="handleRuleSelectionChange"
+          >
+            <el-table-column type="selection" width="46" reserve-selection />
             <el-table-column prop="id" label="ID" width="80" />
             <el-table-column label="规则" min-width="220">
               <template #default="{ row }">
@@ -276,9 +306,30 @@
               <h2>方案资产管理</h2>
               <p>集中查看已保存的预测和 What-if 方案，支持详情查看、历史复算和删除。</p>
             </div>
-            <el-button type="primary" :icon="ChatLineRound" @click="goChat">去对话触发</el-button>
+            <div class="batch-action-bar">
+              <span>已选择 {{ selectedPlanIds.length }} 条</span>
+              <el-button
+                size="small"
+                type="danger"
+                plain
+                :disabled="!selectedPlanIds.length"
+                :loading="batchPlanOperating"
+                @click="batchRemovePlans"
+              >
+                批量删除
+              </el-button>
+            </div>
           </div>
-          <el-table class="manage-table" :data="paginatedPlans" v-loading="loading" empty-text="暂无预测/推演方案">
+          <el-table
+            ref="plansTableRef"
+            class="manage-table"
+            :data="paginatedPlans"
+            row-key="id"
+            v-loading="loading"
+            empty-text="暂无预测/推演方案"
+            @selection-change="handlePlanSelectionChange"
+          >
+            <el-table-column type="selection" width="46" reserve-selection />
             <el-table-column prop="id" label="ID" width="80" />
             <el-table-column label="类型" width="120">
               <template #default="{ row }">
@@ -682,6 +733,9 @@ import {
 import * as echarts from 'echarts'
 import AdvancedAnalysisCard from '../../components/AdvancedAnalysisCard.vue'
 import {
+  batchDeleteAdvancedAnalysisPlans,
+  batchDeleteAdvancedAlertRules,
+  batchUpdateAdvancedAlertRuleStatus,
   compareAdvancedAnalysisPlanVersions,
   compareLatestAdvancedAnalysisPlanVersions,
   deleteAdvancedAnalysisPlan,
@@ -721,6 +775,12 @@ const events = ref([])
 const pushLogs = ref([])
 const pushConfig = ref({})
 const plans = ref([])
+const rulesTableRef = ref(null)
+const selectedRules = ref([])
+const batchRuleOperating = ref(false)
+const plansTableRef = ref(null)
+const selectedPlans = ref([])
+const batchPlanOperating = ref(false)
 const pageSizeOptions = [10, 20, 50, 100]
 const tablePagination = reactive({
   rules: {
@@ -790,6 +850,12 @@ const editorForm = ref({
 })
 
 const activeRuleCount = computed(() => rules.value.filter(item => item.status === 'ACTIVE').length)
+const selectedRuleIds = computed(() => selectedRules.value
+  .map(item => Number(item.id))
+  .filter(id => Number.isFinite(id) && id > 0))
+const selectedPlanIds = computed(() => selectedPlans.value
+  .map(item => Number(item.id))
+  .filter(id => Number.isFinite(id) && id > 0))
 
 const clampTablePage = (key, total) => {
   const pager = tablePagination[key]
@@ -1227,6 +1293,10 @@ const loadAll = async () => {
     pushLogs.value = Array.isArray(pushRows) ? pushRows : []
     pushConfig.value = pushConfigRows || {}
     plans.value = Array.isArray(planRows) ? planRows : []
+    selectedRules.value = []
+    rulesTableRef.value?.clearSelection?.()
+    selectedPlans.value = []
+    plansTableRef.value?.clearSelection?.()
   } catch (error) {
     ElMessage.error(`加载预测与情景模拟数据失败：${error.message || '未知原因'}`)
   } finally {
@@ -1438,6 +1508,43 @@ const removePlan = async (plan) => {
     ElMessage.success('方案已删除')
   } catch (error) {
     ElMessage.error(`删除方案失败：${error.message || '未知原因'}`)
+  }
+}
+
+const handlePlanSelectionChange = (selection) => {
+  selectedPlans.value = Array.isArray(selection) ? selection : []
+}
+
+const batchRemovePlans = async () => {
+  const ids = selectedPlanIds.value
+  if (!ids.length) {
+    ElMessage.warning('请先选择需要删除的方案')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(`确定删除选中的 ${ids.length} 个方案吗？删除后不会再出现在方案资产列表中。`, '批量删除方案', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+    batchPlanOperating.value = true
+    const result = await batchDeleteAdvancedAnalysisPlans(ids)
+    const idSet = new Set(ids.map(String))
+    plans.value = plans.value.filter(item => !idSet.has(String(item.id)))
+    selectedPlans.value = []
+    plansTableRef.value?.clearSelection?.()
+    if (selectedPlan.value && idSet.has(String(selectedPlan.value.id))) {
+      selectedPlan.value = null
+      planDetailVisible.value = false
+      planVersionVisible.value = false
+    }
+    await loadAll()
+    ElMessage.success(`已删除 ${result?.updated ?? ids.length} 个方案`)
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(`批量删除方案失败：${error.message || '未知原因'}`)
+  } finally {
+    batchPlanOperating.value = false
   }
 }
 
@@ -1754,6 +1861,10 @@ const submitEditor = async () => {
   }
 }
 
+const handleRuleSelectionChange = (selection) => {
+  selectedRules.value = Array.isArray(selection) ? selection : []
+}
+
 const toggleRule = async (rule) => {
   const status = rule.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE'
   try {
@@ -1765,6 +1876,24 @@ const toggleRule = async (rule) => {
   }
 }
 
+const batchDisableRules = async () => {
+  const ids = selectedRuleIds.value
+  if (!ids.length) {
+    ElMessage.warning('请先选择需要停用的预警规则')
+    return
+  }
+  batchRuleOperating.value = true
+  try {
+    const result = await batchUpdateAdvancedAlertRuleStatus({ ids, status: 'DISABLED' })
+    await loadAll()
+    ElMessage.success(`已停用 ${result?.updated ?? ids.length} 条预警规则`)
+  } catch (error) {
+    ElMessage.error(`批量停用失败：${error.message || '未知原因'}`)
+  } finally {
+    batchRuleOperating.value = false
+  }
+}
+
 const removeRule = async (rule) => {
   try {
     await deleteAdvancedAlertRule({ id: rule.id })
@@ -1772,6 +1901,30 @@ const removeRule = async (rule) => {
     ElMessage.success('预警规则已删除')
   } catch (error) {
     ElMessage.error(`删除失败：${error.message || '未知原因'}`)
+  }
+}
+
+const batchRemoveRules = async () => {
+  const ids = selectedRuleIds.value
+  if (!ids.length) {
+    ElMessage.warning('请先选择需要删除的预警规则')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(`确定删除选中的 ${ids.length} 条预警规则吗？删除后不会再参与离线检测。`, '批量删除预警规则', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+    batchRuleOperating.value = true
+    const result = await batchDeleteAdvancedAlertRules({ ids })
+    await loadAll()
+    ElMessage.success(`已删除 ${result?.updated ?? ids.length} 条预警规则`)
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(`批量删除失败：${error.message || '未知原因'}`)
+  } finally {
+    batchRuleOperating.value = false
   }
 }
 
@@ -2571,6 +2724,20 @@ onBeforeUnmount(() => {
   border-radius: 6px;
 }
 
+.batch-action-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.batch-action-bar > span {
+  color: #51637d;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .rule-title {
   color: #102247;
   font-size: 13px;
@@ -2782,6 +2949,11 @@ onBeforeUnmount(() => {
   }
 
   .table-pagination :deep(.el-pagination) {
+    justify-content: flex-start;
+  }
+
+  .batch-action-bar {
+    flex-wrap: wrap;
     justify-content: flex-start;
   }
 }

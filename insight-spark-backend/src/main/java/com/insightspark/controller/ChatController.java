@@ -26,6 +26,7 @@ import java.util.Date;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -181,11 +182,14 @@ public class ChatController {
     @GetMapping(value = "/business-model-agent-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public void handleBusinessModelAgentStream(@RequestParam String question,
                                                @RequestParam(required = false) String tableName,
-                                               @RequestParam(required = false) String selectedTableName,
-                                               @RequestParam(required = false) String activeBusinessModelId,
-                                               @RequestParam(required = false) String lastCreatedBusinessModelId,
-                                               @RequestParam(required = false) String lastAppliedBusinessModelId,
-                                               HttpServletResponse response) throws IOException {
+                                                @RequestParam(required = false) String selectedTableName,
+                                                @RequestParam(required = false) String activeBusinessModelId,
+                                                @RequestParam(required = false) String lastCreatedBusinessModelId,
+                                                @RequestParam(required = false) String lastAppliedBusinessModelId,
+                                                @RequestParam(required = false) String modelId,
+                                                @RequestParam(required = false) String modelName,
+                                                @RequestParam(required = false) String modelCategory,
+                                                HttpServletResponse response) throws IOException {
         response.setCharacterEncoding("UTF-8");
         response.setContentType(MediaType.TEXT_EVENT_STREAM_VALUE);
         response.setHeader("Cache-Control", "no-cache");
@@ -210,6 +214,15 @@ public class ChatController {
         }
         if (lastAppliedBusinessModelId != null && !lastAppliedBusinessModelId.isBlank()) {
             request.put("lastAppliedBusinessModelId", lastAppliedBusinessModelId);
+        }
+        if (modelId != null && !modelId.isBlank()) {
+            request.put("modelId", modelId);
+        }
+        if (modelName != null && !modelName.isBlank()) {
+            request.put("modelName", modelName);
+        }
+        if (modelCategory != null && !modelCategory.isBlank()) {
+            request.put("modelCategory", modelCategory);
         }
 
         String[] titles = {"收到指令", "定位模型", "语义拆解", "执行修改", "刷新结果"};
@@ -555,10 +568,13 @@ public class ChatController {
         Map<String, Object> executionContext = new LinkedHashMap<>(requestContext == null ? Map.of() : requestContext);
         executionContext.put("rawQuestion", question);
         try {
-            Map<String, Object> result = chatBiService.executeChat(buildChatQueryRequest(
-                    executionQuestion, tableName, activeConversationId, parentTurnId, executionContext
-            ));
-            if (enhanced) {
+            boolean smartRoute = shouldUseSmartRouteForHttpQuestion(question);
+            ChatBiService.ChatQueryRequest queryRequest = buildChatQueryRequest(
+                    executionQuestion, tableName, activeConversationId, parentTurnId, executionContext);
+            Map<String, Object> result = smartRoute
+                    ? smartChatService.executeSmart(queryRequest)
+                    : chatBiService.executeChat(queryRequest);
+            if (enhanced || smartRoute) {
                 enrichEnhancedResponse(result, question, tableName);
             }
             attachHistoryReplaySteps(result, question, tableName);
@@ -643,8 +659,32 @@ public class ChatController {
         return request;
     }
 
+    private boolean shouldUseSmartRouteForHttpQuestion(String question) {
+        String q = text(question).trim();
+        if (q.isBlank()) {
+            return false;
+        }
+        String lower = q.toLowerCase(Locale.ROOT);
+        boolean alertWord = containsAny(q, "预警", "告警", "报警", "警报")
+                || lower.contains("alert") || lower.contains("warning");
+        boolean alertRuleDraft = containsAny(q, "提醒我", "通知我", "帮我提醒", "邮件提醒", "钉钉提醒")
+                || (containsAny(q, "低于", "高于", "超过", "跌破", "阈值")
+                && containsAny(q, "提醒", "通知", "预警", "告警", "报警", "警报"));
+        return alertWord || alertRuleDraft;
+    }
+
+    private boolean containsAny(String source, String... candidates) {
+        String text = text(source);
+        for (String candidate : candidates) {
+            if (!text(candidate).isBlank() && text.contains(candidate)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void attachHistoryConversationMetadata(Long historyId, Long conversationId, Map<String, Object> userTurn,
-                                                   Map<String, Object> assistantTurn, String question,
+                                                    Map<String, Object> assistantTurn, String question,
                                                    String tableName, Map<String, Object> result) {
         if (historyId == null || conversationId == null) {
             return;
@@ -655,6 +695,8 @@ public class ChatController {
         context.put("artifactId", assistantTurn.get("artifactId"));
         context.put("tableName", tableName);
         context.put("engine", result == null ? null : result.get("engine"));
+        context.put("smartRouteAudit", result == null ? null : result.get("smartRouteAudit"));
+        context.put("actionPlan", result == null ? null : result.get("actionPlan"));
         Map<String, Object> scope = new LinkedHashMap<>();
         scope.put("tableName", tableName);
         scope.put("dataSourceId", result == null ? null : result.get("dataSourceId"));

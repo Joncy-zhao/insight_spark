@@ -1,11 +1,13 @@
 package com.insightspark;
 
 import com.insightspark.common.ApiResponse;
+import com.insightspark.controller.ChatController;
 import com.insightspark.controller.DataUploadController;
 import com.insightspark.controller.DiagnosisController;
 import com.insightspark.service.AiChartRuleConfigService;
 import com.insightspark.service.AdvancedAnalysisService;
 import com.insightspark.service.ChatBiService;
+import com.insightspark.service.ChatQueryHistoryService;
 import com.insightspark.service.DataUploadService;
 import com.insightspark.service.DatasourceService;
 import com.insightspark.service.DiagnosisService;
@@ -21,9 +23,11 @@ import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.InputStream;
 import java.util.AbstractList;
 import java.util.ArrayList;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -598,11 +602,230 @@ class P2AcceptanceTests {
                 "series", List.of(Map.of("name", "2026-06", "history", 100), Map.of("name", "2026-07", "forecast", 120))
         ));
 
-        Map<String, Object> result = service.executeSmart(chatRequest("预测下个月销售额", "sales_order"));
+        ChatBiService.ChatQueryRequest request = chatRequest("预测下个月销售额", "sales_order");
+        request.setConversationId(99L);
+        Map<String, Object> result = service.executeSmart(request);
 
         assertEquals("FORECAST", result.get("smartIntent"));
         assertEquals("FORECAST", result.get("responseType"));
         assertTrue(Boolean.TRUE.equals(result.get("smartRouted")));
+        Map<String, Object> audit = (Map<String, Object>) result.get("smartRouteAudit");
+        assertEquals("预测下个月销售额", audit.get("question"));
+        assertEquals(99L, audit.get("conversationId"));
+        assertEquals("FORECAST", audit.get("primaryIntent"));
+        assertEquals("advanced-analysis-forecast", audit.get("chosenExecutor"));
+        assertEquals("COMPLETED", audit.get("outcome"));
+        assertEquals(Boolean.TRUE, audit.get("success"));
+        assertTrue(audit.containsKey("durationMs"));
+    }
+
+    @Test
+    void adminHistoryAnalyticsAggregatesSmartRouteAuditSnapshots() throws Exception {
+        ChatQueryHistoryService service = new ChatQueryHistoryService();
+        JdbcTemplate jdbcTemplate = org.mockito.Mockito.mock(JdbcTemplate.class);
+        ReflectionTestUtils.setField(service, "jdbcTemplate", jdbcTemplate);
+        ObjectMapper mapper = new ObjectMapper();
+        List<Map<String, Object>> routeRows = List.of(
+                smartRouteHistoryRow(mapper, 101L, "预测下个月销售额", smartAudit(
+                        "question", "预测下个月销售额",
+                        "tableName", "sales_order",
+                        "primaryIntent", "FORECAST",
+                        "actions", List.of(Map.of("type", "FORECAST")),
+                        "confidence", 0.92,
+                        "fallbackUsed", false,
+                        "missingSlots", List.of(),
+                        "requiresConfirmation", false,
+                        "chosenExecutor", "advanced-analysis-forecast",
+                        "success", true,
+                        "failureReason", "",
+                        "outcome", "COMPLETED",
+                        "durationMs", 120
+                )),
+                smartRouteHistoryRow(mapper, 102L, "查销售额", smartAudit(
+                        "question", "查销售额",
+                        "tableName", "sales_order",
+                        "primaryIntent", "QUERY_SQL",
+                        "actions", List.of(Map.of("type", "QUERY_SQL")),
+                        "confidence", 0.81,
+                        "fallbackUsed", true,
+                        "missingSlots", List.of(),
+                        "requiresConfirmation", false,
+                        "chosenExecutor", "java-fallback",
+                        "success", false,
+                        "failureReason", "SQL 执行失败",
+                        "outcome", "FAILED",
+                        "durationMs", 90
+                )),
+                smartRouteHistoryRow(mapper, 103L, "提醒我", smartAudit(
+                        "question", "提醒我",
+                        "tableName", "sales_order",
+                        "primaryIntent", "ALERT_RULE_CREATE",
+                        "actions", List.of(Map.of("type", "ALERT_RULE_CREATE")),
+                        "confidence", 0.62,
+                        "fallbackUsed", false,
+                        "missingSlots", List.of("metricField"),
+                        "requiresConfirmation", true,
+                        "chosenExecutor", "alert-rule-draft",
+                        "success", true,
+                        "failureReason", "",
+                        "outcome", "NEEDS_INPUT",
+                        "durationMs", 30
+                ))
+        );
+        org.mockito.Mockito.when(jdbcTemplate.queryForList(
+                        org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.<Object[]>any()))
+                .thenAnswer(invocation -> {
+                    String sql = invocation.getArgument(0);
+                    return sql.contains("h.chart_snapshot AS chartSnapshot") ? routeRows : List.of();
+                });
+        org.mockito.Mockito.when(jdbcTemplate.queryForMap(
+                        org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.<Object[]>any()))
+                .thenReturn(Map.of(
+                        "totalCount", 3,
+                        "cacheHitCount", 0,
+                        "cacheMissCount", 3,
+                        "avgDurationMs", 80,
+                        "maxDurationMs", 120,
+                        "riskCount", 0
+                ));
+        org.mockito.Mockito.when(jdbcTemplate.queryForObject(
+                        org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.eq(Long.class),
+                        org.mockito.ArgumentMatchers.<Object[]>any()))
+                .thenReturn(0L);
+
+        Map<String, Object> analytics = service.adminHistoryAnalytics(
+                null, null, null, null, null, null,
+                null, null, null, null, null, null
+        );
+
+        Map<String, Object> routeAudit = (Map<String, Object>) analytics.get("routeAudit");
+        Map<String, Object> summary = (Map<String, Object>) routeAudit.get("summary");
+        assertEquals(3L, summary.get("totalRouted"));
+        assertEquals(1L, summary.get("fallbackCount"));
+        assertEquals(1L, summary.get("failureCount"));
+        assertEquals(1L, summary.get("clarificationCount"));
+        assertEquals(33.3, summary.get("fallbackRate"));
+        assertEquals(33.3, summary.get("failureRate"));
+        assertEquals(33.3, summary.get("clarificationRate"));
+        assertEquals(80L, summary.get("avgDurationMs"));
+
+        List<Map<String, Object>> executorGroups = (List<Map<String, Object>>) routeAudit.get("executorGroups");
+        assertTrue(executorGroups.stream().anyMatch(item ->
+                "advanced-analysis-forecast".equals(item.get("chosenExecutor"))));
+        List<Map<String, Object>> missingSlotGroups = (List<Map<String, Object>>) routeAudit.get("missingSlotGroups");
+        assertEquals("metricField", missingSlotGroups.get(0).get("slot"));
+        List<Map<String, Object>> failureReasons = (List<Map<String, Object>>) routeAudit.get("failureReasons");
+        assertEquals("SQL 执行失败", failureReasons.get(0).get("reason"));
+        List<Map<String, Object>> problemSamples = (List<Map<String, Object>>) routeAudit.get("problemSamples");
+        assertEquals(2, problemSamples.size());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void adminHistoryAnalyticsFallsBackToConversationArtifactSmartRouteAudit() throws Exception {
+        ChatQueryHistoryService service = new ChatQueryHistoryService();
+        JdbcTemplate jdbcTemplate = org.mockito.Mockito.mock(JdbcTemplate.class);
+        ReflectionTestUtils.setField(service, "jdbcTemplate", jdbcTemplate);
+        ObjectMapper mapper = new ObjectMapper();
+        Map<String, Object> audit = smartAudit(
+                "question", "查销售额趋势",
+                "tableName", "sales_order",
+                "primaryIntent", "QUERY_SQL",
+                "actions", List.of(Map.of("type", "QUERY_SQL")),
+                "confidence", 0.88,
+                "fallbackUsed", false,
+                "missingSlots", List.of(),
+                "requiresConfirmation", false,
+                "chosenExecutor", "chat-bi-sql",
+                "success", true,
+                "failureReason", "",
+                "outcome", "COMPLETED",
+                "durationMs", 64
+        );
+        Map<String, Object> artifactRow = new LinkedHashMap<>();
+        artifactRow.put("historyId", 201L);
+        artifactRow.put("userId", "u1");
+        artifactRow.put("question", "查销售额趋势");
+        artifactRow.put("queryTableName", "sales_order");
+        artifactRow.put("chartSnapshot", "{}");
+        artifactRow.put("contextJson", "{}");
+        artifactRow.put("artifactJson", mapper.writeValueAsString(Map.of("smartRouteAudit", audit)));
+        artifactRow.put("intentType", "QUERY");
+        artifactRow.put("artifactType", "CHART");
+        artifactRow.put("llmModelUsed", "chat-bi-sql");
+        artifactRow.put("createdAt", "2026-06-14 11:00:00");
+        List<Map<String, Object>> routeRows = List.of(artifactRow);
+        org.mockito.Mockito.when(jdbcTemplate.queryForList(
+                        org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.<Object[]>any()))
+                .thenAnswer(invocation -> {
+                    String sql = invocation.getArgument(0);
+                    return sql.contains("h.chart_snapshot AS chartSnapshot") ? routeRows : List.of();
+                });
+        org.mockito.Mockito.when(jdbcTemplate.queryForMap(
+                        org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.<Object[]>any()))
+                .thenReturn(Map.of(
+                        "totalCount", 1,
+                        "cacheHitCount", 0,
+                        "cacheMissCount", 1,
+                        "avgDurationMs", 64,
+                        "maxDurationMs", 64,
+                        "riskCount", 0
+                ));
+        org.mockito.Mockito.when(jdbcTemplate.queryForObject(
+                        org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.eq(Long.class),
+                        org.mockito.ArgumentMatchers.<Object[]>any()))
+                .thenReturn(0L);
+
+        Map<String, Object> analytics = service.adminHistoryAnalytics(
+                null, null, null, null, null, null,
+                null, null, null, null, null, null
+        );
+
+        Map<String, Object> routeAudit = (Map<String, Object>) analytics.get("routeAudit");
+        Map<String, Object> summary = (Map<String, Object>) routeAudit.get("summary");
+        assertEquals(1L, summary.get("totalRouted"));
+        List<Map<String, Object>> executorGroups = (List<Map<String, Object>>) routeAudit.get("executorGroups");
+        assertEquals("chat-bi-sql", executorGroups.get(0).get("chosenExecutor"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void chatHistorySnapshotKeepsSmartRouteAuditPayload() {
+        ChatQueryHistoryService service = new ChatQueryHistoryService();
+        Map<String, Object> audit = smartAudit(
+                "primaryIntent", "MULTI_STEP",
+                "chosenExecutor", "multi-step-orchestrator",
+                "outcome", "NEEDS_CONFIRMATION",
+                "confidence", 0.74
+        );
+        Map<String, Object> actionPlan = Map.of(
+                "primaryIntent", "MULTI_STEP",
+                "actions", List.of(Map.of("type", "QUERY_SQL"), Map.of("type", "ALERT_RULE_CREATE_DRAFT"))
+        );
+
+        Map<String, Object> snapshot = (Map<String, Object>) ReflectionTestUtils.invokeMethod(
+                service,
+                "buildChartSnapshot",
+                "sales_order",
+                new LinkedHashMap<>(Map.of(
+                        "chartType", "bar",
+                        "smartRouteAudit", audit,
+                        "smartRouted", true,
+                        "actionPlan", actionPlan,
+                        "multiStepSummary", Map.of("total", 2, "completed", 1, "needsConfirmation", 1),
+                        "data", List.of()
+                ))
+        );
+
+        assertEquals(audit, snapshot.get("smartRouteAudit"));
+        assertEquals(actionPlan, snapshot.get("actionPlan"));
+        assertEquals(Boolean.TRUE, snapshot.get("smartRouted"));
     }
 
     @Test
@@ -681,6 +904,447 @@ class P2AcceptanceTests {
         assertEquals("ALERT_RULE_DRAFT", result.get("responseType"));
         assertTrue(Boolean.TRUE.equals(result.get("requiresConfirmation")));
         assertEquals("DRAFT_ONLY", result.get("sideEffectMode"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void smartChatAlertEventQueryDoesNotFallbackToSql() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        ChatBiService chatBiService = org.mockito.Mockito.mock(ChatBiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "chatBiService", chatBiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(pythonAiService.parseAdvancedAnalysisIntent(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(advancedAnalysisService.listAlertEvents(org.mockito.Mockito.anyMap()))
+                .thenReturn(List.of(alertEventFixture(8L)));
+
+        Map<String, Object> result = service.executeSmart(chatRequest("最近有哪些报警", "sales_order"));
+
+        assertEquals("ALERT_EVENT_QUERY", result.get("smartIntent"));
+        assertEquals("ALERT_EVENT_QUERY", result.get("responseType"));
+        assertEquals("table", result.get("chartType"));
+        List<Map<String, Object>> events = (List<Map<String, Object>>) result.get("alertEvents");
+        assertEquals(1, events.size());
+        List<Map<String, Object>> rows = (List<Map<String, Object>>) result.get("data");
+        assertEquals("销售额低于阈值提醒", rows.get(0).get("ruleName"));
+        org.mockito.Mockito.verify(chatBiService, org.mockito.Mockito.never())
+                .executeChat(org.mockito.Mockito.any(ChatBiService.ChatQueryRequest.class));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void smartChatCorrectsSqlRouteForAlertEventQuestion() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        ChatBiService chatBiService = org.mockito.Mockito.mock(ChatBiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "chatBiService", chatBiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.of(Map.of(
+                        "primaryIntent", "QUERY_SQL",
+                        "confidence", 0.91D,
+                        "reasoning", "误判为普通查询"
+                )));
+        org.mockito.Mockito.when(advancedAnalysisService.listAlertEvents(org.mockito.Mockito.anyMap()))
+                .thenReturn(List.of(alertEventFixture(8L)));
+
+        Map<String, Object> result = service.executeSmart(chatRequest("最近有哪些报警", "sales_order"));
+
+        assertEquals("ALERT_EVENT_QUERY", result.get("smartIntent"));
+        assertEquals("ALERT_EVENT_QUERY", result.get("responseType"));
+        assertEquals("table", result.get("chartType"));
+        List<Map<String, Object>> events = (List<Map<String, Object>>) result.get("alertEvents");
+        assertEquals(1, events.size());
+        org.mockito.Mockito.verify(chatBiService, org.mockito.Mockito.never())
+                .executeChat(org.mockito.Mockito.any(ChatBiService.ChatQueryRequest.class));
+    }
+
+    @Test
+    void smartChatParsesLeadingAlertEventIdForExplainQuestion() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(pythonAiService.parseAdvancedAnalysisIntent(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(advancedAnalysisService.getAlertEvent(3320L)).thenReturn(alertEventFixture(3320L));
+
+        Map<String, Object> result = service.executeSmart(chatRequest("3320报警为什么触发", "sales_order"));
+
+        assertEquals("ALERT_EVENT_EXPLAIN", result.get("smartIntent"));
+        assertEquals("ALERT_EVENT_EXPLAIN", result.get("responseType"));
+        org.mockito.Mockito.verify(advancedAnalysisService).getAlertEvent(3320L);
+    }
+
+    @Test
+    void chatAskRoutesAlertEventQuestionThroughSmartService() {
+        ChatController controller = new ChatController();
+        SmartChatService smartChatService = org.mockito.Mockito.mock(SmartChatService.class);
+        ChatBiService chatBiService = org.mockito.Mockito.mock(ChatBiService.class);
+        ChatQueryHistoryService chatQueryHistoryService = org.mockito.Mockito.mock(ChatQueryHistoryService.class);
+        ReflectionTestUtils.setField(controller, "smartChatService", smartChatService);
+        ReflectionTestUtils.setField(controller, "chatBiService", chatBiService);
+        ReflectionTestUtils.setField(controller, "chatQueryHistoryService", chatQueryHistoryService);
+        Map<String, Object> smartResult = new LinkedHashMap<>();
+        smartResult.put("smartIntent", "ALERT_EVENT_QUERY");
+        smartResult.put("responseType", "ALERT_EVENT_QUERY");
+        smartResult.put("message", "已查询到 1 条预警事件。");
+        smartResult.put("alertEvents", List.of(alertEventFixture(8L)));
+        org.mockito.Mockito.when(smartChatService.executeSmart(org.mockito.Mockito.any(ChatBiService.ChatQueryRequest.class)))
+                .thenReturn(smartResult);
+
+        ApiResponse<Map<String, Object>> response = controller.askQuestion(Map.of(
+                "question", "最近有哪些报警",
+                "tableName", "sales_order"
+        ));
+
+        assertEquals(200, response.getCode());
+        assertEquals("ALERT_EVENT_QUERY", response.getData().get("smartIntent"));
+        assertEquals("ALERT_EVENT_QUERY", response.getData().get("responseType"));
+        org.mockito.ArgumentCaptor<ChatBiService.ChatQueryRequest> captor =
+                org.mockito.ArgumentCaptor.forClass(ChatBiService.ChatQueryRequest.class);
+        org.mockito.Mockito.verify(smartChatService).executeSmart(captor.capture());
+        org.mockito.Mockito.verify(chatBiService, org.mockito.Mockito.never())
+                .executeChat(org.mockito.Mockito.any(ChatBiService.ChatQueryRequest.class));
+        assertEquals("最近有哪些报警", captor.getValue().getFilters().get("rawQuestion"));
+        assertEquals(List.of("sales_order"), captor.getValue().getTableNames());
+    }
+
+    @Test
+    void smartChatConfirmedAlertEventCloseUpdatesEventStatus() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(pythonAiService.parseAdvancedAnalysisIntent(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(advancedAnalysisService.updateAlertEventStatus(org.mockito.Mockito.eq(8L), org.mockito.Mockito.anyMap()))
+                .thenAnswer(invocation -> {
+                    Map<String, Object> event = new LinkedHashMap<>(alertEventFixture(8L));
+                    event.put("status", ((Map<String, Object>) invocation.getArgument(1)).get("status"));
+                    return event;
+                });
+        ChatBiService.ChatQueryRequest request = chatRequest("关闭报警事件8", "sales_order");
+        request.setFilters(Map.of("tableName", "sales_order", "userConfirmed", true));
+
+        Map<String, Object> result = service.executeSmart(request);
+
+        assertEquals("ALERT_EVENT_CLOSE", result.get("smartIntent"));
+        assertEquals("ALERT_EVENT_CLOSE", result.get("responseType"));
+        org.mockito.ArgumentCaptor<Map<String, Object>> captor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(advancedAnalysisService).updateAlertEventStatus(org.mockito.Mockito.eq(8L), captor.capture());
+        assertEquals("CLOSED", captor.getValue().get("status"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void smartChatAlertEventAckWithExplicitIdUpdatesImmediately() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(pythonAiService.parseAdvancedAnalysisIntent(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(advancedAnalysisService.updateAlertEventStatus(org.mockito.Mockito.eq(3320L), org.mockito.Mockito.anyMap()))
+                .thenAnswer(invocation -> {
+                    Map<String, Object> event = new LinkedHashMap<>(alertEventFixture(3320L));
+                    event.put("status", ((Map<String, Object>) invocation.getArgument(1)).get("status"));
+                    return event;
+                });
+
+        Map<String, Object> result = service.executeSmart(chatRequest("确认3320报警", "sales_order"));
+
+        assertEquals("ALERT_EVENT_ACK", result.get("smartIntent"));
+        assertEquals("ALERT_EVENT_ACK", result.get("responseType"));
+        assertEquals(Boolean.FALSE, result.get("requiresConfirmation"));
+        org.mockito.ArgumentCaptor<Map<String, Object>> captor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(advancedAnalysisService).updateAlertEventStatus(org.mockito.Mockito.eq(3320L), captor.capture());
+        assertEquals("ACK", captor.getValue().get("status"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void smartChatAlertEventAckUsesContextEventIdWhenRawQuestionOmitsId() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(pythonAiService.parseAdvancedAnalysisIntent(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(advancedAnalysisService.updateAlertEventStatus(org.mockito.Mockito.eq(3320L), org.mockito.Mockito.anyMap()))
+                .thenAnswer(invocation -> {
+                    Map<String, Object> event = new LinkedHashMap<>(alertEventFixture(3320L));
+                    event.put("status", ((Map<String, Object>) invocation.getArgument(1)).get("status"));
+                    return event;
+                });
+        ChatBiService.ChatQueryRequest request = chatRequest("""
+                已有对话上下文：
+                ASSISTANT_CONTEXT: 最近预警事件3320，规则名：销售额低于阈值提醒，状态：OPEN。
+
+                本轮用户追问：
+                确认这个报警
+                """, "sales_order");
+        request.setFilters(Map.of("tableName", "sales_order", "rawQuestion", "确认这个报警"));
+
+        Map<String, Object> result = service.executeSmart(request);
+
+        assertEquals("ALERT_EVENT_ACK", result.get("smartIntent"));
+        assertEquals("ALERT_EVENT_ACK", result.get("responseType"));
+        assertEquals(Boolean.FALSE, result.get("requiresConfirmation"));
+        org.mockito.ArgumentCaptor<Map<String, Object>> captor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(advancedAnalysisService).updateAlertEventStatus(org.mockito.Mockito.eq(3320L), captor.capture());
+        assertEquals("ACK", captor.getValue().get("status"));
+    }
+
+    @Test
+    void smartChatConfirmedAlertRuleDisableUpdatesRuleStatus() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(pythonAiService.parseAdvancedAnalysisIntent(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(advancedAnalysisService.updateAlertRuleStatus(org.mockito.Mockito.eq(12L), org.mockito.Mockito.anyMap()))
+                .thenAnswer(invocation -> {
+                    Map<String, Object> rule = new LinkedHashMap<>(alertRuleFixture(12L));
+                    rule.put("status", ((Map<String, Object>) invocation.getArgument(1)).get("status"));
+                    return rule;
+                });
+        ChatBiService.ChatQueryRequest request = chatRequest("停用预警规则12", "sales_order");
+        request.setFilters(Map.of("tableName", "sales_order", "userConfirmed", true));
+
+        Map<String, Object> result = service.executeSmart(request);
+
+        assertEquals("ALERT_RULE_DISABLE", result.get("smartIntent"));
+        assertEquals("ALERT_RULE_DISABLE", result.get("responseType"));
+        org.mockito.ArgumentCaptor<Map<String, Object>> captor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(advancedAnalysisService).updateAlertRuleStatus(org.mockito.Mockito.eq(12L), captor.capture());
+        assertEquals("DISABLED", captor.getValue().get("status"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void smartChatReopensAlertEventByIdInsteadOfListingEvents() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.of(Map.of(
+                        "primaryIntent", "QUERY_SQL",
+                        "confidence", 0.91D,
+                        "reasoning", "误判为普通查询"
+                )));
+        org.mockito.Mockito.when(advancedAnalysisService.updateAlertEventStatus(org.mockito.Mockito.eq(3139L), org.mockito.Mockito.anyMap()))
+                .thenAnswer(invocation -> {
+                    Map<String, Object> event = new LinkedHashMap<>(alertEventFixture(3139L));
+                    event.put("status", ((Map<String, Object>) invocation.getArgument(1)).get("status"));
+                    return event;
+                });
+
+        Map<String, Object> result = service.executeSmart(chatRequest("重开3139报警", "sales_order"));
+
+        assertEquals("ALERT_EVENT_REOPEN", result.get("smartIntent"));
+        assertEquals("ALERT_EVENT_REOPEN", result.get("responseType"));
+        assertEquals(Boolean.FALSE, result.get("requiresConfirmation"));
+        org.mockito.ArgumentCaptor<Map<String, Object>> captor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(advancedAnalysisService).updateAlertEventStatus(org.mockito.Mockito.eq(3139L), captor.capture());
+        assertEquals("OPEN", captor.getValue().get("status"));
+        org.mockito.Mockito.verify(advancedAnalysisService, org.mockito.Mockito.never()).listAlertEvents(org.mockito.Mockito.anyMap());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void smartChatDisablesAlertRuleInstructionEvenWhenAiSuggestsCreate() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.of(Map.of(
+                        "primaryIntent", "ALERT_RULE_CREATE",
+                        "confidence", 0.92D,
+                        "requiresConfirmation", true,
+                        "reasoning", "误判为新建预警"
+                )));
+        org.mockito.Mockito.when(advancedAnalysisService.updateAlertRuleStatus(org.mockito.Mockito.eq(43L), org.mockito.Mockito.anyMap()))
+                .thenAnswer(invocation -> {
+                    Map<String, Object> rule = new LinkedHashMap<>(alertRuleFixture(43L));
+                    rule.put("status", ((Map<String, Object>) invocation.getArgument(1)).get("status"));
+                    return rule;
+                });
+
+        Map<String, Object> result = service.executeSmart(chatRequest("停用预警规则43", "sales_order"));
+
+        assertEquals("ALERT_RULE_DISABLE", result.get("smartIntent"));
+        assertEquals("ALERT_RULE_DISABLE", result.get("responseType"));
+        assertEquals(Boolean.FALSE, result.get("requiresConfirmation"));
+        org.mockito.ArgumentCaptor<Map<String, Object>> captor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(advancedAnalysisService).updateAlertRuleStatus(org.mockito.Mockito.eq(43L), captor.capture());
+        assertEquals("DISABLED", captor.getValue().get("status"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void smartChatUpdatesAlertRuleThresholdInstructionEvenWhenAiSuggestsCreate() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.of(Map.of(
+                        "primaryIntent", "ALERT_RULE_CREATE",
+                        "confidence", 0.92D,
+                        "requiresConfirmation", true,
+                        "reasoning", "误判为新建预警"
+                )));
+        org.mockito.Mockito.when(advancedAnalysisService.updateAlertRule(org.mockito.Mockito.eq(43L), org.mockito.Mockito.anyMap()))
+                .thenAnswer(invocation -> {
+                    Map<String, Object> rule = new LinkedHashMap<>(alertRuleFixture(43L));
+                    rule.putAll((Map<String, Object>) invocation.getArgument(1));
+                    return rule;
+                });
+
+        Map<String, Object> result = service.executeSmart(chatRequest("把预警规则43阈值改成90万", "sales_order"));
+
+        assertEquals("ALERT_RULE_UPDATE", result.get("smartIntent"));
+        assertEquals("ALERT_RULE_UPDATE", result.get("responseType"));
+        assertEquals(Boolean.FALSE, result.get("requiresConfirmation"));
+        org.mockito.ArgumentCaptor<Map<String, Object>> captor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(advancedAnalysisService).updateAlertRule(org.mockito.Mockito.eq(43L), captor.capture());
+        assertEquals(900000D, (Double) captor.getValue().get("threshold"), 0.01D);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void smartChatEnablesAlertRuleInstructionEvenWhenAiSuggestsCreate() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.of(Map.of(
+                        "primaryIntent", "ALERT_RULE_CREATE",
+                        "confidence", 0.92D,
+                        "requiresConfirmation", true,
+                        "reasoning", "误判为新建预警"
+                )));
+        org.mockito.Mockito.when(advancedAnalysisService.updateAlertRuleStatus(org.mockito.Mockito.eq(43L), org.mockito.Mockito.anyMap()))
+                .thenAnswer(invocation -> {
+                    Map<String, Object> rule = new LinkedHashMap<>(alertRuleFixture(43L));
+                    rule.put("status", ((Map<String, Object>) invocation.getArgument(1)).get("status"));
+                    return rule;
+                });
+
+        Map<String, Object> result = service.executeSmart(chatRequest("重开预警规则43", "sales_order"));
+
+        assertEquals("ALERT_RULE_ENABLE", result.get("smartIntent"));
+        assertEquals("ALERT_RULE_ENABLE", result.get("responseType"));
+        assertEquals(Boolean.FALSE, result.get("requiresConfirmation"));
+        org.mockito.ArgumentCaptor<Map<String, Object>> captor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(advancedAnalysisService).updateAlertRuleStatus(org.mockito.Mockito.eq(43L), captor.capture());
+        assertEquals("ACTIVE", captor.getValue().get("status"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void smartChatDetectsAlertRuleInstructionEvenWhenAiSuggestsCreate() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.of(Map.of(
+                        "primaryIntent", "ALERT_RULE_CREATE",
+                        "confidence", 0.92D,
+                        "requiresConfirmation", true,
+                        "reasoning", "误判为新建预警"
+                )));
+        org.mockito.Mockito.when(advancedAnalysisService.getAlertRule(43L))
+                .thenReturn(alertRuleFixture(43L));
+        org.mockito.Mockito.when(advancedAnalysisService.runAlertRuleDetection(org.mockito.Mockito.anyMap()))
+                .thenReturn(Map.of(
+                        "checkedRules", 1,
+                        "skippedRules", 0,
+                        "createdEvents", 0,
+                        "refreshedEvents", 0,
+                        "scope", "manual",
+                        "events", List.of()
+                ));
+
+        Map<String, Object> result = service.executeSmart(chatRequest("检测预警规则43", "sales_order"));
+
+        assertEquals("ALERT_RULE_DETECT", result.get("smartIntent"));
+        assertEquals("ALERT_RULE_DETECT", result.get("responseType"));
+        assertEquals(Boolean.FALSE, result.get("requiresConfirmation"));
+        org.mockito.ArgumentCaptor<Map<String, Object>> captor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(advancedAnalysisService).runAlertRuleDetection(captor.capture());
+        assertEquals(43L, ((Number) captor.getValue().get("ruleId")).longValue());
+        assertEquals(Boolean.TRUE, captor.getValue().get("force"));
+        assertTrue(((List<Map<String, Object>>) result.get("data")).get(0).containsKey("checkedRules"));
     }
 
     @Test
@@ -878,9 +1542,63 @@ class P2AcceptanceTests {
         assertEquals("COMPLETED", steps.get(1).get("status"));
         Map<String, Object> actionPlan = (Map<String, Object>) result.get("actionPlan");
         List<Map<String, Object>> actions = (List<Map<String, Object>>) actionPlan.get("actions");
+        assertEquals("MULTI_STEP", actionPlan.get("primaryIntent"));
+        assertEquals(Boolean.FALSE, actionPlan.get("needClarification"));
+        assertEquals(List.of(), actionPlan.get("missingSlots"));
+        assertTrue(actionPlan.containsKey("confidence"));
+        assertTrue(actionPlan.containsKey("reasoning"));
         assertEquals(List.of("query_1"), actions.get(1).get("dependsOn"));
+        assertTrue(actions.get(0).containsKey("confidence"));
+        assertTrue(actions.get(1).containsKey("confidence"));
+        assertTrue(steps.get(0).containsKey("confidence"));
+        Map<String, Object> audit = (Map<String, Object>) result.get("smartRouteAudit");
+        assertEquals("MULTI_STEP", audit.get("primaryIntent"));
+        assertEquals("multi-step-orchestrator", audit.get("chosenExecutor"));
+        assertEquals("COMPLETED", audit.get("outcome"));
+        assertEquals(Boolean.TRUE, audit.get("success"));
+        assertEquals(2, ((List<Map<String, Object>>) audit.get("actions")).size());
         org.mockito.Mockito.verify(chatBiService).executeChat(org.mockito.Mockito.any(ChatBiService.ChatQueryRequest.class));
         org.mockito.Mockito.verify(advancedAnalysisService).forecast(org.mockito.Mockito.anyMap());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void smartChatIntentRegressionDatasetCoversP0MultiStepCases() throws Exception {
+        try (InputStream input = getClass().getClassLoader().getResourceAsStream("smart-chat-intent-cases.json")) {
+            assertNotNull(input);
+            List<Map<String, Object>> cases = new ObjectMapper().readValue(input, List.class);
+
+            assertFalse(cases.isEmpty());
+            assertTrue(cases.stream().allMatch(item ->
+                    !Objects.toString(item.get("question"), "").isBlank()
+                            && !Objects.toString(item.get("expectedPrimaryIntent"), "").isBlank()));
+            assertTrue(cases.size() >= 12);
+
+            for (Map<String, Object> testCase : cases) {
+                String caseId = Objects.toString(testCase.get("id"), Objects.toString(testCase.get("question"), ""));
+                SmartChatService service = smartChatServiceForIntentRegressionCase(testCase);
+
+                Map<String, Object> result = service.executeSmart(chatRequest(
+                        Objects.toString(testCase.get("question"), ""), "sales_order"));
+                Map<String, Object> actionPlan = (Map<String, Object>) result.get("actionPlan");
+                Map<String, Object> audit = (Map<String, Object>) result.get("smartRouteAudit");
+                List<Map<String, Object>> actions = (List<Map<String, Object>>) actionPlan.get("actions");
+                List<String> actionTypes = actions.stream()
+                        .map(action -> Objects.toString(action.get("type"), ""))
+                        .toList();
+
+                assertEquals(testCase.get("expectedPrimaryIntent"), result.get("smartIntent"), caseId + " smartIntent");
+                assertEquals(testCase.get("expectedPrimaryIntent"), actionPlan.get("primaryIntent"), caseId + " actionPlan intent");
+                assertEquals(testCase.get("expectedResponseType"), result.get("responseType"), caseId + " responseType");
+                assertEquals(stringList(testCase.get("expectedActions")), actionTypes, caseId + " actions");
+                assertEquals(Boolean.TRUE.equals(testCase.get("requiresConfirmation")),
+                        Boolean.TRUE.equals(audit.get("requiresConfirmation")), caseId + " requiresConfirmation");
+                assertEquals(testCase.get("expectedOutcome"), audit.get("outcome"), caseId + " audit outcome");
+                if (testCase.containsKey("sideEffectMode")) {
+                    assertEquals(testCase.get("sideEffectMode"), result.get("sideEffectMode"), caseId + " sideEffectMode");
+                }
+            }
+        }
     }
 
     @Test
@@ -1194,8 +1912,8 @@ class P2AcceptanceTests {
                         "primaryIntent", "MULTI_STEP",
                         "confidence", 0.88,
                         "actions", List.of(
-                                Map.of("id", "query_1", "type", "QUERY_SQL"),
-                                Map.of("id", "forecast_1", "type", "FORECAST")
+                                Map.of("id", "query_1", "type", "QUERY_SQL", "confidence", 0.93),
+                                Map.of("id", "forecast_1", "type", "FORECAST", "confidence", 0.91)
                         ),
                         "slots", Map.of("metricField", "sales_amt", "timeField", "order_date"),
                         "reasoning", "AI 返回查询和预测动作"
@@ -1224,6 +1942,12 @@ class P2AcceptanceTests {
         assertEquals(3, steps.size());
         assertEquals("ALERT_RULE_CREATE_DRAFT", steps.get(2).get("type"));
         assertEquals("NEEDS_CONFIRMATION", steps.get(2).get("status"));
+        Map<String, Object> actionPlan = (Map<String, Object>) result.get("actionPlan");
+        List<Map<String, Object>> actions = (List<Map<String, Object>>) actionPlan.get("actions");
+        assertEquals(0.93D, actions.get(0).get("confidence"));
+        assertEquals(0.91D, actions.get(1).get("confidence"));
+        assertEquals(Boolean.FALSE, actionPlan.get("needClarification"));
+        assertEquals(List.of(), actionPlan.get("missingSlots"));
         Map<String, Object> draft = (Map<String, Object>) result.get("alertRuleDraft");
         assertEquals(800000D, draft.get("threshold"));
         assertEquals("sales_amt", draft.get("metricField"));
@@ -1300,6 +2024,10 @@ class P2AcceptanceTests {
         List<Map<String, Object>> steps = (List<Map<String, Object>>) result.get("stepResults");
         assertEquals("FAILED", steps.get(0).get("status"));
         assertEquals("SKIPPED", steps.get(1).get("status"));
+        Map<String, Object> audit = (Map<String, Object>) result.get("smartRouteAudit");
+        assertEquals("PARTIAL_FAILED", audit.get("outcome"));
+        assertEquals(Boolean.FALSE, audit.get("success"));
+        assertTrue(String.valueOf(audit.get("failureReason")).contains("SQL 执行失败"));
         org.mockito.Mockito.verify(advancedAnalysisService, org.mockito.Mockito.never()).forecast(org.mockito.Mockito.anyMap());
     }
 
@@ -1876,6 +2604,164 @@ class P2AcceptanceTests {
         return service;
     }
 
+    private SmartChatService smartChatServiceForIntentRegressionCase(Map<String, Object> testCase) {
+        SmartChatService service = new SmartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        ChatBiService chatBiService = org.mockito.Mockito.mock(ChatBiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        BusinessModelAgentService businessModelAgentService = org.mockito.Mockito.mock(BusinessModelAgentService.class);
+
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "chatBiService", chatBiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        ReflectionTestUtils.setField(service, "businessModelAgentService", businessModelAgentService);
+
+        org.mockito.Mockito.when(dataUploadService.listFields(org.mockito.Mockito.anyString())).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(
+                        org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenAnswer(invocation -> smartRouteForIntentRegressionCase(testCase));
+        org.mockito.Mockito.when(pythonAiService.parseAdvancedAnalysisIntent(
+                        org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(chatBiService.executeChat(org.mockito.Mockito.any(ChatBiService.ChatQueryRequest.class)))
+                .thenReturn(new java.util.HashMap<>(Map.of(
+                        "message", "查询完成",
+                        "sql", "SELECT DATE_FORMAT(order_date, '%Y-%m') AS name, SUM(sales_amt) AS value FROM sales_order GROUP BY 1",
+                        "chartType", "line",
+                        "data", List.of(Map.of("name", "2026-01", "value", 100))
+                )));
+        org.mockito.Mockito.when(advancedAnalysisService.forecast(org.mockito.Mockito.anyMap())).thenAnswer(invocation -> {
+            Map<String, Object> request = invocation.getArgument(0);
+            return Map.of(
+                    "type", "forecast",
+                    "tableName", Objects.toString(request.get("tableName"), "sales_order"),
+                    "metricField", Objects.toString(request.get("metricField"), "sales_amt"),
+                    "timeField", Objects.toString(request.get("timeField"), "order_date"),
+                    "series", List.of(
+                            Map.of("name", "2026-01", "history", 100),
+                            Map.of("name", "2026-02", "forecast", 120)
+                    )
+            );
+        });
+        org.mockito.Mockito.when(advancedAnalysisService.listAlertEvents(org.mockito.Mockito.anyMap()))
+                .thenReturn(List.of(alertEventFixture(8L)));
+        org.mockito.Mockito.when(advancedAnalysisService.getAlertEvent(org.mockito.Mockito.anyLong()))
+                .thenAnswer(invocation -> alertEventFixture(invocation.getArgument(0)));
+        org.mockito.Mockito.when(advancedAnalysisService.updateAlertEventStatus(org.mockito.Mockito.anyLong(), org.mockito.Mockito.anyMap()))
+                .thenAnswer(invocation -> {
+                    Map<String, Object> event = new LinkedHashMap<>(alertEventFixture(invocation.getArgument(0)));
+                    Map<String, Object> request = invocation.getArgument(1);
+                    event.put("status", request.get("status"));
+                    return event;
+                });
+        org.mockito.Mockito.when(advancedAnalysisService.updateAlertRuleStatus(org.mockito.Mockito.anyLong(), org.mockito.Mockito.anyMap()))
+                .thenAnswer(invocation -> {
+                    Map<String, Object> rule = new LinkedHashMap<>(alertRuleFixture(invocation.getArgument(0)));
+                    Map<String, Object> request = invocation.getArgument(1);
+                    rule.put("status", request.get("status"));
+                    return rule;
+                });
+        org.mockito.Mockito.when(advancedAnalysisService.updateAlertRule(org.mockito.Mockito.anyLong(), org.mockito.Mockito.anyMap()))
+                .thenAnswer(invocation -> {
+                    Map<String, Object> rule = new LinkedHashMap<>(alertRuleFixture(invocation.getArgument(0)));
+                    Map<String, Object> request = invocation.getArgument(1);
+                    rule.putAll(request);
+                    return rule;
+                });
+        org.mockito.Mockito.when(advancedAnalysisService.deleteAlertRule(org.mockito.Mockito.anyLong()))
+                .thenAnswer(invocation -> {
+                    Map<String, Object> rule = new LinkedHashMap<>(alertRuleFixture(invocation.getArgument(0)));
+                    rule.put("status", "DELETED");
+                    return rule;
+                });
+        org.mockito.Mockito.when(businessModelAgentService.handleQuestion(org.mockito.Mockito.anyMap()))
+                .thenReturn(new java.util.HashMap<>(Map.of(
+                        "handled", true,
+                        "message", "业务模型已更新",
+                        "intent", "BIND_FIELDS"
+                )));
+        return service;
+    }
+
+    private java.util.Optional<Map<String, Object>> smartRouteForIntentRegressionCase(Map<String, Object> testCase) {
+        if (!Boolean.TRUE.equals(testCase.get("routeMock"))) {
+            return java.util.Optional.empty();
+        }
+        Map<String, Object> route = new LinkedHashMap<>();
+        route.put("primaryIntent", testCase.get("expectedPrimaryIntent"));
+        route.put("confidence", 0.86D);
+        route.put("requiresConfirmation", Boolean.TRUE.equals(testCase.get("requiresConfirmation")));
+        route.put("reasoning", "语义回归测试路由：" + Objects.toString(testCase.get("id"), ""));
+        route.put("slots", Map.of(
+                "metricField", "sales_amt",
+                "timeField", "order_date",
+                "fieldName", "order_date"
+        ));
+        return java.util.Optional.of(route);
+    }
+
+    private Map<String, Object> alertEventFixture(Long id) {
+        Map<String, Object> event = new LinkedHashMap<>();
+        event.put("id", id);
+        event.put("ruleId", 12L);
+        event.put("ruleName", "销售额低于阈值提醒");
+        event.put("tableName", "sales_order");
+        event.put("metricField", "sales_amt");
+        event.put("timeField", "order_date");
+        event.put("bucketName", "2026-06-14");
+        event.put("actualValue", 760000D);
+        event.put("threshold", 800000D);
+        event.put("operator", "lt");
+        event.put("status", "OPEN");
+        event.put("reason", "销售额低于阈值 800000");
+        event.put("createdAt", "2026-06-14 10:00:00");
+        event.put("chartSnapshot", Map.of("chartType", "line"));
+        event.put("llmExplanation", Map.of());
+        return event;
+    }
+
+    private Map<String, Object> alertRuleFixture(Long id) {
+        Map<String, Object> rule = new LinkedHashMap<>();
+        rule.put("id", id);
+        rule.put("ruleName", "销售额低于阈值提醒");
+        rule.put("tableName", "sales_order");
+        rule.put("metricField", "sales_amt");
+        rule.put("timeField", "order_date");
+        rule.put("operator", "lt");
+        rule.put("threshold", 800000D);
+        rule.put("detectionCycle", "daily");
+        rule.put("channels", List.of("email"));
+        rule.put("status", "ACTIVE");
+        return rule;
+    }
+
+    private Map<String, Object> smartRouteHistoryRow(ObjectMapper mapper, long id,
+                                                     String question,
+                                                     Map<String, Object> audit) throws Exception {
+        return Map.of(
+                "historyId", id,
+                "userId", "u1",
+                "question", question,
+                "queryTableName", "sales_order",
+                "chartSnapshot", mapper.writeValueAsString(Map.of("smartRouteAudit", audit)),
+                "contextJson", "{}",
+                "intentType", audit.get("primaryIntent"),
+                "artifactType", "CHART",
+                "llmModelUsed", audit.get("chosenExecutor"),
+                "createdAt", "2026-06-14 10:00:00"
+        );
+    }
+
+    private Map<String, Object> smartAudit(Object... entries) {
+        Map<String, Object> audit = new java.util.LinkedHashMap<>();
+        for (int i = 0; i + 1 < entries.length; i += 2) {
+            audit.put(String.valueOf(entries[i]), entries[i + 1]);
+        }
+        return audit;
+    }
+
     private ChatBiService.ChatQueryRequest chatRequest(String question, String tableName) {
         ChatBiService.ChatQueryRequest request = new ChatBiService.ChatQueryRequest();
         request.setQuestion(question);
@@ -1891,6 +2777,13 @@ class P2AcceptanceTests {
                 "tableName", "loss_order",
                 "activeBusinessModelId", 2L
         );
+    }
+
+    private List<String> stringList(Object value) {
+        if (!(value instanceof List<?> list)) {
+            return List.of();
+        }
+        return list.stream().map(item -> Objects.toString(item, "")).toList();
     }
 
     private Map<String, Object> field(String columnName, String displayName, String sourceFieldName, String fieldType) {

@@ -44,6 +44,9 @@ public class ChatConversationService {
     @Autowired
     private PythonAiService pythonAiService;
 
+    @Autowired
+    private ChatQueryHistoryService chatQueryHistoryService;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @PostConstruct
@@ -378,6 +381,7 @@ public class ChatConversationService {
         if (result != null) {
             context.put("reasoningReplaySteps", result.getOrDefault("reasoningReplaySteps",
                     result.getOrDefault("reasoningLogs", List.of())));
+            attachAlertEventContext(context, result);
         }
         Long turnId = insertTurn(conversationId, parentTurnId, turnNo, "ASSISTANT", message,
                 "ANSWER", context, "REPLY");
@@ -495,6 +499,9 @@ public class ChatConversationService {
                 null,
                 advancedChartType(analysisType),
                 "alert".equals(analysisType) ? "WARNING" : "SAFE");
+        Long historyId = recordAdvancedAnalysisHistory(question, tableName, analysis, request, message, analysisType,
+                intentType, artifactType, conversationId, userTurnId, assistantTurnId, assistantTurnNo, artifactId,
+                clientMessageId, compactThinkingLogs);
         updateConversationAfterTurn(conversationId, assistantTurnId, question, message);
 
         Map<String, Object> payload = new LinkedHashMap<>();
@@ -502,9 +509,112 @@ public class ChatConversationService {
         payload.put("userTurnId", userTurnId);
         payload.put("assistantTurnId", assistantTurnId);
         payload.put("artifactId", artifactId);
+        payload.put("historyId", historyId);
         payload.put("artifactType", artifactType);
         payload.put("recorded", assistantTurnId != null && artifactId != null);
         return payload;
+    }
+
+    private Long recordAdvancedAnalysisHistory(String question,
+                                               String tableName,
+                                               Map<String, Object> analysis,
+                                               Map<String, Object> request,
+                                               String message,
+                                               String analysisType,
+                                               String intentType,
+                                               String artifactType,
+                                               Long conversationId,
+                                               Long userTurnId,
+                                               Long assistantTurnId,
+                                               Integer assistantTurnNo,
+                                               Long artifactId,
+                                               String clientMessageId,
+                                               List<Object> thinkingLogs) {
+        try {
+            Map<String, Object> safeAnalysis = analysis == null ? Map.of() : analysis;
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("type", analysisType);
+            result.put("advancedAnalysisType", analysisType);
+            result.put("chartType", advancedChartType(analysisType));
+            result.put("message", message);
+            result.put("riskLevel", "alert".equals(analysisType) ? "WARN" : "SAFE");
+            result.put("riskReason", message);
+            result.put("params", safeAnalysis.getOrDefault("params", Map.of()));
+            result.put("fieldMapping", safeAnalysis.getOrDefault("fieldMapping", Map.of()));
+            result.put("series", safeAnalysis.getOrDefault("series", List.of()));
+            result.put("data", firstPresent(safeAnalysis.get("data"), safeAnalysis.get("series"), List.of()));
+            result.put("insights", safeAnalysis.getOrDefault("insights", List.of()));
+            result.put("explanation", safeAnalysis.getOrDefault("explanation", Map.of()));
+            result.put("optionTemplate", safeAnalysis.get("optionTemplate"));
+            result.put("chartRecommendation", safeAnalysis.get("chartRecommendation"));
+            result.put("ruleRecommendation", safeAnalysis.get("ruleRecommendation"));
+            result.put("alertRuleDraft", safeAnalysis.get("alertRuleDraft"));
+            result.put("alertRuleCreated", safeAnalysis.get("alertRuleCreated"));
+            result.put("alertMeta", safeAnalysis.get("alertMeta"));
+            result.put("ruleId", nestedValue(safeAnalysis, "params", "ruleId"));
+            result.put("eventId", nestedValue(safeAnalysis, "params", "eventId"));
+            result.put("conversationId", conversationId);
+            result.put("userTurnId", userTurnId);
+            result.put("assistantTurnId", assistantTurnId);
+            result.put("artifactId", artifactId);
+            result.put("clientMessageId", clientMessageId);
+            result.put("reasoningReplaySteps", thinkingLogs == null ? List.of() : thinkingLogs);
+
+            Map<String, Object> params = asMap(safeAnalysis.get("params"));
+            putIfPresent(result, "metricField", firstNonBlank(safeAnalysis.get("metricField"), params.get("metricField")));
+            putIfPresent(result, "timeField", firstNonBlank(safeAnalysis.get("timeField"), params.get("timeField")));
+            putIfPresent(result, "operator", firstNonBlank(safeAnalysis.get("operator"), params.get("operator")));
+            Object threshold = firstPresent(safeAnalysis.get("threshold"), params.get("threshold"));
+            if (threshold != null) {
+                result.put("threshold", threshold);
+            }
+            putIfPresent(result, "detectionCycle", firstNonBlank(safeAnalysis.get("detectionCycle"), params.get("detectionCycle")));
+            Object channels = firstPresent(safeAnalysis.get("channels"), params.get("channels"), params.get("channel"));
+            if (channels != null) {
+                result.put("channels", channels);
+            }
+            putIfPresent(result, "status", firstNonBlank(safeAnalysis.get("status"), "alert".equals(analysisType) ? "CREATED" : "GENERATED"));
+
+            String historyQuestion = firstNonBlank(question, safeAnalysis.get("sourceQuestion"), safeAnalysis.get("title"), message);
+            Long historyId = chatQueryHistoryService.recordSuccess(historyQuestion, tableName, result, null);
+            if (historyId == null || historyId <= 0) {
+                return null;
+            }
+
+            Map<String, Object> context = new LinkedHashMap<>();
+            context.put("module", "advancedAnalysis");
+            context.put("analysisType", analysisType);
+            context.put("clientMessageId", clientMessageId);
+            context.put("conversationId", conversationId);
+            context.put("userTurnId", userTurnId);
+            context.put("assistantTurnId", assistantTurnId);
+            context.put("artifactId", artifactId);
+            context.put("engine", "advanced-analysis");
+            context.put("ruleId", nestedValue(safeAnalysis, "params", "ruleId"));
+            context.put("eventId", nestedValue(safeAnalysis, "params", "eventId"));
+            chatQueryHistoryService.attachConversationMetadata(
+                    historyId,
+                    conversationId,
+                    null,
+                    assistantTurnNo,
+                    "ASSISTANT",
+                    intentType,
+                    context,
+                    Map.of("tableName", tableName),
+                    artifactType,
+                    message
+            );
+            if (artifactId != null) {
+                jdbcTemplate.update("""
+                        UPDATE is_chat_conversation_artifact
+                           SET history_id = ?
+                         WHERE id = ? AND conversation_id = ? AND turn_id = ?
+                        """, historyId, artifactId, conversationId, assistantTurnId);
+            }
+            return historyId;
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     public Map<String, Object> markAlertRuleCreated(Map<String, Object> request) {
@@ -521,16 +631,16 @@ public class ChatConversationService {
 
         List<Map<String, Object>> rows = artifactId == null
                 ? jdbcTemplate.queryForList("""
-                        SELECT id, artifact_json AS artifactJson
-                          FROM is_chat_conversation_artifact
-                         WHERE conversation_id = ? AND turn_id = ? AND artifact_type = 'CHART'
-                         ORDER BY id DESC LIMIT 1
+                        SELECT id, history_id AS historyId, artifact_json AS artifactJson
+                           FROM is_chat_conversation_artifact
+                          WHERE conversation_id = ? AND turn_id = ? AND artifact_type IN ('CHART', 'ADVANCED_ALERT')
+                          ORDER BY id DESC LIMIT 1
                         """, conversationId, assistantTurnId)
                 : jdbcTemplate.queryForList("""
-                        SELECT id, artifact_json AS artifactJson
-                          FROM is_chat_conversation_artifact
-                         WHERE conversation_id = ? AND turn_id = ? AND id = ?
-                         LIMIT 1
+                        SELECT id, history_id AS historyId, artifact_json AS artifactJson
+                           FROM is_chat_conversation_artifact
+                          WHERE conversation_id = ? AND turn_id = ? AND id = ?
+                          LIMIT 1
                         """, conversationId, assistantTurnId, artifactId);
         if (rows.isEmpty()) {
             return Map.of("updated", false);
@@ -538,12 +648,15 @@ public class ChatConversationService {
 
         Map<String, Object> row = rows.get(0);
         Long resolvedArtifactId = toLong(row.get("id"));
+        Long historyId = toLong(row.get("historyId"));
         Map<String, Object> artifact = parseJsonMap(row.get("artifactJson"));
+        mergeMultiStepPayloadFromRequest(artifact, request);
         artifact.put("alertRuleDraft", null);
         artifact.put("alertRuleCreated", compactAdvancedValue(alertRuleCreated, MAX_ADVANCED_NESTED_LIST_ITEMS, 4));
         if (!advancedAnalysis.isEmpty()) {
             artifact.put("advancedAnalysis", compactAdvancedAnalysis(advancedAnalysis));
         }
+        applyAlertRuleCreatedToMultiStepPayload(artifact, alertRuleCreated, advancedAnalysis);
         jdbcTemplate.update("""
                 UPDATE is_chat_conversation_artifact
                    SET artifact_json = ?
@@ -551,20 +664,224 @@ public class ChatConversationService {
                 """, toJson(artifact), resolvedArtifactId, conversationId, assistantTurnId);
         jdbcTemplate.update("""
                 UPDATE is_chat_conversation_turn
-                   SET message_text = ?, context_json = JSON_SET(COALESCE(context_json, JSON_OBJECT()), '$.alertRuleCreated', CAST(? AS JSON))
-                 WHERE id = ? AND conversation_id = ?
+                   SET message_text = ?,
+                       context_json = JSON_SET(
+                           COALESCE(context_json, JSON_OBJECT()),
+                           '$.alertRuleCreated', CAST(? AS JSON),
+                           '$.stepResults', CAST(? AS JSON),
+                           '$.multiStepSummary', CAST(? AS JSON),
+                           '$.actionPlan', CAST(? AS JSON),
+                           '$.requiresConfirmation', ?
+                       )
+                  WHERE id = ? AND conversation_id = ?
                 """,
                 safeText(Objects.toString(request == null ? null : request.get("message"),
                         "预警规则已创建，可在预警规则管理中查看和维护。"), MAX_MESSAGE_LENGTH),
                 toJson(alertRuleCreated),
+                toJson(artifact.getOrDefault("stepResults", List.of())),
+                toJson(artifact.getOrDefault("multiStepSummary", Map.of())),
+                toJson(artifact.getOrDefault("actionPlan", Map.of())),
+                Boolean.TRUE.equals(artifact.get("requiresConfirmation")) ? 1 : 0,
                 assistantTurnId,
                 conversationId);
-        return Map.of(
-                "updated", true,
-                "conversationId", conversationId,
-                "assistantTurnId", assistantTurnId,
-                "artifactId", resolvedArtifactId
-        );
+        updateAdvancedAlertHistoryCreated(historyId, alertRuleCreated, advancedAnalysis,
+                Objects.toString(request == null ? null : request.get("message"),
+                        "预警规则已创建，可在预警规则管理中查看和维护。"));
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("updated", true);
+        payload.put("conversationId", conversationId);
+        payload.put("assistantTurnId", assistantTurnId);
+        payload.put("artifactId", resolvedArtifactId);
+        payload.put("historyId", historyId);
+        return payload;
+    }
+
+    private void updateAdvancedAlertHistoryCreated(Long historyId,
+                                                   Map<String, Object> alertRuleCreated,
+                                                   Map<String, Object> advancedAnalysis,
+                                                   String message) {
+        if (historyId == null || historyId <= 0) {
+            return;
+        }
+        try {
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                    SELECT chart_snapshot AS chartSnapshot
+                      FROM is_chat_query_history
+                     WHERE id = ? AND user_id = ?
+                     LIMIT 1
+                    """, historyId, resolveUserId());
+            if (rows.isEmpty()) {
+                return;
+            }
+            Map<String, Object> snapshot = parseJsonMap(rows.get(0).get("chartSnapshot"));
+            snapshot.put("advancedAnalysisType", "alert");
+            snapshot.put("type", "alert");
+            snapshot.put("alertRuleDraft", null);
+            snapshot.put("alertRuleCreated", compactAdvancedValue(alertRuleCreated, MAX_ADVANCED_NESTED_LIST_ITEMS, 4));
+            snapshot.put("status", firstNonBlank(advancedAnalysis.get("status"), alertRuleCreated.get("status"), "已启用"));
+            snapshot.put("message", message);
+            Map<String, Object> alertMeta = asMap(snapshot.get("alertMeta"));
+            putIfPresent(alertMeta, "ruleName", firstNonBlank(alertRuleCreated.get("title"), advancedAnalysis.get("title")));
+            putIfPresent(alertMeta, "metricField", firstNonBlank(alertRuleCreated.get("metricField"), nestedValue(advancedAnalysis, "params", "metricField")));
+            putIfPresent(alertMeta, "timeField", firstNonBlank(alertRuleCreated.get("timeField"), nestedValue(advancedAnalysis, "params", "timeField")));
+            putIfPresent(alertMeta, "operator", firstNonBlank(alertRuleCreated.get("operator"), nestedValue(advancedAnalysis, "params", "operator")));
+            Object threshold = firstPresent(alertRuleCreated.get("threshold"), nestedValue(advancedAnalysis, "params", "threshold"));
+            if (threshold != null) {
+                alertMeta.put("threshold", threshold);
+            }
+            Object channels = firstPresent(alertRuleCreated.get("channels"), nestedValue(advancedAnalysis, "params", "channels"));
+            if (channels != null) {
+                alertMeta.put("channels", channels);
+            }
+            putIfPresent(alertMeta, "status", "ACTIVE");
+            snapshot.put("alertMeta", alertMeta);
+            applyAlertRuleCreatedToMultiStepPayload(snapshot, alertRuleCreated, advancedAnalysis);
+            jdbcTemplate.update("""
+                    UPDATE is_chat_query_history
+                       SET chart_type = 'alert',
+                           chart_snapshot = ?,
+                           generated_sql = NULL,
+                           llm_model_used = 'advanced-analysis',
+                           execution_status = 1,
+                           execution_time_ms = NULL,
+                           is_hit_cache = 0,
+                           risk_level = 'WARN',
+                           audit_info = ?,
+                           artifact_type = 'ADVANCED_ALERT',
+                           intent_type = 'ADVANCED_ALERT',
+                           summary_text = ?
+                     WHERE id = ? AND user_id = ?
+                    """,
+                    toJson(snapshot),
+                    safeText(message, MAX_SUMMARY_LENGTH),
+                    safeText(message, MAX_SUMMARY_LENGTH),
+                    historyId,
+                    resolveUserId());
+        } catch (Exception ignored) {
+            // 历史快照增强失败不应影响预警规则保存。
+        }
+    }
+
+    private void mergeMultiStepPayloadFromRequest(Map<String, Object> artifact, Map<String, Object> request) {
+        if (artifact == null || request == null) {
+            return;
+        }
+        List<Object> requestStepResults = asList(request.get("stepResults"));
+        if (!requestStepResults.isEmpty()) {
+            artifact.put("stepResults", requestStepResults);
+        }
+        Map<String, Object> requestActionPlan = asMap(request.get("actionPlan"));
+        if (!requestActionPlan.isEmpty()) {
+            artifact.put("actionPlan", requestActionPlan);
+        }
+        Map<String, Object> requestSummary = asMap(request.get("multiStepSummary"));
+        if (!requestSummary.isEmpty()) {
+            artifact.put("multiStepSummary", requestSummary);
+        }
+    }
+
+    private void applyAlertRuleCreatedToMultiStepPayload(Map<String, Object> payload,
+                                                         Map<String, Object> alertRuleCreated,
+                                                         Map<String, Object> advancedAnalysis) {
+        if (payload == null || payload.isEmpty()) {
+            return;
+        }
+        Map<String, Object> patch = alertRuleCreatedStepPatch(alertRuleCreated, advancedAnalysis);
+        List<Object> stepResults = updateAlertRuleCreatedSteps(payload.get("stepResults"), patch);
+        if (!stepResults.isEmpty()) {
+            payload.put("stepResults", stepResults);
+        }
+        Map<String, Object> actionPlan = asMap(payload.get("actionPlan"));
+        if (!actionPlan.isEmpty()) {
+            List<Object> actions = updateAlertRuleCreatedSteps(actionPlan.get("actions"), patch);
+            if (!actions.isEmpty()) {
+                actionPlan.put("actions", actions);
+            }
+            actionPlan.put("requiresConfirmation", hasPendingConfirmation(actions));
+            payload.put("actionPlan", actionPlan);
+        }
+        List<Object> summarySteps = !stepResults.isEmpty() ? stepResults : asList(actionPlan.get("actions"));
+        if (!summarySteps.isEmpty()) {
+            payload.put("multiStepSummary", buildMultiStepSummary(summarySteps, asMap(payload.get("multiStepSummary"))));
+            payload.put("requiresConfirmation", hasPendingConfirmation(summarySteps));
+        }
+    }
+
+    private Map<String, Object> alertRuleCreatedStepPatch(Map<String, Object> alertRuleCreated,
+                                                          Map<String, Object> advancedAnalysis) {
+        Map<String, Object> patch = new LinkedHashMap<>();
+        Object ruleId = firstPresent(alertRuleCreated.get("id"), alertRuleCreated.get("ruleId"),
+                advancedAnalysis.get("ruleId"), nestedValue(advancedAnalysis, "params", "ruleId"));
+        patch.put("status", "COMPLETED");
+        patch.put("message", ruleId == null
+                ? "预警规则已创建，后续将按检测周期离线检测。"
+                : "预警规则已创建，规则 #" + ruleId + " 已进入离线检测。");
+        patch.put("requiresConfirmation", false);
+        if (ruleId != null) {
+            patch.put("ruleId", ruleId);
+        }
+        patch.put("alertRuleCreated", compactAdvancedValue(alertRuleCreated, MAX_ADVANCED_NESTED_LIST_ITEMS, 4));
+        return patch;
+    }
+
+    private List<Object> updateAlertRuleCreatedSteps(Object value, Map<String, Object> patch) {
+        List<Object> steps = asList(value);
+        if (steps.isEmpty()) {
+            return List.of();
+        }
+        List<Object> updated = new ArrayList<>();
+        for (Object item : steps) {
+            Map<String, Object> step = asMap(item);
+            if (step.isEmpty()) {
+                updated.add(item);
+                continue;
+            }
+            if (isAlertRuleStep(step)) {
+                Map<String, Object> next = new LinkedHashMap<>(step);
+                next.putAll(patch);
+                updated.add(next);
+            } else {
+                updated.add(step);
+            }
+        }
+        return updated;
+    }
+
+    private boolean isAlertRuleStep(Map<String, Object> step) {
+        String type = firstNonBlank(step.get("type"), step.get("intent"), step.get("smartIntent"))
+                .trim()
+                .toUpperCase(Locale.ROOT);
+        return "ALERT_RULE_CREATE_DRAFT".equals(type)
+                || "ALERT_RULE_CREATE".equals(type)
+                || "ALERT_RULE_DRAFT".equals(type);
+    }
+
+    private Map<String, Object> buildMultiStepSummary(List<Object> steps, Map<String, Object> existing) {
+        Map<String, Object> summary = new LinkedHashMap<>(existing == null ? Map.of() : existing);
+        long completed = countStepsByStatus(steps, "COMPLETED");
+        long needsConfirmation = countStepsByStatus(steps, "NEEDS_CONFIRMATION");
+        long failed = countStepsByStatus(steps, "FAILED");
+        long skipped = countStepsByStatus(steps, "SKIPPED");
+        summary.put("total", steps.size());
+        summary.put("completed", completed);
+        summary.put("needsConfirmation", needsConfirmation);
+        summary.put("failed", failed);
+        summary.put("skipped", skipped);
+        return summary;
+    }
+
+    private long countStepsByStatus(List<Object> steps, String status) {
+        return steps.stream()
+                .map(this::asMap)
+                .filter(step -> status.equalsIgnoreCase(Objects.toString(step.get("status"), "").trim()))
+                .count();
+    }
+
+    private boolean hasPendingConfirmation(List<Object> steps) {
+        return steps.stream()
+                .map(this::asMap)
+                .anyMatch(step -> "NEEDS_CONFIRMATION".equalsIgnoreCase(
+                        Objects.toString(step.get("status"), "").trim()));
     }
 
     private Map<String, Object> findExistingAdvancedRecord(Long conversationId, String clientMessageId) {
@@ -917,12 +1234,157 @@ public class ChatConversationService {
         return null;
     }
 
+    private String firstNonBlank(Object... values) {
+        for (Object value : values) {
+            String text = Objects.toString(value, "").trim();
+            if (!text.isBlank() && !"null".equalsIgnoreCase(text) && !"undefined".equalsIgnoreCase(text)) {
+                return text;
+            }
+        }
+        return "";
+    }
+
+    private Object firstPresent(Object... values) {
+        for (Object value : values) {
+            if (value == null) {
+                continue;
+            }
+            if (value instanceof String text && text.trim().isBlank()) {
+                continue;
+            }
+            return value;
+        }
+        return null;
+    }
+
+    private void putIfPresent(Map<String, Object> target, String key, Object value) {
+        if (target == null || key == null || key.isBlank() || value == null) {
+            return;
+        }
+        if (value instanceof String text && text.trim().isBlank()) {
+            return;
+        }
+        target.put(key, value);
+    }
+
     @SuppressWarnings("unchecked")
     private Map<String, Object> asMap(Object value) {
         if (value instanceof Map<?, ?> map) {
             return new LinkedHashMap<>((Map<String, Object>) map);
         }
         return new LinkedHashMap<>();
+    }
+
+    private void attachAlertEventContext(Map<String, Object> context, Map<String, Object> result) {
+        String type = Objects.toString(firstPresent(result.get("responseType"), result.get("smartIntent"), result.get("intent")), "")
+                .trim()
+                .toUpperCase(Locale.ROOT);
+        if (!type.startsWith("ALERT_EVENT")) {
+            return;
+        }
+        List<Map<String, Object>> events = alertEventCandidates(result);
+        if (events.isEmpty()) {
+            return;
+        }
+        Long eventId = null;
+        List<Map<String, Object>> compactEvents = new ArrayList<>();
+        Set<Long> seen = new LinkedHashSet<>();
+        for (Map<String, Object> event : events) {
+            Long id = toLong(firstPresent(event.get("id"), event.get("eventId"), event.get("alertEventId")));
+            if (id == null || id <= 0 || !seen.add(id)) {
+                continue;
+            }
+            if (eventId == null) {
+                eventId = id;
+            }
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", id);
+            putIfPresent(item, "ruleId", firstPresent(event.get("ruleId"), event.get("alertRuleId")));
+            putIfPresent(item, "ruleName", firstPresent(event.get("ruleName"), event.get("ruleTitle"), event.get("title"), event.get("name")));
+            putIfPresent(item, "status", event.get("status"));
+            putIfPresent(item, "bucketName", firstPresent(event.get("bucketName"), event.get("bucket"), event.get("period")));
+            if (compactEvents.size() < 5) {
+                compactEvents.add(item);
+            }
+        }
+        if (eventId == null) {
+            return;
+        }
+        context.put("currentAlertEventId", eventId);
+        context.put("lastAlertEventId", eventId);
+        context.put("alertEvents", compactEvents);
+    }
+
+    private List<Map<String, Object>> alertEventCandidates(Map<String, Object> result) {
+        List<Map<String, Object>> events = new ArrayList<>();
+        appendAlertEventCandidates(events, result.get("alertEvent"));
+        appendAlertEventCandidates(events, result.get("alertEvents"));
+        appendAlertEventCandidates(events, result.get("data"));
+        return events;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void appendAlertEventCandidates(List<Map<String, Object>> events, Object value) {
+        if (value instanceof Map<?, ?> map) {
+            events.add(new LinkedHashMap<>((Map<String, Object>) map));
+            return;
+        }
+        if (value instanceof List<?> list) {
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> map) {
+                    events.add(new LinkedHashMap<>((Map<String, Object>) map));
+                }
+            }
+        }
+    }
+
+    private String alertEventContextLine(Map<String, Object> context) {
+        if (context == null || context.isEmpty()) {
+            return "";
+        }
+        Long eventId = toLong(firstPresent(
+                context.get("currentAlertEventId"),
+                context.get("lastAlertEventId"),
+                context.get("alertEventId"),
+                context.get("eventId")
+        ));
+        List<Map<String, Object>> events = asMapList(context.get("alertEvents"));
+        if ((eventId == null || eventId <= 0) && !events.isEmpty()) {
+            eventId = toLong(firstPresent(events.get(0).get("id"), events.get(0).get("eventId"), events.get(0).get("alertEventId")));
+        }
+        if (eventId == null || eventId <= 0) {
+            return "";
+        }
+        Long currentEventId = eventId;
+        Map<String, Object> current = events.stream()
+                .filter(event -> currentEventId.equals(toLong(firstPresent(event.get("id"), event.get("eventId"), event.get("alertEventId")))))
+                .findFirst()
+                .orElse(events.isEmpty() ? Map.of() : events.get(0));
+        String ruleName = firstNonBlank(current.get("ruleName"), current.get("ruleTitle"), current.get("title"), current.get("name"));
+        String status = firstNonBlank(current.get("status"));
+        StringBuilder line = new StringBuilder("最近预警事件").append(eventId);
+        if (!ruleName.isBlank()) {
+            line.append("，规则名：").append(safeText(ruleName, 80));
+        }
+        if (!status.isBlank()) {
+            line.append("，状态：").append(status);
+        }
+        line.append("。");
+        return line.toString();
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> asMapList(Object value) {
+        if (!(value instanceof List<?> list)) {
+            return List.of();
+        }
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Object item : list) {
+            if (item instanceof Map<?, ?> map) {
+                rows.add(new LinkedHashMap<>((Map<String, Object>) map));
+            }
+        }
+        return rows;
     }
 
     private List<Object> asList(Object value) {
@@ -950,7 +1412,7 @@ public class ChatConversationService {
         List<Map<String, Object>> rows = explicitBranch
                 ? loadBranchContextTurns(conversationId, branchParentTurnId, 6)
                 : jdbcTemplate.queryForList("""
-                SELECT role, message_text AS messageText
+                SELECT role, message_text AS messageText, context_json AS contextJson
                   FROM is_chat_conversation_turn
                  WHERE conversation_id = ? AND (? IS NULL OR id <> ?)
                  ORDER BY turn_no DESC, id DESC
@@ -966,6 +1428,10 @@ public class ChatConversationService {
             String text = safeText(Objects.toString(row.get("messageText"), "").trim(), 500);
             if (!text.isBlank()) {
                 contextLines.add(role + ": " + text);
+            }
+            String alertContextLine = alertEventContextLine(parseJsonMap(row.get("contextJson")));
+            if (!alertContextLine.isBlank()) {
+                contextLines.add("ASSISTANT_CONTEXT: " + alertContextLine);
             }
         }
         if (contextLines.isEmpty()) {
@@ -1011,7 +1477,8 @@ public class ChatConversationService {
             }
             visited.add(currentTurnId);
             List<Map<String, Object>> found = jdbcTemplate.queryForList("""
-                    SELECT id, parent_turn_id AS parentTurnId, role, message_text AS messageText
+                    SELECT id, parent_turn_id AS parentTurnId, role, message_text AS messageText,
+                           context_json AS contextJson
                       FROM is_chat_conversation_turn
                      WHERE conversation_id = ? AND id = ?
                      LIMIT 1
@@ -1320,6 +1787,10 @@ public class ChatConversationService {
         artifact.put("message", result.get("message"));
         artifact.put("sql", result.get("sql"));
         artifact.put("data", result.get("data"));
+        artifact.put("tableColumns", result.get("tableColumns"));
+        artifact.put("alertEvent", result.get("alertEvent"));
+        artifact.put("alertEvents", result.get("alertEvents"));
+        artifact.put("alertEventSummary", result.get("alertEventSummary"));
         artifact.put("riskLevel", result.getOrDefault("riskLevel", "SAFE"));
         artifact.put("riskReason", result.getOrDefault("riskReason", ""));
         artifact.put("sensitiveFields", result.getOrDefault("sensitiveFields", List.of()));
@@ -1333,6 +1804,7 @@ public class ChatConversationService {
         artifact.put("actionPlan", result.get("actionPlan"));
         artifact.put("stepResults", result.get("stepResults"));
         artifact.put("multiStepSummary", result.get("multiStepSummary"));
+        artifact.put("smartRouteAudit", result.get("smartRouteAudit"));
         artifact.put("alertRuleDraft", result.get("alertRuleDraft"));
         return artifact;
     }

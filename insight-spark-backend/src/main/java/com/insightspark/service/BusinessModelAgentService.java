@@ -63,7 +63,7 @@ public class BusinessModelAgentService {
                     activeBusinessModelId, lastCreatedBusinessModelId, lastAppliedBusinessModelId);
         }
         if (looksLikePatch(question)) {
-            return patchCurrentModel(question, tableName, userModels, activeBusinessModelId, lastCreatedBusinessModelId, lastAppliedBusinessModelId);
+            return patchCurrentModel(question, tableName, request, userModels, activeBusinessModelId, lastCreatedBusinessModelId, lastAppliedBusinessModelId);
         }
         if (looksLikeExplain(question)) {
             return focusCurrentModel(question, tableName, userModels, activeBusinessModelId, lastCreatedBusinessModelId, lastAppliedBusinessModelId);
@@ -124,14 +124,24 @@ public class BusinessModelAgentService {
         String requirement = trim(Objects.toString(request.getOrDefault("requirement", question), ""));
         List<Map<String, Object>> previewRows = safeList(dataUploadService.preview(targetTableName, 1, 5));
         final String fallbackRequirement = requirement;
+        Map<String, Object> modelOptions = modelOptions(request);
 
-        Map<String, Object> semantic = pythonAiService.businessModelSemantic(
-                question,
-                requirement,
-                targetTableName,
-                dataUploadService.listFields(targetTableName),
-                previewRows
-        ).orElseGet(() -> buildBusinessModelSemanticFallback(question, fallbackRequirement, targetTableName));
+        Map<String, Object> semantic = (modelOptions.isEmpty()
+                ? pythonAiService.businessModelSemantic(
+                        question,
+                        requirement,
+                        targetTableName,
+                        dataUploadService.listFields(targetTableName),
+                        previewRows
+                )
+                : pythonAiService.businessModelSemantic(
+                        question,
+                        requirement,
+                        targetTableName,
+                        dataUploadService.listFields(targetTableName),
+                        previewRows,
+                        modelOptions
+                )).orElseGet(() -> buildBusinessModelSemanticFallback(question, fallbackRequirement, targetTableName));
 
         String semanticRequirement = trim(Objects.toString(semantic.getOrDefault("requirement", requirement), ""));
         if (!semanticRequirement.isBlank()) {
@@ -291,6 +301,7 @@ public class BusinessModelAgentService {
 
     private Map<String, Object> patchCurrentModel(String question,
                                                   String tableName,
+                                                  Map<String, Object> request,
                                                   List<Map<String, Object>> userModels,
                                                   Long activeBusinessModelId,
                                                   Long lastCreatedBusinessModelId,
@@ -312,18 +323,32 @@ public class BusinessModelAgentService {
         List<Map<String, Object>> existingDictionaryEntries = safeListMap(modelJson.get("dictionaryEntries"));
         List<Map<String, Object>> existingMetricDefinitions = safeListMap(modelJson.get("metricDefinitions"));
         List<Map<String, Object>> existingDimensionDefinitions = safeListMap(modelJson.get("dimensionSystem"));
+        Map<String, Object> modelOptions = modelOptions(request);
 
-        Map<String, Object> patch = pythonAiService.businessModelPatch(
-                question,
-                resolvedTableName,
-                trim(Objects.toString(detail.get("modelName"), "")),
-                trim(Objects.toString(detail.get("modelRequirement"), "")),
-                existingDictionaryEntries,
-                existingMetricDefinitions,
-                existingDimensionDefinitions,
-                fields,
-                previewRows
-        ).orElseGet(() -> buildBusinessModelPatchFallback(question));
+        Map<String, Object> patch = (modelOptions.isEmpty()
+                ? pythonAiService.businessModelPatch(
+                        question,
+                        resolvedTableName,
+                        trim(Objects.toString(detail.get("modelName"), "")),
+                        trim(Objects.toString(detail.get("modelRequirement"), "")),
+                        existingDictionaryEntries,
+                        existingMetricDefinitions,
+                        existingDimensionDefinitions,
+                        fields,
+                        previewRows
+                )
+                : pythonAiService.businessModelPatch(
+                        question,
+                        resolvedTableName,
+                        trim(Objects.toString(detail.get("modelName"), "")),
+                        trim(Objects.toString(detail.get("modelRequirement"), "")),
+                        existingDictionaryEntries,
+                        existingMetricDefinitions,
+                        existingDimensionDefinitions,
+                        fields,
+                        previewRows,
+                        modelOptions
+                )).orElseGet(() -> buildBusinessModelPatchFallback(question));
 
         List<Map<String, Object>> normalizedOperations = normalizeSemanticPatchOperations(
                 question,
@@ -2022,6 +2047,29 @@ public class BusinessModelAgentService {
         String value = trim(text).toLowerCase(Locale.ROOT);
         value = value.replaceAll("[\\s，。；、：:,.!?！？“”\"'（）()【】\\[\\]{}<>《》·`~|\\\\/+=-]", "");
         return value;
+    }
+
+    private Map<String, Object> modelOptions(Map<String, Object> request) {
+        if (request == null || request.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Object> options = new LinkedHashMap<>();
+        putModelOption(options, "modelId", request.get("modelId"));
+        putModelOption(options, "modelName", request.get("modelName"));
+        putModelOption(options, "modelCategory", request.get("modelCategory"));
+        putModelOption(options, "temperature", request.get("temperature"));
+        putModelOption(options, "timeoutSeconds", request.get("timeoutSeconds"));
+        return options.isEmpty() ? Map.of() : options;
+    }
+
+    private void putModelOption(Map<String, Object> target, String key, Object value) {
+        if (value == null) {
+            return;
+        }
+        if (value instanceof String text && text.trim().isEmpty()) {
+            return;
+        }
+        target.put(key, value);
     }
 
     private String trim(String text) {

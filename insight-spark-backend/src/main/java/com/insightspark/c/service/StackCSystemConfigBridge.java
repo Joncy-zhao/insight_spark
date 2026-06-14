@@ -385,7 +385,7 @@ public class StackCSystemConfigBridge {
                 return String.valueOf(model);
             }
         }
-        return fallback != null && !fallback.isBlank() ? fallback : "gpt-4";
+        return fallback != null && !fallback.isBlank() ? fallback : "";
     }
 
     private String resolveProvider(List<Map<String, Object>> models, String fallback) {

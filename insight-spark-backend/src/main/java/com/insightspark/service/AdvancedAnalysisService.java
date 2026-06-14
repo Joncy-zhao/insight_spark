@@ -670,6 +670,22 @@ public class AdvancedAnalysisService {
         return alertRuleDetail(id);
     }
 
+    public Map<String, Object> batchUpdateAlertRuleStatus(List<Long> ids, Map<String, Object> request) {
+        List<Long> normalizedIds = normalizeIds(ids);
+        if (normalizedIds.isEmpty()) {
+            throw new IllegalArgumentException("请选择需要更新的预警规则");
+        }
+        String status = normalizeAlertRuleStatus(text(request.getOrDefault("status", "ACTIVE")));
+        int updated = updateAlertRuleStatusByIds(normalizedIds, status);
+        return Map.of(
+                "ids", normalizedIds,
+                "status", status,
+                "requested", normalizedIds.size(),
+                "updated", updated,
+                "skipped", Math.max(0, normalizedIds.size() - updated)
+        );
+    }
+
     public Map<String, Object> deleteAlertRule(long id) {
         int updated = jdbcTemplate.update("""
                 UPDATE is_advanced_alert_rule
@@ -680,6 +696,21 @@ public class AdvancedAnalysisService {
             throw new IllegalArgumentException("预警规则不存在或无权操作");
         }
         return Map.of("id", id, "status", "DELETED");
+    }
+
+    public Map<String, Object> batchDeleteAlertRules(List<Long> ids) {
+        List<Long> normalizedIds = normalizeIds(ids);
+        if (normalizedIds.isEmpty()) {
+            throw new IllegalArgumentException("请选择需要删除的预警规则");
+        }
+        int updated = updateAlertRuleStatusByIds(normalizedIds, "DELETED");
+        return Map.of(
+                "ids", normalizedIds,
+                "status", "DELETED",
+                "requested", normalizedIds.size(),
+                "updated", updated,
+                "skipped", Math.max(0, normalizedIds.size() - updated)
+        );
     }
 
     public Map<String, Object> runAlertRuleDetection(Map<String, Object> request) {
@@ -751,27 +782,29 @@ public class AdvancedAnalysisService {
         long ruleId = parseLong(request.get("ruleId"), 0L);
         List<Object> args = new ArrayList<>();
         StringBuilder sql = new StringBuilder("""
-                SELECT id, rule_id AS ruleId, user_id AS userId, org_scope AS orgScope,
-                       table_name AS tableName,
-                       metric_field AS metricField, time_field AS timeField, bucket_name AS bucketName,
-                       actual_value AS actualValue, threshold_value AS threshold, operator, z_score AS zScore,
-                       baseline_value AS baselineValue, deviation_rate AS deviationRate, reason,
-                       chart_snapshot_json AS chartSnapshotJson, llm_explanation_json AS llmExplanationJson,
-                       explanation_note AS explanationNote, explanation_updated_at AS explanationUpdatedAt,
-                       status, ack_by AS ackBy,
-                       ack_at AS ackAt, closed_by AS closedBy, closed_at AS closedAt,
-                       handle_note AS handleNote, status_updated_at AS statusUpdatedAt,
-                       created_at AS createdAt
-                FROM is_advanced_alert_event
-                WHERE (user_id = ? OR ? = 'ADMIN')
+                SELECT e.id, e.rule_id AS ruleId, e.user_id AS userId, e.org_scope AS orgScope,
+                       COALESCE(r.rule_name, CONCAT('规则 #', e.rule_id)) AS ruleName,
+                       e.table_name AS tableName,
+                       e.metric_field AS metricField, e.time_field AS timeField, e.bucket_name AS bucketName,
+                       e.actual_value AS actualValue, e.threshold_value AS threshold, e.operator, e.z_score AS zScore,
+                       e.baseline_value AS baselineValue, e.deviation_rate AS deviationRate, e.reason,
+                       e.chart_snapshot_json AS chartSnapshotJson, e.llm_explanation_json AS llmExplanationJson,
+                       e.explanation_note AS explanationNote, e.explanation_updated_at AS explanationUpdatedAt,
+                       e.status, e.ack_by AS ackBy,
+                       e.ack_at AS ackAt, e.closed_by AS closedBy, e.closed_at AS closedAt,
+                       e.handle_note AS handleNote, e.status_updated_at AS statusUpdatedAt,
+                       e.created_at AS createdAt
+                FROM is_advanced_alert_event e
+                LEFT JOIN is_advanced_alert_rule r ON r.id = e.rule_id
+                WHERE (e.user_id = ? OR ? = 'ADMIN')
                 """);
         args.add(AuthContext.userId());
         args.add(AuthContext.role());
         if (ruleId > 0) {
-            sql.append(" AND rule_id = ?");
+            sql.append(" AND e.rule_id = ?");
             args.add(ruleId);
         }
-        sql.append(" ORDER BY created_at DESC, id DESC LIMIT 200");
+        sql.append(" ORDER BY e.created_at DESC, e.id DESC LIMIT 200");
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql.toString(), args.toArray());
         rows.forEach(this::parseAlertEventJsonFields);
         return rows;
@@ -980,6 +1013,21 @@ public class AdvancedAnalysisService {
             throw new IllegalArgumentException("方案不存在或无权操作");
         }
         return Map.of("id", id, "status", "DELETED");
+    }
+
+    public Map<String, Object> batchDeletePlans(List<Long> ids) {
+        List<Long> normalizedIds = normalizeIds(ids);
+        if (normalizedIds.isEmpty()) {
+            throw new IllegalArgumentException("请选择需要删除的方案");
+        }
+        int updated = updatePlanStatusByIds(normalizedIds, "DELETED");
+        return Map.of(
+                "ids", normalizedIds,
+                "status", "DELETED",
+                "requested", normalizedIds.size(),
+                "updated", updated,
+                "skipped", Math.max(0, normalizedIds.size() - updated)
+        );
     }
 
     public Map<String, Object> renamePlan(long id, Map<String, Object> request) {
@@ -2784,18 +2832,21 @@ public class AdvancedAnalysisService {
 
     private Map<String, Object> alertEventDetail(long id) {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
-                SELECT id, rule_id AS ruleId, user_id AS userId, org_scope AS orgScope, table_name AS tableName,
-                       metric_field AS metricField, time_field AS timeField, bucket_name AS bucketName,
-                       actual_value AS actualValue, threshold_value AS threshold, operator, z_score AS zScore,
-                       baseline_value AS baselineValue, deviation_rate AS deviationRate, reason,
-                       chart_snapshot_json AS chartSnapshotJson, llm_explanation_json AS llmExplanationJson,
-                       explanation_note AS explanationNote, explanation_updated_at AS explanationUpdatedAt,
-                       status, ack_by AS ackBy,
-                       ack_at AS ackAt, closed_by AS closedBy, closed_at AS closedAt,
-                       handle_note AS handleNote, status_updated_at AS statusUpdatedAt,
-                       created_at AS createdAt
-                FROM is_advanced_alert_event
-                WHERE id = ? AND (user_id = ? OR ? = 'ADMIN')
+                SELECT e.id, e.rule_id AS ruleId, e.user_id AS userId, e.org_scope AS orgScope,
+                       COALESCE(r.rule_name, CONCAT('规则 #', e.rule_id)) AS ruleName,
+                       e.table_name AS tableName,
+                       e.metric_field AS metricField, e.time_field AS timeField, e.bucket_name AS bucketName,
+                       e.actual_value AS actualValue, e.threshold_value AS threshold, e.operator, e.z_score AS zScore,
+                       e.baseline_value AS baselineValue, e.deviation_rate AS deviationRate, e.reason,
+                       e.chart_snapshot_json AS chartSnapshotJson, e.llm_explanation_json AS llmExplanationJson,
+                       e.explanation_note AS explanationNote, e.explanation_updated_at AS explanationUpdatedAt,
+                       e.status, e.ack_by AS ackBy,
+                       e.ack_at AS ackAt, e.closed_by AS closedBy, e.closed_at AS closedAt,
+                       e.handle_note AS handleNote, e.status_updated_at AS statusUpdatedAt,
+                       e.created_at AS createdAt
+                FROM is_advanced_alert_event e
+                LEFT JOIN is_advanced_alert_rule r ON r.id = e.rule_id
+                WHERE e.id = ? AND (e.user_id = ? OR ? = 'ADMIN')
                 LIMIT 1
                 """, id, AuthContext.userId(), AuthContext.role());
         if (rows.isEmpty()) {
@@ -4163,6 +4214,61 @@ public class AdvancedAnalysisService {
             return text;
         }
         return "ACTIVE";
+    }
+
+    private List<Long> normalizeIds(List<Long> ids) {
+        if (ids == null) {
+            return List.of();
+        }
+        return ids.stream()
+                .filter(Objects::nonNull)
+                .filter(id -> id > 0)
+                .distinct()
+                .toList();
+    }
+
+    private int updateAlertRuleStatusByIds(List<Long> ids, String status) {
+        List<Long> normalizedIds = normalizeIds(ids);
+        if (normalizedIds.isEmpty()) {
+            return 0;
+        }
+        String placeholders = normalizedIds.stream()
+                .map(id -> "?")
+                .collect(Collectors.joining(", "));
+        List<Object> args = new ArrayList<>();
+        args.add(status);
+        args.addAll(normalizedIds);
+        args.add(AuthContext.userId());
+        args.add(AuthContext.role());
+        return jdbcTemplate.update("""
+                UPDATE is_advanced_alert_rule
+                SET status = ?
+                WHERE id IN (%s)
+                  AND status <> 'DELETED'
+                  AND (user_id = ? OR ? = 'ADMIN')
+                """.formatted(placeholders), args.toArray());
+    }
+
+    private int updatePlanStatusByIds(List<Long> ids, String status) {
+        List<Long> normalizedIds = normalizeIds(ids);
+        if (normalizedIds.isEmpty()) {
+            return 0;
+        }
+        String placeholders = normalizedIds.stream()
+                .map(id -> "?")
+                .collect(Collectors.joining(", "));
+        List<Object> args = new ArrayList<>();
+        args.add(status);
+        args.addAll(normalizedIds);
+        args.add(AuthContext.userId());
+        args.add(AuthContext.role());
+        return jdbcTemplate.update("""
+                UPDATE is_advanced_analysis_plan
+                SET status = ?
+                WHERE id IN (%s)
+                  AND status <> 'DELETED'
+                  AND (user_id = ? OR ? = 'ADMIN')
+                """.formatted(placeholders), args.toArray());
     }
 
     private String normalizeAlertEventStatus(String value) {
