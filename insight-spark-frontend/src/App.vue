@@ -51,7 +51,7 @@
         </div>
       </el-header>
 
-      <el-main class="main-stage" :class="{ 'main-stage--dashboard': isDashboardFlushLayout }">
+      <el-main ref="mainStageRef" class="main-stage" :class="{ 'main-stage--dashboard': isDashboardFlushLayout }">
         <DataUploadView v-if="activeModule === 'upload'" />
         <ChatAnalysisView v-if="activeModule === 'chat'" />
         <PermissionCenterView v-if="isPermissionModule" />
@@ -67,11 +67,12 @@
         <BusinessCollaborationView v-if="activeModule === 'collaboration'" />
         <AdminWorkbenchView v-if="activeModule === 'adminWorkbench'" />
         <AdminDashboardView v-if="activeModule === 'adminDashboard'" />
+        <AdminUserPermissionManageView v-if="activeModule === 'userPermissionManage'" />
         <StackCSystemConfigView v-if="activeModule === 'stackCConfig'" />
         <AiChartRuleConfigView v-if="activeModule === 'aiChartRules'" />
         <PerformanceGovernanceView v-if="activeModule === 'performanceGovernance'" />
         <PlaceholderView
-            v-if="!['upload', 'chat', 'audit', 'adminChatHistory', 'adminChatQueryLab', 'permission', 'permissionAdmin', 'datasource', 'diagnosis', 'advancedAnalysis', 'knowledgeGraph', 'workbench', 'dashboard', 'collaboration', 'adminWorkbench', 'adminDashboard', 'stackCConfig', 'aiChartRules', 'performanceGovernance'].includes(activeModule)"
+            v-if="!['upload', 'chat', 'audit', 'adminChatHistory', 'adminChatQueryLab', 'permission', 'permissionAdmin', 'userPermissionManage', 'datasource', 'diagnosis', 'advancedAnalysis', 'knowledgeGraph', 'workbench', 'dashboard', 'collaboration', 'adminWorkbench', 'adminDashboard', 'stackCConfig', 'aiChartRules', 'performanceGovernance'].includes(activeModule)"
         />
       </el-main>
     </el-container>
@@ -161,6 +162,7 @@ import AiChartRuleConfigView from './views/admin/AiChartRuleConfigView.vue'
 import PerformanceGovernanceView from './views/admin/PerformanceGovernanceView.vue'
 import AdminWorkbenchView from './views/admin/AdminWorkbenchView.vue'
 import AdminDashboardView from './views/admin/AdminDashboardView.vue'
+import AdminUserPermissionManageView from './views/admin/AdminUserPermissionManageView.vue'
 import UserWorkbenchView from './views/user/UserWorkbenchView.vue'
 import UserDashboardView from './views/user/UserDashboardView.vue'
 import BusinessCollaborationView from './views/user/BusinessCollaborationView.vue'
@@ -197,6 +199,7 @@ const moduleIconMap = {
   chat: ChatDotRound,
   permission: Lock,
   permissionAdmin: Key,
+  userPermissionManage: Management,
   diagnosis: DocumentChecked,
   datasource: Connection,
   knowledgeGraph: Share,
@@ -246,6 +249,7 @@ const clearLastSelectedTable = () => {
 
 const datasourceHealthMap = ref({})
 const activeModule = ref('workbench')
+const mainStageRef = ref(null)
 const isAsideCollapsed = ref(false)
 const navigationTabs = ref([])
 const nextTabOrder = ref(1)
@@ -461,7 +465,7 @@ const handleChartResize = () => {
 
 const moduleTitle = computed(() => moduleMap[activeModule.value].title)
 const moduleSubtitle = computed(() => moduleMap[activeModule.value].subtitle)
-const isDashboardFlushLayout = computed(() => activeModule.value === 'dashboard' || activeModule.value === 'adminDashboard')
+const isDashboardFlushLayout = computed(() => activeModule.value === 'dashboard')
 const asideWidth = computed(() => isAsideCollapsed.value ? '64px' : '248px')
 const visibleMenuGroups = computed(() => {
   const role = currentUser.value?.role || 'USER'
@@ -2341,6 +2345,11 @@ watch(selectedTableName, async (tableName, prevTableName) => {
 
 watch(activeModule, async (moduleName) => {
   ensureNavigationTab(moduleName)
+  await nextTick()
+  if (mainStageRef.value) {
+    mainStageRef.value.scrollTop = 0
+    mainStageRef.value.scrollLeft = 0
+  }
 
   if (moduleName === 'chat') {
     await nextTick()

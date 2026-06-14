@@ -423,7 +423,19 @@ public class StackCDashboardService {
         result.put("privateCount", toLong(totals.get("privateCount")));
         result.put("totalViews", toLong(totals.get("totalViews")));
         result.put("topByViews", topByViews);
+        result.put("totalQueries", safeQueryCount("SELECT COUNT(*) FROM is_chat_query_history"));
+        result.put("totalCharts", safeQueryCount("SELECT COUNT(*) FROM is_chat_query_history WHERE chart_snapshot IS NOT NULL"));
+        result.put("totalUploads", safeQueryCount("SELECT COUNT(*) FROM is_data_table"));
         return result;
+    }
+
+    private long safeQueryCount(String sql) {
+        try {
+            Long value = jdbcTemplate.queryForObject(sql, Long.class);
+            return value == null ? 0L : value;
+        } catch (Exception ignored) {
+            return 0L;
+        }
     }
 
     private void enrichAdminGroupDisplay(Map<String, Object> row) {

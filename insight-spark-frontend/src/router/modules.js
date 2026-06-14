@@ -87,6 +87,13 @@ export const menuGroups = [
         subtitle: '数据源新增、编辑、连接测试、Schema 解析、字段中文注释、联邦库配置和权限绑定。'
       },
       {
+        key: 'userPermissionManage',
+        role: 'ADMIN',
+        index: '6',
+        title: '用户与权限管理',
+        subtitle: '一个菜单内管理用户、角色、RBAC 权限、数据授权、字段级规则和权限预览。'
+      },
+      {
         key: 'permissionAdmin',
         role: 'ADMIN',
         index: '6',
