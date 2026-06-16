@@ -1,13 +1,43 @@
 <template>
   <div class="dc-root">
     <div v-if="title && !hideTitle" class="dc-title">{{ title }}</div>
+
+    <div v-if="isTableView" class="dc-table-wrap">
+      <el-table
+        :data="tableRows"
+        border
+        :stripe="tableStripe"
+        height="100%"
+        table-layout="fixed"
+        empty-text="暂无明细数据"
+        :class="['dc-table', { 'dc-table--compact': tableBodyFontSize <= 11 }]"
+        :style="tableStyleVars"
+      >
+        <el-table-column
+          v-for="column in tableColumns"
+          :key="column.prop"
+          :prop="column.prop"
+          :label="column.label"
+          min-width="96"
+          show-overflow-tooltip
+        />
+      </el-table>
+    </div>
+
+    <div v-else-if="isMetricView" class="dc-metric" :style="metricStyleVars">
+      <div class="dc-metric-value">{{ metricDisplay.value }}</div>
+      <div class="dc-metric-label">{{ metricDisplay.label }}</div>
+    </div>
+
     <div
+      v-else
       ref="host"
       class="dc-host"
       @mousedown.stop
       @touchstart.stop
       @pointerdown.stop
     />
+
     <div v-if="!hasData" class="dc-empty">暂无图表数据</div>
   </div>
 </template>
@@ -15,7 +45,18 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as echarts from 'echarts'
-import { buildOptionFromHistoryRow, normalizeInteractiveDataZoom, resolveDynamicRefreshInterval } from '../../utils/chartOptionFromSnapshot.js'
+import {
+  buildOptionFromHistoryRow,
+  normalizeChartType,
+  normalizeInteractiveDataZoom,
+  resolveDynamicRefreshInterval
+} from '../../utils/chartOptionFromSnapshot.js'
+import { mergeChartStyle } from '../../utils/chartUiConfig.js'
+import {
+  snapshotMetricDisplay,
+  snapshotTableColumns,
+  snapshotTableRows
+} from '../../utils/dashboardChartSnapshotView.js'
 
 const props = defineProps({
   /** charts-batch 返回的单行 */
@@ -35,8 +76,38 @@ let chart = null
 let resizeObserver = null
 let refreshTimer = null
 
+const chartType = computed(() => {
+  const snap = props.payload?.chartSnapshot
+  const obj = typeof snap === 'object' && snap ? snap : {}
+  return normalizeChartType(props.payload?.chartType || obj.chartType)
+})
+
+const chartStyle = computed(() => mergeChartStyle(props.chartUi?.chartStyle))
+
+const isTableView = computed(() => chartType.value === 'table')
+const isMetricView = computed(() => chartType.value === 'metric')
+const isEchartsView = computed(() => !isTableView.value && !isMetricView.value)
+
+const tableRows = computed(() => snapshotTableRows(props.payload))
+const tableColumns = computed(() => snapshotTableColumns(props.payload))
+const tableStripe = computed(() => chartStyle.value.tableStripe !== false)
+const tableBodyFontSize = computed(() => Number(chartStyle.value.tableBodyFontSize) || 12)
+const tableHeaderFontSize = computed(() => Number(chartStyle.value.tableHeaderFontSize) || 12)
+
+const tableStyleVars = computed(() => ({
+  '--dc-table-header-size': `${tableHeaderFontSize.value}px`,
+  '--dc-table-body-size': `${tableBodyFontSize.value}px`
+}))
+
+const metricDisplay = computed(() => snapshotMetricDisplay(props.payload))
+const metricStyleVars = computed(() => ({
+  '--dc-metric-value-size': `${Number(chartStyle.value.metricValueFontSize) || 36}px`,
+  '--dc-metric-label-size': `${Number(chartStyle.value.metricLabelFontSize) || 13}px`,
+  '--dc-metric-value-color': chartStyle.value.metricValueColor || '#0f172a'
+}))
+
 function bindResizeObserver() {
-  if (typeof ResizeObserver === 'undefined') return
+  if (typeof ResizeObserver === 'undefined' || !isEchartsView.value) return
   resizeObserver?.disconnect()
   const el = host.value
   if (!el) return
@@ -55,6 +126,8 @@ const title = computed(() => {
 })
 
 const hasData = computed(() => {
+  if (isTableView.value) return tableRows.value.length > 0
+  if (isMetricView.value) return metricDisplay.value.value !== '—'
   if (props.payload?.option && typeof props.payload.option === 'object') return true
   const snap = props.payload?.chartSnapshot
   if (typeof snap === 'object' && snap && Array.isArray(snap.data)) return snap.data.length > 0
@@ -66,7 +139,22 @@ const hasData = computed(() => {
   }
 })
 
+function disposeChart() {
+  if (chart) {
+    try {
+      chart.dispose()
+    } catch {
+      // ignore
+    }
+    chart = null
+  }
+}
+
 const render = () => {
+  if (!isEchartsView.value) {
+    disposeChart()
+    return
+  }
   if (!host.value) return
   if (!hasData.value) {
     chart?.clear?.()
@@ -75,13 +163,16 @@ const render = () => {
   if (!chart) {
     chart = echarts.getInstanceByDom(host.value) || echarts.init(host.value)
   }
-  const option = props.payload?.option && typeof props.payload.option === 'object'
-    ? props.payload.option
-    : buildOptionFromHistoryRow(props.payload, props.chartUi || {})
+  const ui = props.chartUi || {}
+  const option = buildOptionFromHistoryRow(props.payload, ui)
+  if (!option) {
+    chart?.clear?.()
+    return
+  }
   if (Array.isArray(option?.dataZoom) && option.dataZoom.length) {
     option.dataZoom = normalizeInteractiveDataZoom(option.dataZoom)
   }
-  chart.setOption(option, true)
+  chart.setOption(option, { notMerge: true })
   chart.resize()
   scheduleDynamicRefresh(resolveDynamicRefreshInterval(option))
 }
@@ -96,7 +187,12 @@ function scheduleDynamicRefresh(seconds) {
   refreshTimer = window.setInterval(() => emit('refresh'), intervalSeconds * 1000)
 }
 
-watch(() => [props.payload, props.chartUi], render, { deep: true })
+watch(() => [props.payload, props.chartUi, chartType.value], () => {
+  nextTick(() => {
+    render()
+    bindResizeObserver()
+  })
+}, { deep: true })
 
 watch(host, () => {
   nextTick(() => bindResizeObserver())
@@ -116,14 +212,7 @@ onBeforeUnmount(() => {
     refreshTimer = null
   }
   window.removeEventListener('resize', render)
-  if (chart) {
-    try {
-      chart.dispose()
-    } catch {
-      // ignore
-    }
-    chart = null
-  }
+  disposeChart()
 })
 </script>
 
@@ -145,6 +234,46 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 120px;
   width: 100%;
+}
+.dc-table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.dc-table :deep(.el-table__header th.el-table__cell) {
+  font-size: var(--dc-table-header-size, 12px);
+  padding: 6px 0;
+}
+.dc-table :deep(.el-table__body td.el-table__cell) {
+  font-size: var(--dc-table-body-size, 12px);
+  padding: 5px 0;
+}
+.dc-table--compact :deep(.el-table__body td.el-table__cell) {
+  padding: 3px 0;
+}
+.dc-metric {
+  flex: 1;
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px;
+  text-align: center;
+}
+.dc-metric-value {
+  font-size: var(--dc-metric-value-size, 36px);
+  font-weight: 700;
+  color: var(--dc-metric-value-color, #0f172a);
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
+.dc-metric-label {
+  font-size: var(--dc-metric-label-size, 13px);
+  color: #64748b;
+  line-height: 1.4;
 }
 .dc-empty {
   flex: 1;

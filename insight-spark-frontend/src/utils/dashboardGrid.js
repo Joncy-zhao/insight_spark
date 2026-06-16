@@ -2,6 +2,11 @@
 
 import { sanitizeSeriesItemStylesForApi, normalizeChartType } from './chartOptionFromSnapshot.js'
 import {
+  chartUiFromGridItem,
+  cloneChartFieldsForApi,
+  ensureLayoutOrigin
+} from './chartUiConfig.js'
+import {
   DASHBOARD_GRID_COL_NUM,
   DASHBOARD_GRID_DEFAULT_ITEM_H,
   DASHBOARD_GRID_DEFAULT_ITEM_W,
@@ -13,6 +18,8 @@ import {
   serializeWidgetFieldsForApi,
   isBasicWidgetItem
 } from './dashboardWidgetVideo.js'
+
+export { chartUiFromGridItem }
 import { basicWidgetLabelForItem, resolveBasicWidgetEntry } from './dashboardBasicWidgetRegistry.js'
 
 export {
@@ -296,12 +303,11 @@ export function cloneLayoutForGrid(items, gridCols = DASHBOARD_GRID_COL_NUM) {
     }
     const t = String(it.title ?? '').trim()
     if (t) row.title = t
-    const bc = String(it.barColor ?? '').trim()
-    if (bc) row.barColor = bc
-    const bmw = Number(it.barMaxWidth)
-    if (Number.isFinite(bmw) && bmw >= 8 && bmw <= 160) row.barMaxWidth = Math.round(bmw)
-    const sis = sanitizeSeriesItemStylesForApi(it.seriesItemStyles)
-    if (sis) row.seriesItemStyles = sis
+    Object.assign(row, cloneChartFieldsForApi(it))
+    if (!row.layoutOrigin) {
+      const lo = ensureLayoutOrigin(it)
+      if (lo) row.layoutOrigin = lo
+    }
     Object.assign(row, cloneWidgetFieldsFromItem(it))
     return row
   })
@@ -354,12 +360,7 @@ export function serializeLayoutForApi(items, cards, canvasStyle) {
     if (it.static) o.static = true
     const t = String(it.title ?? '').trim()
     if (t) o.title = t
-    const bc = String(it.barColor ?? '').trim()
-    if (bc) o.barColor = bc
-    const bmw = Number(it.barMaxWidth)
-    if (Number.isFinite(bmw) && bmw >= 8 && bmw <= 160) o.barMaxWidth = Math.round(bmw)
-    const sis = sanitizeSeriesItemStylesForApi(it.seriesItemStyles)
-    if (sis) o.seriesItemStyles = sis
+    Object.assign(o, cloneChartFieldsForApi(it))
     Object.assign(o, serializeWidgetFieldsForApi(it))
     return o
   })
@@ -411,18 +412,6 @@ export function mergeGridItemsWithComponents(layoutItems, components, gridCols =
 }
 
 /** layout_json.items 上与 DashboardChart 一致的 UI 覆盖（柱色、柱宽、分项色） */
-export function chartUiFromGridItem(item) {
-  if (!item || typeof item !== 'object') return {}
-  const o = {}
-  const c = String(item.barColor || '').trim()
-  if (c) o.barColor = c
-  const w = Number(item.barMaxWidth)
-  if (Number.isFinite(w) && w >= 8) o.barMaxWidth = w
-  const sis = item.seriesItemStyles
-  if (sis && typeof sis === 'object' && Object.keys(sis).length) o.seriesItemStyles = sis
-  return o
-}
-
 function parseMaybeJson(raw) {
   if (!raw) return {}
   if (typeof raw === 'object') return raw

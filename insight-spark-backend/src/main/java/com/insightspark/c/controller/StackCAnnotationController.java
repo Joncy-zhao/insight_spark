@@ -8,6 +8,8 @@ import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -37,8 +39,10 @@ public class StackCAnnotationController {
     }
 
     @GetMapping("/annotations/by-dashboard/{dashboardId}")
-    public ApiResponse<List<Map<String, Object>>> listAnnotationsByDashboard(@PathVariable long dashboardId) {
-        return ApiResponse.success(annotationService.listAnnotationsForDashboard(dashboardId));
+    public ApiResponse<List<Map<String, Object>>> listAnnotationsByDashboard(
+            @PathVariable long dashboardId,
+            @RequestParam(defaultValue = "false") boolean includeHidden) {
+        return ApiResponse.success(annotationService.listAnnotationsForDashboard(dashboardId, includeHidden));
     }
 
     @PostMapping("/annotations")
@@ -65,6 +69,39 @@ public class StackCAnnotationController {
                 collabWebSocketBroadcaster.broadcastAnnotationDeleted(dashboardId, id);
             }
             return ApiResponse.success("已删除", null);
+        } catch (IllegalArgumentException e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    @PutMapping("/annotations/{id}")
+    public ApiResponse<Map<String, Object>> updateAnnotation(@PathVariable long id, @RequestBody Map<String, Object> body) {
+        try {
+            Map<String, Object> updated = annotationService.updateAnnotation(id, body);
+            long dashboardId = resolveDashboardBroadcastId(updated);
+            if (dashboardId > 0) {
+                collabWebSocketBroadcaster.broadcastAnnotationUpdated(dashboardId, updated);
+            }
+            return ApiResponse.success("批注已更新", updated);
+        } catch (IllegalArgumentException e) {
+            return ApiResponse.badRequest(e.getMessage());
+        }
+    }
+
+    @PatchMapping("/annotations/{id}/hidden")
+    @PutMapping("/annotations/{id}/hidden")
+    public ApiResponse<Map<String, Object>> setAnnotationHidden(
+            @PathVariable long id,
+            @RequestBody Map<String, Object> body) {
+        try {
+            boolean hidden = Boolean.TRUE.equals(body.get("hidden"))
+                    || "true".equalsIgnoreCase(String.valueOf(body.getOrDefault("hidden", false)));
+            Map<String, Object> updated = annotationService.setAnnotationHidden(id, hidden);
+            long dashboardId = resolveDashboardBroadcastId(updated);
+            if (dashboardId > 0) {
+                collabWebSocketBroadcaster.broadcastAnnotationUpdated(dashboardId, updated);
+            }
+            return ApiResponse.success(hidden ? "批注已隐藏" : "批注已显示", updated);
         } catch (IllegalArgumentException e) {
             return ApiResponse.badRequest(e.getMessage());
         }

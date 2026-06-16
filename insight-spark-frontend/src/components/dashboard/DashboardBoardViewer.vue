@@ -31,12 +31,16 @@
       :selectable="selectable"
       :active-item-id="activeItemId"
       :item-badges="itemBadges"
-      :board-annotation-count="boardAnnotationCount"
+      :pending-selection-rect="pendingSelectionRect"
+      :annotation-overlays-by-item-id="annotationOverlaysByItemId"
+      :focused-annotation-id="focusedAnnotationId"
+      :show-selection-overlays="showSelectionOverlays"
       @select-item="(payload) => emit('select-item', payload)"
+      @box-select="(payload) => emit('box-select', payload)"
     />
   </el-dialog>
 
-  <div v-else class="dbv-embedded-root" v-loading="loading">
+  <div v-else class="dbv-embedded-root" :class="{ 'dbv-embedded-root--collab': selectable }" v-loading="loading">
     <DashboardBoardBody
       v-model:grid-layout="gridLayout"
       :board="board"
@@ -50,8 +54,12 @@
       :selectable="selectable"
       :active-item-id="activeItemId"
       :item-badges="itemBadges"
-      :board-annotation-count="boardAnnotationCount"
+      :pending-selection-rect="pendingSelectionRect"
+      :annotation-overlays-by-item-id="annotationOverlaysByItemId"
+      :focused-annotation-id="focusedAnnotationId"
+      :show-selection-overlays="showSelectionOverlays"
       @select-item="(payload) => emit('select-item', payload)"
+      @box-select="(payload) => emit('box-select', payload)"
     />
   </div>
 </template>
@@ -68,6 +76,7 @@ import {
   parseDashboardLayout,
   buildCanvasStageInlineStyle
 } from '../../utils/dashboardGrid.js'
+import { buildCollabNodesFromBoard, buildChartContextMap } from '../../utils/collabAnnotation.js'
 import DashboardBoardBody from './DashboardBoardBody.vue'
 
 const props = defineProps({
@@ -87,7 +96,10 @@ const props = defineProps({
   selectable: { type: Boolean, default: false },
   activeItemId: { type: [String, Number], default: null },
   itemBadges: { type: Object, default: () => ({}) },
-  boardAnnotationCount: { type: Number, default: 0 },
+  pendingSelectionRect: { type: Object, default: null },
+  annotationOverlaysByItemId: { type: Object, default: () => ({}) },
+  focusedAnnotationId: { type: [String, Number], default: null },
+  showSelectionOverlays: { type: Boolean, default: true },
   /**
    * 预填充数据则跳过接口拉取：{ board, components, chartPayloadById }
    * chartPayloadById: Record<string, historyRow>
@@ -95,7 +107,7 @@ const props = defineProps({
   prefetch: { type: Object, default: null }
 })
 
-const emit = defineEmits(['update:modelValue', 'select-item'])
+const emit = defineEmits(['update:modelValue', 'select-item', 'box-select', 'nodes-ready', 'chart-contexts-ready'])
 
 const innerVisible = computed({
   get: () => props.modelValue,
@@ -117,6 +129,31 @@ const legacyPreviewCards = computed(() => {
   return extractLegacyChartCards(board.value.layoutJson, 'board-viewer')
 })
 
+function emitNodesReady() {
+  if (!board.value?.id) return
+  emit('nodes-ready', {
+    nodes: buildCollabNodesFromBoard(
+      board.value,
+      gridLayout.value,
+      components.value,
+      chartPayloadById.value,
+      legacyPreviewCards.value
+    )
+  })
+}
+
+function emitChartContextsReady() {
+  if (!board.value?.id) return
+  emit('chart-contexts-ready', {
+    map: buildChartContextMap(gridLayout.value, components.value, chartPayloadById.value)
+  })
+}
+
+function emitBoardMetaReady() {
+  emitNodesReady()
+  emitChartContextsReady()
+}
+
 function applyPrefetch(p) {
   if (!p?.board) return
   board.value = p.board
@@ -130,6 +167,7 @@ function applyPrefetch(p) {
     components.value,
     parsed.gridCols
   )
+  nextTick().then(() => emitBoardMetaReady())
 }
 
 function resetState() {
@@ -189,6 +227,7 @@ async function loadBoard() {
   )
   await loadChartPayloads()
   await nextTick()
+  emitBoardMetaReady()
   window.dispatchEvent(new Event('resize'))
 }
 
@@ -281,6 +320,12 @@ watch(
 .dbv-embedded-root {
   min-height: 200px;
   width: 100%;
+}
+.dbv-embedded-root--collab {
+  height: 100%;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 </style>
 

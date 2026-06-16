@@ -10,9 +10,30 @@
     <template #header>
       <div class="dge-head">
         <div class="dge-title">
-          <span>设计看板 · {{ board?.name || '看板' }}</span>
-          <el-tag v-if="saveAsMode" size="small" type="warning">他人公共看板 · 须另存为</el-tag>
-          <el-tag v-else size="small" type="info">grid-layout-plus · 24 列</el-tag>
+          <span class="dge-title-badge">设计看板</span>
+          <div class="dge-title-main">
+            <div class="dge-title-board-row">
+              <h2 class="dge-title-board" :title="boardDisplayName">{{ boardDisplayName }}</h2>
+              <div v-if="board" class="dge-title-tags">
+                <el-tag size="small" :type="boardIsPublicTag ? 'warning' : 'info'" effect="plain">
+                  {{ boardVisibilityText }}
+                </el-tag>
+                <el-tag v-if="boardIsCopyTag" size="small" effect="plain">副本</el-tag>
+                <el-tag v-if="saveAsMode" size="small" type="warning" effect="plain">只读 · 须另存为</el-tag>
+                <el-tooltip
+                  v-if="saveAsMode"
+                  placement="bottom"
+                  :show-after="200"
+                  popper-class="dge-help-popper"
+                >
+                  <template #content>
+                    <p class="dge-help-tip">{{ saveAsReadonlyTip }}</p>
+                  </template>
+                  <span class="dge-help" tabindex="0" aria-label="只读说明">?</span>
+                </el-tooltip>
+              </div>
+            </div>
+          </div>
         </div>
         <div class="dge-actions">
           <el-button
@@ -46,41 +67,6 @@
     </template>
 
     <div v-if="board" class="dge-body">
-      <el-alert
-        v-if="saveAsMode"
-        type="warning"
-        show-icon
-        :closable="false"
-        class="dge-save-as-alert"
-        title="他人已发布公共看板为只读预览"
-        description="您不是该看板的所有者或另存人，移动、拖拽、增删组件等操作均不可用。任何修改须点击右上角「另存为」保存副本，原看板不会被直接覆盖。"
-      />
-      <template v-if="!gridLayout.length">
-        <el-alert type="warning" show-icon :closable="false" class="dge-alert">
-          <template #title>为什么列表里显示有图表，这里却是空的？</template>
-          <p class="dge-alert-p">
-            「图表卡片」列统计的是 <strong>layout_json.cards</strong>（旧版把数据嵌在 JSON 里）。
-            网格编排依赖 <strong>is_dashboard_component</strong> 表 + <strong>layout_json.items</strong>
-            （钉入成功后由后端写入）。若只有 cards、没有组件表记录，就会出现「有数字但不能拖格子」。
-          </p>
-          <p v-if="legacyPreviewCards.length" class="dge-alert-p">
-            下面是你当前 JSON 里嵌的图表（只读预览）。请在左侧<strong>已钉图表</strong>点「加入画布」，或到<strong>对话查询</strong>先<strong>钉入看板</strong>（带
-            <code>chartId</code>）。
-          </p>
-          <p v-else class="dge-alert-p">
-            当前既没有 <code>items</code>，也没有可渲染的 <code>cards</code>。请先在<strong>对话查询</strong>将图表<strong>钉入本看板</strong>，再在左侧列表加入画布。
-          </p>
-        </el-alert>
-        <el-alert
-          v-if="legacyPreviewCards.length"
-          type="info"
-          show-icon
-          :closable="false"
-          class="dge-legacy-tip"
-          title="当前为旧版「内嵌数据」预览，不支持拖拽改位置。"
-          description="请从左侧「已钉入看板的图表」加入画布，或先在对话查询中钉入看板。"
-        />
-      </template>
       <div
         ref="workbenchRef"
         class="dge-workbench"
@@ -95,39 +81,79 @@
           class="dge-side"
           :style="{ width: `${sidePanelWidth}px` }"
         >
-          <div class="dge-side-head-row">
-            <div class="dge-side-head">本看板已钉图表</div>
-            <el-button size="small" type="primary" plain @click="openChartLibrary">图表库</el-button>
+          <div class="dge-side-header">
+            <div class="dge-side-head-text">
+              <span class="dge-side-head-title">
+                已钉图表
+                <el-tooltip
+                  v-if="!gridLayout.length"
+                  placement="right"
+                  :show-after="200"
+                  popper-class="dge-help-popper"
+                >
+                  <template #content>
+                    <p class="dge-help-tip">{{ emptyCanvasTip }}</p>
+                  </template>
+                  <span class="dge-help" tabindex="0" aria-label="画布为空说明">?</span>
+                </el-tooltip>
+              </span>
+              <span class="dge-side-head-sub">共 {{ displayedPinnedLibrary.length }} 项</span>
+            </div>
+            <button type="button" class="dge-side-lib-btn" @click="openChartLibrary">
+              <el-icon :size="14"><Collection /></el-icon>
+              <span>图表库</span>
+            </button>
           </div>
           <div class="dge-side-search">
             <el-input
               v-model="historyKeyword"
               clearable
               size="small"
-              placeholder="筛选名称"
+              placeholder="搜索图表名称"
+              :prefix-icon="Search"
             />
           </div>
           <div v-loading="sideListLoading" class="dge-side-list">
-            <div v-for="h in displayedPinnedLibrary" :key="h.id" class="dge-side-row">
-              <div v-if="isChartInGridLayout(h.id)" class="dge-side-row-status">
-                <el-tag size="small" type="success" effect="light">已在画布</el-tag>
+            <article
+              v-for="h in displayedPinnedLibrary"
+              :key="h.id"
+              :class="['dge-side-card', { 'is-on-canvas': isChartInGridLayout(h.id) }]"
+            >
+              <div class="dge-side-card-top">
+                <span :class="['dge-side-type', `dge-side-type--${h.chartType || 'bar'}`]">
+                  {{ sideChartTypeLabel(h.chartType) }}
+                </span>
+                <span v-if="isChartInGridLayout(h.id)" class="dge-side-status">画布中</span>
               </div>
-              <div class="dge-side-q">{{ h.question || h.queryText || '（无摘要）' }}</div>
-              <el-button
-                size="small"
-                type="primary"
-                :plain="isChartInGridLayout(h.id)"
-                :disabled="saveAsMode"
-                :loading="pinningId === h.id"
+              <h4 class="dge-side-card-title" :title="h.question || h.queryText">
+                {{ h.question || h.queryText || '（无摘要）' }}
+              </h4>
+              <p v-if="h.tableName" class="dge-side-card-meta">{{ h.tableName }}</p>
+              <button
+                type="button"
+                class="dge-side-card-btn"
+                :class="isChartInGridLayout(h.id) ? 'is-remove' : 'is-add'"
+                :disabled="saveAsMode || pinningId === h.id"
                 @click="onPinnedLibraryAction(h)"
               >
-                {{ isChartInGridLayout(h.id) ? '从画布移除' : '加入画布' }}
-              </el-button>
-            </div>
+                <span v-if="pinningId === h.id" class="dge-side-card-btn-loading">处理中…</span>
+                <template v-else>
+                  <el-icon :size="14">
+                    <Remove v-if="isChartInGridLayout(h.id)" />
+                    <Plus v-else />
+                  </el-icon>
+                  <span>{{ isChartInGridLayout(h.id) ? '从画布移除' : '加入画布' }}</span>
+                </template>
+              </button>
+            </article>
             <el-empty
               v-if="!sideListLoading && !displayedPinnedLibrary.length"
-              description="本看板暂未钉入图表，请先在对话查询中钉入本看板"
-            />
+              :image-size="72"
+              description="暂未钉入图表"
+              class="dge-side-empty"
+            >
+              <p class="dge-side-empty-tip">请先在对话查询中将图表钉入本看板</p>
+            </el-empty>
           </div>
         </aside>
         <div
@@ -222,6 +248,8 @@
                   :editing="editingItemId === String(item.i)"
                   :title-draft="titleDraft"
                   :display-title="displayTitleForItem(item)"
+                  :title-style="cardTitleStyleForItem(item)"
+                  :card-style="cardChromeStyleForItem(item)"
                   :title-input-id="'dge-title-inp-' + item.i"
                   :can-edit="Boolean(payloadForItem(item))"
                   @select="selectGridItem(item)"
@@ -234,6 +262,7 @@
                 >
                   <DashboardChart
                     v-if="payloadForItem(item)"
+                    :key="chartRenderKeyForItem(item)"
                     :payload="payloadForItem(item)"
                     :chart-ui="chartUiForItem(item)"
                     hide-title
@@ -361,122 +390,33 @@
       </template>
     </el-dialog>
 
-    <el-drawer
+    <DashboardChartWidgetInspector
       v-model="inspectorOpen"
-      title="图表组件（对话查询产物）"
-      direction="rtl"
-      size="min(520px, 92vw)"
-      destroy-on-close
-      class="dge-inspector-drawer"
+      :grid-item="inspectorItem"
+      :payload="inspectorPayload"
+      :raw-chart-type="inspectorChartType"
+      :table-name="inspectorTableName"
+      :data-rows="inspectorDataRows"
+      :overlap-hint="inspectorOverlapHint"
+      @patch-grid-item="patchInspectorGridItem"
+      @collapse="collapseChartInspector"
+      @save="onInspectorSave"
+      @reset-style="onInspectorResetStyle"
+      @reset-layout="onInspectorResetLayout"
+      @cancel="onInspectorCancel"
       @closed="onInspectorDrawerClosed"
+    />
+
+    <button
+      v-if="inspectorCollapsed && inspectorItem"
+      type="button"
+      class="dge-inspector-fab"
+      title="展开图表编辑"
+      @click="reopenChartInspector"
     >
-      <template v-if="inspectorPayload">
-        <p class="dge-inspector-lead">
-          <strong>系列分项组件</strong>指图中每一个数据图形单元（每根柱、每个扇区、每个折线点等），可单独配色；<strong>整图默认样式</strong>（如柱宽、统一柱色）与<strong>卡片占位</strong>一并写入 <code>layout_json.items</code>，保存布局后生效。下方 SQL / 字段映射等为对话历史只读。
-        </p>
-        <template v-if="inspectorItem">
-          <div
-            v-if="inspectorSupportsSeriesComponents && inspectorSeriesPoints.length"
-            class="dge-inspector-block dge-inspector-card-style"
-          >
-            <div class="dge-inspector-label">分项组件（逐项配色）</div>
-            <p class="dge-inspector-sub">
-              共 {{ inspectorSeriesPoints.length }} 项；未改动的项沿用 ECharts 默认调色。清空表示撤销该项覆盖。
-            </p>
-            <div class="dge-series-list">
-              <div
-                v-for="(pt, idx) in inspectorSeriesPoints"
-                :key="idx"
-                class="dge-series-item-row"
-              >
-                <div class="dge-series-item-meta">
-                  <span class="dge-series-item-name" :title="pt.name">{{ pt.name }}</span>
-                  <span class="dge-series-item-val">{{ formatSeriesPointValue(pt.value) }}</span>
-                </div>
-                <el-color-picker
-                  :model-value="seriesItemColorPickerModel(idx)"
-                  show-alpha
-                  size="small"
-                  @change="(c) => onSeriesItemColorChange(idx, c)"
-                />
-              </div>
-            </div>
-            <el-button text type="primary" size="small" @click="clearAllSeriesItemStyles">
-              清除全部分项配色
-            </el-button>
-          </div>
-          <div v-if="inspectorIsBar" class="dge-inspector-block dge-inspector-card-style">
-            <div class="dge-inspector-label">柱图 · 整图默认（无分项覆盖时生效）</div>
-            <div class="dge-inspector-row">
-              <span class="dge-inspector-k">柱颜色</span>
-              <el-color-picker
-                :model-value="inspectorBarColorModel"
-                show-alpha
-                @change="onInspectorBarColorChange"
-              />
-              <el-button text type="primary" size="small" @click="resetInspectorBarStyle">恢复默认样式</el-button>
-            </div>
-            <div class="dge-inspector-row dge-inspector-row--slider">
-              <span class="dge-inspector-k">柱宽度上限</span>
-              <el-slider
-                :model-value="inspectorBarMaxWidthModel"
-                :min="8"
-                :max="72"
-                :step="2"
-                class="dge-inspector-slider"
-                @update:model-value="(v) => patchInspectorGridItem({ barMaxWidth: v })"
-              />
-            </div>
-          </div>
-          <div class="dge-inspector-block dge-inspector-card-style">
-            <div class="dge-inspector-label">卡片占位（网格）</div>
-            <div class="dge-inspector-row">
-              <span class="dge-inspector-k">宽度 w（列）</span>
-              <el-input-number
-                :model-value="inspectorItem.w"
-                :min="4"
-                :max="DASHBOARD_GRID_COL_NUM"
-                size="small"
-                controls-position="right"
-                @change="(v) => patchInspectorGridItem({ w: v })"
-              />
-            </div>
-            <div class="dge-inspector-row">
-              <span class="dge-inspector-k">高度 h（行）</span>
-              <el-input-number
-                :model-value="inspectorItem.h"
-                :min="2"
-                :max="24"
-                size="small"
-                controls-position="right"
-                @change="(v) => patchInspectorGridItem({ h: v })"
-              />
-            </div>
-          </div>
-        </template>
-        <el-descriptions :column="1" border size="small" class="dge-inspector-desc">
-          <el-descriptions-item label="历史 ID">{{ chartIdForItem(inspectorItem) }}</el-descriptions-item>
-          <el-descriptions-item label="Artifact ID">{{ artifactIdForItem(inspectorItem) || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="Turn ID">{{ turnIdForItem(inspectorItem) || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="图表类型">{{ inspectorChartType }}</el-descriptions-item>
-          <el-descriptions-item label="数据表">{{ inspectorTableName || '—' }}</el-descriptions-item>
-          <el-descriptions-item label="结果行数">{{ inspectorDataRows }}</el-descriptions-item>
-        </el-descriptions>
-        <div class="dge-inspector-block">
-          <div class="dge-inspector-label">原始问题</div>
-          <el-input :model-value="inspectorQuestion" type="textarea" :rows="3" readonly />
-        </div>
-        <div class="dge-inspector-block">
-          <div class="dge-inspector-label">字段映射 fieldMapping（维度 / 指标等）</div>
-          <pre class="dge-inspector-pre">{{ inspectorFieldMappingText }}</pre>
-        </div>
-        <div class="dge-inspector-block">
-          <div class="dge-inspector-label">SQL（快照优先，否则 generated_sql）</div>
-          <el-input :model-value="inspectorSql" type="textarea" :rows="12" readonly class="dge-inspector-sql" />
-        </div>
-      </template>
-      <el-empty v-else description="无图表载荷" />
-    </el-drawer>
+      <span class="dge-inspector-fab-icon">✎</span>
+      <span class="dge-inspector-fab-text">图表编辑</span>
+    </button>
 
     <el-dialog
       v-model="saveMetaVisible"
@@ -558,10 +498,10 @@ import axios from 'axios'
 import html2canvas from 'html2canvas'
 import { jsPDF } from 'jspdf'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { DArrowLeft, DArrowRight } from '@element-plus/icons-vue'
+import { DArrowLeft, DArrowRight, Search, Collection, Plus, Remove } from '@element-plus/icons-vue'
 import { GridLayout, GridItem } from 'grid-layout-plus'
 import { restoreSessionHeader } from '../../store/session'
-import { isPublicSaveAsDesign, decorateGroupNodesOnly } from '../../utils/dashboardManageTree.js'
+import { isPublicSaveAsDesign, decorateGroupNodesOnly, boardVisibilityLabel, boardIsPublic } from '../../utils/dashboardManageTree.js'
 import {
   parseDashboardLayout,
   mergeGridItemsWithComponents,
@@ -605,13 +545,21 @@ import {
 import '../../styles/dashboard-grid-canvas.css'
 import DashboardChart from '../../components/dashboard/DashboardChart.vue'
 import DashboardChartGridItem from '../../components/dashboard/DashboardChartGridItem.vue'
+import DashboardChartWidgetInspector from '../../components/dashboard/DashboardChartWidgetInspector.vue'
 import DashboardComponentPalette from '../../components/dashboard/DashboardComponentPalette.vue'
 import DashboardChartLibraryDrawer from '../../components/dashboard/DashboardChartLibraryDrawer.vue'
 import LegacyInlineChart from '../../components/dashboard/LegacyInlineChart.vue'
 import {
-  normalizeChartType,
-  normalizedChartDataPoints
+  normalizeChartType
 } from '../../utils/chartOptionFromSnapshot.js'
+import { historyChartTypeLabel } from '../../utils/chatHistoryItem.js'
+import {
+  chartUiFromGridItem,
+  cloneChartStyleFields,
+  ensureLayoutOrigin,
+  mergeChartStyle,
+  mergeLayoutConstraints
+} from '../../utils/chartUiConfig.js'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -675,7 +623,9 @@ const editingItemId = ref(null)
 const titleDraft = ref('')
 
 const inspectorOpen = ref(false)
+const inspectorCollapsed = ref(false)
 const inspectorItem = ref(null)
+const inspectorSnapshot = ref(null)
 
 const selectedItemId = ref('')
 const widgetInspectorOpen = ref(false)
@@ -1313,13 +1263,102 @@ function parseChartSnapshot(raw) {
 
 function openChartInspector(item) {
   if (!requireSaveAsBeforeMutate()) return
+  inspectorSnapshot.value = JSON.parse(JSON.stringify(item))
   inspectorItem.value = item
   inspectorOpen.value = true
+  inspectorCollapsed.value = false
 }
 
 function onInspectorDrawerClosed() {
-  inspectorItem.value = null
+  if (!inspectorCollapsed.value) {
+    inspectorItem.value = null
+    inspectorSnapshot.value = null
+  }
 }
+
+function collapseChartInspector() {
+  inspectorOpen.value = false
+  inspectorCollapsed.value = true
+}
+
+function reopenChartInspector() {
+  inspectorOpen.value = true
+  inspectorCollapsed.value = false
+}
+
+function revertInspectorSnapshot() {
+  const snap = inspectorSnapshot.value
+  if (!snap) return
+  const idx = gridLayout.value.findIndex((x) => String(x.i) === String(snap.i))
+  if (idx < 0) return
+  gridLayout.value.splice(idx, 1, { ...snap })
+  inspectorItem.value = gridLayout.value[idx]
+  onLayoutUpdated()
+}
+
+function onInspectorCancel() {
+  revertInspectorSnapshot()
+  inspectorOpen.value = false
+  inspectorCollapsed.value = false
+}
+
+function onInspectorSave() {
+  if (inspectorItem.value) {
+    inspectorSnapshot.value = JSON.parse(JSON.stringify(inspectorItem.value))
+  }
+  inspectorOpen.value = false
+  inspectorCollapsed.value = false
+  nextTick(() => {
+    window.dispatchEvent(new Event('resize'))
+  })
+  ElMessage.success('已应用图表样式，画布已更新；持久化请点击顶部「保存布局」')
+}
+
+function onInspectorResetStyle() {
+  const snap = inspectorSnapshot.value
+  const it = inspectorItem.value
+  if (!snap || !it) return
+  const idx = gridLayout.value.findIndex((x) => String(x.i) === String(it.i))
+  if (idx < 0) return
+  const cur = gridLayout.value[idx]
+  const next = { ...cur }
+  delete next.barColor
+  delete next.barMaxWidth
+  delete next.seriesItemStyles
+  delete next.chartStyle
+  Object.assign(next, cloneChartStyleFields(snap))
+  gridLayout.value.splice(idx, 1, next)
+  inspectorItem.value = next
+  onLayoutUpdated()
+  ElMessage.success('已重置样式（布局未改动）')
+}
+
+function onInspectorResetLayout() {
+  const it = inspectorItem.value
+  if (!it) return
+  const origin = ensureLayoutOrigin(it)
+  const idx = gridLayout.value.findIndex((x) => String(x.i) === String(it.i))
+  if (idx < 0) return
+  const next = { ...gridLayout.value[idx], x: origin.x, y: origin.y, w: origin.w, h: origin.h }
+  gridLayout.value.splice(idx, 1, next)
+  inspectorItem.value = next
+  onLayoutUpdated()
+  ElMessage.success('已重置布局（样式未改动）')
+}
+
+function gridItemsOverlap(a, b) {
+  if (!a || !b) return false
+  return !(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y)
+}
+
+const inspectorOverlapHint = computed(() => {
+  const it = inspectorItem.value
+  if (!it) return ''
+  const hit = (gridLayout.value || []).some(
+    (o) => String(o.i) !== String(it.i) && gridItemsOverlap(it, o)
+  )
+  return hit ? '当前卡片与其他图表重叠，可开启网格吸附对齐' : ''
+})
 
 const inspectorPayload = computed(() => {
   const it = inspectorItem.value
@@ -1341,102 +1380,9 @@ const inspectorTableName = computed(() => {
   return String(snap.tableName || p?.queryTableName || '').trim()
 })
 
-const inspectorQuestion = computed(() => String(inspectorPayload.value?.queryText || '').trim())
-
-const inspectorSql = computed(() => {
-  const p = inspectorPayload.value
-  if (!p) return ''
-  const snap = inspectorSnap.value
-  const fromSnap = String(snap.sql || '').trim()
-  if (fromSnap) return fromSnap
-  return String(p.generatedSql || '').trim()
-})
-
-const inspectorFieldMappingText = computed(() => {
-  const fm = inspectorSnap.value.fieldMapping
-  if (fm && typeof fm === 'object' && Object.keys(fm).length) {
-    return JSON.stringify(fm, null, 2)
-  }
-  return '（本条历史未写入 fieldMapping，可在对话查询链路中核对 BI 返回结构）'
-})
-
 const inspectorDataRows = computed(() => {
   const d = inspectorSnap.value.data
   return Array.isArray(d) ? d.length : 0
-})
-
-const inspectorNormalizedChartType = computed(() =>
-  normalizeChartType(
-    inspectorPayload.value?.chartType ||
-      inspectorSnap.value.chartType ||
-      inspectorChartType.value
-  )
-)
-
-const inspectorSeriesPoints = computed(() => {
-  const p = inspectorPayload.value
-  if (!p) return []
-  return normalizedChartDataPoints(p)
-})
-
-const inspectorSupportsSeriesComponents = computed(() =>
-  ['bar', 'pie', 'line'].includes(inspectorNormalizedChartType.value)
-)
-
-const SERIES_ITEM_PALETTE = [
-  '#5470c6',
-  '#91cc75',
-  '#fac858',
-  '#ee6666',
-  '#73c0de',
-  '#3ba272',
-  '#fc8452',
-  '#9a60b4',
-  '#ea7ccc'
-]
-
-function formatSeriesPointValue(v) {
-  const n = Number(v)
-  if (!Number.isFinite(n)) return String(v ?? '')
-  return n.toLocaleString()
-}
-
-function seriesItemColorPickerModel(idx) {
-  const it = inspectorItem.value
-  const stored = it?.seriesItemStyles?.[String(idx)]?.color
-  if (stored != null && String(stored).trim() !== '') return String(stored).trim()
-  return SERIES_ITEM_PALETTE[idx % SERIES_ITEM_PALETTE.length]
-}
-
-function onSeriesItemColorChange(idx, val) {
-  const it = inspectorItem.value
-  if (!it) return
-  const base =
-    it.seriesItemStyles && typeof it.seriesItemStyles === 'object' ? { ...it.seriesItemStyles } : {}
-  if (val == null || val === '') delete base[String(idx)]
-  else base[String(idx)] = { color: String(val).trim() }
-  patchInspectorGridItem({
-    seriesItemStyles: Object.keys(base).length ? base : null
-  })
-}
-
-function clearAllSeriesItemStyles() {
-  patchInspectorGridItem({ seriesItemStyles: null })
-}
-
-const inspectorIsBar = computed(() => {
-  const t = String(inspectorChartType.value || '').toLowerCase()
-  return t === 'bar' || t.includes('柱')
-})
-
-const inspectorBarColorModel = computed(() => {
-  const c = String(inspectorItem.value?.barColor || '').trim()
-  return c || '#5470c6'
-})
-
-const inspectorBarMaxWidthModel = computed(() => {
-  const w = Number(inspectorItem.value?.barMaxWidth)
-  return Number.isFinite(w) && w >= 8 ? w : 32
 })
 
 function patchInspectorGridItem(patch) {
@@ -1458,38 +1404,54 @@ function patchInspectorGridItem(patch) {
     else next.barMaxWidth = Math.min(160, Math.round(n))
   }
   if ('w' in patch && patch.w != null) {
-    next.w = Math.min(12, Math.max(2, Math.round(Number(patch.w))))
+    const lc = mergeLayoutConstraints(next.layoutConstraints)
+    next.w = Math.min(lc.maxW, Math.max(lc.minW, Math.round(Number(patch.w))))
   }
   if ('h' in patch && patch.h != null) {
-    next.h = Math.min(24, Math.max(2, Math.round(Number(patch.h))))
+    const lc = mergeLayoutConstraints(next.layoutConstraints)
+    next.h = Math.min(lc.maxH, Math.max(lc.minH, Math.round(Number(patch.h))))
+  }
+  if ('x' in patch && patch.x != null) next.x = Math.max(0, Math.round(Number(patch.x)))
+  if ('y' in patch && patch.y != null) next.y = Math.max(0, Math.round(Number(patch.y)))
+  if ('title' in patch) {
+    const t = String(patch.title ?? '').trim()
+    if (t) next.title = t
+    else delete next.title
+  }
+  if ('chartStyle' in patch) {
+    if (patch.chartStyle == null) delete next.chartStyle
+    else next.chartStyle = { ...patch.chartStyle }
+  }
+  if ('layoutConstraints' in patch) {
+    if (patch.layoutConstraints == null) delete next.layoutConstraints
+    else next.layoutConstraints = { ...patch.layoutConstraints }
   }
   if ('seriesItemStyles' in patch) {
     const s = patch.seriesItemStyles
     if (s == null || (typeof s === 'object' && Object.keys(s).length === 0)) delete next.seriesItemStyles
     else next.seriesItemStyles = { ...s }
   }
-  gridLayout.value.splice(idx, 1, next)
+  gridLayout.value = gridLayout.value.map((x, i) => (i === idx ? next : x))
   inspectorItem.value = next
   onLayoutUpdated()
+  nextTick(() => {
+    window.dispatchEvent(new Event('resize'))
+  })
 }
 
-function onInspectorBarColorChange(val) {
-  if (val == null || val === '') patchInspectorGridItem({ barColor: null })
-  else patchInspectorGridItem({ barColor: val })
-}
-
-function resetInspectorBarStyle() {
-  const it = inspectorItem.value
-  if (!it) return
-  const idx = gridLayout.value.findIndex((x) => String(x.i) === String(it.i))
-  if (idx < 0) return
-  const cur = gridLayout.value[idx]
-  const next = { ...cur }
-  delete next.barColor
-  delete next.barMaxWidth
-  gridLayout.value.splice(idx, 1, next)
-  inspectorItem.value = next
-  onLayoutUpdated()
+function applyGridSnapIfNeeded() {
+  let changed = false
+  const nextLayout = (gridLayout.value || []).map((item) => {
+    const lc = mergeLayoutConstraints(item.layoutConstraints)
+    if (!lc.gridSnap) return item
+    const cs = Math.max(1, Math.round(Number(lc.gridCellSize) || 1))
+    const nx = Math.round(Number(item.x) / cs) * cs
+    const ny = Math.round(Number(item.y) / cs) * cs
+    if (nx === item.x && ny === item.y) return item
+    changed = true
+    return { ...item, x: Math.max(0, nx), y: Math.max(0, ny) }
+  })
+  if (changed) gridLayout.value = nextLayout
 }
 
 const legacyPreviewCards = computed(() =>
@@ -1533,6 +1495,10 @@ const displayedPinnedLibrary = computed(() => {
 
 const chartLibraryOpen = ref(false)
 
+function sideChartTypeLabel(type) {
+  return historyChartTypeLabel(type)
+}
+
 /** 四边及四角均可缩放（interact.js 使用网格项边缘）；角部可同时改变 w 与 h */
 function allSidesResizeOption() {
   return {
@@ -1541,8 +1507,12 @@ function allSidesResizeOption() {
 }
 
 const itemProps = (item) => {
-  const base = basicWidgetGridItemProps(item, { resizeOption: allSidesResizeOption() })
-  if (saveAsMode.value) return { ...base, static: true }
+  const base = basicWidgetGridItemProps(item, {
+    resizeOption: allSidesResizeOption(),
+    isResizable: !saveAsMode.value,
+    isDraggable: !saveAsMode.value
+  })
+  if (saveAsMode.value) return { ...base, static: true, isResizable: false, isDraggable: false }
   return base
 }
 
@@ -1657,16 +1627,35 @@ function readableTitleFromPayload(payload) {
   return ''
 }
 
-/** layout_json.items 上的展示覆盖，传给 ECharts（整图 + 分项 seriesItemStyles） */
+/** layout_json.items 上的展示覆盖，传给 ECharts */
 function chartUiForItem(item) {
-  const o = {}
-  const c = String(item.barColor || '').trim()
-  if (c) o.barColor = c
-  const w = Number(item.barMaxWidth)
-  if (Number.isFinite(w) && w >= 8) o.barMaxWidth = w
-  const sis = item.seriesItemStyles
-  if (sis && typeof sis === 'object' && Object.keys(sis).length) o.seriesItemStyles = sis
-  return o
+  return chartUiFromGridItem(item)
+}
+
+function cardTitleStyleForItem(item) {
+  const s = mergeChartStyle(item?.chartStyle)
+  const fw = Number(s.titleFontWeight)
+  return {
+    fontSize: `${Number(s.titleFontSize) || 13}px`,
+    fontWeight: Number.isFinite(fw) && fw >= 100 ? fw : 600,
+    color: s.titleColor || '#111827',
+    textAlign: s.titleAlign || 'left'
+  }
+}
+
+function cardChromeStyleForItem(item) {
+  const s = mergeChartStyle(item?.chartStyle)
+  const radius = Number(s.cardBorderRadius)
+  return {
+    borderRadius: `${Number.isFinite(radius) ? radius : 8}px`,
+    boxShadow: s.cardShadow === false ? 'none' : '0 1px 2px rgba(15, 23, 42, 0.06)'
+  }
+}
+
+function chartRenderKeyForItem(item) {
+  if (!item) return ''
+  const ui = chartUiForItem(item)
+  return `${item.i}-${item.w}-${item.h}-${item.title || ''}-${JSON.stringify(ui)}`
 }
 
 function defaultTitleFromPayload(item) {
@@ -1741,6 +1730,13 @@ function onLayoutUpdated() {
       ElMessage.warning(SAVE_AS_FIRST_MSG)
       return
     }
+  }
+  applyGridSnapIfNeeded()
+  if (inspectorItem.value) {
+    const fresh = (gridLayout.value || []).find(
+      (x) => String(x.i) === String(inspectorItem.value.i)
+    )
+    if (fresh) inspectorItem.value = fresh
   }
   if (layoutUpdateRaf) return
   layoutUpdateRaf = requestAnimationFrame(() => {
@@ -1927,6 +1923,14 @@ async function refreshChartPayloadsFromDynamicConfig() {
   }
 }
 
+function ensureLayoutOriginsOnGrid() {
+  gridLayout.value = (gridLayout.value || []).map((item) => {
+    if (item.layoutOrigin) return item
+    const lo = ensureLayoutOrigin(item)
+    return lo ? { ...item, layoutOrigin: lo } : item
+  })
+}
+
 async function loadBoard() {
   const id = props.initialRow?.id
   if (!id) return
@@ -1944,6 +1948,7 @@ async function loadBoard() {
   Object.assign(canvasStyle, normalizeCanvasStyle(parsed.canvasStyle))
   ensureCanvasBackgroundType()
   gridLayout.value = mergeGridItemsWithComponents(parsed.items, components.value, parsed.gridCols)
+  ensureLayoutOriginsOnGrid()
   await loadChartPayloads()
   await nextTick()
   attachGridCanvas()
@@ -2005,6 +2010,38 @@ const readonlyGridLayoutClone = ref([])
 const SAVE_AS_FIRST_MSG = '他人已发布公共看板须先另存为副本，再进行编辑'
 
 const saveAsMode = computed(() => isPublicSaveAsDesign(board.value || props.initialRow))
+
+const saveAsReadonlyTip =
+  '您不是该看板的所有者或另存人，移动、拖拽、增删组件等操作均不可用。须点击右上角「另存为」保存副本，原看板不会被直接覆盖。'
+
+const emptyCanvasTip = computed(() => {
+  const base =
+    '列表「图表卡片」数来自 layout_json.cards（旧版内嵌数据），画布网格来自 layout_json.items 与组件表。若只有 cards、没有 items，会出现有数字但不能编排。'
+  if (legacyPreviewCards.value.length) {
+    return `${base} 下方旧版图表仅只读预览，不能拖拽。请从左侧「已钉图表」加入画布，或到对话查询钉入看板。`
+  }
+  return `${base} 请先在对话查询将图表钉入本看板，再从左侧列表加入画布。`
+})
+
+function cleanBoardDisplayName(name) {
+  let s = String(name || '看板').trim()
+  s = s.replace(/\s+(公开|公共|私密)\s*$/u, '')
+  s = s.replace(/\s+副本\s*$/u, '')
+  return s || '看板'
+}
+
+const boardDisplayName = computed(() => cleanBoardDisplayName(board.value?.name))
+
+const boardIsPublicTag = computed(() => boardIsPublic(board.value))
+
+const boardVisibilityText = computed(() => boardVisibilityLabel(board.value?.isPublic))
+
+const boardIsCopyTag = computed(() => {
+  const raw = String(board.value?.name || '')
+  if (/\s副本\s*$/u.test(raw)) return true
+  const saveAs = String(board.value?.saveAsUserId || '').trim()
+  return Boolean(saveAs)
+})
 
 const saveAsDialogHintSub = computed(() => {
   if (saveAsUsesPlatformGroupsOnly.value) {
@@ -2234,6 +2271,10 @@ function onClosed() {
   }
   canvasStyleDialogOpen.value = false
   componentPaletteOpen.value = false
+  inspectorOpen.value = false
+  inspectorCollapsed.value = false
+  inspectorItem.value = null
+  inspectorSnapshot.value = null
   Object.assign(canvasStyle, normalizeCanvasStyle())
 }
 
@@ -2252,6 +2293,7 @@ watch(saveAsMode, (readonly) => {
     widgetInspectorOpen.value = false
     canvasStyleDialogOpen.value = false
     inspectorOpen.value = false
+    inspectorCollapsed.value = false
     captureReadonlyGridLayout()
   } else {
     readonlyGridLayoutClone.value = []
@@ -2298,14 +2340,58 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 16px;
   flex-wrap: wrap;
+  padding: 2px 0;
 }
 .dge-title {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+.dge-title-badge {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
   font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #4338ca;
+  background: linear-gradient(135deg, #eef2ff 0%, #e0e7ff 100%);
+  border: 1px solid #c7d2fe;
+  line-height: 1.35;
+}
+.dge-title-main {
+  flex: 1;
+  min-width: 0;
+}
+.dge-title-board-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.dge-title-board {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: #0f172a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  max-width: 100%;
+}
+.dge-title-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
 }
 .dge-name-hint {
   margin: 0 0 12px;
@@ -2323,25 +2409,26 @@ onBeforeUnmount(() => {
   flex-direction: column;
   min-height: 100%;
   width: 100%;
-  --dge-canvas-chrome: 168px;
+  --dge-canvas-chrome: 120px;
   --vgl-resizer-size: 14px;
   --vgl-resizer-border-color: #3b82f6;
   --vgl-resizer-border-width: 2px;
 }
-.dge-legacy-tip {
-  margin-bottom: 12px;
-}
-.dge-alert {
-  margin-bottom: 16px;
-}
-.dge-alert-p {
-  margin: 8px 0 0;
-  font-size: 13px;
-  line-height: 1.65;
-  color: #606266;
-}
-.dge-save-as-alert {
-  margin-bottom: 12px;
+
+.dge-help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #e2e8f0;
+  color: #64748b;
+  font-size: 11px;
+  cursor: help;
+  flex-shrink: 0;
+  line-height: 1;
+  user-select: none;
 }
 .dge-empty-workbench {
   display: flex;
@@ -2364,15 +2451,216 @@ onBeforeUnmount(() => {
 }
 .dge-side {
   flex-shrink: 0;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px 0 0 10px;
+  border: 1px solid #e8ecf1;
+  border-radius: 12px 0 0 12px;
   border-right: none;
-  background: #fafafa;
-  padding: 10px;
+  background: linear-gradient(180deg, #fcfcfd 0%, #f6f8fb 100%);
+  padding: 14px 12px;
   display: flex;
   flex-direction: column;
   align-self: stretch;
   max-height: none;
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.8);
+}
+.dge-side-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.dge-side-head-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.dge-side-head-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #0f172a;
+  letter-spacing: -0.01em;
+}
+.dge-side-head-sub {
+  font-size: 11px;
+  color: #94a3b8;
+}
+.dge-side-lib-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #fff;
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+.dge-side-lib-btn:hover {
+  background: #eff6ff;
+  border-color: #93c5fd;
+  box-shadow: 0 1px 4px rgba(37, 99, 235, 0.12);
+}
+.dge-side-search {
+  margin-bottom: 12px;
+}
+.dge-side-search :deep(.el-input__wrapper) {
+  border-radius: 8px;
+  box-shadow: 0 0 0 1px #e2e8f0 inset;
+  background: #fff;
+}
+.dge-side-search :deep(.el-input__wrapper:hover),
+.dge-side-search :deep(.el-input__wrapper.is-focus) {
+  box-shadow: 0 0 0 1px #cbd5e1 inset;
+}
+.dge-side-list {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 120px;
+  padding-right: 2px;
+  margin-right: -2px;
+}
+.dge-side-list::-webkit-scrollbar {
+  width: 5px;
+}
+.dge-side-list::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 999px;
+}
+.dge-side-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  margin-bottom: 10px;
+  background: #fff;
+  border: 1px solid #eef2f6;
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  transition: border-color 0.18s, box-shadow 0.18s, transform 0.18s;
+}
+.dge-side-card:hover {
+  border-color: #dbeafe;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.06);
+  transform: translateY(-1px);
+}
+.dge-side-card.is-on-canvas {
+  border-color: #e2e8f0;
+  background: #fff;
+}
+.dge-side-card.is-on-canvas::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: #3b82f6;
+}
+.dge-side-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.dge-side-type {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+.dge-side-type--bar { color: #1d4ed8; background: #eff6ff; }
+.dge-side-type--line { color: #047857; background: #ecfdf5; }
+.dge-side-type--pie { color: #b45309; background: #fffbeb; }
+.dge-side-type--table { color: #6d28d9; background: #f5f3ff; }
+.dge-side-status {
+  font-size: 10px;
+  font-weight: 600;
+  color: #64748b;
+  letter-spacing: 0.02em;
+}
+.dge-side-card-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: #1e293b;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.dge-side-card-meta {
+  margin: 0;
+  font-size: 11px;
+  color: #94a3b8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dge-side-card-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: 100%;
+  margin-top: 2px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.dge-side-card-btn.is-add {
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  color: #2563eb;
+}
+.dge-side-card-btn.is-add:hover:not(:disabled) {
+  background: #dbeafe;
+  border-color: #93c5fd;
+}
+.dge-side-card-btn.is-remove {
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #64748b;
+}
+.dge-side-card-btn.is-remove:hover:not(:disabled) {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #dc2626;
+}
+.dge-side-card-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.dge-side-card-btn-loading {
+  font-size: 12px;
+  color: #94a3b8;
+}
+.dge-side-empty :deep(.el-empty__description) {
+  font-size: 13px;
+  color: #64748b;
+}
+.dge-side-empty-tip {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #94a3b8;
+  text-align: center;
+  line-height: 1.5;
 }
 .dge-side-rail {
   width: 14px;
@@ -2451,65 +2739,6 @@ onBeforeUnmount(() => {
 .dge-workbench.is-side-collapsed .dge-main-col .dge-legacy-grid {
   border: 1px solid #e5e7eb;
   border-radius: 0 10px 10px 0;
-}
-.dge-side-head-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-.dge-side-head {
-  font-weight: 600;
-  font-size: 14px;
-  margin-bottom: 0;
-  color: #111827;
-}
-.dge-side-search {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-.dge-side-search .el-input {
-  flex: 1;
-}
-.dge-side-list {
-  flex: 1;
-  overflow-y: auto;
-  min-height: 120px;
-}
-.dge-side-row {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px;
-  margin-bottom: 8px;
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-}
-.dge-side-row-status {
-  display: flex;
-  align-items: center;
-}
-.dge-side-q {
-  font-size: 13px;
-  font-weight: 600;
-  color: #111827;
-  line-height: 1.45;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.dge-side-meta {
-  font-size: 12px;
-  color: #9ca3af;
-  line-height: 1.5;
-  word-break: break-word;
-}
-.dge-side-row .el-button {
-  align-self: stretch;
 }
 .dge-load-more {
   width: 100%;
@@ -2781,6 +3010,32 @@ onBeforeUnmount(() => {
   font-size: 12px;
   color: #6b7280;
 }
+.dge-inspector-fab {
+  position: fixed;
+  right: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 4999;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 4px 16px rgba(59, 130, 246, 0.18);
+  cursor: pointer;
+  color: #1d4ed8;
+  font-size: 13px;
+  font-weight: 500;
+}
+.dge-inspector-fab:hover {
+  background: #eff6ff;
+}
+.dge-inspector-fab-icon {
+  font-size: 15px;
+  line-height: 1;
+}
 </style>
 
 <style>
@@ -2794,6 +3049,12 @@ onBeforeUnmount(() => {
   margin-top: -8px;
   font-size: 12px;
   color: #9ca3af;
+}
+.dge-dialog.is-fullscreen .el-dialog__header {
+  padding: 14px 20px 12px;
+  margin-right: 0;
+  border-bottom: 1px solid #f1f5f9;
+  background: #fff;
 }
 .dge-dialog.is-fullscreen {
   display: flex;
@@ -2817,5 +3078,28 @@ onBeforeUnmount(() => {
 /* 改用四边 interact 缩放，隐藏库自带右下角小块，避免与边缘拖拽重复 */
 .dge-grid .vgl-item__resizer {
   display: none !important;
+}
+</style>
+
+<style>
+.dge-help-popper.el-popper {
+  max-width: 320px;
+  padding: 10px 12px !important;
+  background: #fff !important;
+  border: 1px solid #e2e8f0 !important;
+  color: #334155 !important;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12) !important;
+}
+
+.dge-help-popper.el-popper .el-popper__arrow::before {
+  background: #fff !important;
+  border: 1px solid #e2e8f0 !important;
+}
+
+.dge-help-popper .dge-help-tip {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #334155 !important;
 }
 </style>

@@ -9,9 +9,11 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 @Service
 public class StackCCollabService {
@@ -143,9 +145,15 @@ public class StackCCollabService {
     }
 
     public String buildMarkdownReport(long dashboardId) {
+        return buildMarkdownReport(dashboardId, true, true, true);
+    }
+
+    public String buildMarkdownReport(long dashboardId, boolean includeAnnotations, boolean includeComments, boolean includeBindDetail) {
         Map<String, Object> dashboard = dashboardService.getById(dashboardId);
-        List<Map<String, Object>> annotations = annotationService.listAnnotationsForDashboard(dashboardId);
-        List<Map<String, Object>> comments = annotationService.listComments("DASHBOARD", dashboardId);
+        List<Map<String, Object>> annotations = includeAnnotations
+                ? annotationService.listAnnotationsForDashboard(dashboardId, true) : List.of();
+        List<Map<String, Object>> comments = includeComments
+                ? annotationService.listComments("DASHBOARD", dashboardId) : List.of();
         List<Map<String, Object>> nodes = extractLayoutNodes(dashboard);
         Map<String, String> nodeLabels = new LinkedHashMap<>();
         for (Map<String, Object> node : nodes) {
@@ -160,33 +168,56 @@ public class StackCCollabService {
         sb.append("- 评论数：").append(comments.size()).append("\n");
         sb.append("- 导出时间：").append(java.time.LocalDateTime.now()).append("\n\n");
 
+        if (includeAnnotations) {
         sb.append("## 批注\n\n");
         if (annotations.isEmpty()) {
             sb.append("_暂无批注_\n\n");
         } else {
             for (Map<String, Object> ann : annotations) {
+                if (Boolean.TRUE.equals(ann.get("isHidden")) || "1".equals(String.valueOf(ann.get("isHidden")))) {
+                    continue;
+                }
                 String key = ann.get("targetType") + ":" + ann.get("targetId");
                 String nodeLabel = nodeLabels.getOrDefault(key, "整板");
                 sb.append("### ").append(displayUser(ann)).append(" · ").append(nodeLabel).append("\n");
                 if (ann.get("tag") != null && !String.valueOf(ann.get("tag")).isBlank()) {
                     sb.append("标签：`").append(ann.get("tag")).append("`\n\n");
                 }
-                if (ann.get("bindJson") != null && !String.valueOf(ann.get("bindJson")).isBlank()) {
-                    sb.append("绑定维度：```json\n").append(ann.get("bindJson")).append("\n```\n\n");
+                if (includeBindDetail && ann.get("bindJson") != null && !String.valueOf(ann.get("bindJson")).isBlank()) {
+                    sb.append(formatBindDetailForExport(ann.get("bindJson"))).append("\n\n");
                 }
                 sb.append(String.valueOf(ann.get("content"))).append("\n\n");
-                sb.append("_").append(ann.get("createdAt")).append("_\n\n");
+                sb.append("_").append(ann.get("createdAt"));
+                Object updatedAt = ann.get("updatedAt");
+                if (updatedAt != null && !String.valueOf(updatedAt).equals(String.valueOf(ann.get("createdAt")))) {
+                    sb.append(" · 更新于 ").append(updatedAt);
+                }
+                sb.append("_\n\n");
             }
         }
+        }
 
+        if (includeComments) {
         sb.append("## 评论\n\n");
         if (comments.isEmpty()) {
             sb.append("_暂无评论_\n\n");
         } else {
+            Map<Long, Map<String, Object>> commentMap = new LinkedHashMap<>();
             for (Map<String, Object> c : comments) {
-                sb.append("- **").append(displayUser(c)).append("** (").append(c.get("createdAt")).append(")：");
+                commentMap.put(Long.parseLong(String.valueOf(c.get("id"))), c);
+            }
+            for (Map<String, Object> c : comments) {
+                Object parentId = c.get("parentId");
+                String prefix = parentId != null && commentMap.containsKey(Long.parseLong(String.valueOf(parentId)))
+                        ? "  ↳ 回复：" : "- **";
+                if (prefix.startsWith("-")) {
+                    sb.append(prefix).append(displayUser(c)).append("** (").append(c.get("createdAt")).append(")：");
+                } else {
+                    sb.append(prefix);
+                }
                 sb.append(String.valueOf(c.get("content"))).append("\n");
             }
+        }
         }
         return sb.toString();
     }
@@ -200,6 +231,20 @@ public class StackCCollabService {
                 "label", "整板",
                 "kind", "dashboard"
         ));
+        long dashboardId = Long.parseLong(String.valueOf(dashboard.get("id")));
+        Map<String, Map<String, Object>> componentById = new LinkedHashMap<>();
+        try {
+            for (Map<String, Object> comp : dashboardService.listDashboardComponents(dashboardId)) {
+                Object compId = comp.get("id");
+                if (compId != null) {
+                    componentById.put(String.valueOf(compId), comp);
+                }
+            }
+        } catch (Exception ignored) {
+            // access check may fail for some callers; summary still works for board-level
+        }
+
+        Set<String> layoutItemIds = new LinkedHashSet<>();
         String layoutJson = Objects.toString(dashboard.get("layoutJson"), "{}");
         try {
             Map<String, Object> layout = objectMapper.readValue(layoutJson, new TypeReference<>() {
@@ -216,14 +261,13 @@ public class StackCCollabService {
                     if (id == null) {
                         continue;
                     }
+                    String itemId = String.valueOf(id);
+                    layoutItemIds.add(itemId);
                     String kind = Objects.toString(item.get("kind"), Objects.toString(item.get("type"), "widget"));
-                    String label = Objects.toString(item.get("title"), "").trim();
-                    if (label.isBlank()) {
-                        label = layoutItemFallbackLabel(kind, id);
-                    }
+                    String label = resolveLayoutNodeLabel(item, kind, id, componentById.get(itemId));
                     nodes.add(Map.of(
                             "targetType", "COMPONENT",
-                            "targetId", String.valueOf(id),
+                            "targetId", itemId,
                             "label", label,
                             "kind", kind
                     ));
@@ -232,25 +276,126 @@ public class StackCCollabService {
         } catch (Exception ignored) {
             // layout parse failure is non-fatal
         }
-        long dashboardId = Long.parseLong(String.valueOf(dashboard.get("id")));
-        try {
-            for (Map<String, Object> comp : dashboardService.listDashboardComponents(dashboardId)) {
-                Object compId = comp.get("id");
-                if (compId == null) {
-                    continue;
-                }
-                String chartType = Objects.toString(comp.get("artifactChartType"), "chart");
-                nodes.add(Map.of(
-                        "targetType", "COMPONENT",
-                        "targetId", String.valueOf(compId),
-                        "label", "图表组件 #" + compId + " (" + chartType + ")",
-                        "kind", "chart"
-                ));
+
+        // 仅追加 layout 中未出现的组件（避免与画布节点重复）
+        for (Map.Entry<String, Map<String, Object>> entry : componentById.entrySet()) {
+            String compId = entry.getKey();
+            if (layoutItemIds.contains(compId)) {
+                continue;
             }
-        } catch (Exception ignored) {
-            // access check may fail for some callers; summary still works for board-level
+            Map<String, Object> comp = entry.getValue();
+            String chartType = Objects.toString(comp.get("artifactChartType"), "chart");
+            String label = resolveComponentNodeLabel(comp, chartType);
+            nodes.add(Map.of(
+                    "targetType", "COMPONENT",
+                    "targetId", compId,
+                    "label", label,
+                    "kind", "chart"
+            ));
         }
         return nodes;
+    }
+
+    private String resolveLayoutNodeLabel(Map<String, Object> item, String kind, Object id, Map<String, Object> comp) {
+        String label = Objects.toString(item.get("title"), "").trim();
+        if (!label.isBlank()) {
+            return label;
+        }
+        if (comp != null) {
+            String fromComp = resolveComponentNodeLabel(comp, Objects.toString(comp.get("artifactChartType"), kind));
+            if (!fromComp.isBlank() && !fromComp.startsWith("图表组件 #")) {
+                return fromComp;
+            }
+        }
+        return layoutItemFallbackLabel(kind, id);
+    }
+
+    @SuppressWarnings("unchecked")
+    private String resolveComponentNodeLabel(Map<String, Object> comp, String fallbackKind) {
+        Object chartId = comp.get("chartId");
+        if (chartId != null) {
+            try {
+                List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                        SELECT query_text AS queryText FROM is_chat_query_history
+                        WHERE id = ? LIMIT 1
+                        """, chartId);
+                if (!rows.isEmpty()) {
+                    String query = Objects.toString(rows.get(0).get("queryText"), "").trim();
+                    if (!query.isBlank()) {
+                        return query.length() > 120 ? query.substring(0, 120) : query;
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        Object artifact = comp.get("artifact");
+        if (artifact instanceof Map<?, ?> artifactMap) {
+            Object message = artifactMap.get("message");
+            if (message != null) {
+                String text = Objects.toString(message, "").trim();
+                if (!text.isBlank()) {
+                    return text.length() > 120 ? text.substring(0, 120) : text;
+                }
+            }
+        }
+        Object compId = comp.get("id");
+        String chartType = Objects.toString(comp.get("artifactChartType"), fallbackKind);
+        return "图表组件 #" + compId + " (" + chartType + ")";
+    }
+
+    private String formatBindDetailForExport(Object bindJson) {
+        String raw = String.valueOf(bindJson);
+        try {
+            Map<String, Object> bind = objectMapper.readValue(raw, new TypeReference<>() {
+            });
+            StringBuilder line = new StringBuilder("数据绑定：");
+            appendBindPart(line, "维度", bind.get("dimension"));
+            appendBindPart(line, "指标", bind.get("metric"));
+            Object time = bind.get("time");
+            if (time == null || String.valueOf(time).isBlank()) {
+                time = bind.get("timeField");
+            }
+            appendBindPart(line, "时间", time);
+            Object selImg = bind.get("selectionImage");
+            if (selImg != null && String.valueOf(selImg).startsWith("data:image/")) {
+                appendBindPart(line, "框选", "含截图");
+            } else {
+                Object sel = bind.get("selectionRect");
+                if (sel instanceof Map<?, ?> selMap && !selMap.isEmpty()) {
+                    appendBindPart(line, "框选", "已标记区域");
+                }
+            }
+            if (line.length() > "数据绑定：".length()) {
+                line.append("\n```json\n").append(raw).append("\n```");
+                return line.toString();
+            }
+        } catch (Exception ignored) {
+        }
+        return "数据绑定：```json\n" + raw + "\n```";
+    }
+
+    private static void appendBindPart(StringBuilder sb, String label, Object value) {
+        if (value == null || String.valueOf(value).isBlank()) {
+            return;
+        }
+        if (sb.length() > "数据绑定：".length()) {
+            sb.append(" · ");
+        }
+        sb.append(label).append(" ").append(value);
+    }
+
+    private static String formatSelectionRectForExport(Map<?, ?> rect) {
+        if (rect == null || rect.isEmpty()) {
+            return "";
+        }
+        Object x = rect.get("x");
+        Object y = rect.get("y");
+        Object w = rect.get("w");
+        Object h = rect.get("h");
+        if (x == null || y == null || w == null || h == null) {
+            return "已标记";
+        }
+        return String.format("(%s, %s) %s×%s", x, y, w, h);
     }
 
     private static String layoutItemFallbackLabel(String kind, Object id) {

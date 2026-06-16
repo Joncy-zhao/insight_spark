@@ -44,7 +44,7 @@
           <span v-if="!isHomeModule(activeModule)" class="current-crumb">{{ moduleTitle }}</span>
         </div>
         <div class="topbar-actions">
-          <el-tag :type="currentUser?.role === 'ADMIN' ? 'warning' : 'success'">
+          <el-tag :type="isSuperAdminUser() ? 'danger' : currentUser?.role === 'ADMIN' ? 'warning' : 'success'">
             {{ portalLabel }}
           </el-tag>
           <el-button @click="handleLogout">退出</el-button>
@@ -65,6 +65,7 @@
         <UserWorkbenchView v-if="activeModule === 'workbench'" />
         <UserDashboardView v-if="activeModule === 'dashboard'" />
         <BusinessCollaborationView v-if="activeModule === 'collaboration'" />
+        <BusinessCollabRoomView v-if="activeModule === 'collaborationRoom'" />
         <AdminWorkbenchView v-if="activeModule === 'adminWorkbench'" />
         <AdminDashboardView v-if="activeModule === 'adminDashboard'" />
         <AdminUserPermissionManageView v-if="activeModule === 'userPermissionManage'" />
@@ -72,7 +73,7 @@
         <AiChartRuleConfigView v-if="activeModule === 'aiChartRules'" />
         <PerformanceGovernanceView v-if="activeModule === 'performanceGovernance'" />
         <PlaceholderView
-            v-if="!['upload', 'chat', 'audit', 'adminChatHistory', 'adminChatQueryLab', 'permission', 'permissionAdmin', 'userPermissionManage', 'datasource', 'diagnosis', 'advancedAnalysis', 'knowledgeGraph', 'workbench', 'dashboard', 'collaboration', 'adminWorkbench', 'adminDashboard', 'stackCConfig', 'aiChartRules', 'performanceGovernance'].includes(activeModule)"
+            v-if="!['upload', 'chat', 'audit', 'adminChatHistory', 'adminChatQueryLab', 'permission', 'permissionAdmin', 'userPermissionManage', 'datasource', 'diagnosis', 'advancedAnalysis', 'knowledgeGraph', 'workbench', 'dashboard', 'collaboration', 'collaborationRoom', 'adminWorkbench', 'adminDashboard', 'stackCConfig', 'aiChartRules', 'performanceGovernance'].includes(activeModule)"
         />
       </el-main>
     </el-container>
@@ -147,7 +148,7 @@ import {
   Upload
 } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
-import { menuGroups, moduleMap } from './router/modules'
+import { menuGroups, moduleMap, canAccessModule, isSuperAdmin, allAdminSidebarModules } from './router/modules'
 import DataUploadView from './views/user/DataUploadView.vue'
 import ChatAnalysisView from './views/user/ChatAnalysisView.vue'
 import PermissionCenterView from './views/user/PermissionCenterView.vue'
@@ -166,10 +167,11 @@ import AdminUserPermissionManageView from './views/admin/AdminUserPermissionMana
 import UserWorkbenchView from './views/user/UserWorkbenchView.vue'
 import UserDashboardView from './views/user/UserDashboardView.vue'
 import BusinessCollaborationView from './views/user/BusinessCollaborationView.vue'
+import BusinessCollabRoomView from './views/user/BusinessCollabRoomView.vue'
 import AdvancedAnalysisManageView from './views/user/AdvancedAnalysisManageView.vue'
 import PlaceholderView from './views/PlaceholderView.vue'
 import AuthView from './views/AuthView.vue'
-import { authToken, currentUser, isAuthenticated, clearSession, restoreSessionHeader } from './store/session'
+import { authToken, currentUser, isAuthenticated, clearSession, restoreSessionHeader, refreshSessionProfile, userPermissionCodes, hasPermission, isSuperAdminUser } from './store/session'
 import { logout } from './api/auth'
 import { useVoiceInteraction } from './composables/useVoiceInteraction'
 import {
@@ -249,6 +251,12 @@ const clearLastSelectedTable = () => {
 
 const datasourceHealthMap = ref({})
 const activeModule = ref('workbench')
+const dashboardPendingOpen = ref(null)
+
+function openDashboardPreview(row) {
+  dashboardPendingOpen.value = row && typeof row === 'object' ? { ...row } : null
+  activeModule.value = 'dashboard'
+}
 const mainStageRef = ref(null)
 const isAsideCollapsed = ref(false)
 const navigationTabs = ref([])
@@ -463,24 +471,44 @@ const handleChartResize = () => {
   chartInstance?.resize()
 }
 
-const moduleTitle = computed(() => moduleMap[activeModule.value].title)
-const moduleSubtitle = computed(() => moduleMap[activeModule.value].subtitle)
-const isDashboardFlushLayout = computed(() => activeModule.value === 'dashboard')
+const moduleTitle = computed(() => moduleMap[activeModule.value]?.title || '协作批注')
+const moduleSubtitle = computed(() => moduleMap[activeModule.value]?.subtitle || '')
+const isDashboardFlushLayout = computed(() => ['dashboard', 'collaborationRoom'].includes(activeModule.value))
 const asideWidth = computed(() => isAsideCollapsed.value ? '64px' : '248px')
 const visibleMenuGroups = computed(() => {
   const role = currentUser.value?.role || 'USER'
+  const codes = userPermissionCodes.value || []
+  if (isSuperAdmin(role, codes)) {
+    return [{
+      id: 'portal-admin',
+      title: '',
+      modules: allAdminSidebarModules()
+    }]
+  }
+  const portalId = role === 'ADMIN' ? 'portal-admin' : 'portal-user'
   return menuGroups
+      .filter(group => group.id === portalId)
       .map(group => ({
         ...group,
-        modules: group.modules.filter(module => module.role === 'ALL' || module.role === role)
+        modules: group.modules.filter(module => canAccessModule(module, role, codes))
       }))
       .filter(group => group.modules.length)
 })
+const canApprovePermissions = computed(() => hasPermission('menu:permission-approval'))
 const isPermissionModule = computed(() => activeModule.value === 'permission' || activeModule.value === 'permissionAdmin')
 const isAdminModule = computed(() => ['datasource', 'permissionAdmin', 'knowledgeGraph', 'audit', 'adminChatHistory', 'adminChatQueryLab', 'stackCConfig', 'aiChartRules', 'adminWorkbench', 'adminDashboard', 'performanceGovernance'].includes(activeModule.value))
-const isAdminUser = computed(() => currentUser.value?.role === 'ADMIN')
-const portalLabel = computed(() => isAdminUser.value ? '管理员门户' : '用户门户')
-const homeModuleKey = computed(() => isAdminUser.value ? 'adminWorkbench' : 'workbench')
+const isAdminUser = computed(() => {
+  const role = currentUser.value?.role || ''
+  return role === 'ADMIN' || role === 'SUPER_ADMIN' || isSuperAdminUser()
+})
+const portalLabel = computed(() => isSuperAdminUser() ? '超级管理员门户' : isAdminUser.value ? '管理员门户' : '用户门户')
+const homeModuleKey = computed(() => {
+  const role = currentUser.value?.role || 'USER'
+  const codes = userPermissionCodes.value || []
+  const preferred = role === 'SUPER_ADMIN' || role === 'ADMIN' ? 'adminWorkbench' : 'workbench'
+  if (canAccessModule(moduleMap[preferred], role, codes)) return preferred
+  return visibleMenuGroups.value[0]?.modules[0]?.key || preferred
+})
 const orderedNavigationTabs = computed(() => [...navigationTabs.value].sort((a, b) => a.order - b.order))
 const placeholderStep = computed(() => activeModule.value === 'audit' ? 1 : 0)
 const previewColumns = computed(() => previewRows.value.length ? Object.keys(previewRows.value[0]) : [])
@@ -848,7 +876,7 @@ const loadDatasourceHealth = async (datasourceId) => {
 }
 const ensureSessionAlive = async () => {
   try {
-    await axios.get(`${API_BASE}/api/auth/me`).then(unwrap)
+    await refreshSessionProfile()
     return true
   } catch (error) {
     clearSession()
@@ -870,7 +898,7 @@ const bootstrapPersistedSession = async () => {
     ElMessage.warning('登录状态已过期，请重新登录')
     return
   }
-
+  normalizeActiveModule()
   await bootstrapWorkbench()
 }
 
@@ -2301,6 +2329,8 @@ const regenerateLastAnalysis = async () => {
 }
 
 const handleAuthenticated = async () => {
+  await refreshSessionProfile().catch(() => {})
+  normalizeActiveModule()
   await bootstrapWorkbench()
 }
 
@@ -2433,7 +2463,7 @@ const loadPermissionCenter = async () => {
   sensitiveFieldPermissions.value = unwrap(await axios.get(`${API_BASE}/api/permission/sensitive-fields`))
   rowPolicyDetails.value = unwrap(await axios.get(`${API_BASE}/api/permission/row-policies`))
   complianceDocument.value = unwrap(await axios.get(`${API_BASE}/api/permission/compliance-document`))
-  if (isAdminUser.value) {
+  if (canApprovePermissions.value) {
     await loadAdminPermissionRequests()
   } else {
     adminPermissionRequests.value = []
@@ -2441,7 +2471,7 @@ const loadPermissionCenter = async () => {
 }
 
 const loadAdminPermissionRequests = async () => {
-  if (!isAdminUser.value) {
+  if (!canApprovePermissions.value) {
     adminPermissionRequests.value = []
     return
   }
@@ -6137,6 +6167,8 @@ provide('workbench', {
   datasourceHealthMap,
   loadDatasourceHealth,
   activeModule,
+  dashboardPendingOpen,
+  openDashboardPreview,
   diagnoseFromLastAnalysis,
   tables,
   selectedTableName,
@@ -6244,6 +6276,7 @@ provide('workbench', {
   isPermissionModule,
   isAdminModule,
   isAdminUser,
+  canApprovePermissions,
   placeholderStep,
   previewColumns,
   chartTypeLabel,

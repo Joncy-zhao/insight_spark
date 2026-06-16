@@ -7,6 +7,7 @@
 
 import { DASHBOARD_GRID_COL_NUM } from './dashboardGridCanvas.js'
 import { isBasicWidgetItem } from './dashboardWidgetVideo.js'
+import { mergeLayoutConstraints } from './chartUiConfig.js'
 
 export const DASHBOARD_BASIC_WIDGET_MIN_W = 2
 export const DASHBOARD_BASIC_WIDGET_MIN_H = 2
@@ -28,17 +29,22 @@ const CHART_DRAG_IGNORE =
  */
 export function basicWidgetGridItemProps(item, options = {}) {
   const isWidget = isBasicWidgetItem(item)
+  const lc = mergeLayoutConstraints(item?.layoutConstraints)
+  const lockSize = Boolean(lc.lockSize)
+  const lockPosition = Boolean(lc.lockPosition) || Boolean(item.static)
   return {
     i: item.i,
     x: item.x,
     y: item.y,
     w: item.w,
     h: item.h,
-    static: Boolean(item.static),
-    minW: isWidget ? DASHBOARD_BASIC_WIDGET_MIN_W : 4,
-    maxW: DASHBOARD_GRID_COL_NUM,
-    minH: isWidget ? DASHBOARD_BASIC_WIDGET_MIN_H : 2,
-    maxH: isWidget ? DASHBOARD_BASIC_WIDGET_MAX_H : 24,
+    static: lockPosition,
+    minW: isWidget ? DASHBOARD_BASIC_WIDGET_MIN_W : Math.max(2, lc.minW || 4),
+    maxW: Math.min(DASHBOARD_GRID_COL_NUM, lc.maxW || DASHBOARD_GRID_COL_NUM),
+    minH: isWidget ? DASHBOARD_BASIC_WIDGET_MIN_H : Math.max(2, lc.minH || 2),
+    maxH: isWidget ? DASHBOARD_BASIC_WIDGET_MAX_H : Math.max(2, lc.maxH || 24),
+    isResizable: options.isResizable !== false && !lockSize,
+    isDraggable: options.isDraggable !== false && !lockPosition,
     resizeOption: options.resizeOption,
     dragAllowFrom: isWidget ? DASHBOARD_BASIC_WIDGET_DRAG_HANDLE : undefined,
     dragIgnoreFrom: isWidget ? DASHBOARD_BASIC_WIDGET_DRAG_IGNORE : CHART_DRAG_IGNORE,

@@ -28,7 +28,12 @@ public final class AuthContext {
     }
 
     public static boolean isAdmin() {
-        return "ADMIN".equalsIgnoreCase(role());
+        String r = role();
+        return "ADMIN".equalsIgnoreCase(r) || isSuperAdmin();
+    }
+
+    public static boolean isSuperAdmin() {
+        return RbacConstants.SUPER_ADMIN_ROLE.equalsIgnoreCase(role());
     }
 
     public static void clear() {

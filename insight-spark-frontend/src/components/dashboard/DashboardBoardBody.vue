@@ -1,23 +1,9 @@
 <template>
-  <div class="dbv-body">
+  <div class="dbv-body" :class="{ 'dbv-body--collab': selectable }">
     <p v-if="showLead" class="dbv-lead">
       以下为该看板<strong>画布上的真实排布</strong>（栅格与「设计看板」一致）。此为<strong>看板视图</strong>，与「查看图表」弹窗（仅图表卡片预览）不同。
     </p>
-    <p v-else-if="selectable" class="dbv-collab-hint">
-      点击组件选中并批注；组件右上角为<strong>批注条数</strong>（非标签颜色）。整板批注请点「整板批注」，在右侧面板查看。
-    </p>
-
     <template v-if="board && gridLayout.length">
-      <div v-if="selectable" class="dbv-collab-toolbar">
-        <el-button
-          size="small"
-          :type="!activeItemId ? 'primary' : 'default'"
-          @click="emitSelectBoard"
-        >
-          整板批注
-          <span v-if="boardAnnotationCount > 0" class="dbv-board-ann-badge">{{ boardAnnotationCount }} 条</span>
-        </el-button>
-      </div>
       <div class="dbv-export-stage" :class="{ 'dbv-export-stage--collab': selectable }" :style="canvasStageInlineStyle">
         <div class="dbv-grid-wrap">
           <GridLayout
@@ -45,8 +31,17 @@
                 :class="['dbv-item-hit', { 'dbv-item-has-ann': badgeForItem(item), 'dbv-item-selected': isItemSelected(item) }]"
                 @click.capture="onItemClick(item, slotIndex)"
               >
-                <div v-if="selectable" class="dbv-item-badge">{{ slotDisplayTitle(item, slotIndex) }}</div>
-                <div v-if="badgeForItem(item)" class="dbv-ann-pin" :style="{ background: badgeColor(badgeForItem(item)) }">
+                <div v-if="selectable" class="dbv-widget-head">
+                  <span class="dbv-widget-title">{{ slotDisplayTitle(item, slotIndex) }}</span>
+                  <span
+                    v-if="badgeForItem(item)"
+                    class="dbv-ann-chip"
+                    :style="{ background: badgeColor(badgeForItem(item)) }"
+                  >
+                    {{ badgeForItem(item).count }}
+                  </span>
+                </div>
+                <div v-else-if="badgeForItem(item)" class="dbv-ann-pin" :style="{ background: badgeColor(badgeForItem(item)) }">
                   {{ badgeForItem(item).count }}
                 </div>
                 <component
@@ -60,14 +55,21 @@
                 :class="['dbv-item-hit', { 'dbv-item-has-ann': badgeForItem(item), 'dbv-item-selected': isItemSelected(item) }]"
                 @click.capture="onItemClick(item, slotIndex)"
               >
-                <div v-if="badgeForItem(item)" class="dbv-ann-pin" :style="{ background: badgeColor(badgeForItem(item)) }">
+                <div v-if="!selectable && badgeForItem(item)" class="dbv-ann-pin" :style="{ background: badgeColor(badgeForItem(item)) }">
                   {{ badgeForItem(item).count }}
                 </div>
                 <div class="dbv-card-meta">
                   <div class="dbv-card-titlewrap">
                     <span class="dbv-card-title">{{ slotDisplayTitle(item, slotIndex) }}</span>
+                    <span
+                      v-if="selectable && badgeForItem(item)"
+                      class="dbv-ann-chip"
+                      :style="{ background: badgeColor(badgeForItem(item)) }"
+                    >
+                      {{ badgeForItem(item).count }}
+                    </span>
                   </div>
-                  <div class="dbv-card-actions">
+                  <div v-if="!selectable" class="dbv-card-actions">
                     <span v-if="chartIdForItem(item)" class="dbv-chart-id">历史 {{ chartIdForItem(item) }}</span>
                     <span v-if="artifactIdForItem(item)" class="dbv-chart-id">Artifact {{ artifactIdForItem(item) }}</span>
                     <el-tag v-else-if="legacyInlineCardAt(slotIndex)" size="small" type="warning">
@@ -76,8 +78,40 @@
                   </div>
                 </div>
                 <div class="dbv-chart-host">
+                  <CollabBoxSelectLayer
+                    v-if="selectable && payloadForItem(item)"
+                    :enabled="selectable"
+                    :active="isItemSelected(item)"
+                    :draft-rect="isItemSelected(item) ? pendingSelectionRect : null"
+                    :overlays="overlaysForItem(item)"
+                    :focused-id="focusedAnnotationId"
+                    :show-overlays="showSelectionOverlays"
+                    @box-select="(payload) => onBoxSelect(item, payload)"
+                  >
+                    <DashboardChart
+                      :payload="payloadForItem(item)"
+                      :chart-ui="chartUiForItem(item)"
+                      hide-title
+                    />
+                  </CollabBoxSelectLayer>
+                  <CollabBoxSelectLayer
+                    v-else-if="selectable && legacyInlineCardAt(slotIndex)"
+                    :enabled="selectable"
+                    :active="isItemSelected(item)"
+                    :draft-rect="isItemSelected(item) ? pendingSelectionRect : null"
+                    :overlays="overlaysForItem(item)"
+                    :focused-id="focusedAnnotationId"
+                    :show-overlays="showSelectionOverlays"
+                    @box-select="(payload) => onBoxSelect(item, payload)"
+                  >
+                    <LegacyInlineChart
+                      :title="''"
+                      :chart-type="legacyInlineCardAt(slotIndex).chartType"
+                      :data="legacyInlineCardAt(slotIndex).data"
+                    />
+                  </CollabBoxSelectLayer>
                   <DashboardChart
-                    v-if="payloadForItem(item)"
+                    v-else-if="payloadForItem(item)"
                     :payload="payloadForItem(item)"
                     :chart-ui="chartUiForItem(item)"
                     hide-title
@@ -131,7 +165,8 @@ import DashboardChart from './DashboardChart.vue'
 import LegacyInlineChart from './LegacyInlineChart.vue'
 import { resolveBasicWidgetEntry } from '../../utils/dashboardBasicWidgetRegistry.js'
 import { isBasicWidgetItem } from '../../utils/dashboardWidgetVideo.js'
-import { annotationTagPreset } from '../../utils/collabAnnotation.js'
+import { annotationTagPreset, extractSemanticBindFromChartPayload } from '../../utils/collabAnnotation.js'
+import CollabBoxSelectLayer from '../collab/CollabBoxSelectLayer.vue'
 
 function basicWidgetViewForItem(item) {
   return resolveBasicWidgetEntry(item)?.widget || null
@@ -156,11 +191,17 @@ const props = defineProps({
   activeItemId: { type: [String, Number], default: null },
   /** 组件批注角标 { [itemId]: { count, primaryTag } } */
   itemBadges: { type: Object, default: () => ({}) },
-  /** 整板级批注条数 */
-  boardAnnotationCount: { type: Number, default: 0 }
+  /** 当前待提交的框选区域（归一化坐标） */
+  pendingSelectionRect: { type: Object, default: null },
+  /** 各组件已有批注框选 { [itemId]: [{ id, rect, accent }] } */
+  annotationOverlaysByItemId: { type: Object, default: () => ({}) },
+  /** 列表聚焦的批注 id，用于高亮框选 */
+  focusedAnnotationId: { type: [String, Number], default: null },
+  /** 是否在画布上显示圈注线框 */
+  showSelectionOverlays: { type: Boolean, default: true }
 })
 
-const emit = defineEmits(['select-item'])
+const emit = defineEmits(['select-item', 'box-select'])
 
 const layoutModel = defineModel('gridLayout', { type: Array, default: () => [] })
 
@@ -305,24 +346,39 @@ function itemKind(item) {
   return String(item.kind || item.type || 'widget')
 }
 
-function emitSelectBoard() {
-  if (!props.selectable || !props.board?.id) return
-  emit('select-item', {
-    targetType: 'DASHBOARD',
-    targetId: props.board.id,
-    label: '整板',
-    kind: 'dashboard'
-  })
+function chartContextForItem(item) {
+  const payload = payloadForItem(item)
+  if (!payload) return null
+  const semanticBind = extractSemanticBindFromChartPayload(payload, { chartType: item?.chartType })
+  const chartId = chartIdForItem(item) || payload.id
+  if (!Object.keys(semanticBind).length && !chartId) return null
+  return { chartId, semanticBind }
 }
 
 function onItemClick(item, slotIndex) {
   if (!props.selectable) return
+  if (Date.now() - lastBoxSelectAt.value < 300) return
   emit('select-item', {
     targetType: 'COMPONENT',
     targetId: String(item.i),
     label: slotDisplayTitle(item, slotIndex),
-    kind: itemKind(item)
+    kind: itemKind(item),
+    chartContext: chartContextForItem(item)
   })
+}
+
+const lastBoxSelectAt = { value: 0 }
+
+function onBoxSelect(item, payload) {
+  lastBoxSelectAt.value = Date.now()
+  const rect = payload?.rect || payload
+  const image = payload?.image || null
+  emit('box-select', { targetId: String(item.i), rect, image })
+}
+
+function overlaysForItem(item) {
+  if (!item?.i) return []
+  return props.annotationOverlaysByItemId[String(item.i)] || []
 }
 
 function badgeForItem(item) {
@@ -346,6 +402,11 @@ function isItemSelected(item) {
   flex-direction: column;
   min-height: 0;
   --dbv-canvas-chrome: 200px;
+}
+.dbv-body--collab {
+  height: auto;
+  min-height: 100%;
+  overflow: visible;
 }
 .dbv-lead {
   margin: 0 0 14px;
@@ -373,35 +434,12 @@ function isItemSelected(item) {
   touch-action: auto;
 }
 .dbv-collab-hint {
-  margin: 0 0 10px;
-  padding: 8px 12px;
-  font-size: 13px;
-  line-height: 1.5;
-  color: #1d4ed8;
-  background: #eff6ff;
-  border: 1px solid #bfdbfe;
-  border-radius: 8px;
-}
-.dbv-collab-toolbar {
-  margin-bottom: 10px;
-}
-.dbv-board-ann-badge {
-  margin-left: 6px;
-  padding: 0 6px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.9);
-  color: #1d4ed8;
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 18px;
-}
-.el-button--primary .dbv-board-ann-badge {
-  background: rgba(255, 255, 255, 0.25);
-  color: #fff;
+  display: none;
 }
 .dbv-export-stage--collab {
-  min-height: 480px;
-  --dbv-canvas-chrome: 320px;
+  min-height: 400px;
+  height: auto;
+  padding-top: 4px;
 }
 .dbv-grid-item--selectable :deep(.vgl-item) {
   transition: box-shadow 0.15s ease;
@@ -447,12 +485,42 @@ function isItemSelected(item) {
   white-space: nowrap;
   pointer-events: none;
 }
+.dbv-widget-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: #475569;
+  background: #f8fafc;
+  border-bottom: 1px solid #e2e8f0;
+}
+.dbv-widget-title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  color: #1e293b;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .dbv-widget-shell {
   position: relative;
   width: 100%;
   height: 100%;
   border-radius: 8px;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #e5e7eb;
+  background: #fff;
+}
+.dbv-widget-shell > :not(.dbv-widget-head):not(.dbv-ann-pin) {
+  flex: 1;
+  min-height: 0;
 }
 .dbv-item-has-ann:not(.dbv-item-selected).dbv-card,
 .dbv-item-has-ann:not(.dbv-item-selected).dbv-widget-shell {
@@ -474,6 +542,18 @@ function isItemSelected(item) {
   text-align: center;
   box-shadow: 0 2px 6px rgba(15, 23, 42, 0.25);
   pointer-events: none;
+}
+.dbv-ann-chip {
+  flex-shrink: 0;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
 }
 .dbv-card {
   position: relative;
@@ -502,6 +582,9 @@ function isItemSelected(item) {
 .dbv-card-titlewrap {
   flex: 1;
   min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .dbv-card-title {
   font-weight: 600;
@@ -521,9 +604,19 @@ function isItemSelected(item) {
   color: #9ca3af;
 }
 .dbv-chart-host {
+  position: relative;
+  flex: 1;
+  min-height: 120px;
+  padding: 6px 8px 8px;
+  display: flex;
+  flex-direction: column;
+}
+.dbv-chart-host :deep(.cbs-layer),
+.dbv-chart-host :deep(.dc-root),
+.dbv-chart-host :deep(.lic-root) {
   flex: 1;
   min-height: 0;
-  padding: 6px 8px 8px;
+  height: 100%;
 }
 .dbv-chart-fallback {
   height: 100%;

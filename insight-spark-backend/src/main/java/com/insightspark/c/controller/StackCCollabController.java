@@ -93,9 +93,13 @@ public class StackCCollabController {
     }
 
     @GetMapping("/dashboards/{id}/report")
-    public ResponseEntity<byte[]> exportReport(@PathVariable long id) {
+    public ResponseEntity<byte[]> exportReport(
+            @PathVariable long id,
+            @RequestParam(defaultValue = "true") boolean includeAnnotations,
+            @RequestParam(defaultValue = "true") boolean includeComments,
+            @RequestParam(defaultValue = "true") boolean includeBindDetail) {
         try {
-            String markdown = collabService.buildMarkdownReport(id);
+            String markdown = collabService.buildMarkdownReport(id, includeAnnotations, includeComments, includeBindDetail);
             byte[] bytes = markdown.getBytes(StandardCharsets.UTF_8);
             return ResponseEntity.ok()
                     .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"dashboard-" + id + "-collab.md\"")

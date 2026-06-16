@@ -812,6 +812,12 @@
               </el-descriptions-item>
             </el-descriptions>
 
+            <CollabChatInsightPanel
+              v-if="lastAnalysis"
+              :chart-id="lastAnalysisChartLinkId"
+              :dashboard-id="pinDashboardId"
+            />
+
             <section
                 v-if="lastAnalysis || diagnosisPreviewHasReport"
                 class="diagnosis-preview-card"
@@ -2054,6 +2060,7 @@ import * as echarts from 'echarts'
 import { ElMessage } from 'element-plus'
 import BusinessDictionaryView from '../../components/BusinessDictionaryView.vue'
 import AdvancedAnalysisCard from '../../components/AdvancedAnalysisCard.vue'
+import CollabChatInsightPanel from '../../components/collab/CollabChatInsightPanel.vue'
 import chatQueryAvatar from '../../assets/chat-query-avatar.png'
 import chatPeopleAvatar from '../../assets/chat-people.png'
 import noImageIllustration from '../../assets/no_image.png'
@@ -2290,6 +2297,12 @@ const {
   userQuestion,
   xAxisData
 } = inject('workbench')
+
+const lastAnalysisChartLinkId = computed(() => {
+  const analysis = lastAnalysis.value
+  if (!analysis) return null
+  return analysis.chartId || analysis.artifactId || analysis.layoutItemId || null
+})
 
 const chatModelPickerVisible = ref(false)
 

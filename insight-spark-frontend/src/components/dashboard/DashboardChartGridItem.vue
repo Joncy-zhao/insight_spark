@@ -2,6 +2,7 @@
   <div
     class="dcgi-root dge-card"
     :class="{ 'is-selected': selected, 'is-interactive': interactive }"
+    :style="cardStyle"
     @mouseenter="hovered = true"
     @mouseleave="onMouseLeave"
     @click.stop="emit('select')"
@@ -9,6 +10,7 @@
     <div class="dge-card-meta">
       <div
         class="dge-card-titlewrap"
+        :class="titleAlignClass"
         :title="interactive ? '双击修改标题' : ''"
         @dblclick.stop="onTitleDblClick"
       >
@@ -23,7 +25,7 @@
           @blur="emit('commit-title')"
           @keydown.enter.prevent="emit('commit-title')"
         />
-        <span v-else class="dge-card-title">{{ displayTitle }}</span>
+        <span v-else class="dge-card-title" :style="titleStyle">{{ displayTitle }}</span>
       </div>
     </div>
 
@@ -87,7 +89,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { Delete, EditPen, MoreFilled } from '@element-plus/icons-vue'
 
 const props = defineProps({
@@ -97,6 +99,8 @@ const props = defineProps({
   editing: { type: Boolean, default: false },
   titleDraft: { type: String, default: '' },
   displayTitle: { type: String, default: '' },
+  titleStyle: { type: Object, default: () => ({}) },
+  cardStyle: { type: Object, default: () => ({}) },
   titleInputId: { type: String, default: '' },
   canEdit: { type: Boolean, default: true }
 })
@@ -105,6 +109,13 @@ const emit = defineEmits(['select', 'pin', 'edit', 'remove', 'start-edit-title',
 
 const hovered = ref(false)
 const menuOpen = ref(false)
+
+const titleAlignClass = computed(() => {
+  const align = String(props.titleStyle?.textAlign || 'left')
+  if (align === 'center') return 'is-title-center'
+  if (align === 'right') return 'is-title-right'
+  return 'is-title-left'
+})
 
 function onMouseLeave() {
   if (!menuOpen.value) hovered.value = false
@@ -158,7 +169,11 @@ function onTitleDblClick() {
   min-width: 0;
   cursor: text;
 }
+.dge-card-titlewrap.is-title-left { text-align: left; }
+.dge-card-titlewrap.is-title-center { text-align: center; }
+.dge-card-titlewrap.is-title-right { text-align: right; }
 .dge-card-title {
+  display: block;
   font-weight: 600;
   color: #111827;
   font-size: 13px;

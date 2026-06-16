@@ -7,46 +7,17 @@
       </div>
     </div>
 
-    <div class="adm-stats-wrap" v-loading="loadingStats">
-      <div class="adm-stat-grid">
-        <article class="adm-stat-card adm-stat-card--blue">
-          <span class="adm-stat-label">看板总数</span>
-          <strong class="adm-stat-value">{{ stats.totalCount }}</strong>
-          <small class="adm-stat-hint">私密 + 公共合计</small>
-        </article>
-        <article class="adm-stat-card adm-stat-card--amber">
-          <span class="adm-stat-label">公共看板</span>
-          <strong class="adm-stat-value">{{ stats.publicCount }}</strong>
-          <small class="adm-stat-hint">开放类型 = 公共</small>
-        </article>
-        <article class="adm-stat-card adm-stat-card--indigo">
-          <span class="adm-stat-label">私密看板</span>
-          <strong class="adm-stat-value">{{ stats.privateCount }}</strong>
-          <small class="adm-stat-hint">开放类型 = 私密</small>
-        </article>
-        <article class="adm-stat-card adm-stat-card--green">
-          <span class="adm-stat-label">总访问量</span>
-          <strong class="adm-stat-value">{{ stats.totalViews }}</strong>
-          <small class="adm-stat-hint">全平台访问量求和</small>
-        </article>
-      </div>
-      <div class="adm-charts-grid">
-        <section class="adm-chart-panel">
-          <h3 class="adm-chart-title">看板类型占比</h3>
-          <p class="adm-chart-sub">公共 / 私密看板数量（南丁格尔玫瑰图）</p>
-          <div ref="typeChartRef" class="adm-chart-canvas" />
-        </section>
-        <section class="adm-chart-panel">
-          <h3 class="adm-chart-title">TOP5 热门看板</h3>
-          <p class="adm-chart-sub">按访问量倒排，便于性能治理</p>
-          <div ref="topChartRef" class="adm-chart-canvas" />
-        </section>
-      </div>
-    </div>
-
-    <div class="adm-body">
-      <div class="adm-main">
-        <div class="adm-filters">
+    <el-tabs v-model="activeTab" class="adm-main-tabs" @tab-change="onMainTabChange">
+      <el-tab-pane name="list">
+        <template #label>
+          <span class="adm-tab-label">
+            <el-icon><List /></el-icon>
+            <span>看板列表</span>
+          </span>
+        </template>
+        <div class="adm-body">
+          <div class="adm-main">
+            <div class="adm-filters">
           <el-input
             v-model="filters.keyword"
             class="adm-filter-search"
@@ -288,6 +259,124 @@
         </div>
       </div>
     </div>
+      </el-tab-pane>
+
+      <el-tab-pane name="stats" lazy>
+        <template #label>
+          <span class="adm-tab-label">
+            <el-icon><DataAnalysis /></el-icon>
+            <span>数据概览</span>
+          </span>
+        </template>
+        <div class="adm-stats-wrap" v-loading="loadingStats">
+          <div class="adm-stat-grid">
+            <article class="adm-stat-card adm-stat-card--blue">
+              <span class="adm-stat-label">看板总数</span>
+              <strong class="adm-stat-value">{{ stats.totalCount }}</strong>
+              <small class="adm-stat-hint">未归档看板合计</small>
+            </article>
+            <article class="adm-stat-card adm-stat-card--indigo">
+              <span class="adm-stat-label">图表槽位</span>
+              <strong class="adm-stat-value">{{ stats.totalChartSlots }}</strong>
+              <small class="adm-stat-hint">平均每板 {{ stats.avgChartSlots }} 个</small>
+            </article>
+            <article class="adm-stat-card adm-stat-card--violet">
+              <span class="adm-stat-label">基础组件</span>
+              <strong class="adm-stat-value">{{ stats.totalWidgetSlots }}</strong>
+              <small class="adm-stat-hint">文本 / 视频等占位</small>
+            </article>
+            <article class="adm-stat-card adm-stat-card--green">
+              <span class="adm-stat-label">总访问量</span>
+              <strong class="adm-stat-value">{{ stats.totalViews }}</strong>
+              <small class="adm-stat-hint">全平台访问累计</small>
+            </article>
+          </div>
+          <div class="adm-stat-grid adm-stat-grid--secondary">
+            <article class="adm-stat-card adm-stat-card--cyan">
+              <span class="adm-stat-label">平台图表生成</span>
+              <strong class="adm-stat-value">{{ stats.totalCharts }}</strong>
+              <small class="adm-stat-hint">对话历史含 chart 快照</small>
+            </article>
+            <article class="adm-stat-card adm-stat-card--blue">
+              <span class="adm-stat-label">平台查询次数</span>
+              <strong class="adm-stat-value">{{ stats.totalQueries }}</strong>
+              <small class="adm-stat-hint">自然语言 / Text-to-SQL</small>
+            </article>
+            <article class="adm-stat-card adm-stat-card--amber">
+              <span class="adm-stat-label">活跃数据表</span>
+              <strong class="adm-stat-value">{{ stats.totalUploads }}</strong>
+              <small class="adm-stat-hint">用户上传 Excel / CSV</small>
+            </article>
+            <article class="adm-stat-card adm-stat-card--slate">
+              <span class="adm-stat-label">看板分组</span>
+              <strong class="adm-stat-value">{{ stats.groupCount }}</strong>
+              <small class="adm-stat-hint">已使用分组名称数</small>
+            </article>
+          </div>
+
+          <div class="adm-stats-deck">
+            <div class="adm-stats-deck-main">
+              <div class="adm-charts-grid adm-charts-grid--quad">
+                <section class="adm-chart-panel">
+                  <h3 class="adm-chart-title">近 7 日看板活跃</h3>
+                  <p class="adm-chart-sub">更新 / 新建数量</p>
+                  <div ref="activityChartRef" class="adm-chart-canvas adm-chart-canvas--sm" />
+                </section>
+                <section class="adm-chart-panel">
+                  <h3 class="adm-chart-title">看板规模分布</h3>
+                  <p class="adm-chart-sub">按单看板图表数量区间</p>
+                  <div ref="sizeChartRef" class="adm-chart-canvas adm-chart-canvas--sm" />
+                </section>
+                <section class="adm-chart-panel">
+                  <h3 class="adm-chart-title">TOP5 图表槽位</h3>
+                  <p class="adm-chart-sub">单看板图表组件数</p>
+                  <div ref="topSlotChartRef" class="adm-chart-canvas adm-chart-canvas--sm" />
+                </section>
+                <section class="adm-chart-panel">
+                  <h3 class="adm-chart-title">开放类型占比</h3>
+                  <p class="adm-chart-sub">公共 / 私密看板</p>
+                  <div ref="typeChartRef" class="adm-chart-canvas adm-chart-canvas--sm" />
+                </section>
+              </div>
+            </div>
+
+            <aside class="adm-stats-deck-side">
+              <section class="adm-side-panel">
+                <h3 class="adm-chart-title">数据摘要</h3>
+                <div class="adm-side-metrics">
+                  <div class="adm-side-metric">
+                    <span>公共看板</span>
+                    <strong>{{ stats.publicCount }}</strong>
+                  </div>
+                  <div class="adm-side-metric">
+                    <span>私密看板</span>
+                    <strong>{{ stats.privateCount }}</strong>
+                  </div>
+                  <div class="adm-side-metric">
+                    <span>钉入组件</span>
+                    <strong>{{ stats.totalPinnedComponents }}</strong>
+                  </div>
+                </div>
+              </section>
+              <section class="adm-side-panel">
+                <h3 class="adm-chart-title">TOP5 热门看板</h3>
+                <p class="adm-chart-sub">按访问量</p>
+                <div v-if="!stats.topByViews.length" class="adm-side-empty">暂无访问数据</div>
+                <div v-else class="adm-side-list">
+                  <div v-for="(row, idx) in stats.topByViews.slice(0, 5)" :key="row.id || idx" class="adm-side-row">
+                    <span class="adm-side-rank">{{ idx + 1 }}</span>
+                    <div class="adm-side-main">
+                      <strong>{{ row.name || `#${row.id}` }}</strong>
+                      <small>{{ row.viewCount || 0 }} 次访问</small>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            </aside>
+          </div>
+        </div>
+      </el-tab-pane>
+    </el-tabs>
 
     <DashboardPreviewDialogs ref="previewDialogsRef" :api-base="API_BASE" />
 
@@ -445,9 +534,11 @@ import axios from 'axios'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ArrowDown,
+  DataAnalysis,
   Delete,
   EditPen,
   Folder,
+  List,
   Odometer,
   Plus,
   Refresh,
@@ -482,19 +573,32 @@ const rows = ref([])
 const groupTree = ref([])
 const loadingList = ref(false)
 const loadingStats = ref(false)
+const activeTab = ref('list')
 
 const stats = reactive({
   totalCount: 0,
   publicCount: 0,
   privateCount: 0,
   totalViews: 0,
-  topByViews: []
+  totalChartSlots: 0,
+  totalWidgetSlots: 0,
+  avgChartSlots: 0,
+  groupCount: 0,
+  totalQueries: 0,
+  totalCharts: 0,
+  totalUploads: 0,
+  totalPinnedComponents: 0,
+  topByViews: [],
+  topByChartSlots: [],
+  sizeDistribution: [],
+  dailyActivity: []
 })
 
 const typeChartRef = ref(null)
-const topChartRef = ref(null)
-let typeChart = null
-let topChart = null
+const activityChartRef = ref(null)
+const sizeChartRef = ref(null)
+const topSlotChartRef = ref(null)
+const chartInstances = []
 
 const treeSelectProps = { label: 'name', value: 'id', children: 'children' }
 const groupFilterTreeProps = { label: 'name', children: 'children' }
@@ -669,69 +773,396 @@ function buildListParams() {
   return params
 }
 
-function renderTypeChart() {
-  if (!typeChartRef.value) return
-  if (!typeChart) {
-    typeChart = echarts.getInstanceByDom(typeChartRef.value) || echarts.init(typeChartRef.value)
+function initStatsChart(ref, slot) {
+  if (!ref.value) return null
+  if (chartInstances[slot]) return chartInstances[slot]
+  const chart = echarts.getInstanceByDom(ref.value) || echarts.init(ref.value, null, { renderer: 'canvas' })
+  chartInstances[slot] = chart
+  return chart
+}
+
+function statsLinearGradient(x2, y2, stops) {
+  return new echarts.graphic.LinearGradient(0, 0, x2, y2, stops)
+}
+
+const STATS_AXIS_LABEL = { color: '#64748b', fontSize: 11 }
+const STATS_AXIS_LINE = { lineStyle: { color: '#e2e8f0' } }
+const STATS_SPLIT_LINE = { lineStyle: { type: 'dashed', color: '#eef2f7' } }
+const STATS_TOOLTIP_AXIS = {
+  trigger: 'axis',
+  backgroundColor: 'rgba(15, 23, 42, 0.92)',
+  borderColor: 'rgba(255, 255, 255, 0.08)',
+  borderWidth: 1,
+  padding: [10, 14],
+  textStyle: { color: '#f8fafc', fontSize: 12 },
+  extraCssText: 'border-radius:10px;box-shadow:0 12px 32px rgba(15,23,42,.24);'
+}
+const STATS_TOOLTIP_ITEM = {
+  trigger: 'item',
+  backgroundColor: 'rgba(15, 23, 42, 0.92)',
+  borderColor: 'rgba(255, 255, 255, 0.08)',
+  borderWidth: 1,
+  padding: [10, 14],
+  textStyle: { color: '#f8fafc', fontSize: 12 },
+  extraCssText: 'border-radius:10px;box-shadow:0 12px 32px rgba(15,23,42,.24);'
+}
+const STATS_LEGEND = {
+  bottom: 0,
+  left: 'center',
+  itemWidth: 10,
+  itemHeight: 10,
+  itemGap: 16,
+  icon: 'roundRect',
+  textStyle: { color: '#64748b', fontSize: 11 }
+}
+const STATS_ANIMATION = {
+  animationDuration: 900,
+  animationEasing: 'cubicOut',
+  animationDelay(idx) {
+    return idx * 60
   }
+}
+const STATS_BAR_EMPHASIS = {
+  focus: 'series',
+  itemStyle: {
+    shadowBlur: 14,
+    shadowColor: 'rgba(37, 99, 235, 0.22)'
+  }
+}
+
+function renderActivityChart() {
+  const chart = initStatsChart(activityChartRef, 0)
+  if (!chart) return
+  const items = Array.isArray(stats.dailyActivity) ? stats.dailyActivity : []
+  const labels = items.map((row) => String(row?.label || row?.date || ''))
+  const updates = items.map((row) => Number(row?.updates) || 0)
+  const creates = items.map((row) => Number(row?.creates) || 0)
+  chart.setOption({
+    ...STATS_ANIMATION,
+    tooltip: {
+      ...STATS_TOOLTIP_AXIS,
+      axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(99, 102, 241, 0.06)' } }
+    },
+    legend: STATS_LEGEND,
+    grid: { left: 6, right: 6, top: 12, bottom: 32, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: labels.length ? labels : ['—'],
+      axisLabel: STATS_AXIS_LABEL,
+      axisLine: STATS_AXIS_LINE,
+      axisTick: { show: false }
+    },
+    yAxis: {
+      type: 'value',
+      minInterval: 1,
+      axisLabel: STATS_AXIS_LABEL,
+      axisLine: { show: false },
+      axisTick: { show: false },
+      splitLine: STATS_SPLIT_LINE
+    },
+    series: [
+      {
+        name: '更新',
+        type: 'bar',
+        stack: 'activity',
+        data: updates,
+        barMaxWidth: 18,
+        itemStyle: {
+          color: statsLinearGradient(0, 1, [
+            { offset: 0, color: '#818cf8' },
+            { offset: 1, color: '#4f46e5' }
+          ]),
+          borderRadius: [0, 0, 0, 0]
+        },
+        emphasis: STATS_BAR_EMPHASIS
+      },
+      {
+        name: '新建',
+        type: 'bar',
+        stack: 'activity',
+        data: creates,
+        barMaxWidth: 18,
+        itemStyle: {
+          color: statsLinearGradient(0, 1, [
+            { offset: 0, color: '#4ade80' },
+            { offset: 1, color: '#16a34a' }
+          ]),
+          borderRadius: [6, 6, 0, 0]
+        },
+        emphasis: STATS_BAR_EMPHASIS
+      }
+    ]
+  }, true)
+}
+
+function renderSizeChart() {
+  const chart = initStatsChart(sizeChartRef, 1)
+  if (!chart) return
+  const items = Array.isArray(stats.sizeDistribution) ? stats.sizeDistribution : []
+  const labels = items.map((row) => String(row?.name || ''))
+  const values = items.map((row) => Number(row?.value) || 0)
+  const palette = [
+    ['#cbd5e1', '#64748b'],
+    ['#93c5fd', '#2563eb'],
+    ['#a5b4fc', '#4f46e5'],
+    ['#c4b5fd', '#7c3aed']
+  ]
+  chart.setOption({
+    ...STATS_ANIMATION,
+    tooltip: {
+      ...STATS_TOOLTIP_AXIS,
+      axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(124, 58, 237, 0.06)' } }
+    },
+    grid: { left: 6, right: 6, top: 18, bottom: 8, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: labels.length ? labels : ['暂无数据'],
+      axisLabel: STATS_AXIS_LABEL,
+      axisLine: STATS_AXIS_LINE,
+      axisTick: { show: false }
+    },
+    yAxis: {
+      type: 'value',
+      minInterval: 1,
+      axisLabel: STATS_AXIS_LABEL,
+      axisLine: { show: false },
+      axisTick: { show: false },
+      splitLine: STATS_SPLIT_LINE
+    },
+    series: [{
+      type: 'bar',
+      data: labels.length ? values.map((value, index) => {
+        const [light, deep] = palette[index % palette.length]
+        return {
+          value,
+          itemStyle: {
+            color: statsLinearGradient(0, 1, [
+              { offset: 0, color: light },
+              { offset: 1, color: deep }
+            ]),
+            borderRadius: [8, 8, 0, 0],
+            shadowBlur: 8,
+            shadowColor: 'rgba(79, 70, 229, 0.12)',
+            shadowOffsetY: 4
+          }
+        }
+      }) : [0],
+      barMaxWidth: 34,
+      showBackground: true,
+      backgroundStyle: {
+        color: 'rgba(148, 163, 184, 0.12)',
+        borderRadius: [8, 8, 0, 0]
+      },
+      label: {
+        show: true,
+        position: 'top',
+        distance: 6,
+        color: '#475569',
+        fontSize: 11,
+        fontWeight: 600
+      },
+      emphasis: STATS_BAR_EMPHASIS
+    }]
+  }, true)
+}
+
+function renderTopSlotChart() {
+  const chart = initStatsChart(topSlotChartRef, 2)
+  if (!chart) return
+  const items = (Array.isArray(stats.topByChartSlots) ? stats.topByChartSlots : []).slice(0, 5)
+  const names = items.map((row) => String(row?.name || `#${row?.id || ''}`)).reverse()
+  const counts = items.map((row) => Number(row?.chartCount) || 0).reverse()
+  const palette = [
+    ['#bfdbfe', '#2563eb'],
+    ['#a5b4fc', '#4f46e5'],
+    ['#c4b5fd', '#7c3aed'],
+    ['#7dd3fc', '#0284c7'],
+    ['#6ee7b7', '#059669']
+  ]
+  chart.setOption({
+    ...STATS_ANIMATION,
+    tooltip: {
+      ...STATS_TOOLTIP_AXIS,
+      axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(37, 99, 235, 0.06)' } }
+    },
+    grid: { left: 4, right: 28, top: 8, bottom: 4, containLabel: true },
+    xAxis: {
+      type: 'value',
+      minInterval: 1,
+      axisLabel: STATS_AXIS_LABEL,
+      axisLine: { show: false },
+      axisTick: { show: false },
+      splitLine: STATS_SPLIT_LINE
+    },
+    yAxis: {
+      type: 'category',
+      data: names.length ? names : ['暂无数据'],
+      axisLabel: { ...STATS_AXIS_LABEL, width: 92, overflow: 'truncate' },
+      axisLine: STATS_AXIS_LINE,
+      axisTick: { show: false }
+    },
+    series: [{
+      type: 'bar',
+      data: names.length ? counts.map((value, index) => {
+        const [light, deep] = palette[index % palette.length]
+        return {
+          value,
+          itemStyle: {
+            color: statsLinearGradient(1, 0, [
+              { offset: 0, color: light },
+              { offset: 1, color: deep }
+            ]),
+            borderRadius: [0, 8, 8, 0],
+            shadowBlur: 8,
+            shadowColor: 'rgba(37, 99, 235, 0.14)',
+            shadowOffsetX: 2
+          }
+        }
+      }) : [0],
+      barMaxWidth: 14,
+      label: {
+        show: true,
+        position: 'right',
+        distance: 8,
+        color: '#475569',
+        fontSize: 11,
+        fontWeight: 600,
+        formatter: '{c}'
+      },
+      emphasis: STATS_BAR_EMPHASIS
+    }]
+  }, true)
+}
+
+function renderTypeChart() {
+  const chart = initStatsChart(typeChartRef, 3)
+  if (!chart) return
   const pub = Number(stats.publicCount) || 0
   const priv = Number(stats.privateCount) || 0
+  const total = pub + priv
   const seriesData = []
-  if (pub > 0) seriesData.push({ name: '公共看板', value: pub })
-  if (priv > 0) seriesData.push({ name: '私密看板', value: priv })
+  if (pub > 0) {
+    seriesData.push({
+      name: '公共看板',
+      value: pub,
+      itemStyle: {
+        color: statsLinearGradient(0, 1, [
+          { offset: 0, color: '#fcd34d' },
+          { offset: 1, color: '#f59e0b' }
+        ])
+      }
+    })
+  }
+  if (priv > 0) {
+    seriesData.push({
+      name: '私密看板',
+      value: priv,
+      itemStyle: {
+        color: statsLinearGradient(0, 1, [
+          { offset: 0, color: '#a5b4fc' },
+          { offset: 1, color: '#6366f1' }
+        ])
+      }
+    })
+  }
   if (!seriesData.length) {
     seriesData.push({ name: '暂无看板', value: 1, itemStyle: { color: '#e5e7eb' } })
   }
-  typeChart.setOption({
-    color: ['#f59e0b', '#6366f1', '#e5e7eb'],
-    tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
-    legend: { bottom: 0, left: 'center', textStyle: { fontSize: 12 } },
+  chart.setOption({
+    ...STATS_ANIMATION,
+    tooltip: {
+      ...STATS_TOOLTIP_ITEM,
+      formatter: '{b}<br/>{c} 个 · {d}%'
+    },
+    legend: STATS_LEGEND,
+    graphic: total > 0 ? [{
+      type: 'group',
+      left: 'center',
+      top: '34%',
+      children: [
+        {
+          type: 'text',
+          style: {
+            text: String(total),
+            fill: '#0f172a',
+            fontSize: 22,
+            fontWeight: 700,
+            textAlign: 'center'
+          },
+          top: -8
+        },
+        {
+          type: 'text',
+          style: {
+            text: '看板总数',
+            fill: '#94a3b8',
+            fontSize: 11,
+            textAlign: 'center'
+          },
+          top: 18
+        }
+      ]
+    }] : [],
     series: [{
       type: 'pie',
-      radius: ['16%', '68%'],
-      center: ['50%', '44%'],
-      roseType: 'area',
-      itemStyle: { borderRadius: 4 },
-      label: { fontSize: 12, formatter: '{b}\n{c}' },
+      radius: ['54%', '72%'],
+      center: ['50%', '42%'],
+      padAngle: total > 1 ? 3 : 0,
+      avoidLabelOverlap: true,
+      itemStyle: {
+        borderRadius: 8,
+        borderColor: '#fff',
+        borderWidth: 3,
+        shadowBlur: 10,
+        shadowColor: 'rgba(15, 23, 42, 0.08)'
+      },
+      label: {
+        show: total > 0,
+        formatter: '{b}\n{c}',
+        color: '#475569',
+        fontSize: 11,
+        lineHeight: 16
+      },
+      labelLine: {
+        length: 10,
+        length2: 8,
+        smooth: true,
+        lineStyle: { color: '#cbd5e1' }
+      },
+      emphasis: {
+        scale: true,
+        scaleSize: 6,
+        itemStyle: {
+          shadowBlur: 16,
+          shadowColor: 'rgba(15, 23, 42, 0.16)'
+        }
+      },
       data: seriesData
     }]
   }, true)
 }
 
-function renderTopChart() {
-  if (!topChartRef.value) return
-  if (!topChart) {
-    topChart = echarts.getInstanceByDom(topChartRef.value) || echarts.init(topChartRef.value)
-  }
-  const items = (Array.isArray(stats.topByViews) ? stats.topByViews : []).slice(0, 5)
-  const names = items.map((row) => String(row?.name || `#${row?.id || ''}`)).reverse()
-  const views = items.map((row) => Number(row?.viewCount) || 0).reverse()
-  topChart.setOption({
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    grid: { left: 8, right: 16, top: 8, bottom: 8, containLabel: true },
-    xAxis: { type: 'value', minInterval: 1, splitLine: { lineStyle: { type: 'dashed', color: '#e5e7eb' } } },
-    yAxis: {
-      type: 'category',
-      data: names.length ? names : ['暂无数据'],
-      axisLabel: { width: 96, overflow: 'truncate', fontSize: 12 }
-    },
-    series: [{
-      type: 'bar',
-      data: names.length ? views : [0],
-      itemStyle: { color: '#3b82f6', borderRadius: [0, 4, 4, 0] },
-      barMaxWidth: 22
-    }]
-  }, true)
-}
-
 function renderStatsCharts() {
+  renderActivityChart()
+  renderSizeChart()
+  renderTopSlotChart()
   renderTypeChart()
-  renderTopChart()
 }
 
 function onStatsResize() {
-  typeChart?.resize()
-  topChart?.resize()
+  chartInstances.forEach((chart) => chart?.resize?.())
+}
+
+async function refreshStatsCharts() {
+  await nextTick()
+  renderStatsCharts()
+  onStatsResize()
+}
+
+function onMainTabChange(name) {
+  if (name === 'stats') {
+    refreshStatsCharts()
+  }
 }
 
 async function loadStats() {
@@ -745,9 +1176,21 @@ async function loadStats() {
     stats.publicCount = Number(data.publicCount) || 0
     stats.privateCount = Number(data.privateCount) || 0
     stats.totalViews = Number(data.totalViews) || 0
+    stats.totalChartSlots = Number(data.totalChartSlots) || 0
+    stats.totalWidgetSlots = Number(data.totalWidgetSlots) || 0
+    stats.avgChartSlots = Number(data.avgChartSlots) || 0
+    stats.groupCount = Number(data.groupCount) || 0
+    stats.totalQueries = Number(data.totalQueries) || 0
+    stats.totalCharts = Number(data.totalCharts) || 0
+    stats.totalUploads = Number(data.totalUploads) || 0
+    stats.totalPinnedComponents = Number(data.totalPinnedComponents) || 0
     stats.topByViews = Array.isArray(data.topByViews) ? data.topByViews : []
-    await nextTick()
-    renderStatsCharts()
+    stats.topByChartSlots = Array.isArray(data.topByChartSlots) ? data.topByChartSlots : []
+    stats.sizeDistribution = Array.isArray(data.sizeDistribution) ? data.sizeDistribution : []
+    stats.dailyActivity = Array.isArray(data.dailyActivity) ? data.dailyActivity : []
+    if (activeTab.value === 'stats') {
+      await refreshStatsCharts()
+    }
   } catch (e) {
     ElMessage.error(e.message || '统计加载失败')
   } finally {
@@ -1153,10 +1596,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onStatsResize)
-  typeChart?.dispose()
-  topChart?.dispose()
-  typeChart = null
-  topChart = null
+  chartInstances.forEach((chart) => chart?.dispose?.())
 })
 </script>
 
@@ -1172,8 +1612,62 @@ onBeforeUnmount(() => {
   gap: 16px;
   margin-bottom: 14px;
 }
-.adm-stats-wrap {
+.adm-main-tabs {
   margin-bottom: 16px;
+}
+.adm-main-tabs :deep(.el-tabs__header) {
+  margin-bottom: 16px;
+  padding: 5px;
+  border: 1px solid #e8edf7;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.045);
+}
+.adm-main-tabs :deep(.el-tabs__nav-wrap::after) {
+  display: none;
+}
+.adm-main-tabs :deep(.el-tabs__active-bar) {
+  display: none;
+}
+.adm-main-tabs :deep(.el-tabs__nav-scroll) {
+  overflow: visible;
+}
+.adm-main-tabs :deep(.el-tabs__nav) {
+  float: none;
+  display: inline-flex;
+  gap: 6px;
+}
+.adm-main-tabs :deep(.el-tabs__item) {
+  height: 38px;
+  padding: 0 18px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #64748b;
+  transition: color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+}
+.adm-main-tabs :deep(.el-tabs__item:hover) {
+  color: #334155;
+  background: rgba(255, 255, 255, 0.72);
+}
+.adm-main-tabs :deep(.el-tabs__item.is-active) {
+  color: #1d4ed8;
+  background: #fff;
+  box-shadow:
+    0 4px 14px rgba(37, 99, 235, 0.12),
+    0 0 0 1px rgba(37, 99, 235, 0.08);
+}
+.adm-tab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1;
+}
+.adm-tab-label .el-icon {
+  font-size: 15px;
+}
+.adm-stats-wrap {
+  margin-bottom: 0;
 }
 .adm-stat-grid {
   display: grid;
@@ -1181,17 +1675,125 @@ onBeforeUnmount(() => {
   gap: 12px;
   margin-bottom: 12px;
 }
+.adm-stat-grid--secondary {
+  margin-bottom: 14px;
+}
 .adm-stat-card {
+  position: relative;
+  overflow: hidden;
   padding: 16px 18px;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  background: #fff;
-  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.04);
+  border: 1px solid #e8edf7;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.04);
 }
 .adm-stat-card--blue { border-top: 3px solid #3b82f6; }
 .adm-stat-card--amber { border-top: 3px solid #f59e0b; }
 .adm-stat-card--indigo { border-top: 3px solid #6366f1; }
 .adm-stat-card--green { border-top: 3px solid #22c55e; }
+.adm-stat-card--violet { border-top: 3px solid #8b5cf6; }
+.adm-stat-card--cyan { border-top: 3px solid #06b6d4; }
+.adm-stat-card--slate { border-top: 3px solid #64748b; }
+.adm-stats-deck {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 12px;
+  align-items: start;
+}
+.adm-stats-deck-main {
+  min-width: 0;
+}
+.adm-stats-deck-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.adm-side-panel {
+  position: relative;
+  overflow: hidden;
+  padding: 16px;
+  border: 1px solid #e8edf7;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.04);
+}
+.adm-side-panel .adm-chart-title::before {
+  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.1);
+}
+.adm-side-metrics {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+.adm-side-empty {
+  margin-top: 12px;
+  font-size: 12px;
+  color: #94a3b8;
+}
+.adm-side-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.adm-side-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid #f1f5f9;
+}
+.adm-side-row:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.adm-side-metric {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid #eef2f7;
+  font-size: 13px;
+  color: #4b5563;
+}
+.adm-side-metric strong {
+  font-size: 18px;
+  font-weight: 700;
+  color: #0f172a;
+}
+.adm-side-rank {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #eff6ff 0%, #dbeafe 100%);
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 24px;
+  text-align: center;
+}
+.adm-side-main {
+  min-width: 0;
+}
+.adm-side-main strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: #111827;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.adm-side-main small {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: #9ca3af;
+}
 .adm-stat-label {
   display: block;
   font-size: 13px;
@@ -1216,28 +1818,68 @@ onBeforeUnmount(() => {
 .adm-charts-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: 14px;
 }
 .adm-chart-panel {
-  padding: 14px 16px 10px;
-  border: 1px solid #e5e7eb;
-  border-radius: 10px;
-  background: #fff;
+  --adm-chart-accent: #6366f1;
+  position: relative;
+  overflow: hidden;
+  padding: 16px 16px 12px;
+  border: 1px solid #e8edf7;
+  border-radius: 14px;
+  background:
+    radial-gradient(circle at top right, rgba(99, 102, 241, 0.05), transparent 42%),
+    linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.045);
 }
+.adm-chart-panel::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 16px;
+  right: 16px;
+  height: 3px;
+  border-radius: 0 0 4px 4px;
+  background: var(--adm-chart-accent);
+  opacity: 0.88;
+}
+.adm-charts-grid--quad .adm-chart-panel:nth-child(1) { --adm-chart-accent: #6366f1; }
+.adm-charts-grid--quad .adm-chart-panel:nth-child(2) { --adm-chart-accent: #8b5cf6; }
+.adm-charts-grid--quad .adm-chart-panel:nth-child(3) { --adm-chart-accent: #2563eb; }
+.adm-charts-grid--quad .adm-chart-panel:nth-child(4) { --adm-chart-accent: #f59e0b; }
 .adm-chart-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 0;
   font-size: 14px;
   font-weight: 700;
-  color: #111827;
+  color: #0f172a;
+}
+.adm-chart-title::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--adm-chart-accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--adm-chart-accent) 16%, transparent);
+  flex-shrink: 0;
 }
 .adm-chart-sub {
-  margin: 4px 0 0;
+  margin: 6px 0 0 16px;
   font-size: 12px;
-  color: #9ca3af;
+  color: #94a3b8;
 }
 .adm-chart-canvas {
   width: 100%;
   height: 240px;
+}
+.adm-chart-canvas--sm {
+  height: 196px;
+  margin-top: 10px;
+}
+.adm-charts-grid--quad .adm-chart-panel {
+  min-height: 248px;
 }
 .adm-title {
   margin: 0 0 6px;
@@ -1351,6 +1993,11 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+@media (max-width: 1100px) {
+  .adm-stats-deck {
+    grid-template-columns: 1fr;
+  }
 }
 @media (max-width: 900px) {
   .adm-head {

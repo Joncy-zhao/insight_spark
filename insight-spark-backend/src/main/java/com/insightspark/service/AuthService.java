@@ -12,6 +12,7 @@ import javax.crypto.spec.PBEKeySpec;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -27,6 +28,9 @@ public class AuthService {
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    private PermissionService permissionService;
 
     @Autowired(required = false)
     private StackCRuntimeConfigProvider runtimeConfig;
@@ -57,7 +61,7 @@ public class AuthService {
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='RBAC用户表';
                 """);
         ensureUser("demo-user", "demo-user", "普通用户", null, "user@example.com", "user123456", "USER");
-        ensureUser("admin", "admin", "管理员", null, "admin@example.com", "admin123456", "ADMIN");
+        ensureUser("admin", "admin", "超级管理员", null, "admin@example.com", "admin123456", "SUPER_ADMIN");
     }
 
     public Map<String, Object> captcha() {
@@ -148,7 +152,11 @@ public class AuthService {
         String token = UUID.randomUUID() + "-" + UUID.randomUUID();
         UserPrincipal principal = toPrincipal(user);
         sessions.put(token, principal);
-        return Map.of("token", token, "user", publicUser(user));
+        Map<String, Object> publicProfile = publicUser(user);
+        publicProfile.put("permissionCodes", permissionService.effectivePermissionCodesFor(
+                Objects.toString(user.get("userId")),
+                Objects.toString(user.get("role"), "USER")));
+        return Map.of("token", token, "user", publicProfile);
     }
 
     private void validateCaptcha(Map<String, Object> request) {
@@ -173,16 +181,16 @@ public class AuthService {
     }
 
     private Map<String, Object> publicUser(Map<String, Object> user) {
-        return Map.of(
-                "id", user.get("id"),
-                "userId", user.get("userId"),
-                "username", user.get("username"),
-                "nickname", user.get("nickname"),
-                "phone", user.get("phone") == null ? "" : user.get("phone"),
-                "email", user.get("email") == null ? "" : user.get("email"),
-                "role", user.get("role"),
-                "status", user.get("status")
-        );
+        Map<String, Object> profile = new LinkedHashMap<>();
+        profile.put("id", user.get("id"));
+        profile.put("userId", user.get("userId"));
+        profile.put("username", user.get("username"));
+        profile.put("nickname", user.get("nickname"));
+        profile.put("phone", user.get("phone") == null ? "" : user.get("phone"));
+        profile.put("email", user.get("email") == null ? "" : user.get("email"));
+        profile.put("role", user.get("role"));
+        profile.put("status", user.get("status"));
+        return profile;
     }
 
     private UserPrincipal toPrincipal(Map<String, Object> user) {

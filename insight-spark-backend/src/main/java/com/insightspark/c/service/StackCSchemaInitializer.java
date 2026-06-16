@@ -155,6 +155,8 @@ public class StackCSchemaInitializer {
                         ON DELETE SET NULL ON UPDATE CASCADE
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='业务批注';
                     """);
+            addColumnIfMissing("is_annotation", "is_hidden",
+                    "`is_hidden` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否隐藏' AFTER `is_deleted`");
 
             jdbcTemplate.execute("""
                     CREATE TABLE IF NOT EXISTS `is_comment` (

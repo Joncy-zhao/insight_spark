@@ -1,0 +1,81 @@
+/* 业务批注与协同 — 统一表格样式 */
+.collab-data-table {
+  --el-table-header-bg-color: #f0f5ff;
+  --el-table-header-text-color: #344054;
+  --el-table-row-hover-bg-color: #f8fbff;
+  --el-table-current-row-bg-color: #ecf5ff;
+  border-radius: 8px;
+  width: 100%;
+}
+
+.collab-data-table .el-table__header th.el-table__cell {
+  font-weight: 600;
+  font-size: 13px;
+  padding: 10px 0;
+}
+
+.collab-data-table .el-table__body td.el-table__cell {
+  padding: 10px 0;
+  vertical-align: middle;
+  font-size: 13px;
+}
+
+.collab-data-table .col-actions .cell {
+  overflow: visible;
+  white-space: nowrap;
+}
+
+.collab-row-actions {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 2px;
+  white-space: nowrap;
+}
+
+.collab-row-actions .el-button.is-link {
+  padding: 0 6px;
+  margin: 0;
+  height: auto;
+}
+
+.collab-row-actions .el-dropdown {
+  display: inline-flex;
+  vertical-align: middle;
+}
+
+.collab-cell-ellipsis {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.collab-board-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.collab-board-name strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.collab-perm-tags {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 4px;
+}
+
+.collab-perm-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}

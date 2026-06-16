@@ -49,6 +49,7 @@ public class StackCSystemConfigService {
 
         List<Map<String, Object>> modules = new ArrayList<>();
         int wiredCount = 0;
+        int kvOnlyCount = 0;
         int readOnlyCount = 0;
         for (String moduleId : StackCSystemConfigDefinitions.MODULE_ORDER) {
             List<Map<String, Object>> items = new ArrayList<>();
@@ -67,6 +68,8 @@ public class StackCSystemConfigService {
                     item.put("readOnly", hf.meta().readOnly());
                     if (!"STORE_ONLY".equals(hf.meta().binding()) && !"SYSTEM_CONFIG".equals(hf.meta().binding())) {
                         wiredCount++;
+                    } else {
+                        kvOnlyCount++;
                     }
                     if (hf.meta().readOnly()) {
                         readOnlyCount++;
@@ -86,6 +89,7 @@ public class StackCSystemConfigService {
         result.put("modules", modules);
         result.put("totalKeys", StackCSystemConfigDefinitions.ALL.size());
         result.put("wiredCount", wiredCount);
+        result.put("kvOnlyCount", kvOnlyCount);
         result.put("readOnlyCount", readOnlyCount);
         result.put("moduleOrder", StackCSystemConfigDefinitions.MODULE_ORDER);
         return result;

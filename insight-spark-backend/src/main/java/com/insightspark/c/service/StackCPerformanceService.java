@@ -483,6 +483,7 @@ public class StackCPerformanceService {
         long nonHeap = memBean.getNonHeapMemoryUsage().getUsed();
         OperatingSystemMXBean osBean = ManagementFactory.getOperatingSystemMXBean();
         double load = osBean.getSystemLoadAverage();
+        Double systemCpuPercent = readSystemCpuPercent(osBean);
 
         Map<String, Object> jvm = new LinkedHashMap<>();
         jvm.put("processors", rt.availableProcessors());
@@ -491,7 +492,38 @@ public class StackCPerformanceService {
         jvm.put("nonHeapUsedBytes", nonHeap);
         jvm.put("heapUsedPercent", heapMax > 0 ? Math.round(10000.0 * heapUsed / heapMax) / 100.0 : null);
         jvm.put("systemLoadAverage", load >= 0 ? load : null);
+        jvm.put("systemCpuPercent", systemCpuPercent);
+        jvm.put("cpuUsagePercent", resolveCpuUsagePercent(load, rt.availableProcessors(), systemCpuPercent));
         return jvm;
+    }
+
+    private Double readSystemCpuPercent(OperatingSystemMXBean osBean) {
+        if (!(osBean instanceof com.sun.management.OperatingSystemMXBean sunOs)) {
+            return null;
+        }
+        double systemCpu = sunOs.getSystemCpuLoad();
+        if (systemCpu < 0) {
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            systemCpu = sunOs.getSystemCpuLoad();
+        }
+        if (systemCpu < 0) {
+            return null;
+        }
+        return Math.round(systemCpu * 10000.0) / 100.0;
+    }
+
+    private Double resolveCpuUsagePercent(double load, int processors, Double systemCpuPercent) {
+        if (systemCpuPercent != null) {
+            return systemCpuPercent;
+        }
+        if (load >= 0 && processors > 0) {
+            return Math.min(100.0, Math.round((load / processors) * 10000.0) / 100.0);
+        }
+        return null;
     }
 
     private long readSlowQueryThresholdMs() {

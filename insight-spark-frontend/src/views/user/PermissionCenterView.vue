@@ -413,6 +413,8 @@ import {
   WarningFilled
 } from '@element-plus/icons-vue'
 import permissionShieldIllustration from '../../assets/permission-shield-illustration.png'
+import { menuGroups, canAccessModule, isSuperAdmin, allAdminSidebarModules } from '../../router/modules'
+import { currentUser, userPermissionCodes } from '../../store/session'
 
 const {
   accessibleTables,
@@ -453,9 +455,19 @@ const roleDisplay = computed(() => permissionOverview.value?.roleLevel || permis
 const roleCode = computed(() => permissionOverview.value?.role || '-')
 const rowPermissionDescription = computed(() => permissionOverview.value?.rowPolicy
   || '系统按 owner_user_id / owner_id 与授权关系强制过滤数据行；未获得授权时，其他用户上传的数据不会出现在查询、预览和导出结果中。')
-const menuPermissions = computed(() => permissionOverview.value?.menuPermissions?.length
-  ? permissionOverview.value.menuPermissions
-  : ['用户工作台', '对话分析', '数据上传', '数据权限中心'])
+const menuPermissions = computed(() => {
+  const fromOverview = permissionOverview.value?.menuPermissions
+  if (fromOverview?.length) return fromOverview
+  const role = currentUser.value?.role || 'USER'
+  const codes = userPermissionCodes.value || []
+  if (isSuperAdmin(role, codes)) {
+    return allAdminSidebarModules().map(m => m.title)
+  }
+  return menuGroups
+    .flatMap(g => g.modules)
+    .filter(m => canAccessModule(m, role, codes))
+    .map(m => m.title)
+})
 const complianceTips = computed(() => permissionOverview.value?.complianceTips?.length
   ? permissionOverview.value.complianceTips
   : [

@@ -63,13 +63,17 @@ function normalizeChartItem(item) {
 
 export function normalizeChartType(value) {
   const type = String(value || '').toLowerCase()
-  if (type === 'line' || type === 'pie' || type === 'bar' || type === 'table') return type
+  if (['line', 'pie', 'bar', 'table', 'radar', 'scatter', 'map', 'metric'].includes(type)) return type
   if (type === 'doughnut' || type === 'donut') return 'pie'
   if (type.includes('饼')) return 'pie'
   if (type.includes('环')) return 'pie'
   if (type.includes('折')) return 'line'
   if (type.includes('柱')) return 'bar'
   if (type.includes('表')) return 'table'
+  if (type.includes('雷达')) return 'radar'
+  if (type.includes('散点')) return 'scatter'
+  if (type.includes('地图')) return 'map'
+  if (type.includes('指标')) return 'metric'
   return 'bar'
 }
 
@@ -847,12 +851,114 @@ function readBarUi(ui) {
   return { barW, barColor }
 }
 
+function buildRadarFromPoints(points, ui) {
+  const values = points.map((p) => Number(p.value ?? 0))
+  const maxVal = Math.max(...values, 0)
+  const max = maxVal > 0 ? Math.ceil(maxVal * 1.15) : 100
+  const { barColor } = readBarUi(ui)
+  return {
+    tooltip: { trigger: 'item', confine: true },
+    radar: {
+      indicator: points.map((p) => ({ name: p.name, max })),
+      radius: '62%',
+      splitLine: { lineStyle: { color: '#eef2f7' } },
+      axisName: { fontSize: 11, color: '#64748b' }
+    },
+    series: [
+      {
+        type: 'radar',
+        data: [{ value: values, name: '数据' }],
+        areaStyle: { opacity: 0.25 },
+        lineStyle: barColor ? { color: barColor, width: 2 } : { width: 2 },
+        itemStyle: barColor ? { color: barColor } : undefined,
+        symbolSize: 4
+      }
+    ]
+  }
+}
+
+function buildScatterFromPoints(points, ui, itemOv = {}) {
+  const xAxisData = points.map((p) => p.name)
+  const seriesData = points.map((p, i) => {
+    const v = Number(p.value ?? 0)
+    const col = itemOv[i]?.color
+    if (col) return { value: v, itemStyle: { color: col } }
+    return v
+  })
+  const valueAxisRange = buildValueAxisRange(seriesData.map((d) => (typeof d === 'object' ? d.value : d)))
+  const { barColor } = readBarUi(ui)
+  const useZoom = xAxisData.length > 14
+  const endPct = xAxisData.length ? Math.min(100, Math.ceil((14 / xAxisData.length) * 100)) : 100
+
+  const option = {
+    tooltip: { trigger: 'axis', axisPointer: { type: 'cross' }, confine: true },
+    grid: {
+      left: 48,
+      right: 12,
+      top: 14,
+      bottom: useZoom ? 80 : Math.min(110, 32 + (xAxisData.length > 10 ? 52 : 38))
+    },
+    xAxis: {
+      type: 'category',
+      data: xAxisData,
+      axisLabel: {
+        interval: 0,
+        rotate: xAxisData.length > 8 ? 38 : 20,
+        hideOverlap: true,
+        fontSize: 11
+      }
+    },
+    yAxis: {
+      type: 'value',
+      min: valueAxisRange.min,
+      max: valueAxisRange.max,
+      splitLine: { lineStyle: { color: '#eef2f7' } },
+      axisLabel: { fontSize: 11 }
+    },
+    series: [
+      {
+        type: 'scatter',
+        data: seriesData,
+        symbolSize: 10,
+        itemStyle: barColor ? { color: barColor, opacity: 0.85 } : { opacity: 0.85 },
+        large: seriesData.length > 80,
+        largeThreshold: 80
+      }
+    ]
+  }
+
+  if (useZoom) {
+    option.dataZoom = normalizeInteractiveDataZoom([
+      { type: 'slider', show: true, xAxisIndex: 0, bottom: 8, height: 22, start: 0, end: endPct },
+      { type: 'inside', xAxisIndex: 0, start: 0, end: endPct }
+    ])
+  }
+  return option
+}
+
+function buildRadarFromEncodeDataset(snap, dimensions, source, ui) {
+  const enc = snap.encode || {}
+  const nameKey = String(enc.x ?? enc.itemName ?? dimensions[0] ?? 'name')
+  const valKey = String(enc.y ?? enc.value ?? dimensions[1] ?? 'value')
+  const ni = dimensions.indexOf(nameKey)
+  const vi = dimensions.indexOf(valKey)
+  const points = source.map((row) => ({
+    name: String(ni >= 0 ? row[nameKey] ?? row[ni] : row[dimensions[0]] ?? ''),
+    value: Number(vi >= 0 ? row[valKey] ?? row[vi] : row[dimensions[1]] ?? 0)
+  }))
+  return buildRadarFromPoints(points, ui)
+}
+
 function buildOptionFromEncodeDataset(snap, chartType, ui) {
   const { dimensions, source } = buildDatasetFromSnapshot(snap)
   const enc = snap.encode || {}
   const { barW, barColor } = readBarUi(ui)
   const n = source.length
   const manyPie = n > 10
+
+  if (chartType === 'radar') {
+    return buildRadarFromEncodeDataset(snap, dimensions, source, ui)
+  }
 
   if (chartType === 'pie') {
     const itemName = String(enc.itemName ?? 'name')
@@ -945,8 +1051,17 @@ function buildOptionFromEncodeDataset(snap, chartType, ui) {
     series0.lineStyle = { color: barColor, width: 2 }
   }
 
+  if (chartType === 'scatter') {
+    series0.symbolSize = 10
+    series0.itemStyle = barColor ? { color: barColor, opacity: 0.85 } : { opacity: 0.85 }
+  }
+
   const option = {
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, confine: true },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: chartType === 'scatter' ? 'cross' : 'shadow' },
+      confine: true
+    },
     grid: {
       left: 48,
       right: 12,
@@ -998,6 +1113,14 @@ function buildOptionFromEncodeDataset(snap, chartType, ui) {
 function buildOptionLegacyFromPoints(snap, chartType, ui, itemOv) {
   const data = Array.isArray(snap.data) ? snap.data : []
   const points = data.map(normalizeChartItem)
+
+  if (chartType === 'radar') {
+    return buildRadarFromPoints(points, ui)
+  }
+
+  if (chartType === 'scatter') {
+    return buildScatterFromPoints(points, ui, itemOv)
+  }
 
   if (chartType === 'pie') {
     const many = points.length > 10
@@ -1149,6 +1272,171 @@ function buildOptionLegacyFromPoints(snap, chartType, ui, itemOv) {
   return option
 }
 
+function applyAxisPatch(axis, patchFn) {
+  if (!axis) return axis
+  if (Array.isArray(axis)) return axis.map((a) => patchFn(a || {}))
+  return patchFn(axis || {})
+}
+
+/**
+ * 将 layout_json.items[].chartStyle 应用到 ECharts option（通用 + 按类型）
+ * @param {object} option
+ * @param {object} style 已合并默认值的 chartStyle
+ * @param {string} chartType
+ */
+export function applyChartUiStyle(option, style, chartType) {
+  if (!option || !style || typeof style !== 'object') return option
+  const out = { ...option }
+  const t = String(chartType || '').toLowerCase()
+
+  if (style.legendShow === false) {
+    out.legend = mergeObjects(out.legend, { show: false })
+  } else if (style.legendShow !== false && style.legendPosition) {
+    const pos = String(style.legendPosition)
+    const legendPatch = { show: true, textStyle: { fontSize: Number(style.legendFontSize) || 11 } }
+    if (pos === 'bottom') Object.assign(legendPatch, { top: undefined, bottom: 0, left: 'center' })
+    else if (pos === 'left') Object.assign(legendPatch, { orient: 'vertical', left: 0, top: 'middle' })
+    else if (pos === 'right') Object.assign(legendPatch, { orient: 'vertical', right: 0, top: 'middle' })
+    else Object.assign(legendPatch, { top: 0, left: 'center' })
+    out.legend = mergeObjects(out.legend, legendPatch)
+  }
+
+  if (style.tooltipShow === false) {
+    out.tooltip = mergeObjects(out.tooltip, { show: false })
+  }
+
+  if (['bar', 'line', 'radar', 'scatter'].includes(t) && style.axisXRotate != null) {
+    const deg = Math.max(-90, Math.min(90, Math.round(Number(style.axisXRotate) || 0)))
+    out.xAxis = applyAxisPatch(out.xAxis, (ax) =>
+      mergeObjects(ax, {
+        axisLabel: mergeObjects(ax.axisLabel, { rotate: deg, fontSize: Number(style.legendFontSize) || ax.axisLabel?.fontSize || 11 })
+      })
+    )
+  }
+
+  if (style.axisYShow === false) {
+    out.yAxis = applyAxisPatch(out.yAxis, (ax) => mergeObjects(ax, { show: false }))
+  }
+
+  if (style.gridLineShow === false) {
+    out.xAxis = applyAxisPatch(out.xAxis, (ax) => mergeObjects(ax, { splitLine: { show: false } }))
+    out.yAxis = applyAxisPatch(out.yAxis, (ax) => mergeObjects(ax, { splitLine: { show: false } }))
+  }
+
+  if (style.dataLabelShow && Array.isArray(out.series)) {
+    out.series = out.series.map((s) =>
+      mergeObjects(s, {
+        label: mergeObjects(s.label, { show: true, position: style.dataLabelPosition || 'top' })
+      })
+    )
+  }
+
+  const primary = String(style.primaryColor || '').trim()
+  if (primary && Array.isArray(out.series) && out.series.length) {
+    out.color = out.color || []
+    if (!out.color.length) out.color = [primary]
+  }
+
+  if (t === 'line' && Array.isArray(out.series)) {
+    out.series = out.series.map((s) => {
+      const patch = {}
+      if (style.lineSmooth) patch.smooth = true
+      const lw = Number(style.lineWidth)
+      if (Number.isFinite(lw) && lw > 0) patch.lineStyle = mergeObjects(s.lineStyle, { width: lw })
+      const sym = Number(style.lineSymbolSize)
+      if (Number.isFinite(sym) && sym > 0) patch.symbolSize = sym
+      return mergeObjects(s, patch)
+    })
+  }
+
+  if (t === 'pie' && Array.isArray(out.series)) {
+    const inner = Math.max(0, Math.min(80, Number(style.pieInnerRadius) || 0))
+    const pad = Math.max(0, Math.min(20, Number(style.piePadAngle) || 0))
+    out.series = out.series.map((s) =>
+      mergeObjects(s, {
+        padAngle: pad / 10,
+        radius: inner > 0 ? [`${inner}%`, '70%'] : s.radius
+      })
+    )
+  }
+
+  if (t === 'bar' && Array.isArray(out.series)) {
+    const r = Math.max(0, Math.min(16, Number(style.barRadius) || 0))
+    if (r > 0) {
+      out.series = out.series.map((s) =>
+        mergeObjects(s, { itemStyle: mergeObjects(s.itemStyle, { borderRadius: [r, r, 0, 0] }) })
+      )
+    }
+  }
+
+  if (t === 'scatter' && Array.isArray(out.series)) {
+    const sym = Number(style.scatterSymbolSize)
+    const op = Number(style.scatterOpacity)
+    out.series = out.series.map((s) => {
+      if (String(s.type || '').toLowerCase() !== 'scatter') return s
+      const patch = {}
+      if (Number.isFinite(sym) && sym > 0) patch.symbolSize = sym
+      if (Number.isFinite(op) && op >= 0 && op <= 1) {
+        patch.itemStyle = mergeObjects(s.itemStyle, { opacity: op })
+      }
+      return mergeObjects(s, patch)
+    })
+  }
+
+  if (t === 'radar') {
+    const areaOp = Number(style.radarAreaOpacity)
+    const lw = Number(style.radarLineWidth)
+    const sym = Number(style.radarSymbolSize)
+    if (Array.isArray(out.series)) {
+      out.series = out.series.map((s) => {
+        if (String(s.type || '').toLowerCase() !== 'radar') return s
+        const patch = {}
+        if (Number.isFinite(areaOp) && areaOp >= 0 && areaOp <= 1) {
+          patch.areaStyle = mergeObjects(s.areaStyle, { opacity: areaOp })
+        }
+        if (Number.isFinite(lw) && lw > 0) {
+          patch.lineStyle = mergeObjects(s.lineStyle, { width: lw })
+        }
+        if (Number.isFinite(sym) && sym > 0) patch.symbolSize = sym
+        return mergeObjects(s, patch)
+      })
+    }
+    if (Number.isFinite(areaOp) && out.radar) {
+      out.radar = mergeObjects(out.radar, {
+        splitArea: mergeObjects(out.radar.splitArea, { show: areaOp > 0 })
+      })
+    }
+  }
+
+  if (t === 'map') {
+    const area = String(style.mapAreaColor || '').trim()
+    const border = String(style.mapBorderColor || '').trim()
+    const emph = String(style.mapEmphasisColor || '').trim()
+    if (area || border) {
+      const geoPatch = (g) =>
+        mergeObjects(g, {
+          itemStyle: mergeObjects(g.itemStyle, {
+            ...(area ? { areaColor: area } : {}),
+            ...(border ? { borderColor: border } : {})
+          })
+        })
+      out.geo = applyAxisPatch(out.geo, geoPatch)
+    }
+    if (emph && Array.isArray(out.series)) {
+      out.series = out.series.map((s) => {
+        if (String(s.type || '').toLowerCase() !== 'map') return s
+        return mergeObjects(s, {
+          emphasis: mergeObjects(s.emphasis, {
+            itemStyle: mergeObjects(s.emphasis?.itemStyle, { areaColor: emph })
+          })
+        })
+      })
+    }
+  }
+
+  return out
+}
+
 /**
  * @param row 来自 charts-batch 的单行：chartType, chartSnapshot, generatedSql, queryTableName, id
  * @param ui 看板网格项上的展示覆盖：barColor、barMaxWidth、seriesItemStyles（按下标逐项 itemStyle）
@@ -1156,6 +1444,9 @@ function buildOptionLegacyFromPoints(snap, chartType, ui, itemOv) {
 export function buildOptionFromHistoryRow(row, ui = {}) {
   const snap = parseSnapshot(row?.chartSnapshot)
   const chartType = normalizeChartType(row?.chartType || snap.chartType)
+  if (chartType === 'table' || chartType === 'metric') {
+    return null
+  }
   const itemOv = normalizeSeriesItemStyles(ui.seriesItemStyles)
   const hasItemOverrides = Object.keys(itemOv).length > 0
   const template =
@@ -1176,7 +1467,11 @@ export function buildOptionFromHistoryRow(row, ui = {}) {
   }
 
   const withTemplate = template ? applyOptionTemplateDefaults(built, template) : built
-  const finalOption = applyDynamicInteractionDefaults(withTemplate, template, { chartType })
+  let finalOption = applyDynamicInteractionDefaults(withTemplate, template, { chartType })
+  const uiStyle = ui?.chartStyle && typeof ui.chartStyle === 'object' ? ui.chartStyle : {}
+  if (Object.keys(uiStyle).length) {
+    finalOption = applyChartUiStyle(finalOption, uiStyle, chartType)
+  }
   if (Array.isArray(finalOption?.dataZoom) && finalOption.dataZoom.length) {
     finalOption.dataZoom = normalizeInteractiveDataZoom(finalOption.dataZoom)
   }

@@ -61,6 +61,26 @@ public class StackCAnnouncementService {
         return Map.of("id", id == null ? 0L : id);
     }
 
+    public void updatePublishStatus(long id, String publishStatus) {
+        String status = Objects.toString(publishStatus, "").trim().toUpperCase();
+        if (!List.of("PUBLISHED", "REVOKED", "DRAFT").contains(status)) {
+            throw new IllegalArgumentException("publishStatus 只能是 PUBLISHED / REVOKED / DRAFT");
+        }
+        int updated = jdbcTemplate.update(
+                "UPDATE is_system_announcement SET publish_status = ?, published_at = CASE WHEN ? = 'PUBLISHED' THEN NOW() ELSE published_at END WHERE id = ?",
+                status, status, id);
+        if (updated == 0) {
+            throw new IllegalArgumentException("公告不存在：" + id);
+        }
+    }
+
+    public void updatePinned(long id, boolean pinned) {
+        int updated = jdbcTemplate.update("UPDATE is_system_announcement SET pinned = ? WHERE id = ?", pinned ? 1 : 0, id);
+        if (updated == 0) {
+            throw new IllegalArgumentException("公告不存在：" + id);
+        }
+    }
+
     private static String requireText(Map<String, Object> body, String key) {
         Object v = body.get(key);
         if (v == null || String.valueOf(v).isBlank()) {

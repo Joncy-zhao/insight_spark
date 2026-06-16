@@ -28,7 +28,7 @@ public class StackCDynamicCorsConfiguration {
     private CorsConfiguration buildCors(StackCRuntimeConfigProvider provider) {
         CorsConfiguration config = new CorsConfiguration();
         applyOrigins(config, provider.getStringList("security.cors.origins"));
-        config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
+        config.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         config.setAllowedHeaders(List.of("*"));
         config.setAllowCredentials(true);
         config.setMaxAge(3600L);

@@ -1,6 +1,7 @@
 package com.insightspark.core.auth;
 
 import com.insightspark.service.AuthService;
+import com.insightspark.service.PermissionService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -13,6 +14,9 @@ public class AuthInterceptor implements HandlerInterceptor {
 
     @Autowired
     private AuthService authService;
+
+    @Autowired
+    private PermissionService permissionService;
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
@@ -50,12 +54,36 @@ public class AuthInterceptor implements HandlerInterceptor {
             return false;
         }
 
-        if (isAdminEndpoint(uri) && !"ADMIN".equalsIgnoreCase(principal.role())) {
-            writeJson(response, HttpServletResponse.SC_FORBIDDEN, "仅管理员可访问");
+        if (permissionService.isSuperAdminUser(principal.userId(), principal.role())) {
+            AuthContext.set(principal);
+            return true;
+        }
+
+        if (isAdminEndpoint(uri) && !hasEndpointAccess(principal, uri, request.getMethod())) {
+            writeJson(response, HttpServletResponse.SC_FORBIDDEN, "无访问权限");
+            return false;
+        }
+
+        String featurePermission = RbacEndpointGuard.requiredPermission(uri, request.getMethod());
+        if (featurePermission != null
+                && !RbacEndpointGuard.isLegacyAdminEndpoint(uri)
+                && !permissionService.hasPermissionFor(principal.userId(), principal.role(), featurePermission)) {
+            writeJson(response, HttpServletResponse.SC_FORBIDDEN, "无访问权限");
             return false;
         }
 
         AuthContext.set(principal);
+        return true;
+    }
+
+    private boolean hasEndpointAccess(AuthContext.UserPrincipal principal, String uri, String method) {
+        String permission = RbacEndpointGuard.requiredPermission(uri, method);
+        if (permission != null) {
+            return permissionService.hasPermissionFor(principal.userId(), principal.role(), permission);
+        }
+        if (RbacEndpointGuard.isLegacyAdminEndpoint(uri)) {
+            return "ADMIN".equalsIgnoreCase(principal.role());
+        }
         return true;
     }
 

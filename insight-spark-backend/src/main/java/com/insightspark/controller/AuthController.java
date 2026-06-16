@@ -3,6 +3,7 @@ package com.insightspark.controller;
 import com.insightspark.common.ApiResponse;
 import com.insightspark.core.auth.AuthContext;
 import com.insightspark.service.AuthService;
+import com.insightspark.service.PermissionService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -12,6 +13,7 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 @RestController
@@ -21,6 +23,9 @@ public class AuthController {
 
     @Autowired
     private AuthService authService;
+
+    @Autowired
+    private PermissionService permissionService;
 
     @GetMapping("/captcha")
     public ApiResponse<Map<String, Object>> captcha() {
@@ -44,7 +49,15 @@ public class AuthController {
     }
 
     @GetMapping("/me")
-    public ApiResponse<AuthContext.UserPrincipal> me() {
-        return ApiResponse.success(AuthContext.get());
+    public ApiResponse<Map<String, Object>> me() {
+        AuthContext.UserPrincipal principal = AuthContext.get();
+        Map<String, Object> profile = new LinkedHashMap<>();
+        profile.put("id", principal.id());
+        profile.put("userId", principal.userId());
+        profile.put("username", principal.username());
+        profile.put("nickname", principal.nickname());
+        profile.put("role", principal.role());
+        profile.put("permissionCodes", permissionService.effectivePermissionCodesFor(principal.userId(), principal.role()));
+        return ApiResponse.success(profile);
     }
 }

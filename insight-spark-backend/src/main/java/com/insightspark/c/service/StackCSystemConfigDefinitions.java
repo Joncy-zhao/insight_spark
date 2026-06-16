@@ -189,7 +189,7 @@ public final class StackCSystemConfigDefinitions {
     );
 
     public static final List<String> MODULE_ORDER = List.of(
-            "AI", "SECURITY", "PERFORMANCE", "UPLOAD", "DATASOURCE", "INTERACTION", "NOTIFICATION"
+            "NOTIFICATION", "AI", "SECURITY", "PERFORMANCE", "UPLOAD", "DATASOURCE", "INTERACTION"
     );
 
     private static ConfigDef def(String key, String category, String label, String valueType, String inputType,

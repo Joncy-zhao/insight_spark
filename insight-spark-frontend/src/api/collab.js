@@ -23,9 +23,11 @@ export async function fetchCollabSummary(dashboardId) {
   return unwrap(await axios.get(`${API_BASE}/api/c/collab/dashboards/${dashboardId}/summary`))
 }
 
-export async function fetchAnnotationsByDashboard(dashboardId) {
+export async function fetchAnnotationsByDashboard(dashboardId, includeHidden = false) {
   restoreSessionHeader()
-  return unwrap(await axios.get(`${API_BASE}/api/c/annotations/by-dashboard/${dashboardId}`))
+  return unwrap(await axios.get(`${API_BASE}/api/c/annotations/by-dashboard/${dashboardId}`, {
+    params: { includeHidden }
+  }))
 }
 
 export async function fetchComments(targetType, targetId) {
@@ -41,6 +43,16 @@ export async function createAnnotation(payload) {
 export async function deleteAnnotation(id) {
   restoreSessionHeader()
   return unwrap(await axios.delete(`${API_BASE}/api/c/annotations/${id}`))
+}
+
+export async function updateAnnotation(id, payload) {
+  restoreSessionHeader()
+  return unwrap(await axios.put(`${API_BASE}/api/c/annotations/${id}`, payload))
+}
+
+export async function setAnnotationHidden(id, hidden) {
+  restoreSessionHeader()
+  return unwrap(await axios.put(`${API_BASE}/api/c/annotations/${id}/hidden`, { hidden }))
 }
 
 export async function createComment(payload) {
@@ -85,9 +97,15 @@ export async function revokeTeamPermission(dashboardId, userId, permissionType =
   }))
 }
 
-export async function downloadCollabReport(dashboardId) {
+export async function downloadCollabReport(dashboardId, options = {}) {
   restoreSessionHeader()
+  const {
+    includeAnnotations = true,
+    includeComments = true,
+    includeBindDetail = true
+  } = options
   const res = await axios.get(`${API_BASE}/api/c/collab/dashboards/${dashboardId}/report`, {
+    params: { includeAnnotations, includeComments, includeBindDetail },
     responseType: 'blob'
   })
   const blob = new Blob([res.data], { type: 'text/markdown;charset=utf-8' })

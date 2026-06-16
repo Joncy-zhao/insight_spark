@@ -15,6 +15,7 @@ import java.security.SecureRandom;
 import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.sql.Timestamp;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -406,10 +407,12 @@ public class StackCDashboardService {
                   COUNT(*) AS totalCount,
                   SUM(CASE WHEN d.is_public = 1 THEN 1 ELSE 0 END) AS publicCount,
                   SUM(CASE WHEN d.is_public = 0 THEN 1 ELSE 0 END) AS privateCount,
-                  COALESCE(SUM(d.view_count), 0) AS totalViews
+                  COALESCE(SUM(d.view_count), 0) AS totalViews,
+                  COUNT(DISTINCT NULLIF(TRIM(d.group_name), '')) AS groupCount
                 FROM is_dashboard d
                 WHERE d.status != 'ARCHIVED'
                 """);
+        LayoutSlotTotals layoutTotals = aggregateLayoutSlotTotals();
         List<Map<String, Object>> topByViews = jdbcTemplate.queryForList("""
                 SELECT d.id, d.name, d.view_count AS viewCount, d.is_public AS isPublic
                 FROM is_dashboard d
@@ -422,16 +425,185 @@ public class StackCDashboardService {
         result.put("publicCount", toLong(totals.get("publicCount")));
         result.put("privateCount", toLong(totals.get("privateCount")));
         result.put("totalViews", toLong(totals.get("totalViews")));
+        result.put("groupCount", toLong(totals.get("groupCount")));
+        result.put("totalChartSlots", layoutTotals.totalChartSlots());
+        result.put("totalWidgetSlots", layoutTotals.totalWidgetSlots());
+        result.put("avgChartSlots", layoutTotals.avgChartSlots());
+        result.put("topByChartSlots", layoutTotals.topByChartSlots());
         result.put("topByViews", topByViews);
+        result.put("sizeDistribution", layoutTotals.sizeDistribution());
+        result.put("dailyActivity", adminDashboardDailyActivity());
         result.put("totalQueries", safeQueryCount("SELECT COUNT(*) FROM is_chat_query_history"));
         result.put("totalCharts", safeQueryCount("SELECT COUNT(*) FROM is_chat_query_history WHERE chart_snapshot IS NOT NULL"));
-        result.put("totalUploads", safeQueryCount("SELECT COUNT(*) FROM is_data_table"));
+        result.put("totalUploads", safeQueryCount("SELECT COUNT(*) FROM is_data_table WHERE status = 'ACTIVE'"));
+        result.put("totalPinnedComponents", safeQueryCount("""
+                SELECT COUNT(*)
+                FROM is_dashboard_component dc
+                INNER JOIN is_dashboard d ON d.id = dc.dashboard_id
+                WHERE d.status != 'ARCHIVED'
+                """));
         return result;
     }
 
-    private long safeQueryCount(String sql) {
+    private List<Map<String, Object>> adminDashboardDailyActivity() {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        LocalDate today = LocalDate.now();
+        for (int i = 6; i >= 0; i--) {
+            LocalDate day = today.minusDays(i);
+            String date = day.format(DateTimeFormatter.ISO_LOCAL_DATE);
+            long updates = safeQueryCount("""
+                    SELECT COUNT(*) FROM is_dashboard
+                    WHERE status != 'ARCHIVED' AND DATE(updated_at) = ?
+                    """, date);
+            long creates = safeQueryCount("""
+                    SELECT COUNT(*) FROM is_dashboard
+                    WHERE status != 'ARCHIVED' AND DATE(created_at) = ?
+                    """, date);
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("date", date);
+            item.put("label", day.getMonthValue() + "/" + day.getDayOfMonth());
+            item.put("updates", updates);
+            item.put("creates", creates);
+            rows.add(item);
+        }
+        return rows;
+    }
+
+    private LayoutSlotTotals aggregateLayoutSlotTotals() {
+        List<Map<String, Object>> layouts;
         try {
-            Long value = jdbcTemplate.queryForObject(sql, Long.class);
+            layouts = jdbcTemplate.queryForList("""
+                    SELECT id, name, layout_json AS layoutJson
+                    FROM is_dashboard
+                    WHERE status != 'ARCHIVED'
+                    """);
+        } catch (Exception ignored) {
+            return new LayoutSlotTotals(0, 0, 0, List.of(), defaultSizeDistribution());
+        }
+        long chartSlots = 0;
+        long widgetSlots = 0;
+        long bucket0 = 0;
+        long bucket1To2 = 0;
+        long bucket3To5 = 0;
+        long bucket6Plus = 0;
+        List<Map<String, Object>> ranked = new ArrayList<>();
+        for (Map<String, Object> row : layouts) {
+            String layoutJson = Objects.toString(row.get("layoutJson"), "{}");
+            int charts = countChartSlotsInLayout(layoutJson);
+            int widgets = countBasicWidgetSlotsInLayout(layoutJson);
+            chartSlots += charts;
+            widgetSlots += widgets;
+            if (charts <= 0) {
+                bucket0++;
+            } else if (charts <= 2) {
+                bucket1To2++;
+            } else if (charts <= 5) {
+                bucket3To5++;
+            } else {
+                bucket6Plus++;
+            }
+            if (charts > 0) {
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("id", row.get("id"));
+                item.put("name", row.get("name"));
+                item.put("chartCount", charts);
+                ranked.add(item);
+            }
+        }
+        ranked.sort(Comparator.comparingLong((Map<String, Object> item) -> toLong(item.get("chartCount"))).reversed());
+        if (ranked.size() > 5) {
+            ranked = new ArrayList<>(ranked.subList(0, 5));
+        }
+        return new LayoutSlotTotals(
+                chartSlots,
+                widgetSlots,
+                layouts.size(),
+                ranked,
+                buildSizeDistribution(bucket0, bucket1To2, bucket3To5, bucket6Plus));
+    }
+
+    private List<Map<String, Object>> defaultSizeDistribution() {
+        return buildSizeDistribution(0, 0, 0, 0);
+    }
+
+    private List<Map<String, Object>> buildSizeDistribution(
+            long bucket0,
+            long bucket1To2,
+            long bucket3To5,
+            long bucket6Plus) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        rows.add(sizeDistributionItem("0 张", bucket0));
+        rows.add(sizeDistributionItem("1-2 张", bucket1To2));
+        rows.add(sizeDistributionItem("3-5 张", bucket3To5));
+        rows.add(sizeDistributionItem("6+ 张", bucket6Plus));
+        return rows;
+    }
+
+    private Map<String, Object> sizeDistributionItem(String name, long value) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("name", name);
+        item.put("value", value);
+        return item;
+    }
+
+    private int countChartSlotsInLayout(String layoutJson) {
+        Map<String, Object> layout = parseLayoutJson(layoutJson);
+        List<Map<String, Object>> items = extractGridItems(layout);
+        if (!items.isEmpty()) {
+            int count = 0;
+            for (Map<String, Object> item : items) {
+                if (isBasicWidgetItem(item)) {
+                    continue;
+                }
+                count++;
+            }
+            return count;
+        }
+        Object cards = layout.get("cards");
+        if (cards instanceof List<?> list) {
+            return list.size();
+        }
+        return 0;
+    }
+
+    private int countBasicWidgetSlotsInLayout(String layoutJson) {
+        Map<String, Object> layout = parseLayoutJson(layoutJson);
+        List<Map<String, Object>> items = extractGridItems(layout);
+        if (items.isEmpty()) {
+            return 0;
+        }
+        int count = 0;
+        for (Map<String, Object> item : items) {
+            if (isBasicWidgetItem(item)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private boolean isBasicWidgetItem(Map<String, Object> item) {
+        return !Objects.toString(item.get("widgetKind"), "").trim().isEmpty();
+    }
+
+    private record LayoutSlotTotals(
+            long totalChartSlots,
+            long totalWidgetSlots,
+            long dashboardCount,
+            List<Map<String, Object>> topByChartSlots,
+            List<Map<String, Object>> sizeDistribution) {
+        double avgChartSlots() {
+            if (dashboardCount <= 0) {
+                return 0D;
+            }
+            return Math.round((totalChartSlots * 10.0) / dashboardCount) / 10.0;
+        }
+    }
+
+    private long safeQueryCount(String sql, Object... args) {
+        try {
+            Long value = args == null || args.length == 0
+                    ? jdbcTemplate.queryForObject(sql, Long.class)
+                    : jdbcTemplate.queryForObject(sql, Long.class, args);
             return value == null ? 0L : value;
         } catch (Exception ignored) {
             return 0L;

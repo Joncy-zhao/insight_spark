@@ -1,264 +1,490 @@
 <template>
   <section class="sys-config">
-    <header class="sys-head">
-      <div class="sys-head-text">
-        <h1>全局系统参数配置</h1>
-        <p>
-          可视化维护全局 KV 配置，替代硬编码规则，适配私有化部署与不同企业业务场景。
-          修改后自动保存并生效；复杂字段提供标签、表格、用户选择等交互组件，无需手写 JSON。
+    <header class="config-topbar">
+      <div class="config-topbar-main">
+        <span class="config-eyebrow">平台管理 · 参数中心</span>
+        <h1>系统配置</h1>
+        <p>统一维护 is_system_config 全局参数，支持分模块编辑、批量保存与恢复默认，复杂字段提供可视化编辑组件。</p>
+      </div>
+      <div class="config-topbar-stats-wrap">
+        <div class="config-topbar-stats">
+          <el-tooltip content="系统预定义的全部配置键" placement="bottom">
+            <div class="stat-block">
+              <span>参数总数</span>
+              <strong>{{ stats.totalKeys }}</strong>
+            </div>
+          </el-tooltip>
+          <el-tooltip content="已桥接 SQL 审计、Neo4j、环境变量、数据源等外部模块" placement="bottom">
+            <div class="stat-block">
+              <span>已联动</span>
+              <strong>{{ stats.wiredCount }}</strong>
+            </div>
+          </el-tooltip>
+          <el-tooltip content="仅写入 is_system_config，尚未对接外部数据源" placement="bottom">
+            <div class="stat-block">
+              <span>纯 KV</span>
+              <strong>{{ kvOnlyCount }}</strong>
+            </div>
+          </el-tooltip>
+          <el-tooltip content="当前页面未保存的本地修改" placement="bottom">
+            <div class="stat-block" :class="{ warn: dirtyCount > 0 }">
+              <span>待保存</span>
+              <strong>{{ dirtyCount }}</strong>
+            </div>
+          </el-tooltip>
+        </div>
+        <p class="stats-formula">
+          {{ stats.totalKeys }} = {{ stats.wiredCount }} 已联动 + {{ kvOnlyCount }} 纯 KV
+          <span class="stats-meta">· 只读 {{ stats.readOnlyCount }} 项（与上述分类有交叉）</span>
         </p>
       </div>
-      <div class="sys-head-actions">
-        <el-tag type="info" effect="plain">{{ stats.totalKeys }} 项配置</el-tag>
-        <el-tag type="success" effect="plain">{{ stats.wiredCount }} 项已接入真实数据源</el-tag>
-        <el-tag v-if="stats.readOnlyCount" type="info" effect="plain">{{ stats.readOnlyCount }} 项只读</el-tag>
-        <el-tag v-if="dirtyCount" type="warning" effect="plain">{{ dirtyCount }} 项待保存</el-tag>
-        <el-button :loading="loading" @click="reload">刷新</el-button>
+      <div class="config-topbar-actions">
+        <el-button :icon="Refresh" :loading="loading" @click="reload">刷新</el-button>
         <el-button type="primary" :loading="savingAll" :disabled="!dirtyCount" @click="saveAllDirty">
           保存全部变更
         </el-button>
       </div>
     </header>
 
-    <el-container class="sys-layout">
-      <el-aside width="220px" class="sys-aside">
-        <el-menu :default-active="activeModule" class="sys-menu" @select="onSelectModule">
-          <el-menu-item v-for="m in modules" :key="m.id" :index="m.id">
-            <span class="menu-icon">{{ moduleMeta(m.id).icon }}</span>
-            <span class="menu-label">{{ m.title }}</span>
-            <el-badge
-              v-if="moduleDirtyCount(m.id)"
-              :value="moduleDirtyCount(m.id)"
-              class="menu-badge"
-              type="warning"
-            />
-          </el-menu-item>
-        </el-menu>
-      </el-aside>
+    <div class="config-workspace">
+      <aside class="config-nav">
+        <el-input
+          v-model="moduleSearch"
+          clearable
+          :prefix-icon="Search"
+          placeholder="搜索配置模块"
+          class="nav-search"
+        />
+        <nav class="nav-list" aria-label="配置模块">
+          <button
+            v-for="m in filteredModules"
+            :key="m.id"
+            type="button"
+            class="nav-item"
+            :class="{ active: activeModule === m.id, dirty: moduleDirtyCount(m.id) > 0 }"
+            @click="onSelectModule(m.id)"
+          >
+            <span class="nav-item-icon">
+              <el-icon><component :is="moduleIcon(m.id)" /></el-icon>
+            </span>
+            <span class="nav-item-body">
+              <strong>{{ m.title }}</strong>
+              <small>{{ moduleMeta(m.id).purpose }}</small>
+            </span>
+            <el-badge v-if="moduleDirtyCount(m.id)" :value="moduleDirtyCount(m.id)" type="warning" />
+          </button>
+        </nav>
+      </aside>
 
-      <el-main class="sys-main" v-loading="loading">
+      <main class="config-main" v-loading="loading">
         <template v-if="currentModule">
-          <div class="module-banner">
-            <div>
-              <h2>
-                <span class="banner-icon">{{ moduleMeta(currentModule.id).icon }}</span>
-                {{ currentModule.title }}
-              </h2>
-              <p>{{ moduleMeta(currentModule.id).desc }}</p>
-            </div>
-            <div class="module-actions">
-              <el-button @click="resetCurrentModule" :loading="resetting">恢复默认</el-button>
-              <el-button
-                type="primary"
-                :loading="savingModule"
-                :disabled="!moduleDirtyCount(currentModule.id)"
-                @click="saveCurrentModule"
-              >
-                保存本模块
-              </el-button>
-            </div>
-          </div>
-
-          <!-- 通知模块：公告管理 -->
-          <el-card v-if="activeModule === 'NOTIFICATION'" shadow="never" class="ann-card">
-            <template #header>
-              <div class="card-head">
-                <span>公告发布与管理</span>
-                <el-button link type="primary" @click="annPanelOpen = !annPanelOpen">
-                  {{ annPanelOpen ? '收起' : '展开' }}发布表单
+          <section class="module-panel">
+            <div class="module-panel-head">
+              <div>
+                <div class="module-kicker">
+                  <el-icon><component :is="moduleIcon(currentModule.id)" /></el-icon>
+                  <span>{{ currentModule.title }}</span>
+                </div>
+                <p class="module-desc">{{ moduleMeta(currentModule.id).desc }}</p>
+              </div>
+              <div class="module-panel-actions">
+                <el-button @click="resetCurrentModule" :loading="resetting">恢复默认</el-button>
+                <el-button
+                  type="primary"
+                  :loading="savingModule"
+                  :disabled="!moduleDirtyCount(currentModule.id)"
+                  @click="saveCurrentModule"
+                >
+                  保存本模块
                 </el-button>
               </div>
-            </template>
-            <el-collapse-transition>
-              <el-form v-show="annPanelOpen" label-position="top" class="ann-form" @submit.prevent>
-                <el-row :gutter="16">
-                  <el-col :span="16">
-                    <el-form-item label="标题" required>
-                      <el-input v-model="ann.title" placeholder="公告标题" maxlength="255" show-word-limit />
-                    </el-form-item>
-                  </el-col>
-                  <el-col :span="8">
-                    <el-form-item label="受众">
-                      <el-select v-model="ann.audience" style="width: 100%">
-                        <el-option label="全员 ALL" value="ALL" />
-                        <el-option label="普通用户 USER" value="USER" />
-                        <el-option label="管理员 ADMIN" value="ADMIN" />
-                      </el-select>
-                    </el-form-item>
-                  </el-col>
-                </el-row>
-                <el-form-item label="正文" required>
-                  <el-input
-                    v-model="ann.content"
-                    type="textarea"
-                    :rows="4"
-                    placeholder="支持多行正文，将写入 is_system_announcement"
-                  />
-                </el-form-item>
-                <el-row :gutter="16">
-                  <el-col :span="8">
-                    <el-form-item label="置顶">
-                      <el-switch v-model="ann.pinned" active-text="置顶" inactive-text="普通" />
-                    </el-form-item>
-                  </el-col>
-                  <el-col :span="8">
-                    <el-form-item label="优先级">
-                      <el-input-number v-model="ann.priority" :min="0" :max="999" style="width: 100%" />
-                    </el-form-item>
-                  </el-col>
-                  <el-col :span="8" class="ann-submit-col">
-                    <el-button type="primary" :loading="annLoading" @click="submitAnnouncement">发布公告</el-button>
-                  </el-col>
-                </el-row>
-              </el-form>
-            </el-collapse-transition>
-            <el-table :data="announcements" size="small" border empty-text="暂无公告" class="ann-table">
-              <el-table-column prop="title" label="标题" min-width="140" show-overflow-tooltip />
-              <el-table-column prop="audience" label="受众" width="80" />
-              <el-table-column label="置顶" width="64" align="center">
-                <template #default="{ row }">
-                  <el-tag v-if="row.pinned" type="danger" size="small">置顶</el-tag>
-                  <span v-else class="muted">—</span>
-                </template>
-              </el-table-column>
-              <el-table-column prop="priority" label="优先级" width="72" align="center" />
-              <el-table-column prop="publishStatus" label="状态" width="88" />
-              <el-table-column prop="publishedAt" label="发布时间" width="168">
-                <template #default="{ row }">{{ formatTime(row.publishedAt || row.createdAt) }}</template>
-              </el-table-column>
-            </el-table>
-          </el-card>
+            </div>
 
-          <el-form label-position="top" class="config-form" @submit.prevent>
-            <div class="config-grid">
-              <div
-                v-for="item in currentModule.items"
-                :key="item.configKey"
-                class="config-field"
-                :class="{ 'is-dirty': isDirty(item.configKey) }"
-              >
-                <div class="field-head">
-                  <label :for="`cfg-${item.configKey}`">{{ item.label }}</label>
-                  <el-tooltip
-                    v-if="item.bindingNote || item.bindingSource"
-                    :content="`${item.bindingSource || ''} · ${item.bindingNote || ''}`"
-                    placement="top"
-                  >
-                    <el-tag size="small" :type="bindingTagType(item.binding)" effect="plain" class="binding-tag">
-                      {{ bindingLabel(item.binding) }}
-                    </el-tag>
-                  </el-tooltip>
-                  <el-tooltip v-if="item.description" :content="item.description" placement="top">
-                    <el-icon class="field-help"><QuestionFilled /></el-icon>
-                  </el-tooltip>
-                  <el-tag v-if="item.readOnly" size="small" type="info" effect="plain">只读</el-tag>
-                  <el-tag v-if="isDirty(item.configKey)" size="small" type="warning" effect="plain">已修改</el-tag>
-                </div>
-                <p class="field-key">{{ item.configKey }}</p>
-
-                <el-switch
-                  v-if="item.inputType === 'boolean'"
-                  :id="`cfg-${item.configKey}`"
-                  :model-value="boolValue(item.configKey)"
-                  :disabled="item.readOnly"
-                  @change="(v) => setValueAndSave(item, v ? 'true' : 'false')"
-                />
-
-                <el-input-number
-                  v-else-if="item.inputType === 'number'"
-                  :id="`cfg-${item.configKey}`"
-                  :model-value="numberValue(item.configKey)"
-                  :min="0"
-                  :max="9999999"
-                  :disabled="item.readOnly"
-                  controls-position="right"
-                  style="width: 100%"
-                  @change="(v) => setValueAndSave(item, v == null ? '' : String(v))"
-                />
-
-                <el-select
-                  v-else-if="item.inputType === 'select'"
-                  :id="`cfg-${item.configKey}`"
-                  :model-value="values[item.configKey]"
-                  :disabled="item.readOnly"
-                  style="width: 100%"
-                  @change="(v) => setValueAndSave(item, v)"
-                >
-                  <el-option
-                    v-for="opt in parseOptions(item.options)"
-                    :key="opt"
-                    :label="opt"
-                    :value="opt"
-                  />
-                </el-select>
-
-                <ConfigStringListEditor
-                  v-else-if="item.inputType === 'stringList'"
-                  :model-value="values[item.configKey]"
-                  :disabled="item.readOnly"
-                  :placeholder="item.placeholder"
-                  @update:model-value="(v) => setValueAndSave(item, v)"
-                />
-
-                <ConfigSensitiveRulesEditor
-                  v-else-if="item.inputType === 'sensitiveRules'"
-                  :model-value="values[item.configKey]"
-                  :disabled="item.readOnly"
-                  @update:model-value="(v) => setValueAndSave(item, v)"
-                />
-
-                <ConfigUserMultiSelect
-                  v-else-if="item.inputType === 'userMulti'"
-                  :model-value="values[item.configKey]"
-                  :disabled="item.readOnly"
-                  @update:model-value="(v) => setValueAndSave(item, v)"
-                />
-
-                <ConfigChannelMultiSelect
-                  v-else-if="item.inputType === 'channelMulti'"
-                  :model-value="values[item.configKey]"
-                  :disabled="item.readOnly"
-                  @update:model-value="(v) => setValueAndSave(item, v)"
-                />
-
-                <ConfigRoleMultiSelect
-                  v-else-if="item.inputType === 'roleMulti'"
-                  :model-value="values[item.configKey]"
-                  :disabled="item.readOnly"
-                  @update:model-value="(v) => setValueAndSave(item, v)"
-                />
-
-                <el-input
-                  v-else-if="item.inputType === 'textarea' || item.inputType === 'json'"
-                  :id="`cfg-${item.configKey}`"
-                  :model-value="values[item.configKey]"
-                  type="textarea"
-                  :rows="item.inputType === 'json' ? 4 : 5"
-                  :placeholder="item.placeholder || ''"
-                  :disabled="item.readOnly"
-                  @input="(v) => setValue(item, v)"
-                  @blur="() => autoSaveItem(item)"
-                />
-
-                <el-input
-                  v-else
-                  :id="`cfg-${item.configKey}`"
-                  :model-value="values[item.configKey]"
-                  :placeholder="item.placeholder || (item.inputType === 'cron' ? '0 0 6 * * ?' : '')"
-                  :disabled="item.readOnly"
-                  @input="(v) => setValue(item, v)"
-                  @blur="() => autoSaveItem(item)"
-                />
-
-                <p v-if="autoSavingKeys.has(item.configKey)" class="field-saving">保存中…</p>
-
-                <p v-if="item.updatedAt" class="field-meta">更新于 {{ formatTime(item.updatedAt) }}</p>
+            <div class="module-guide">
+              <div class="guide-block">
+                <span class="guide-label">模块用途</span>
+                <p>{{ moduleMeta(currentModule.id).purpose }}</p>
+              </div>
+              <div class="guide-block">
+                <span class="guide-label">推荐操作步骤</span>
+                <ol class="guide-steps">
+                  <li v-for="(step, idx) in moduleMeta(currentModule.id).steps" :key="idx">{{ step }}</li>
+                </ol>
+              </div>
+              <div class="guide-block guide-tip">
+                <span class="guide-label">生效说明</span>
+                <p>{{ moduleMeta(currentModule.id).tip }}</p>
               </div>
             </div>
-          </el-form>
+
+            <div class="module-metrics">
+              <span>本模块 {{ currentModule.items?.length || 0 }} 项</span>
+              <span v-if="moduleDirtyCount(currentModule.id)">{{ moduleDirtyCount(currentModule.id) }} 项待保存</span>
+              <span v-else>已全部同步</span>
+            </div>
+          </section>
+
+          <section v-if="currentModule.id === 'NOTIFICATION'" class="panel-block ann-workspace">
+            <div class="ann-toolbar">
+              <div class="ann-toolbar-main">
+                <strong>公告发布与管理</strong>
+                <p>面向平台用户发布通知，写入 is_system_announcement；支持受众、置顶、草稿与实时预览</p>
+              </div>
+              <div class="ann-stat-chips">
+                <button type="button" class="ann-chip" :class="{ active: !annStatusFilter && !annPinnedOnly }" @click="applyAnnStatFilter('all')">
+                  全部 {{ announcements.length }}
+                </button>
+                <button type="button" class="ann-chip" :class="{ active: annStatusFilter === 'PUBLISHED' }" @click="applyAnnStatFilter('published')">
+                  已发布 {{ annPublishedCount }}
+                </button>
+                <button type="button" class="ann-chip warn" :class="{ active: annPinnedOnly }" @click="applyAnnStatFilter('pinned')">
+                  置顶 {{ annPinnedCount }}
+                </button>
+              </div>
+              <div class="ann-toolbar-actions">
+                <el-input
+                  v-model="annKeyword"
+                  clearable
+                  :prefix-icon="Search"
+                  placeholder="搜索标题或正文"
+                  class="ann-filter-input"
+                />
+                <el-select v-model="annAudienceFilter" clearable placeholder="受众" class="ann-filter-select">
+                  <el-option label="全员" value="ALL" />
+                  <el-option label="用户" value="USER" />
+                  <el-option label="管理员" value="ADMIN" />
+                </el-select>
+                <el-select v-model="annStatusFilter" clearable placeholder="状态" class="ann-filter-select">
+                  <el-option label="已发布" value="PUBLISHED" />
+                  <el-option label="已撤回" value="REVOKED" />
+                  <el-option label="草稿" value="DRAFT" />
+                </el-select>
+                <el-button :icon="Refresh" :loading="annListLoading" @click="loadAnnouncements">刷新</el-button>
+                <el-button type="primary" :icon="Plus" @click="openAnnComposer">发布新公告</el-button>
+              </div>
+            </div>
+
+            <div v-if="filteredAnnouncements.length" class="ann-table-wrap">
+              <el-table
+                :data="filteredAnnouncements"
+                size="small"
+                border
+                highlight-current-row
+                row-key="id"
+                class="ann-table"
+                @row-click="previewAnnouncement"
+              >
+                <el-table-column prop="title" label="标题" min-width="160" show-overflow-tooltip />
+                <el-table-column label="受众" width="92">
+                  <template #default="{ row }">
+                    <el-tag size="small" effect="plain">{{ audienceLabel(row.audience) }}</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="置顶" width="72" align="center">
+                  <template #default="{ row }">
+                    <el-switch
+                      :model-value="!!row.pinned"
+                      size="small"
+                      @click.stop
+                      @change="(v) => toggleAnnPin(row, v)"
+                    />
+                  </template>
+                </el-table-column>
+                <el-table-column prop="priority" label="优先级" width="72" align="center" />
+                <el-table-column label="状态" width="96">
+                  <template #default="{ row }">
+                    <el-tag size="small" :type="annStatusTagType(row.publishStatus)">
+                      {{ annStatusLabel(row.publishStatus) }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="发布时间" width="168">
+                  <template #default="{ row }">{{ formatTime(row.publishedAt || row.createdAt) }}</template>
+                </el-table-column>
+                <el-table-column label="操作" width="180" fixed="right">
+                  <template #default="{ row }">
+                    <el-button link type="primary" size="small" @click.stop="previewAnnouncement(row)">预览</el-button>
+                    <el-button link type="primary" size="small" @click.stop="copyAnnContent(row)">复制</el-button>
+                    <el-button
+                      v-if="row.publishStatus === 'PUBLISHED'"
+                      link
+                      type="danger"
+                      size="small"
+                      @click.stop="revokeAnnouncement(row)"
+                    >
+                      撤回
+                    </el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+            <div v-else class="ann-empty">
+              <el-icon><Bell /></el-icon>
+              <strong>{{ announcements.length ? '无匹配结果' : '暂无公告' }}</strong>
+              <p v-if="announcements.length">
+                当前筛选条件下没有公告，可调整关键词或清除筛选后重试。
+              </p>
+              <p v-else>点击「发布新公告」创建第一条平台通知，用户将在工作台看到已发布内容。</p>
+              <div class="ann-empty-actions">
+                <el-button v-if="annHasActiveFilter" @click="clearAnnFilters">清除筛选</el-button>
+                <el-button type="primary" :icon="Plus" @click="openAnnComposer">发布新公告</el-button>
+              </div>
+            </div>
+          </section>
+
+          <el-drawer
+            v-if="currentModule.id === 'NOTIFICATION'"
+            v-model="annComposerOpen"
+            title="发布平台公告"
+            size="880px"
+            class="ann-drawer"
+            destroy-on-close
+            @closed="resetAnnForm"
+          >
+            <div class="ann-composer">
+              <div class="ann-compose-form">
+                <div class="ann-template-row">
+                  <span>快速模板</span>
+                  <div class="ann-template-list">
+                    <button
+                      v-for="tpl in annTemplates"
+                      :key="tpl.label"
+                      type="button"
+                      class="ann-template-btn"
+                      @click="applyAnnTemplate(tpl)"
+                    >
+                      {{ tpl.label }}
+                    </button>
+                  </div>
+                </div>
+                <el-form label-position="top" class="ann-compose-form-inner" @submit.prevent>
+                  <el-form-item label="标题" required>
+                    <el-input v-model="ann.title" placeholder="例如：系统维护通知" maxlength="255" show-word-limit />
+                  </el-form-item>
+                  <el-form-item label="受众范围">
+                    <el-radio-group v-model="ann.audience" class="ann-audience-group">
+                      <el-radio-button label="ALL">全员</el-radio-button>
+                      <el-radio-button label="USER">用户</el-radio-button>
+                      <el-radio-button label="ADMIN">管理员</el-radio-button>
+                    </el-radio-group>
+                  </el-form-item>
+                  <el-form-item label="优先级">
+                    <div class="ann-priority-row">
+                      <el-slider v-model="ann.priority" :min="0" :max="999" class="ann-priority-slider" />
+                      <el-input-number
+                        v-model="ann.priority"
+                        :min="0"
+                        :max="999"
+                        controls-position="right"
+                        class="ann-priority-input"
+                      />
+                    </div>
+                    <p class="ann-field-hint">0–999，数值越大排序越靠前</p>
+                  </el-form-item>
+                  <el-form-item label="正文" required>
+                    <el-input
+                      v-model="ann.content"
+                      type="textarea"
+                      :rows="10"
+                      placeholder="请输入公告正文，支持多行文本"
+                      show-word-limit
+                      maxlength="5000"
+                    />
+                  </el-form-item>
+                  <el-form-item label="发布选项" class="ann-options-item">
+                    <el-checkbox v-model="ann.pinned">置顶显示</el-checkbox>
+                  </el-form-item>
+                </el-form>
+              </div>
+              <aside class="ann-compose-preview">
+                <span class="preview-kicker">用户端预览</span>
+                <article class="ann-preview-card">
+                  <div class="ann-preview-head">
+                    <el-tag v-if="ann.pinned" type="danger" size="small">置顶</el-tag>
+                    <el-tag size="small" effect="plain">{{ audienceLabel(ann.audience) }}</el-tag>
+                  </div>
+                  <strong>{{ ann.title.trim() || '公告标题预览' }}</strong>
+                  <p>{{ ann.content.trim() || '在此输入正文后，可实时预览用户在工作台看到的公告样式。' }}</p>
+                  <small>优先级 {{ ann.priority }} · 发布后即时可见</small>
+                </article>
+              </aside>
+            </div>
+            <template #footer>
+              <el-button @click="annComposerOpen = false">取消</el-button>
+              <el-button :loading="annLoading" @click="submitAnnouncementAs('DRAFT')">存为草稿</el-button>
+              <el-button type="primary" :loading="annLoading" @click="submitAnnouncementAs('PUBLISHED')">立即发布</el-button>
+            </template>
+          </el-drawer>
+
+          <el-drawer
+            v-if="currentModule.id === 'NOTIFICATION'"
+            v-model="annPreviewOpen"
+            title="公告详情预览"
+            size="480px"
+          >
+            <article v-if="annPreviewRow" class="ann-preview-card ann-preview-card--detail">
+              <div class="ann-preview-head">
+                <el-tag v-if="annPreviewRow.pinned" type="danger" size="small">置顶</el-tag>
+                <el-tag size="small" effect="plain">{{ audienceLabel(annPreviewRow.audience) }}</el-tag>
+                <el-tag size="small" :type="annStatusTagType(annPreviewRow.publishStatus)">
+                  {{ annStatusLabel(annPreviewRow.publishStatus) }}
+                </el-tag>
+              </div>
+              <strong>{{ annPreviewRow.title }}</strong>
+              <p class="ann-preview-content">{{ annPreviewRow.content }}</p>
+              <ul class="ann-preview-meta">
+                <li>优先级：{{ annPreviewRow.priority ?? 0 }}</li>
+                <li>发布时间：{{ formatTime(annPreviewRow.publishedAt || annPreviewRow.createdAt) }}</li>
+                <li>发布人：{{ annPreviewRow.createdBy || '—' }}</li>
+              </ul>
+            </article>
+          </el-drawer>
+
+          <section class="panel-block config-panel">
+            <div class="panel-head compact">
+              <div>
+                <strong>参数明细</strong>
+                <p>字段失焦或开关切换后自动保存；批量修改可使用右上角「保存全部变更」</p>
+              </div>
+              <el-input
+                v-model="fieldSearch"
+                clearable
+                :prefix-icon="Search"
+                placeholder="搜索参数名或键"
+                class="field-search"
+              />
+            </div>
+
+            <el-form label-position="top" class="config-form" @submit.prevent>
+              <div
+                v-for="item in filteredModuleItems"
+                :key="item.configKey"
+                class="config-row"
+                :class="{ 'is-dirty': isDirty(item.configKey), 'is-readonly': item.readOnly }"
+              >
+                <div class="config-row-label">
+                  <div class="field-head">
+                    <label :for="`cfg-${item.configKey}`">{{ item.label }}</label>
+                    <el-tooltip
+                      v-if="item.bindingNote || item.bindingSource"
+                      :content="`${item.bindingSource || ''} · ${item.bindingNote || ''}`"
+                      placement="top"
+                    >
+                      <el-tag size="small" :type="bindingTagType(item.binding)" effect="plain" class="binding-tag">
+                        {{ bindingLabel(item.binding) }}
+                      </el-tag>
+                    </el-tooltip>
+                    <el-tooltip v-if="item.description" :content="item.description" placement="top">
+                      <el-icon class="field-help"><QuestionFilled /></el-icon>
+                    </el-tooltip>
+                    <el-tag v-if="item.readOnly" size="small" type="info" effect="plain">只读</el-tag>
+                    <el-tag v-if="isDirty(item.configKey)" size="small" type="warning" effect="plain">已修改</el-tag>
+                  </div>
+                  <p class="field-key">{{ item.configKey }}</p>
+                  <p v-if="item.description" class="field-desc">{{ item.description }}</p>
+                </div>
+
+                <div class="config-row-control">
+                  <el-switch
+                    v-if="item.inputType === 'boolean'"
+                    :id="`cfg-${item.configKey}`"
+                    :model-value="boolValue(item.configKey)"
+                    :disabled="item.readOnly"
+                    @change="(v) => setValueAndSave(item, v ? 'true' : 'false')"
+                  />
+
+                  <el-input-number
+                    v-else-if="item.inputType === 'number'"
+                    :id="`cfg-${item.configKey}`"
+                    :model-value="numberValue(item.configKey)"
+                    :min="0"
+                    :max="9999999"
+                    :disabled="item.readOnly"
+                    controls-position="right"
+                    style="width: 100%"
+                    @change="(v) => setValueAndSave(item, v == null ? '' : String(v))"
+                  />
+
+                  <el-select
+                    v-else-if="item.inputType === 'select'"
+                    :id="`cfg-${item.configKey}`"
+                    :model-value="values[item.configKey]"
+                    :disabled="item.readOnly"
+                    style="width: 100%"
+                    @change="(v) => setValueAndSave(item, v)"
+                  >
+                    <el-option v-for="opt in parseOptions(item.options)" :key="opt" :label="opt" :value="opt" />
+                  </el-select>
+
+                  <ConfigStringListEditor
+                    v-else-if="item.inputType === 'stringList'"
+                    :model-value="values[item.configKey]"
+                    :disabled="item.readOnly"
+                    :placeholder="item.placeholder"
+                    @update:model-value="(v) => setValueAndSave(item, v)"
+                  />
+
+                  <ConfigSensitiveRulesEditor
+                    v-else-if="item.inputType === 'sensitiveRules'"
+                    :model-value="values[item.configKey]"
+                    :disabled="item.readOnly"
+                    @update:model-value="(v) => setValueAndSave(item, v)"
+                  />
+
+                  <ConfigUserMultiSelect
+                    v-else-if="item.inputType === 'userMulti'"
+                    :model-value="values[item.configKey]"
+                    :disabled="item.readOnly"
+                    @update:model-value="(v) => setValueAndSave(item, v)"
+                  />
+
+                  <ConfigChannelMultiSelect
+                    v-else-if="item.inputType === 'channelMulti'"
+                    :model-value="values[item.configKey]"
+                    :disabled="item.readOnly"
+                    @update:model-value="(v) => setValueAndSave(item, v)"
+                  />
+
+                  <ConfigRoleMultiSelect
+                    v-else-if="item.inputType === 'roleMulti'"
+                    :model-value="values[item.configKey]"
+                    :disabled="item.readOnly"
+                    @update:model-value="(v) => setValueAndSave(item, v)"
+                  />
+
+                  <el-input
+                    v-else-if="item.inputType === 'textarea' || item.inputType === 'json'"
+                    :id="`cfg-${item.configKey}`"
+                    :model-value="values[item.configKey]"
+                    type="textarea"
+                    :rows="item.inputType === 'json' ? 4 : 5"
+                    :placeholder="item.placeholder || ''"
+                    :disabled="item.readOnly"
+                    @input="(v) => setValue(item, v)"
+                    @blur="() => autoSaveItem(item)"
+                  />
+
+                  <el-input
+                    v-else
+                    :id="`cfg-${item.configKey}`"
+                    :model-value="values[item.configKey]"
+                    :placeholder="item.placeholder || (item.inputType === 'cron' ? '0 0 6 * * ?' : '')"
+                    :disabled="item.readOnly"
+                    @input="(v) => setValue(item, v)"
+                    @blur="() => autoSaveItem(item)"
+                  />
+
+                  <p v-if="autoSavingKeys.has(item.configKey)" class="field-saving">保存中…</p>
+                  <p v-if="item.updatedAt" class="field-meta">更新于 {{ formatTime(item.updatedAt) }}</p>
+                </div>
+              </div>
+
+              <el-empty v-if="!filteredModuleItems.length" description="当前筛选条件下无匹配参数" />
+            </el-form>
+          </section>
         </template>
-      </el-main>
-    </el-container>
+      </main>
+    </div>
 
     <el-collapse class="advanced-collapse">
       <el-collapse-item title="高级：原始 KV 表（is_system_config）" name="advanced">
@@ -300,7 +526,19 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { QuestionFilled } from '@element-plus/icons-vue'
+import {
+  Bell,
+  ChatLineRound,
+  Coin,
+  Cpu,
+  Lock,
+  Odometer,
+  Plus,
+  QuestionFilled,
+  Refresh,
+  Search,
+  Upload
+} from '@element-plus/icons-vue'
 import ConfigStringListEditor from '../../components/systemConfig/ConfigStringListEditor.vue'
 import ConfigSensitiveRulesEditor from '../../components/systemConfig/ConfigSensitiveRulesEditor.vue'
 import ConfigUserMultiSelect from '../../components/systemConfig/ConfigUserMultiSelect.vue'
@@ -314,29 +552,68 @@ import {
   publishAnnouncement,
   resetConfigModule,
   saveConfigBatch,
-  saveConfigItem
+  saveConfigItem,
+  updateAnnouncementPin,
+  updateAnnouncementStatus
 } from '../../api/systemConfig.js'
 import axios from 'axios'
 import { restoreSessionHeader } from '../../store/session'
 
 const API_BASE = 'http://localhost:8080'
 
+const MODULE_ICONS = {
+  AI: Cpu,
+  SECURITY: Lock,
+  PERFORMANCE: Odometer,
+  UPLOAD: Upload,
+  DATASOURCE: Coin,
+  INTERACTION: ChatLineRound,
+  NOTIFICATION: Bell
+}
+
 const loading = ref(false)
 const savingModule = ref(false)
 const savingAll = ref(false)
 const resetting = ref(false)
 const modules = ref([])
-const activeModule = ref('AI')
+const activeModule = ref('NOTIFICATION')
+const moduleSearch = ref('')
+const fieldSearch = ref('')
 const values = reactive({})
 const originals = reactive({})
 const metaByKey = reactive({})
-const stats = reactive({ totalKeys: 0, wiredCount: 0, readOnlyCount: 0 })
+const stats = reactive({ totalKeys: 0, wiredCount: 0, kvOnlyCount: 0, readOnlyCount: 0 })
 const rawRows = ref([])
 
-const annPanelOpen = ref(true)
+const annComposerOpen = ref(false)
+const annPreviewOpen = ref(false)
+const annPreviewRow = ref(null)
+const annKeyword = ref('')
+const annAudienceFilter = ref('')
+const annStatusFilter = ref('')
+const annPinnedOnly = ref(false)
 const ann = reactive({ title: '', content: '', audience: 'ALL', pinned: false, priority: 0 })
 const annLoading = ref(false)
+const annListLoading = ref(false)
 const announcements = ref([])
+
+const annTemplates = [
+  {
+    label: '系统维护',
+    title: '系统维护通知',
+    content: '平台将于指定时段进行系统维护，期间部分功能可能暂时不可用。请提前保存工作内容，维护结束后服务将自动恢复。'
+  },
+  {
+    label: '版本更新',
+    title: '功能更新说明',
+    content: '本次更新包含性能优化与体验改进。建议刷新页面后使用最新功能，如遇异常请联系管理员。'
+  },
+  {
+    label: '节假日',
+    title: '节假日安排通知',
+    content: '节日期间平台正常提供服务，如有紧急问题请通过管理员渠道反馈。祝大家节日快乐。'
+  }
+]
 
 const rawVisible = ref(false)
 const rawSaving = ref(false)
@@ -354,14 +631,190 @@ const autoSavingKeys = ref(new Set())
 
 const currentModule = computed(() => modules.value.find((m) => m.id === activeModule.value) || null)
 
+const filteredModules = computed(() => {
+  const q = moduleSearch.value.trim().toLowerCase()
+  if (!q) return modules.value
+  return modules.value.filter((m) => {
+    const meta = MODULE_META[m.id] || {}
+    return [m.title, m.id, meta.desc, meta.purpose].some((v) => String(v || '').toLowerCase().includes(q))
+  })
+})
+
+const filteredModuleItems = computed(() => {
+  const items = currentModule.value?.items || []
+  const q = fieldSearch.value.trim().toLowerCase()
+  if (!q) return items
+  return items.filter((item) =>
+    [item.label, item.configKey, item.description].some((v) => String(v || '').toLowerCase().includes(q))
+  )
+})
+
 const dirtyKeys = computed(() =>
   Object.keys(values).filter((k) => String(values[k] ?? '') !== String(originals[k] ?? ''))
 )
 
 const dirtyCount = computed(() => dirtyKeys.value.length)
 
+const kvOnlyCount = computed(() => {
+  const fromApi = Number(stats.kvOnlyCount)
+  if (fromApi > 0 || stats.wiredCount + fromApi === stats.totalKeys) return fromApi
+  return Math.max(0, stats.totalKeys - stats.wiredCount)
+})
+
+const annPublishedCount = computed(
+  () => announcements.value.filter((row) => String(row.publishStatus).toUpperCase() === 'PUBLISHED').length
+)
+
+const annPinnedCount = computed(() => announcements.value.filter((row) => !!row.pinned).length)
+
+const annHasActiveFilter = computed(
+  () => !!annKeyword.value.trim() || !!annAudienceFilter.value || !!annStatusFilter.value || annPinnedOnly.value
+)
+
+const filteredAnnouncements = computed(() => {
+  const keyword = annKeyword.value.trim().toLowerCase()
+  const audience = annAudienceFilter.value
+  const status = annStatusFilter.value
+  return announcements.value.filter((row) => {
+    const audiencePass = !audience || String(row.audience).toUpperCase() === audience
+    const statusPass = !status || String(row.publishStatus).toUpperCase() === status
+    const pinnedPass = !annPinnedOnly.value || !!row.pinned
+    const keywordPass =
+      !keyword ||
+      [row.title, row.content, row.createdBy].some((v) => String(v || '').toLowerCase().includes(keyword))
+    return audiencePass && statusPass && pinnedPass && keywordPass
+  })
+})
+
+function clearAnnFilters() {
+  annKeyword.value = ''
+  annAudienceFilter.value = ''
+  annStatusFilter.value = ''
+  annPinnedOnly.value = false
+}
+
+function applyAnnStatFilter(type) {
+  clearAnnFilters()
+  if (type === 'published') annStatusFilter.value = 'PUBLISHED'
+  if (type === 'pinned') annPinnedOnly.value = true
+}
+
+function audienceLabel(audience) {
+  const map = { ALL: '全员', USER: '用户', ADMIN: '管理员' }
+  return map[String(audience || '').toUpperCase()] || audience || '—'
+}
+
+function annStatusLabel(status) {
+  const map = { PUBLISHED: '已发布', REVOKED: '已撤回', DRAFT: '草稿' }
+  return map[String(status || '').toUpperCase()] || status || '—'
+}
+
+function annStatusTagType(status) {
+  const s = String(status || '').toUpperCase()
+  if (s === 'PUBLISHED') return 'success'
+  if (s === 'REVOKED') return 'info'
+  if (s === 'DRAFT') return 'warning'
+  return ''
+}
+
+function resetAnnForm() {
+  ann.title = ''
+  ann.content = ''
+  ann.audience = 'ALL'
+  ann.pinned = false
+  ann.priority = 0
+}
+
+function openAnnComposer() {
+  resetAnnForm()
+  annComposerOpen.value = true
+}
+
+function applyAnnTemplate(tpl) {
+  ann.title = tpl.title
+  ann.content = tpl.content
+}
+
+function previewAnnouncement(row) {
+  annPreviewRow.value = row
+  annPreviewOpen.value = true
+}
+
+async function copyAnnContent(row) {
+  if (!row) return
+  const text = `${row.title}\n\n${row.content || ''}`
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('公告内容已复制')
+  } catch {
+    ElMessage.error('复制失败')
+  }
+}
+
+async function revokeAnnouncement(row) {
+  if (!row?.id) return
+  try {
+    await ElMessageBox.confirm(`确定撤回公告「${row.title}」？撤回后用户端将不再展示。`, '撤回公告', {
+      type: 'warning',
+      confirmButtonText: '撤回',
+      cancelButtonText: '取消'
+    })
+  } catch {
+    return
+  }
+  try {
+    await updateAnnouncementStatus(row.id, 'REVOKED')
+    ElMessage.success('公告已撤回')
+    await loadAnnouncements()
+  } catch (e) {
+    ElMessage.error(e.message || '撤回失败')
+  }
+}
+
+async function toggleAnnPin(row, pinned) {
+  if (!row?.id) return
+  try {
+    await updateAnnouncementPin(row.id, pinned)
+    row.pinned = pinned ? 1 : 0
+    ElMessage.success(pinned ? '已置顶' : '已取消置顶')
+    await loadAnnouncements()
+  } catch (e) {
+    ElMessage.error(e.message || '操作失败')
+  }
+}
+
+async function submitAnnouncementAs(publishStatus) {
+  if (!ann.title.trim() || !ann.content.trim()) {
+    ElMessage.warning('请填写标题与正文')
+    return
+  }
+  annLoading.value = true
+  try {
+    await publishAnnouncement({
+      title: ann.title.trim(),
+      content: ann.content.trim(),
+      audience: ann.audience,
+      pinned: ann.pinned,
+      priority: ann.priority,
+      publishStatus
+    })
+    ElMessage.success(publishStatus === 'PUBLISHED' ? '公告已发布' : '草稿已保存')
+    annComposerOpen.value = false
+    resetAnnForm()
+    await loadAnnouncements()
+  } catch (e) {
+    ElMessage.error(e.message || '保存失败')
+  } finally {
+    annLoading.value = false
+  }
+}
+
+function moduleIcon(id) {
+  return MODULE_ICONS[id] || Cpu
+}
+
 function moduleMeta(id) {
-  return MODULE_META[id] || { icon: '⚙️', desc: '' }
+  return MODULE_META[id] || { desc: '', purpose: '', steps: [], tip: '' }
 }
 
 function moduleDirtyCount(moduleId) {
@@ -440,6 +893,7 @@ function hydrateFromSchema(data) {
   modules.value = list
   stats.totalKeys = Number(data?.totalKeys) || 0
   stats.wiredCount = Number(data?.wiredCount) || 0
+  stats.kvOnlyCount = Number(data?.kvOnlyCount) || 0
   stats.readOnlyCount = Number(data?.readOnlyCount) || 0
 
   for (const mod of list) {
@@ -500,10 +954,13 @@ function commitSaved(keys) {
 }
 
 async function loadAnnouncements() {
+  annListLoading.value = true
   try {
     announcements.value = await fetchAdminAnnouncements()
   } catch {
     announcements.value = []
+  } finally {
+    annListLoading.value = false
   }
 }
 
@@ -536,6 +993,7 @@ function onSelectModule(id) {
     ElMessage.info('当前模块有未保存变更，切换后仍可回来保存')
   }
   activeModule.value = id
+  fieldSearch.value = ''
 }
 
 async function saveCurrentModule() {
@@ -592,32 +1050,6 @@ async function resetCurrentModule() {
   }
 }
 
-async function submitAnnouncement() {
-  if (!ann.title.trim() || !ann.content.trim()) {
-    ElMessage.warning('请填写标题与正文')
-    return
-  }
-  annLoading.value = true
-  try {
-    await publishAnnouncement({
-      title: ann.title.trim(),
-      content: ann.content.trim(),
-      audience: ann.audience,
-      pinned: ann.pinned,
-      priority: ann.priority,
-      publishStatus: 'PUBLISHED'
-    })
-    ElMessage.success('公告已发布')
-    ann.title = ''
-    ann.content = ''
-    await loadAnnouncements()
-  } catch (e) {
-    ElMessage.error(e.message || '发布失败')
-  } finally {
-    annLoading.value = false
-  }
-}
-
 function openUpsert() {
   rawForm.configKey = ''
   rawForm.configValue = ''
@@ -662,180 +1094,797 @@ onMounted(reload)
 
 <style scoped>
 .sys-config {
-  padding: 0 4px 24px;
+  padding: 0 4px 28px;
   min-height: 100%;
+  background: #f4f6f9;
 }
-.sys-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
+
+.config-topbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) auto auto;
+  gap: 20px;
+  align-items: start;
+  padding: 22px 24px;
   margin-bottom: 16px;
-  padding: 18px 20px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, #f0f9ff 0%, #eef2ff 55%, #faf5ff 100%);
-  border: 1px solid #e0e7ff;
+  background: #fff;
+  border: 1px solid #dde3ea;
+  border-radius: 4px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 }
-.sys-head h1 {
+
+.config-eyebrow {
+  display: inline-block;
+  margin-bottom: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+
+.config-topbar-main h1 {
   margin: 0 0 8px;
-  font-size: 20px;
+  font-size: 22px;
+  font-weight: 700;
   color: #0f172a;
 }
-.sys-head p {
+
+.config-topbar-main p {
   margin: 0;
-  max-width: 720px;
+  max-width: 680px;
   font-size: 13px;
-  line-height: 1.6;
-  color: #475569;
+  line-height: 1.65;
+  color: #64748b;
 }
-.sys-head-actions {
+
+.config-topbar-stats-wrap {
+  min-width: 200px;
+}
+
+.config-topbar-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(88px, 1fr));
+  gap: 10px;
+}
+
+.stats-formula {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #64748b;
+}
+
+.stats-meta {
+  color: #94a3b8;
+}
+
+.stat-block {
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  background: #f8fafc;
+}
+
+.stat-block span {
+  display: block;
+  font-size: 11px;
+  color: #64748b;
+}
+
+.stat-block strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 22px;
+  color: #0f172a;
+}
+
+.stat-block.warn {
+  border-color: #fcd34d;
+  background: #fffbeb;
+}
+
+.stat-block.warn strong {
+  color: #b45309;
+}
+
+.config-topbar-actions {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  flex-direction: column;
   gap: 8px;
+  min-width: 132px;
 }
-.sys-layout {
-  border: 1px solid #ebeef5;
-  border-radius: 12px;
-  overflow: hidden;
+
+.config-workspace {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.config-nav {
+  position: sticky;
+  top: 12px;
+  padding: 14px;
   background: #fff;
-  min-height: 560px;
+  border: 1px solid #dde3ea;
+  border-radius: 4px;
 }
-.sys-aside {
-  border-right: 1px solid #ebeef5;
-  background: #fafbfc;
+
+.nav-search {
+  margin-bottom: 12px;
 }
-.sys-menu {
-  border-right: none;
-  background: transparent;
+
+.nav-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
-.menu-icon {
-  margin-right: 8px;
-}
-.menu-label {
-  flex: 1;
-}
-.menu-badge {
-  margin-left: 6px;
-}
-.sys-main {
-  padding: 20px 24px 28px;
-}
-.module-banner {
+
+.nav-item {
   display: flex;
   align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 20px;
-  padding-bottom: 16px;
-  border-bottom: 1px dashed #e2e8f0;
+  gap: 10px;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
-.module-banner h2 {
-  margin: 0 0 6px;
-  font-size: 18px;
+
+.nav-item:hover {
+  background: #f8fafc;
+  border-color: #e2e8f0;
+}
+
+.nav-item.active {
+  background: #eff6ff;
+  border-color: #93c5fd;
+}
+
+.nav-item.dirty:not(.active) {
+  border-color: #fde68a;
+}
+
+.nav-item-icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+  background: #f1f5f9;
+  color: #334155;
+  flex-shrink: 0;
+}
+
+.nav-item.active .nav-item-icon {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.nav-item-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.nav-item-body strong {
+  display: block;
+  font-size: 13px;
+  color: #0f172a;
+}
+
+.nav-item-body small {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #64748b;
+}
+
+.config-main {
+  min-width: 0;
+}
+
+.module-panel,
+.panel-block {
+  background: #fff;
+  border: 1px solid #dde3ea;
+  border-radius: 4px;
+  margin-bottom: 16px;
+}
+
+.module-panel {
+  padding: 20px 22px;
+}
+
+.module-panel-head {
   display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.module-kicker {
+  display: inline-flex;
   align-items: center;
   gap: 8px;
+  margin-bottom: 8px;
+  font-size: 18px;
+  font-weight: 700;
+  color: #0f172a;
 }
-.banner-icon { font-size: 22px; }
-.module-banner p {
+
+.module-desc {
   margin: 0;
   font-size: 13px;
   color: #64748b;
 }
-.module-actions {
+
+.module-panel-actions {
   display: flex;
   gap: 8px;
   flex-shrink: 0;
 }
-.ann-card {
-  margin-bottom: 20px;
-}
-.card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.ann-form { margin-bottom: 12px; }
-.ann-submit-col {
-  display: flex;
-  align-items: flex-end;
-  padding-bottom: 4px;
-}
-.ann-table { margin-top: 8px; }
-.config-grid {
+
+.module-guide {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
 }
-.config-field {
-  padding: 14px 16px;
-  border: 1px solid #ebeef5;
-  border-radius: 10px;
-  background: #fafafa;
-  transition: border-color 0.15s, box-shadow 0.15s;
-}
-.config-field.is-dirty {
-  border-color: #f59e0b;
-  background: #fffbeb;
-  box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.15);
-}
-.config-field:has(:disabled) {
-  opacity: 0.92;
+
+.guide-block {
+  padding: 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
   background: #f8fafc;
 }
-.binding-tag { cursor: help; }
+
+.guide-block.guide-tip {
+  background: #fff;
+  border-left: 3px solid #2563eb;
+}
+
+.guide-label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+
+.guide-block p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #334155;
+}
+
+.guide-steps {
+  margin: 0;
+  padding-left: 18px;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.module-metrics {
+  display: flex;
+  gap: 16px;
+  margin-top: 14px;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.panel-head.compact {
+  padding: 16px 20px 0;
+}
+
+.panel-head strong {
+  display: block;
+  font-size: 15px;
+  color: #0f172a;
+}
+
+.panel-head p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.field-search {
+  width: 240px;
+}
+
+.config-panel {
+  padding-bottom: 8px;
+}
+
+.config-row {
+  display: grid;
+  grid-template-columns: minmax(240px, 34%) minmax(0, 1fr);
+  gap: 20px;
+  padding: 16px 20px;
+  border-top: 1px solid #eef2f6;
+}
+
+.config-row.is-dirty {
+  background: #fffbeb;
+}
+
+.config-row.is-readonly {
+  background: #fafafa;
+}
+
 .field-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   margin-bottom: 4px;
 }
+
 .field-head label {
   font-weight: 600;
   font-size: 14px;
-  color: #1e293b;
+  color: #0f172a;
 }
+
+.field-key {
+  margin: 0 0 6px;
+  font-size: 11px;
+  color: #94a3b8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.field-desc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #64748b;
+}
+
+.binding-tag {
+  cursor: help;
+}
+
 .field-help {
   color: #94a3b8;
   cursor: help;
 }
-.field-key {
-  margin: 0 0 10px;
-  font-size: 11px;
-  color: #94a3b8;
-  font-family: ui-monospace, monospace;
-}
-.field-meta {
+
+.field-meta,
+.field-saving {
   margin: 8px 0 0;
   font-size: 11px;
-  color: #cbd5e1;
 }
+
+.field-meta {
+  color: #94a3b8;
+}
+
 .field-saving {
-  margin: 4px 0 0;
-  font-size: 11px;
-  color: #409eff;
+  color: #2563eb;
 }
-.advanced-collapse {
-  margin-top: 16px;
-  border: 1px solid #ebeef5;
-  border-radius: 10px;
+
+.ann-workspace {
+  padding: 0;
   overflow: hidden;
 }
+
+.ann-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px 20px;
+  padding: 18px 20px;
+  border-bottom: 1px solid #eef2f6;
+  background: linear-gradient(180deg, #fafbfc 0%, #fff 100%);
+}
+
+.ann-toolbar-main strong {
+  display: block;
+  font-size: 15px;
+  color: #0f172a;
+}
+
+.ann-toolbar-main p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #64748b;
+}
+
+.ann-stat-chips {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ann-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 999px;
+  background: #fff;
+  font-size: 12px;
+  color: #475569;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+
+.ann-chip:hover {
+  border-color: #cbd5e1;
+  background: #f8fafc;
+}
+
+.ann-chip.active {
+  border-color: #2563eb;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.ann-chip.warn.active {
+  border-color: #dc2626;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.ann-toolbar-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.ann-filter-input {
+  width: 220px;
+}
+
+.ann-filter-select {
+  width: 120px;
+}
+
+.ann-table-wrap {
+  padding: 0 20px 16px;
+}
+
+.ann-table {
+  width: 100%;
+}
+
+:deep(.ann-table .el-table__row) {
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+:deep(.ann-table .el-table__row:hover > td) {
+  background: #f8fafc !important;
+}
+
+.ann-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 48px 24px;
+  text-align: center;
+  color: #64748b;
+}
+
+.ann-empty .el-icon {
+  font-size: 28px;
+  color: #94a3b8;
+}
+
+.ann-empty strong {
+  font-size: 15px;
+  color: #334155;
+}
+
+.ann-empty p {
+  margin: 0;
+  max-width: 420px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.ann-empty-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.ann-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 320px);
+  gap: 32px;
+  min-height: 480px;
+  padding: 4px 0 8px;
+}
+
+.ann-compose-form {
+  min-width: 0;
+}
+
+:deep(.ann-drawer .el-drawer__body) {
+  padding: 20px 28px 12px;
+}
+
+:deep(.ann-drawer .el-drawer__footer) {
+  padding: 16px 28px 20px;
+  border-top: 1px solid #eef2f6;
+}
+
+:deep(.ann-compose-form-inner .el-form-item) {
+  margin-bottom: 24px;
+}
+
+:deep(.ann-compose-form-inner .el-form-item__label) {
+  padding-bottom: 8px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.ann-options-item {
+  margin-bottom: 0 !important;
+}
+
+.ann-template-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+  padding: 14px 16px;
+  border: 1px dashed #dbe3ec;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.ann-template-row > span {
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+}
+
+.ann-template-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ann-template-btn {
+  padding: 4px 12px;
+  border: 1px solid #dbe3ec;
+  border-radius: 999px;
+  background: #fff;
+  font-size: 12px;
+  color: #475569;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.ann-template-btn:hover {
+  border-color: #2563eb;
+  color: #2563eb;
+  background: #eff6ff;
+}
+
+.ann-audience-group {
+  display: flex;
+  width: 100%;
+}
+
+:deep(.ann-audience-group .el-radio-button) {
+  flex: 1;
+}
+
+:deep(.ann-audience-group .el-radio-button__inner) {
+  width: 100%;
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+.ann-priority-row {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.ann-priority-slider {
+  flex: 1;
+  min-width: 0;
+}
+
+.ann-priority-input {
+  width: 112px;
+  flex-shrink: 0;
+}
+
+.ann-field-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #94a3b8;
+}
+
+.ann-compose-preview {
+  padding: 20px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #f8fafc;
+  position: sticky;
+  top: 0;
+  align-self: start;
+}
+
+.preview-kicker {
+  display: block;
+  margin-bottom: 16px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+
+.ann-preview-card {
+  padding: 22px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.ann-preview-card--detail {
+  box-shadow: none;
+}
+
+.ann-preview-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.ann-preview-card strong {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 16px;
+  line-height: 1.45;
+  color: #0f172a;
+}
+
+.ann-preview-card p {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #475569;
+  white-space: pre-wrap;
+}
+
+.ann-preview-content {
+  max-height: 320px;
+  overflow: auto;
+}
+
+.ann-preview-card small {
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.ann-preview-meta {
+  margin: 16px 0 0;
+  padding: 12px 0 0;
+  border-top: 1px solid #eef2f6;
+  list-style: none;
+}
+
+.ann-preview-meta li {
+  font-size: 12px;
+  line-height: 1.8;
+  color: #64748b;
+}
+
+.advanced-collapse {
+  margin-top: 16px;
+  border: 1px solid #dde3ea;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #fff;
+}
+
 .advanced-toolbar {
   margin-bottom: 8px;
 }
-.muted { color: #94a3b8; }
-:deep(.el-menu-item) {
-  display: flex;
-  align-items: center;
-  height: 46px;
+
+.muted {
+  color: #94a3b8;
 }
+
 :deep(.advanced-collapse .el-collapse-item__header) {
   padding: 0 16px;
   font-size: 13px;
   color: #64748b;
 }
-:deep(.el-table tbody tr) { cursor: pointer; }
+
+:deep(.el-table tbody tr) {
+  cursor: pointer;
+}
+
+@media (max-width: 1200px) {
+  .config-topbar {
+    grid-template-columns: 1fr;
+  }
+
+  .config-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .config-nav {
+    position: static;
+  }
+
+  .module-guide {
+    grid-template-columns: 1fr;
+  }
+
+  .config-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .config-topbar-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .panel-head {
+    flex-direction: column;
+  }
+
+  .ann-toolbar-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .ann-filter-input,
+  .ann-filter-select {
+    width: 100%;
+  }
+
+  .ann-composer {
+    grid-template-columns: 1fr;
+    gap: 24px;
+  }
+
+  .ann-compose-preview {
+    position: static;
+  }
+
+  .field-search {
+    width: 100%;
+  }
+}
 </style>

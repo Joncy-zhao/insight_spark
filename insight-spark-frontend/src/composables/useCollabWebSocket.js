@@ -16,7 +16,9 @@ export function useCollabWebSocket({
 
   onAnnotationCreated,
 
-  onAnnotationDeleted
+  onAnnotationDeleted,
+
+  onAnnotationUpdated
 
 }) {
 
@@ -125,6 +127,10 @@ export function useCollabWebSocket({
         } else if (msg.type === 'ANNOTATION_DELETED' && msg.payload?.id != null) {
 
           onAnnotationDeleted?.(msg.payload.id)
+
+        } else if (msg.type === 'ANNOTATION_UPDATED' && msg.payload) {
+
+          onAnnotationUpdated?.(msg.payload)
 
         }
 

@@ -602,6 +602,24 @@ const openPreview = async (row) => {
   boardViewerVisible.value = true
 }
 
+function tryConsumePendingDashboard() {
+  const pending = workbench?.dashboardPendingOpen?.value
+  if (!pending?.id) return
+  openPreview(pending)
+  if (workbench?.dashboardPendingOpen) {
+    workbench.dashboardPendingOpen.value = null
+  }
+}
+
+watch(
+  () => workbench?.activeModule?.value,
+  (mod) => {
+    if (mod === 'dashboard') {
+      nextTick(() => tryConsumePendingDashboard())
+    }
+  }
+)
+
 function basicWidgetComponent(widgetKind) {
   return resolveBasicWidgetEntry(widgetKind)?.widget || null
 }

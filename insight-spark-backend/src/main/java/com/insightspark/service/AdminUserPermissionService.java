@@ -29,8 +29,10 @@ public class AdminUserPermissionService {
     }
 
     private void assertAdmin() {
-        if (!AuthContext.isAdmin()) {
-            throw new IllegalArgumentException("仅管理员可操作");
+        if (!permissionService.currentUserIsSuperAdmin()
+                && !permissionService.currentUserHasPermission("operation:rbac-manage")
+                && !AuthContext.isAdmin()) {
+            throw new IllegalArgumentException("无用户与权限管理操作权限");
         }
     }
 
@@ -143,9 +145,44 @@ public class AdminUserPermissionService {
                     FROM is_role_permission WHERE role_code = ? ORDER BY permission_type, permission_code
                     """, roleCode);
             row.put("permissions", permissions);
-            row.put("permissionCount", permissions.size());
+            row.put("directPermissionCount", permissions.size());
         });
+        Map<String, Map<String, Object>> roleByCode = new LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            roleByCode.put(Objects.toString(row.get("roleCode"), ""), row);
+        }
+        for (Map<String, Object> row : rows) {
+            List<Map<String, Object>> effective = mergeEffectivePermissions(
+                    Objects.toString(row.get("roleCode"), ""), roleByCode, new LinkedHashSet<>());
+            row.put("effectivePermissions", effective);
+            row.put("permissionCount", effective.size());
+        }
         return rows;
+    }
+
+    private List<Map<String, Object>> mergeEffectivePermissions(
+            String roleCode, Map<String, Map<String, Object>> roleByCode, Set<String> visiting) {
+        if (roleCode.isBlank() || visiting.contains(roleCode)) {
+            return List.of();
+        }
+        visiting.add(roleCode);
+        Map<String, Object> role = roleByCode.get(roleCode);
+        if (role == null) {
+            return List.of();
+        }
+        LinkedHashMap<String, Map<String, Object>> merged = new LinkedHashMap<>();
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> direct = (List<Map<String, Object>>) role.getOrDefault("permissions", List.of());
+        for (Map<String, Object> permission : direct) {
+            merged.putIfAbsent(Objects.toString(permission.get("permissionCode"), ""), permission);
+        }
+        String parentRoleCode = Objects.toString(role.get("parentRoleCode"), "").trim();
+        if (!parentRoleCode.isBlank()) {
+            for (Map<String, Object> permission : mergeEffectivePermissions(parentRoleCode, roleByCode, visiting)) {
+                merged.putIfAbsent(Objects.toString(permission.get("permissionCode"), ""), permission);
+            }
+        }
+        return new ArrayList<>(merged.values());
     }
 
     public Map<String, Object> saveRole(Map<String, Object> payload) {
@@ -204,29 +241,92 @@ public class AdminUserPermissionService {
     public Map<String, Object> resources() {
         assertAdmin();
         Map<String, Object> result = new LinkedHashMap<>();
-        result.put("uploadTables", jdbcTemplate.queryForList("SELECT table_name AS tableName, display_name AS displayName, owner_id AS ownerId, status FROM is_data_table ORDER BY created_at DESC"));
-        result.put("officialTables", jdbcTemplate.queryForList("""
+        result.put("uploadTables", listGrantableUploadTables());
+        result.put("officialTables", listGrantableOfficialTables());
+        result.put("dashboards", listGrantableDashboards());
+        result.put("fields", listGrantableFields());
+        return result;
+    }
+
+    private List<Map<String, Object>> listGrantableUploadTables() {
+        if (!tableExists("is_data_table")) {
+            return List.of();
+        }
+        return jdbcTemplate.queryForList("""
+                SELECT t.table_name AS tableName,
+                       CONCAT(COALESCE(NULLIF(t.display_name, ''), t.table_name),
+                              '（归属 ', COALESCE(NULLIF(u.nickname, ''), u.username, t.owner_id, '-'), '）') AS displayName,
+                       t.owner_id AS ownerId, t.status AS status
+                FROM is_data_table t
+                LEFT JOIN is_user u ON u.user_id = t.owner_id
+                WHERE t.status = 'ACTIVE'
+                ORDER BY t.created_at DESC
+                """);
+    }
+
+    private List<Map<String, Object>> listGrantableOfficialTables() {
+        if (!tableExists("is_official_datasource") || !tableExists("is_official_schema_table")) {
+            return List.of();
+        }
+        return jdbcTemplate.queryForList("""
                 SELECT CONCAT('official:', d.id, ':', t.table_name) AS tableName,
                        CONCAT(d.name, ' / ', COALESCE(NULLIF(t.table_comment, ''), t.table_name)) AS displayName,
-                       d.name AS ownerId, d.status
+                       d.name AS ownerId, d.status AS status
                 FROM is_official_datasource d
                 JOIN is_official_schema_table t ON t.datasource_id = d.id
+                WHERE d.status = 'ENABLED'
                 ORDER BY d.created_at DESC, t.table_name ASC
-                """));
-        result.put("dashboards", jdbcTemplate.queryForList("SELECT CONCAT('dashboard:', id) AS tableName, name AS displayName, owner_user_id AS ownerId, status FROM is_dashboard ORDER BY created_at DESC"));
-        List<Map<String, Object>> fields = new ArrayList<>(jdbcTemplate.queryForList("""
-                SELECT table_name AS tableName, column_name AS columnName, display_name AS displayName, sensitive, 'UPLOAD' AS sourceType
-                FROM is_data_field ORDER BY table_name, sort_order ASC
-                """));
-        fields.addAll(jdbcTemplate.queryForList("""
-                SELECT CONCAT('official:', datasource_id, ':', table_name) AS tableName,
-                       column_name AS columnName,
-                       COALESCE(NULLIF(business_name, ''), NULLIF(column_comment, ''), column_name) AS displayName,
-                       sensitive, 'OFFICIAL' AS sourceType
-                FROM is_official_schema_field ORDER BY datasource_id, table_name, ordinal_position ASC
-                """));
-        result.put("fields", fields);
-        return result;
+                """);
+    }
+
+    private List<Map<String, Object>> listGrantableDashboards() {
+        if (!tableExists("is_dashboard")) {
+            return List.of();
+        }
+        return jdbcTemplate.queryForList("""
+                SELECT CONCAT('dashboard:', d.id) AS tableName,
+                       CONCAT(d.name, '（', COALESCE(NULLIF(u.nickname, ''), u.username, d.owner_user_id, '-'),
+                              ' · #', d.id,
+                              CASE WHEN d.is_public = 1 THEN ' · 公共' ELSE '' END, '）') AS displayName,
+                       d.owner_user_id AS ownerId, d.status AS status, d.is_public AS isPublic
+                FROM is_dashboard d
+                LEFT JOIN is_user u ON u.user_id = d.owner_user_id
+                WHERE d.status != 'ARCHIVED'
+                ORDER BY d.updated_at DESC
+                """);
+    }
+
+    private List<Map<String, Object>> listGrantableFields() {
+        List<Map<String, Object>> fields = new ArrayList<>();
+        try {
+            if (tableExists("is_data_field")) {
+                fields.addAll(jdbcTemplate.queryForList("""
+                        SELECT table_name AS tableName, column_name AS columnName, display_name AS displayName,
+                               `sensitive` AS sensitive, 'UPLOAD' AS sourceType
+                        FROM is_data_field ORDER BY table_name, sort_order ASC
+                        """));
+            }
+            if (tableExists("is_official_schema_field")) {
+                fields.addAll(jdbcTemplate.queryForList("""
+                        SELECT CONCAT('official:', datasource_id, ':', table_name) AS tableName,
+                               column_name AS columnName,
+                               COALESCE(NULLIF(business_name, ''), NULLIF(column_comment, ''), column_name) AS displayName,
+                               `sensitive` AS sensitive, 'OFFICIAL' AS sourceType
+                        FROM is_official_schema_field ORDER BY datasource_id, table_name, ordinal_position ASC
+                        """));
+            }
+        } catch (Exception ignored) {
+            // 字段元数据仅用于敏感字段规则，不应影响授权资源下拉
+        }
+        return fields;
+    }
+
+    private boolean tableExists(String tableName) {
+        Integer count = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM information_schema.tables
+                WHERE table_schema = DATABASE() AND table_name = ?
+                """, Integer.class, tableName);
+        return count != null && count > 0;
     }
 
     public void grantData(Map<String, Object> payload) {
@@ -269,9 +369,13 @@ public class AdminUserPermissionService {
         String target = userId == null ? "" : userId.trim();
         List<Map<String, Object>> rows = new ArrayList<>();
         if (target.isBlank()) {
-            rows.addAll(jdbcTemplate.queryForList("SELECT 'TABLE' AS scope, user_id AS targetId, table_name AS resource, permission_type AS permissionType, expire_at AS expireAt, created_at AS createdAt FROM is_data_permission ORDER BY created_at DESC"));
+            rows.addAll(queryUploadTableGrants(null));
+            rows.addAll(queryOfficialGrants(null));
+            rows.addAll(queryDashboardGrants(null));
         } else {
-            rows.addAll(jdbcTemplate.queryForList("SELECT 'TABLE' AS scope, user_id AS targetId, table_name AS resource, permission_type AS permissionType, expire_at AS expireAt, created_at AS createdAt FROM is_data_permission WHERE user_id = ? ORDER BY created_at DESC", target));
+            rows.addAll(queryUploadTableGrants(target));
+            rows.addAll(queryOfficialGrants(target));
+            rows.addAll(queryDashboardGrants(target));
         }
         return rows;
     }
@@ -325,10 +429,117 @@ public class AdminUserPermissionService {
 
     private List<Map<String, Object>> listUserGrants(String userId) {
         List<Map<String, Object>> rows = new ArrayList<>();
-        rows.addAll(jdbcTemplate.queryForList("SELECT 'TABLE' AS scope, table_name AS resource, permission_type AS permissionType, expire_at AS expireAt FROM is_data_permission WHERE user_id = ? ORDER BY created_at DESC", userId));
-        rows.addAll(jdbcTemplate.queryForList("SELECT 'OFFICIAL' AS scope, CONCAT(datasource_id, ':', table_name) AS resource, permission_type AS permissionType, expire_at AS expireAt FROM is_official_table_permission WHERE principal_type = 'USER' AND principal_id = ? ORDER BY created_at DESC", userId));
-        rows.addAll(jdbcTemplate.queryForList("SELECT 'DASHBOARD' AS scope, CONCAT('dashboard:', dashboard_id) AS resource, permission_type AS permissionType, expire_at AS expireAt FROM is_dashboard_permission WHERE user_id = ? ORDER BY created_at DESC", userId));
+        rows.addAll(queryUploadTableGrants(userId));
+        rows.addAll(queryOfficialGrants(userId));
+        rows.addAll(queryDashboardGrants(userId));
         return rows;
+    }
+
+    private List<Map<String, Object>> queryUploadTableGrants(String userId) {
+        if (userId == null || userId.isBlank()) {
+            return jdbcTemplate.queryForList("""
+                    SELECT 'TABLE' AS scope, p.user_id AS targetId, p.table_name AS resource,
+                           COALESCE(NULLIF(t.display_name, ''), p.table_name) AS displayName,
+                           COALESCE(t.owner_id, '') AS ownerId,
+                           p.permission_type AS permissionType, p.expire_at AS expireAt, p.created_at AS createdAt,
+                           p.source AS grantSource,
+                           CASE WHEN p.source = 'REQUEST' THEN '审批通过' ELSE '管理员授权' END AS grantSourceLabel
+                    FROM is_data_permission p
+                    LEFT JOIN is_data_table t ON t.table_name = p.table_name
+                    ORDER BY p.created_at DESC
+                    """);
+        }
+        return jdbcTemplate.queryForList("""
+                SELECT 'TABLE' AS scope, p.user_id AS targetId, p.table_name AS resource,
+                       COALESCE(NULLIF(t.display_name, ''), p.table_name) AS displayName,
+                       COALESCE(t.owner_id, '') AS ownerId,
+                       p.permission_type AS permissionType, p.expire_at AS expireAt, p.created_at AS createdAt,
+                       p.source AS grantSource,
+                       CASE WHEN p.source = 'REQUEST' THEN '审批通过' ELSE '管理员授权' END AS grantSourceLabel
+                FROM is_data_permission p
+                LEFT JOIN is_data_table t ON t.table_name = p.table_name
+                WHERE p.user_id = ?
+                ORDER BY p.created_at DESC
+                """, userId);
+    }
+
+    private List<Map<String, Object>> queryOfficialGrants(String userId) {
+        if (userId == null || userId.isBlank()) {
+            return jdbcTemplate.queryForList("""
+                    SELECT 'OFFICIAL' AS scope, p.principal_id AS targetId,
+                           CONCAT('official:', p.datasource_id, ':', p.table_name) AS resource,
+                           CASE
+                             WHEN p.table_name = '*' THEN CONCAT(COALESCE(d.name, CONCAT('官方库#', p.datasource_id)), ' / 全部表')
+                             ELSE CONCAT(COALESCE(d.name, CONCAT('官方库#', p.datasource_id)), ' / ',
+                                  COALESCE(NULLIF(t.table_comment, ''), p.table_name))
+                           END AS displayName,
+                           COALESCE(d.name, '') AS ownerId,
+                           p.permission_type AS permissionType, p.expire_at AS expireAt, p.created_at AS createdAt,
+                           COALESCE(p.source, 'ADMIN') AS grantSource,
+                           CASE WHEN COALESCE(p.source, 'ADMIN') = 'REQUEST' THEN '审批通过' ELSE '管理员授权' END AS grantSourceLabel
+                    FROM is_official_table_permission p
+                    LEFT JOIN is_official_datasource d ON d.id = p.datasource_id
+                    LEFT JOIN is_official_schema_table t ON t.datasource_id = p.datasource_id AND t.table_name = p.table_name
+                    WHERE p.principal_type = 'USER'
+                    ORDER BY p.created_at DESC
+                    """);
+        }
+        return jdbcTemplate.queryForList("""
+                SELECT 'OFFICIAL' AS scope, p.principal_id AS targetId,
+                       CONCAT('official:', p.datasource_id, ':', p.table_name) AS resource,
+                       CASE
+                         WHEN p.table_name = '*' THEN CONCAT(COALESCE(d.name, CONCAT('官方库#', p.datasource_id)), ' / 全部表')
+                         ELSE CONCAT(COALESCE(d.name, CONCAT('官方库#', p.datasource_id)), ' / ',
+                              COALESCE(NULLIF(t.table_comment, ''), p.table_name))
+                       END AS displayName,
+                       COALESCE(d.name, '') AS ownerId,
+                       p.permission_type AS permissionType, p.expire_at AS expireAt, p.created_at AS createdAt,
+                       COALESCE(p.source, 'ADMIN') AS grantSource,
+                       CASE WHEN COALESCE(p.source, 'ADMIN') = 'REQUEST' THEN '审批通过' ELSE '管理员授权' END AS grantSourceLabel
+                FROM is_official_table_permission p
+                LEFT JOIN is_official_datasource d ON d.id = p.datasource_id
+                LEFT JOIN is_official_schema_table t ON t.datasource_id = p.datasource_id AND t.table_name = p.table_name
+                WHERE p.principal_type = 'USER' AND p.principal_id = ?
+                ORDER BY p.created_at DESC
+                """, userId);
+    }
+
+    private List<Map<String, Object>> queryDashboardGrants(String userId) {
+        if (userId == null || userId.isBlank()) {
+            return jdbcTemplate.queryForList("""
+                    SELECT 'DASHBOARD' AS scope, p.user_id AS targetId,
+                           CONCAT('dashboard:', p.dashboard_id) AS resource,
+                           COALESCE(NULLIF(d.name, ''), CONCAT('看板 #', p.dashboard_id)) AS displayName,
+                           COALESCE(d.owner_user_id, '') AS ownerId,
+                           p.permission_type AS permissionType, p.expire_at AS expireAt, p.created_at AS createdAt,
+                           p.source AS grantSource,
+                           CASE
+                             WHEN p.source = 'REQUEST' THEN '审批通过'
+                             WHEN p.source = 'COLLAB' THEN '看板协作'
+                             ELSE '管理员授权'
+                           END AS grantSourceLabel
+                    FROM is_dashboard_permission p
+                    LEFT JOIN is_dashboard d ON d.id = p.dashboard_id
+                    ORDER BY p.created_at DESC
+                    """);
+        }
+        return jdbcTemplate.queryForList("""
+                SELECT 'DASHBOARD' AS scope, p.user_id AS targetId,
+                       CONCAT('dashboard:', p.dashboard_id) AS resource,
+                       COALESCE(NULLIF(d.name, ''), CONCAT('看板 #', p.dashboard_id)) AS displayName,
+                       COALESCE(d.owner_user_id, '') AS ownerId,
+                       p.permission_type AS permissionType, p.expire_at AS expireAt, p.created_at AS createdAt,
+                       p.source AS grantSource,
+                       CASE
+                         WHEN p.source = 'REQUEST' THEN '审批通过'
+                         WHEN p.source = 'COLLAB' THEN '看板协作'
+                         ELSE '管理员授权'
+                       END AS grantSourceLabel
+                FROM is_dashboard_permission p
+                LEFT JOIN is_dashboard d ON d.id = p.dashboard_id
+                WHERE p.user_id = ?
+                ORDER BY p.created_at DESC
+                """, userId);
     }
 
     private List<Map<String, Object>> permissionPreviewTables(String userId) {
@@ -373,7 +584,7 @@ public class AdminUserPermissionService {
     private void grantOfficial(String targetType, String targetId, String resource, String permissionType, String expireAt) {
         Long datasourceId = parseOfficialDatasourceId(resource);
         String tableName = parseOfficialTable(resource);
-        jdbcTemplate.update("INSERT INTO is_official_table_permission(datasource_id, table_name, principal_type, principal_id, permission_type, expire_at) VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE expire_at = VALUES(expire_at), created_at = CURRENT_TIMESTAMP", datasourceId, tableName, targetType, targetId, permissionType, expireAt);
+        jdbcTemplate.update("INSERT INTO is_official_table_permission(datasource_id, table_name, principal_type, principal_id, permission_type, expire_at, source) VALUES (?, ?, ?, ?, ?, ?, 'ADMIN') ON DUPLICATE KEY UPDATE expire_at = VALUES(expire_at), source = VALUES(source), created_at = CURRENT_TIMESTAMP", datasourceId, tableName, targetType, targetId, permissionType, expireAt);
     }
 
     private void grantDashboard(String targetType, String targetId, String resource, String permissionType, String expireAt) {

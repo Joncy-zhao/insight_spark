@@ -72,4 +72,8 @@ public class CollabWebSocketBroadcaster {
     public void broadcastAnnotationDeleted(long dashboardId, long annotationId) {
         broadcast(roomKey("DASHBOARD", dashboardId), "ANNOTATION_DELETED", Map.of("id", annotationId));
     }
+
+    public void broadcastAnnotationUpdated(long dashboardId, Map<String, Object> annotation) {
+        broadcast(roomKey("DASHBOARD", dashboardId), "ANNOTATION_UPDATED", annotation);
+    }
 }

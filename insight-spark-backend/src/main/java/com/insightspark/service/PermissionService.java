@@ -1,6 +1,7 @@
 package com.insightspark.service;
 
 import com.insightspark.core.auth.AuthContext;
+import com.insightspark.core.auth.RbacConstants;
 import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -105,6 +106,7 @@ public class PermissionService {
                   INDEX `idx_official_table_permission_principal` (`principal_type`, `principal_id`, `permission_type`)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='official table permission';
                 """);
+        addColumnIfMissing("is_official_table_permission", "source", "VARCHAR(32) NOT NULL DEFAULT 'ADMIN'");
         initRbacTables();
         initComplianceDocuments();
         migrateApprovedOfficialRequests();
@@ -224,13 +226,13 @@ public class PermissionService {
         overview.put("effectivePermissions", rbacProfile.getOrDefault("effectivePermissions", List.of()));
         overview.put("dataScope", AuthContext.isAdmin() ? "管理员可查看全部数据" : "本人上传数据 + 已审批授权数据");
         overview.put("sensitiveRule", "敏感字段按字段标记识别，查询展示默认脱敏。");
-        overview.put("roleLevel", AuthContext.isAdmin() ? "L3 管理员" : "L1 普通用户");
-        overview.put("roleDescription", AuthContext.isAdmin()
+        overview.put("roleLevel", AuthContext.isSuperAdmin() ? "L4 超级管理员" : AuthContext.isAdmin() ? "L3 管理员" : "L1 普通用户");
+        overview.put("roleDescription", AuthContext.isSuperAdmin()
+                ? "超级管理员拥有管理员端全部菜单与操作权限，不受角色权限勾选限制。"
+                : AuthContext.isAdmin()
                 ? "管理员继承普通用户全部能力，并拥有数据源、权限审批、审计治理和知识图谱管理权限。"
                 : "普通用户可访问本人上传数据、已授权官方库与公共看板，可提交额外权限申请。");
-        overview.put("menuPermissions", AuthContext.isAdmin()
-                ? List.of("用户工作台", "对话分析", "数据上传", "智能诊断", "权限审批", "数据源管理", "SQL审计", "知识图谱")
-                : List.of("用户工作台", "对话分析", "数据上传", "我的看板", "智能诊断", "数据权限中心"));
+        overview.put("menuPermissions", menuPermissionLabelsFor(currentUserId(), currentRole()));
         overview.put("inheritance", AuthContext.isAdmin()
                 ? "ADMIN 继承 USER 基础权限，并叠加治理与审批权限。"
                 : "USER 为基础角色，不继承其他角色；后续子角色会继承 USER 的上传、查询和申请能力。");
@@ -272,6 +274,82 @@ public class PermissionService {
                 "effectivePermissions", permissions,
                 "inheritanceMode", "ROLE_PARENT_CHAIN"
         );
+    }
+
+    public List<String> effectivePermissionCodesFor(String userId, String fallbackRole) {
+        if (isSuperAdminUser(userId, fallbackRole)) {
+            return listAllPermissionCodes();
+        }
+        List<String> effectiveRoles = effectiveRolesFor(assignedRolesFor(userId, fallbackRole));
+        if (effectiveRoles.isEmpty()) {
+            return List.of();
+        }
+        return jdbcTemplate.queryForList("""
+                SELECT DISTINCT permission_code
+                FROM is_role_permission
+                WHERE role_code IN (%s)
+                ORDER BY permission_code
+                """.formatted(placeholders(effectiveRoles.size())), String.class, effectiveRoles.toArray());
+    }
+
+    public List<String> menuPermissionLabelsFor(String userId, String fallbackRole) {
+        if (isSuperAdminUser(userId, fallbackRole)) {
+            return jdbcTemplate.queryForList("""
+                    SELECT DISTINCT permission_name
+                    FROM is_role_permission
+                    WHERE permission_type = 'MENU' AND resource_scope = 'ADMIN'
+                    ORDER BY permission_name
+                    """, String.class);
+        }
+        List<String> effectiveRoles = effectiveRolesFor(assignedRolesFor(userId, fallbackRole));
+        if (effectiveRoles.isEmpty()) {
+            return List.of();
+        }
+        return jdbcTemplate.queryForList("""
+                SELECT DISTINCT permission_name
+                FROM is_role_permission
+                WHERE role_code IN (%s) AND permission_type = 'MENU'
+                ORDER BY permission_name
+                """.formatted(placeholders(effectiveRoles.size())), String.class, effectiveRoles.toArray());
+    }
+
+    public boolean hasPermissionFor(String userId, String fallbackRole, String permissionCode) {
+        if (isSuperAdminUser(userId, fallbackRole)) {
+            return true;
+        }
+        String code = Objects.toString(permissionCode, "").trim();
+        if (code.isBlank()) {
+            return true;
+        }
+        return effectivePermissionCodesFor(userId, fallbackRole).contains(code);
+    }
+
+    public boolean isSuperAdminUser(String userId, String fallbackRole) {
+        if (RbacConstants.SUPER_ADMIN_ROLE.equalsIgnoreCase(Objects.toString(fallbackRole, ""))) {
+            return true;
+        }
+        return effectiveRolesFor(assignedRolesFor(userId, fallbackRole)).stream()
+                .anyMatch(role -> RbacConstants.SUPER_ADMIN_ROLE.equalsIgnoreCase(role));
+    }
+
+    public boolean currentUserIsSuperAdmin() {
+        return isSuperAdminUser(currentUserId(), currentRole());
+    }
+
+    private List<String> listAllPermissionCodes() {
+        List<String> codes = new ArrayList<>(jdbcTemplate.queryForList("""
+                SELECT DISTINCT permission_code
+                FROM is_role_permission
+                ORDER BY permission_code
+                """, String.class));
+        if (!codes.contains(RbacConstants.SUPER_ADMIN_PERMISSION)) {
+            codes.add(RbacConstants.SUPER_ADMIN_PERMISSION);
+        }
+        return codes;
+    }
+
+    public boolean currentUserHasPermission(String permissionCode) {
+        return hasPermissionFor(currentUserId(), currentRole(), permissionCode);
     }
 
     public List<Map<String, Object>> listRowPoliciesForCurrentUser() {
@@ -442,9 +520,9 @@ public class PermissionService {
     private void grantOfficialDatasourcePermission(String tableName, Object applicantId, String permissionType, Object expireAt) {
         String physicalTableName = parseOfficialTableName(tableName);
         jdbcTemplate.update("""
-                INSERT INTO is_official_table_permission(datasource_id, table_name, principal_type, principal_id, permission_type, expire_at)
-                VALUES (?, ?, 'USER', ?, ?, ?)
-                ON DUPLICATE KEY UPDATE expire_at = VALUES(expire_at), created_at = CURRENT_TIMESTAMP
+                INSERT INTO is_official_table_permission(datasource_id, table_name, principal_type, principal_id, permission_type, expire_at, source)
+                VALUES (?, ?, 'USER', ?, ?, ?, 'REQUEST')
+                ON DUPLICATE KEY UPDATE expire_at = VALUES(expire_at), source = VALUES(source), created_at = CURRENT_TIMESTAMP
                 """, parseOfficialDatasourceId(tableName), physicalTableName, applicantId, permissionType, expireAt);
     }
 
@@ -712,7 +790,9 @@ public class PermissionService {
                 """);
         seedRole("USER", "普通用户", null, 1, "SELF", "本人上传数据、已授权官方数据与公共看板申请能力");
         seedRole("ADMIN", "管理员", "USER", 3, "ALL", "继承普通用户权限，并拥有全局配置、审批和治理权限");
+        seedRole("SUPER_ADMIN", "超级管理员", "ADMIN", 4, "ALL", "拥有管理员端全部菜单与操作权限，不受 RBAC 勾选限制");
         bindExistingUserRoles();
+        promoteBuiltInSuperAdmin();
         seedRolePermission("USER", "menu:user-workbench", "用户工作台", "MENU", "USER");
         seedRolePermission("USER", "menu:chat-analysis", "对话分析", "MENU", "USER");
         seedRolePermission("USER", "menu:data-upload", "数据上传", "MENU", "USER");
@@ -726,6 +806,24 @@ public class PermissionService {
         seedRolePermission("ADMIN", "menu:sql-audit", "SQL 审计", "MENU", "ADMIN");
         seedRolePermission("ADMIN", "data:all", "全量数据", "DATA", "ALL");
         seedRolePermission("ADMIN", "operation:rbac-manage", "用户与角色权限管理", "OPERATION", "ADMIN");
+        seedRolePermission("SUPER_ADMIN", RbacConstants.SUPER_ADMIN_PERMISSION, "超级管理员", "OPERATION", "ALL");
+    }
+
+    private void promoteBuiltInSuperAdmin() {
+        if (!tableExists("is_user")) {
+            return;
+        }
+        jdbcTemplate.update("""
+                UPDATE is_user
+                SET role = ?, nickname = CASE WHEN nickname = '管理员' THEN '超级管理员' ELSE nickname END
+                WHERE username = 'admin' AND role IN ('ADMIN', 'SUPER_ADMIN')
+                """, RbacConstants.SUPER_ADMIN_ROLE);
+        jdbcTemplate.update("""
+                INSERT IGNORE INTO is_user_role(user_id, role_code, source)
+                SELECT user_id, ?, 'SYSTEM'
+                FROM is_user
+                WHERE username = 'admin'
+                """, RbacConstants.SUPER_ADMIN_ROLE);
     }
 
     private void initComplianceDocuments() {

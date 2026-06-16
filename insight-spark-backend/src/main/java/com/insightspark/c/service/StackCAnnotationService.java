@@ -30,14 +30,21 @@ public class StackCAnnotationService {
     }
 
     public List<Map<String, Object>> listAnnotationsForDashboard(long dashboardId) {
+        return listAnnotationsForDashboard(dashboardId, false);
+    }
+
+    public List<Map<String, Object>> listAnnotationsForDashboard(long dashboardId, boolean includeHidden) {
         assertCanCollaborate(dashboardId);
+        String hiddenClause = includeHidden ? "" : " AND a.is_hidden = 0 ";
         return jdbcTemplate.queryForList("""
                 SELECT a.id, a.user_id AS userId, u.nickname, a.target_type AS targetType, a.target_id AS targetId,
-                       a.dashboard_id AS dashboardId, a.bind_json AS bindJson, a.content, a.tag, a.created_at AS createdAt
+                       a.dashboard_id AS dashboardId, a.bind_json AS bindJson, a.content, a.tag,
+                       a.is_hidden AS isHidden, a.created_at AS createdAt, a.updated_at AS updatedAt
                 FROM is_annotation a
                 LEFT JOIN is_user u ON u.user_id = a.user_id
                 WHERE a.is_deleted = 0
                   AND (a.dashboard_id = ? OR (a.target_type = 'DASHBOARD' AND a.target_id = ?))
+                """ + hiddenClause + """
                 ORDER BY a.created_at ASC
                 """, dashboardId, dashboardId);
     }
@@ -76,7 +83,47 @@ public class StackCAnnotationService {
         jdbcTemplate.update("UPDATE is_annotation SET is_deleted = 1 WHERE id = ?", id);
     }
 
-    public Map<String, Object> peekAnnotationMeta(long id) {
+    public Map<String, Object> updateAnnotation(long id, Map<String, Object> body) {
+        Map<String, Object> row = fetchAnnotationRow(id);
+        Long dashId = row.get("dashboardId") == null ? null : parseLongQuiet(row.get("dashboardId"));
+        if (dashId != null && dashId <= 0) {
+            dashId = null;
+        }
+        assertCanCollaborate(resolveDashboardId(
+                Objects.toString(row.get("targetType"), ""),
+                parseLongQuiet(row.get("targetId")),
+                dashId));
+        if (!AuthContext.isAdmin() && !AuthContext.userId().equals(Objects.toString(row.get("userId")))) {
+            throw new IllegalArgumentException("仅作者或管理员可编辑");
+        }
+        String content = body.get("content") == null ? null : String.valueOf(body.get("content")).trim();
+        if (content == null || content.isBlank()) {
+            throw new IllegalArgumentException("批注内容不能为空");
+        }
+        String tag = body.get("tag") == null ? null : String.valueOf(body.get("tag")).trim();
+        if (tag != null && tag.isBlank()) {
+            tag = null;
+        }
+        jdbcTemplate.update("""
+                UPDATE is_annotation SET content = ?, tag = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+                """, content, tag, id);
+        return fetchAnnotationRow(id);
+    }
+
+    public Map<String, Object> setAnnotationHidden(long id, boolean hidden) {
+        Map<String, Object> row = fetchAnnotationRow(id);
+        Long dashId = row.get("dashboardId") == null ? null : parseLongQuiet(row.get("dashboardId"));
+        if (dashId != null && dashId <= 0) {
+            dashId = null;
+        }
+        assertCanCollaborate(resolveDashboardId(
+                Objects.toString(row.get("targetType"), ""),
+                parseLongQuiet(row.get("targetId")),
+                dashId));
+        if (!AuthContext.isAdmin() && !AuthContext.userId().equals(Objects.toString(row.get("userId")))) {
+            throw new IllegalArgumentException("仅作者或管理员可隐藏批注");
+        }
+        jdbcTemplate.update("UPDATE is_annotation SET is_hidden = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", hidden ? 1 : 0, id);
         return fetchAnnotationRow(id);
     }
 
@@ -87,7 +134,7 @@ public class StackCAnnotationService {
         return jdbcTemplate.queryForList("""
                 SELECT c.id, c.parent_id AS parentId, c.user_id AS userId, u.nickname, u.username,
                        c.target_type AS targetType, c.target_id AS targetId,
-                       c.content, c.mentions_json AS mentionsJson, c.created_at AS createdAt
+                       c.content, c.mentions_json AS mentionsJson, c.created_at AS createdAt, c.updated_at AS updatedAt
                 FROM is_comment c
                 LEFT JOIN is_user u ON u.user_id = c.user_id
                 WHERE c.target_type = ? AND c.target_id = ? AND c.is_deleted = 0
@@ -125,7 +172,7 @@ public class StackCAnnotationService {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
                 SELECT c.id, c.parent_id AS parentId, c.user_id AS userId, u.nickname, u.username,
                        c.target_type AS targetType, c.target_id AS targetId,
-                       c.content, c.mentions_json AS mentionsJson, c.created_at AS createdAt
+                       c.content, c.mentions_json AS mentionsJson, c.created_at AS createdAt, c.updated_at AS updatedAt
                 FROM is_comment c
                 LEFT JOIN is_user u ON u.user_id = c.user_id
                 WHERE c.id = ? AND c.is_deleted = 0
@@ -136,10 +183,15 @@ public class StackCAnnotationService {
         return rows.get(0);
     }
 
+    public Map<String, Object> peekAnnotationMeta(long id) {
+        return fetchAnnotationRow(id);
+    }
+
     private Map<String, Object> fetchAnnotationRow(long id) {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
                 SELECT a.id, a.user_id AS userId, u.nickname, a.target_type AS targetType, a.target_id AS targetId,
-                       a.dashboard_id AS dashboardId, a.bind_json AS bindJson, a.content, a.tag, a.created_at AS createdAt
+                       a.dashboard_id AS dashboardId, a.bind_json AS bindJson, a.content, a.tag,
+                       a.is_hidden AS isHidden, a.created_at AS createdAt, a.updated_at AS updatedAt
                 FROM is_annotation a
                 LEFT JOIN is_user u ON u.user_id = a.user_id
                 WHERE a.id = ? AND a.is_deleted = 0
