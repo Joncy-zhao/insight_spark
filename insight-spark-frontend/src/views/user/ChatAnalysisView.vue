@@ -225,7 +225,7 @@
                 <el-button size="small" text @click="clearActiveBranchParent">清除</el-button>
               </div>
 
-              <div class="message-list" id="chatHistory">
+              <div class="message-list" id="chatHistory" ref="chatHistoryRef">
                 <div v-for="(msg, index) in messages" :key="index" :class="['message-wrapper', msg.role]">
                   <div class="avatar">
                     <img v-if="msg.role === 'system'" :src="chatQueryAvatar" alt="" aria-hidden="true" />
@@ -2053,7 +2053,7 @@
 </template>
 
 <script setup>
-import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import axios from 'axios'
 import { ArrowDown, ArrowLeftBold, ArrowRightBold, Box, Calendar, Close, DataAnalysis, DataBoard, Document, Edit, Files, Management, Microphone, Promotion, QuestionFilled, Refresh, Search, Setting, Share, Sort, TrendCharts, View } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
@@ -4469,12 +4469,102 @@ const createAdvancedAnalysis = (type, text, params = {}, llmIntent = {}) => {
   }
 }
 
+const chatHistoryRef = ref(null)
+const chatScrollFrameIds = new Set()
+let chatObservedDom = null
+let chatMutationObserver = null
+let chatResizeObserver = null
+
+const getChatHistoryDom = () => chatHistoryRef.value || document.getElementById('chatHistory')
+
+const scrollChatToBottomNow = () => {
+  const dom = getChatHistoryDom()
+  if (!dom) return
+  dom.scrollTop = dom.scrollHeight
+}
+
+const scheduleChatScrollFrames = (frames = 3) => {
+  if (frames <= 0 || typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') return
+  const frameId = window.requestAnimationFrame(() => {
+    chatScrollFrameIds.delete(frameId)
+    scrollChatToBottomNow()
+    scheduleChatScrollFrames(frames - 1)
+  })
+  chatScrollFrameIds.add(frameId)
+}
+
 const scrollChatToBottom = () => {
   nextTick(() => {
-    const dom = document.getElementById('chatHistory')
-    if (dom) dom.scrollTop = dom.scrollHeight
+    scrollChatToBottomNow()
+    scheduleChatScrollFrames()
   })
 }
+
+const observeChatChildrenSize = (dom) => {
+  if (!chatResizeObserver || !dom) return
+  chatResizeObserver.disconnect()
+  chatResizeObserver.observe(dom)
+  Array.from(dom.children || []).forEach(child => chatResizeObserver.observe(child))
+}
+
+const setupChatAutoScrollObservers = () => {
+  const dom = getChatHistoryDom()
+  if (!dom) return
+  if (chatObservedDom === dom) {
+    observeChatChildrenSize(dom)
+    return
+  }
+  chatMutationObserver?.disconnect()
+  chatResizeObserver?.disconnect()
+  chatObservedDom = dom
+  if (typeof ResizeObserver !== 'undefined') {
+    chatResizeObserver = new ResizeObserver(() => scrollChatToBottom())
+    observeChatChildrenSize(dom)
+  }
+  if (typeof MutationObserver !== 'undefined') {
+    chatMutationObserver = new MutationObserver(() => {
+      observeChatChildrenSize(dom)
+      scrollChatToBottom()
+    })
+    chatMutationObserver.observe(dom, { childList: true, subtree: true, characterData: true })
+  }
+}
+
+const chatAutoScrollSignature = computed(() => {
+  const rows = Array.isArray(messages?.value) ? messages.value : []
+  return rows.map((msg, index) => [
+    index,
+    msg?.role || '',
+    msg?.content || '',
+    msg?.thinkingLogs?.length || 0,
+    msg?.thinkingCollapsed === false ? 'open' : 'closed',
+    msg?.sql ? String(msg.sql).length : 0,
+    msg?.chartType || '',
+    msg?.responseType || msg?.smartIntent || '',
+    Array.isArray(msg?.data) ? msg.data.length : 0,
+    Array.isArray(msg?.stepResults) ? msg.stepResults.length : 0,
+    msg?.advancedAnalysis?.type || '',
+    msg?.advancedAnalysis?.status || '',
+    msg?.advancedAnalysis?.params?.eventId || '',
+    Array.isArray(msg?.alertEventRows) ? msg.alertEventRows.length : 0
+  ].join('|')).join('||')
+})
+
+onMounted(() => {
+  setupChatAutoScrollObservers()
+  scrollChatToBottom()
+})
+
+watch(chatAutoScrollSignature, () => {
+  setupChatAutoScrollObservers()
+  scrollChatToBottom()
+}, { flush: 'post' })
+
+watch(activeModule, (moduleName) => {
+  if (moduleName !== 'chat') return
+  setupChatAutoScrollObservers()
+  scrollChatToBottom()
+}, { flush: 'post' })
 
 const buildAdvancedIntentPayload = async (text, signal) => {
   const tableName = selectedTableName?.value || lastAnalysis?.value?.tableName || ''
@@ -4959,6 +5049,11 @@ const openAdvancedAnalysisDialog = (analysis) => {
 
 const sendChatQuestion = async () => {
   const text = String(question?.value || '').trim()
+  const followUpParentTurnId = String(activeBranchParentTurnMeta?.value?.turnId || '').trim()
+  if (followUpParentTurnId) {
+    await sendQuestion()
+    return
+  }
   if (isAlertOperationQuestion(text)) {
     await sendQuestion()
     return
@@ -6379,6 +6474,12 @@ const formatSemanticEvidenceContent = (item) => {
 onBeforeUnmount(() => {
   clearHistoryReplayTimer()
   disposeHistoryPreviewChart()
+  chatMutationObserver?.disconnect()
+  chatResizeObserver?.disconnect()
+  if (typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
+    chatScrollFrameIds.forEach(frameId => window.cancelAnimationFrame(frameId))
+  }
+  chatScrollFrameIds.clear()
 })
 </script>
 <style scoped>

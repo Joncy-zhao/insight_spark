@@ -7,6 +7,7 @@ import com.insightspark.controller.DiagnosisController;
 import com.insightspark.service.AiChartRuleConfigService;
 import com.insightspark.service.AdvancedAnalysisService;
 import com.insightspark.service.ChatBiService;
+import com.insightspark.service.ChatConversationService;
 import com.insightspark.service.ChatQueryHistoryService;
 import com.insightspark.service.DataUploadService;
 import com.insightspark.service.DatasourceService;
@@ -303,6 +304,186 @@ class P2AcceptanceTests {
         Map<?, ?> fieldMapping = ReflectionTestUtils.invokeMethod(correction, "fieldMapping");
         assertTrue(correctedSql.contains("ORDER BY dim_name ASC LIMIT 30"));
         assertEquals("name", fieldMapping.get("chartSortMode"));
+    }
+
+    @Test
+    void followUpMetricInheritanceKeepsPreviousMetricWhenOnlyFilterChanges() {
+        ChatBiService service = new ChatBiService();
+        String contextualQuestion = """
+                已有对话上下文：
+                ASSISTANT: 分析完成。已基于字段「region」和指标「sales_amt」生成折线图。
+
+                本轮用户追问：
+                只看华东区域
+
+                请在上下文一致时继承前文的指标、维度、时间范围和筛选条件；如果本轮明确指定了新范围，以本轮为准。
+                """;
+        String sql = "SELECT `region` AS dim_name, SUM(CAST(NULLIF(`profit`, '') AS DECIMAL(18,2))) AS metric_value "
+                + "FROM `loss_order` WHERE `region` = '华东' GROUP BY `region` ORDER BY metric_value DESC LIMIT 30";
+
+        Object correction = ReflectionTestUtils.invokeMethod(service, "applyFollowUpMetricInheritance",
+                contextualQuestion, "只看华东区域", Map.of(), lossOrderFields(), sql, "line",
+                Map.of("dimensionKey", "region", "metricKey", "profit", "metric", "利润"),
+                new ArrayList<String>());
+
+        String correctedSql = ReflectionTestUtils.invokeMethod(correction, "sql");
+        Map<?, ?> fieldMapping = ReflectionTestUtils.invokeMethod(correction, "fieldMapping");
+        assertTrue(correctedSql.contains("`sales_amt`"));
+        assertFalse(correctedSql.contains("`profit`"));
+        assertEquals("sales_amt", fieldMapping.get("metricKey"));
+        assertEquals("销售额", fieldMapping.get("metric"));
+    }
+
+    @Test
+    void followUpMetricInheritanceUsesStructuredArtifactContext() {
+        ChatBiService service = new ChatBiService();
+        String contextualQuestion = """
+                已有对话上下文：
+                ASSISTANT: 分析完成。
+
+                本轮用户追问：
+                只看华东区域
+                """;
+        String sql = "SELECT `region` AS dim_name, SUM(CAST(NULLIF(`profit`, '') AS DECIMAL(18,2))) AS metric_value "
+                + "FROM `loss_order` WHERE `region` = '华东' GROUP BY `region` ORDER BY metric_value DESC LIMIT 30";
+
+        Object correction = ReflectionTestUtils.invokeMethod(service, "applyFollowUpMetricInheritance",
+                contextualQuestion,
+                "只看华东区域",
+                Map.of("fieldMapping", Map.of("dimensionKey", "region", "metricKey", "sales_amt", "metric", "销售额")),
+                lossOrderFields(),
+                sql,
+                "line",
+                Map.of("dimensionKey", "region", "metricKey", "profit", "metric", "利润"),
+                new ArrayList<String>());
+
+        String correctedSql = ReflectionTestUtils.invokeMethod(correction, "sql");
+        Map<?, ?> fieldMapping = ReflectionTestUtils.invokeMethod(correction, "fieldMapping");
+        assertTrue(correctedSql.contains("`sales_amt`"));
+        assertFalse(correctedSql.contains("`profit`"));
+        assertEquals("sales_amt", fieldMapping.get("metricKey"));
+    }
+
+    @Test
+    void followUpMetricInheritanceKeepsPreviousProfitWhenOnlyFilterChanges() {
+        ChatBiService service = new ChatBiService();
+        String contextualQuestion = """
+                已有对话上下文：
+                ASSISTANT: 分析完成。
+
+                本轮用户追问：
+                只看华东区域
+                """;
+        String sql = "SELECT `region` AS dim_name, SUM(CAST(NULLIF(`sales_amt`, '') AS DECIMAL(18,2))) AS metric_value "
+                + "FROM `loss_order` WHERE `region` = '华东' GROUP BY `region` ORDER BY metric_value DESC LIMIT 30";
+
+        Object correction = ReflectionTestUtils.invokeMethod(service, "applyFollowUpMetricInheritance",
+                contextualQuestion,
+                "只看华东区域",
+                Map.of("fieldMapping", Map.of("dimensionKey", "region", "metricKey", "profit", "metric", "利润")),
+                lossOrderFields(),
+                sql,
+                "bar",
+                Map.of("dimensionKey", "region", "metricKey", "sales_amt", "metric", "销售额"),
+                new ArrayList<String>());
+
+        String correctedSql = ReflectionTestUtils.invokeMethod(correction, "sql");
+        Map<?, ?> fieldMapping = ReflectionTestUtils.invokeMethod(correction, "fieldMapping");
+        assertTrue(correctedSql.contains("`profit`"));
+        assertFalse(correctedSql.contains("`sales_amt`"));
+        assertEquals("profit", fieldMapping.get("metricKey"));
+    }
+
+    @Test
+    void followUpMetricInheritanceAllowsExplicitMetricOverride() {
+        ChatBiService service = new ChatBiService();
+        String contextualQuestion = """
+                已有对话上下文：
+                ASSISTANT: 分析完成。已基于字段「region」和指标「sales_amt」生成折线图。
+
+                本轮用户追问：
+                只看华东区域的利润
+                """;
+        String sql = "SELECT `region` AS dim_name, SUM(CAST(NULLIF(`profit`, '') AS DECIMAL(18,2))) AS metric_value "
+                + "FROM `loss_order` WHERE `region` = '华东' GROUP BY `region` ORDER BY metric_value DESC LIMIT 30";
+
+        Object correction = ReflectionTestUtils.invokeMethod(service, "applyFollowUpMetricInheritance",
+                contextualQuestion, "只看华东区域的利润", Map.of(), lossOrderFields(), sql, "line",
+                Map.of("dimensionKey", "region", "metricKey", "profit", "metric", "利润"),
+                new ArrayList<String>());
+
+        String correctedSql = ReflectionTestUtils.invokeMethod(correction, "sql");
+        Map<?, ?> fieldMapping = ReflectionTestUtils.invokeMethod(correction, "fieldMapping");
+        assertTrue(correctedSql.contains("`profit`"));
+        assertFalse(correctedSql.contains("`sales_amt`"));
+        assertEquals("profit", fieldMapping.get("metricKey"));
+    }
+
+    @Test
+    void followUpDimensionInheritanceKeepsPreviousDimensionWhenOnlyMetricChanges() {
+        ChatBiService service = new ChatBiService();
+        String contextualQuestion = """
+                已有对话上下文：
+                ASSISTANT: 分析完成。
+
+                本轮用户追问：
+                利润呢
+                """;
+        String sql = "SELECT `city` AS dim_name, SUM(CAST(NULLIF(`profit`, '') AS DECIMAL(18,2))) AS metric_value "
+                + "FROM `loss_order` WHERE `city` IS NOT NULL AND `city` <> '' "
+                + "GROUP BY `city` ORDER BY metric_value DESC LIMIT 30";
+
+        Object correction = ReflectionTestUtils.invokeMethod(service, "applyFollowUpMetricInheritance",
+                contextualQuestion,
+                "利润呢",
+                Map.of("fieldMapping", Map.of("dimensionKey", "region", "dimension", "区域",
+                        "metricKey", "sales_amt", "metric", "销售额")),
+                lossOrderFields(),
+                sql,
+                "bar",
+                Map.of("dimensionKey", "city", "dimension", "城市", "metricKey", "profit", "metric", "利润"),
+                new ArrayList<String>());
+
+        String correctedSql = ReflectionTestUtils.invokeMethod(correction, "sql");
+        Map<?, ?> fieldMapping = ReflectionTestUtils.invokeMethod(correction, "fieldMapping");
+        assertTrue(correctedSql.contains("`region` AS dim_name"));
+        assertTrue(correctedSql.contains("`profit`"));
+        assertFalse(correctedSql.contains("`city`"));
+        assertEquals("region", fieldMapping.get("dimensionKey"));
+        assertEquals("profit", fieldMapping.get("metricKey"));
+    }
+
+    @Test
+    void followUpDimensionInheritanceAllowsExplicitDimensionOverride() {
+        ChatBiService service = new ChatBiService();
+        String contextualQuestion = """
+                已有对话上下文：
+                ASSISTANT: 分析完成。
+
+                本轮用户追问：
+                按城市看利润
+                """;
+        String sql = "SELECT `city` AS dim_name, SUM(CAST(NULLIF(`profit`, '') AS DECIMAL(18,2))) AS metric_value "
+                + "FROM `loss_order` WHERE `city` IS NOT NULL AND `city` <> '' "
+                + "GROUP BY `city` ORDER BY metric_value DESC LIMIT 30";
+
+        Object correction = ReflectionTestUtils.invokeMethod(service, "applyFollowUpMetricInheritance",
+                contextualQuestion,
+                "按城市看利润",
+                Map.of("fieldMapping", Map.of("dimensionKey", "region", "dimension", "区域",
+                        "metricKey", "sales_amt", "metric", "销售额")),
+                lossOrderFields(),
+                sql,
+                "bar",
+                Map.of("dimensionKey", "city", "dimension", "城市", "metricKey", "profit", "metric", "利润"),
+                new ArrayList<String>());
+
+        String correctedSql = ReflectionTestUtils.invokeMethod(correction, "sql");
+        Map<?, ?> fieldMapping = ReflectionTestUtils.invokeMethod(correction, "fieldMapping");
+        assertTrue(correctedSql.contains("`city` AS dim_name"));
+        assertFalse(correctedSql.contains("`region` AS dim_name"));
+        assertEquals("city", fieldMapping.get("dimensionKey"));
+        assertEquals("profit", fieldMapping.get("metricKey"));
     }
 
     @Test
@@ -1030,6 +1211,86 @@ class P2AcceptanceTests {
     }
 
     @Test
+    void chatAskInjectsStructuredFollowUpContextFromParentArtifact() {
+        ChatController controller = new ChatController();
+        ChatBiService chatBiService = org.mockito.Mockito.mock(ChatBiService.class);
+        ChatQueryHistoryService chatQueryHistoryService = org.mockito.Mockito.mock(ChatQueryHistoryService.class);
+        ChatConversationService chatConversationService = org.mockito.Mockito.mock(ChatConversationService.class);
+        ReflectionTestUtils.setField(controller, "chatBiService", chatBiService);
+        ReflectionTestUtils.setField(controller, "chatQueryHistoryService", chatQueryHistoryService);
+        ReflectionTestUtils.setField(controller, "chatConversationService", chatConversationService);
+        org.mockito.Mockito.when(chatConversationService.ensureConversation(99L, "只看华东区域", "sales_order"))
+                .thenReturn(99L);
+        org.mockito.Mockito.when(chatConversationService.recordUserTurn(
+                        org.mockito.Mockito.eq(99L),
+                        org.mockito.Mockito.eq(88L),
+                        org.mockito.Mockito.eq("只看华东区域"),
+                        org.mockito.Mockito.eq("sales_order"),
+                        org.mockito.Mockito.anyMap()))
+                .thenReturn(Map.of("id", 100L, "turnNo", 2, "intentType", "FOLLOWUP"));
+        org.mockito.Mockito.when(chatConversationService.buildExecutionQuestion(99L, 100L, "只看华东区域"))
+                .thenReturn("""
+                        已有对话上下文：
+                        ASSISTANT: 分析完成。
+
+                        本轮用户追问：
+                        只看华东区域
+                        """);
+        org.mockito.Mockito.when(chatConversationService.latestChartArtifactForTurn(88L))
+                .thenReturn(Map.of(
+                        "id", 7L,
+                        "historyId", 6L,
+                        "artifact", Map.of(
+                                "tableName", "sales_order",
+                                "chartType", "line",
+                                "fieldMapping", Map.of("dimensionKey", "region", "metricKey", "sales_amt"),
+                                "sql", "SELECT `region`, SUM(`sales_amt`) FROM `sales_order` GROUP BY `region`"
+                        )
+                ));
+        org.mockito.Mockito.when(chatBiService.executeChat(org.mockito.Mockito.any(ChatBiService.ChatQueryRequest.class)))
+                .thenReturn(new java.util.HashMap<>(Map.of(
+                        "message", "分析完成",
+                        "sql", "SELECT 1",
+                        "chartType", "bar",
+                        "data", List.of(),
+                        "fieldMapping", Map.of("dimensionKey", "region", "metricKey", "sales_amt")
+                )));
+        org.mockito.Mockito.when(chatQueryHistoryService.recordSuccess(
+                        org.mockito.Mockito.anyString(),
+                        org.mockito.Mockito.anyString(),
+                        org.mockito.Mockito.anyMap(),
+                        org.mockito.Mockito.anyLong()))
+                .thenReturn(200L);
+        org.mockito.Mockito.when(chatConversationService.recordAssistantResult(
+                        org.mockito.Mockito.eq(99L),
+                        org.mockito.Mockito.eq(100L),
+                        org.mockito.Mockito.eq("只看华东区域"),
+                        org.mockito.Mockito.anyMap(),
+                        org.mockito.Mockito.eq(200L)))
+                .thenReturn(Map.of("id", 101L, "turnNo", 3));
+
+        ApiResponse<Map<String, Object>> response = controller.askQuestion(Map.of(
+                "question", "只看华东区域",
+                "tableName", "sales_order",
+                "conversationId", 99L,
+                "parentTurnId", 88L
+        ));
+
+        assertEquals(200, response.getCode());
+        org.mockito.ArgumentCaptor<ChatBiService.ChatQueryRequest> captor =
+                org.mockito.ArgumentCaptor.forClass(ChatBiService.ChatQueryRequest.class);
+        org.mockito.Mockito.verify(chatBiService).executeChat(captor.capture());
+        Map<String, Object> filters = captor.getValue().getFilters();
+        Map<?, ?> followUpContext = (Map<?, ?>) filters.get("followUpContext");
+        assertNotNull(followUpContext);
+        assertEquals(88L, followUpContext.get("parentTurnId"));
+        assertEquals("line", followUpContext.get("chartType"));
+        Map<?, ?> fieldMapping = (Map<?, ?>) followUpContext.get("fieldMapping");
+        assertEquals("region", fieldMapping.get("dimensionKey"));
+        assertEquals("sales_amt", fieldMapping.get("metricKey"));
+    }
+
+    @Test
     void smartChatConfirmedAlertEventCloseUpdatesEventStatus() {
         SmartChatService service = smartChatService();
         DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
@@ -1272,6 +1533,55 @@ class P2AcceptanceTests {
 
     @Test
     @SuppressWarnings("unchecked")
+    void smartChatUpdatesAlertRuleThresholdFromRawQuestionWhenContextMentionsDisable() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        AdvancedAnalysisService advancedAnalysisService = org.mockito.Mockito.mock(AdvancedAnalysisService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "advancedAnalysisService", advancedAnalysisService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.of(Map.of(
+                        "primaryIntent", "ALERT_RULE_DISABLE",
+                        "confidence", 0.93D,
+                        "requiresConfirmation", false,
+                        "reasoning", "误判为停用预警规则"
+                )));
+        org.mockito.Mockito.when(advancedAnalysisService.updateAlertRule(org.mockito.Mockito.eq(49L), org.mockito.Mockito.anyMap()))
+                .thenAnswer(invocation -> {
+                    Map<String, Object> rule = new LinkedHashMap<>(alertRuleFixture(49L));
+                    rule.putAll((Map<String, Object>) invocation.getArgument(1));
+                    return rule;
+                });
+        String rawQuestion = "把预警规则49的阀值改为15万";
+        String contextualQuestion = """
+                已有对话上下文：
+                system: 预警规则已停用。
+
+                本轮用户追问：
+                %s
+
+                请在上下文一致时继承前文的指标、维度、时间范围和筛选条件；如果本轮明确指定了新范围，以本轮为准。
+                """.formatted(rawQuestion);
+        ChatBiService.ChatQueryRequest request = chatRequest(contextualQuestion, "sales_order");
+        Map<String, Object> filters = new LinkedHashMap<>(request.getFilters());
+        filters.put("rawQuestion", rawQuestion);
+        request.setFilters(filters);
+
+        Map<String, Object> result = service.executeSmart(request);
+
+        assertEquals("ALERT_RULE_UPDATE", result.get("smartIntent"));
+        assertEquals("ALERT_RULE_UPDATE", result.get("responseType"));
+        org.mockito.ArgumentCaptor<Map<String, Object>> captor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(advancedAnalysisService).updateAlertRule(org.mockito.Mockito.eq(49L), captor.capture());
+        org.mockito.Mockito.verify(advancedAnalysisService, org.mockito.Mockito.never()).updateAlertRuleStatus(org.mockito.Mockito.anyLong(), org.mockito.Mockito.anyMap());
+        assertEquals(150000D, (Double) captor.getValue().get("threshold"), 0.01D);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void smartChatEnablesAlertRuleInstructionEvenWhenAiSuggestsCreate() {
         SmartChatService service = smartChatService();
         DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
@@ -1371,6 +1681,161 @@ class P2AcceptanceTests {
         assertEquals("QUERY_SQL", result.get("smartIntent"));
         assertEquals("QUERY_SQL", result.get("responseType"));
         assertEquals("SELECT 1", result.get("sql"));
+    }
+
+    @Test
+    void smartChatFollowUpRoutesByRawQuestionButExecutesWithContextQuestion() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        ChatBiService chatBiService = org.mockito.Mockito.mock(ChatBiService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "chatBiService", chatBiService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(
+                        org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenAnswer(invocation -> {
+                    String routedQuestion = invocation.getArgument(0);
+                    if (routedQuestion.contains("已有对话上下文") || routedQuestion.contains("如果本轮明确指定")) {
+                        return java.util.Optional.of(Map.of(
+                                "primaryIntent", "WHAT_IF",
+                                "confidence", 0.92D,
+                                "requiresConfirmation", true
+                        ));
+                    }
+                    return java.util.Optional.of(Map.of(
+                            "primaryIntent", "QUERY_SQL",
+                            "confidence", 0.9D,
+                            "requiresConfirmation", false
+                    ));
+                });
+        org.mockito.Mockito.when(chatBiService.executeChat(org.mockito.Mockito.any(ChatBiService.ChatQueryRequest.class)))
+                .thenReturn(new java.util.HashMap<>(Map.of(
+                        "message", "分析完成",
+                        "sql", "SELECT region, SUM(sales_amt) FROM sales_order WHERE region = '华东'",
+                        "chartType", "bar",
+                        "data", List.of(Map.of("name", "华东", "value", 100))
+                )));
+        String rawFollowUp = "只看华东区域";
+        String contextualQuestion = """
+                已有对话上下文：
+                ASSISTANT: 分析完成。已基于字段【区域】和指标【销售额】生成分析图。
+
+                本轮用户追问：
+                只看华东区域
+
+                请在上下文一致时继承前文的指标、维度、时间范围和筛选条件；如果本轮明确指定了新范围，以本轮为准。
+                """;
+        ChatBiService.ChatQueryRequest request = chatRequest(contextualQuestion, "sales_order");
+        request.setConversationId(99L);
+        request.setParentTurnId(88L);
+        Map<String, Object> filters = new LinkedHashMap<>(request.getFilters());
+        filters.put("rawQuestion", rawFollowUp);
+        request.setFilters(filters);
+
+        Map<String, Object> result = service.executeSmart(request);
+
+        assertEquals("QUERY_SQL", result.get("smartIntent"));
+        assertEquals("QUERY_SQL", result.get("responseType"));
+        org.mockito.ArgumentCaptor<String> routeCaptor = org.mockito.ArgumentCaptor.forClass(String.class);
+        org.mockito.Mockito.verify(pythonAiService).smartChatRoute(
+                routeCaptor.capture(),
+                org.mockito.Mockito.eq("sales_order"),
+                org.mockito.Mockito.anyMap());
+        assertEquals(List.of(rawFollowUp), routeCaptor.getAllValues());
+        org.mockito.ArgumentCaptor<ChatBiService.ChatQueryRequest> queryCaptor =
+                org.mockito.ArgumentCaptor.forClass(ChatBiService.ChatQueryRequest.class);
+        org.mockito.Mockito.verify(chatBiService).executeChat(queryCaptor.capture());
+        assertEquals(contextualQuestion.trim(), queryCaptor.getValue().getQuestion().trim());
+        assertEquals(88L, queryCaptor.getValue().getParentTurnId());
+        assertEquals(rawFollowUp, queryCaptor.getValue().getFilters().get("rawQuestion"));
+    }
+
+    @Test
+    void smartChatBusinessModelFollowUpUsesRawMutationQuestionInsteadOfContextCreateText() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        BusinessModelAgentService agentService = org.mockito.Mockito.mock(BusinessModelAgentService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "businessModelAgentService", agentService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(
+                        org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.of(Map.of(
+                        "primaryIntent", "BUSINESS_MODEL_CREATE",
+                        "confidence", 0.93D,
+                        "requiresConfirmation", false,
+                        "slots", Map.of()
+                )));
+        org.mockito.Mockito.when(agentService.handleQuestion(org.mockito.Mockito.anyMap()))
+                .thenReturn(new java.util.HashMap<>(Map.of(
+                        "handled", true,
+                        "message", "业务模型已更新",
+                        "intent", "BIND_FIELDS"
+                )));
+        String rawFollowUp = "把销售额这个指标绑定到 销售额";
+        String contextualQuestion = """
+                已有对话上下文：
+                USER: 创建一个智能诊断销售分析模型
+                ASSISTANT: 已创建业务模型「智能诊断销售分析模型」。
+
+                本轮用户追问：
+                把销售额这个指标绑定到 销售额
+
+                请在上下文一致时继承前文的模型上下文；如果本轮明确指定了新动作，以本轮为准。
+                """;
+        ChatBiService.ChatQueryRequest request = chatRequest(contextualQuestion, "sales_order");
+        request.setParentTurnId(88L);
+        Map<String, Object> filters = new LinkedHashMap<>(request.getFilters());
+        filters.put("rawQuestion", rawFollowUp);
+        filters.put("activeBusinessModelId", 12L);
+        request.setFilters(filters);
+
+        Map<String, Object> result = service.executeSmart(request);
+
+        assertEquals("BUSINESS_MODEL_PATCH", result.get("smartIntent"));
+        assertEquals("BUSINESS_MODEL_PATCH", result.get("responseType"));
+        org.mockito.ArgumentCaptor<Map<String, Object>> captor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(agentService).handleQuestion(captor.capture());
+        assertEquals(rawFollowUp, captor.getValue().get("question"));
+        assertEquals("12", String.valueOf(captor.getValue().get("activeBusinessModelId")));
+    }
+
+    @Test
+    void smartChatRoutesNaturalDictionaryAliasPhraseToBusinessModelPatch() {
+        SmartChatService service = smartChatService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        BusinessModelAgentService agentService = org.mockito.Mockito.mock(BusinessModelAgentService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        ReflectionTestUtils.setField(service, "businessModelAgentService", agentService);
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(salesFields());
+        org.mockito.Mockito.when(pythonAiService.smartChatRoute(
+                        org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyMap()))
+                .thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(agentService.handleQuestion(org.mockito.Mockito.anyMap()))
+                .thenReturn(new java.util.HashMap<>(Map.of(
+                        "handled", true,
+                        "message", "业务字典已更新",
+                        "intent", "PATCH_MODEL"
+                )));
+        ChatBiService.ChatQueryRequest request = chatRequest("退货水平统一一按退货率理解", "sales_order");
+        Map<String, Object> filters = new LinkedHashMap<>(request.getFilters());
+        filters.put("activeBusinessModelId", 6L);
+        request.setFilters(filters);
+
+        Map<String, Object> result = service.executeSmart(request);
+
+        assertEquals("BUSINESS_MODEL_PATCH", result.get("smartIntent"));
+        assertEquals("BUSINESS_MODEL_PATCH", result.get("responseType"));
+        org.mockito.ArgumentCaptor<Map<String, Object>> captor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(agentService).handleQuestion(captor.capture());
+        assertEquals("退货水平统一一按退货率理解", captor.getValue().get("question"));
+        assertEquals("6", String.valueOf(captor.getValue().get("activeBusinessModelId")));
     }
 
     @Test
@@ -2135,6 +2600,219 @@ class P2AcceptanceTests {
     }
 
     @Test
+    void businessModelCreateNamePrefersUserSemanticNameOverLlmTransportName() {
+        BusinessModelAgentService service = new BusinessModelAgentService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        org.mockito.Mockito.when(dataUploadService.listBusinessModels(false)).thenReturn(List.of());
+        org.mockito.Mockito.when(dataUploadService.listBusinessModels(true)).thenReturn(List.of());
+        org.mockito.Mockito.when(dataUploadService.listFields("loss_order")).thenReturn(lossOrderFields());
+        org.mockito.Mockito.when(dataUploadService.preview("loss_order", 1, 5)).thenReturn(List.of());
+        org.mockito.Mockito.when(pythonAiService.businessModelSemantic(
+                org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(),
+                org.mockito.Mockito.anyList(), org.mockito.Mockito.anyList(), org.mockito.Mockito.anyMap()
+        )).thenReturn(java.util.Optional.of(Map.of(
+                "requirement", "创建一个智能诊断销售分析模型",
+                "modelName", "qwen-plus",
+                "dictionaryEntries", List.of(),
+                "metricDefinitions", List.of(),
+                "reasoning", List.of("模拟底层模型名污染")
+        )));
+        org.mockito.Mockito.when(dataUploadService.createBusinessModel(org.mockito.Mockito.anyMap()))
+                .thenAnswer(invocation -> {
+                    Map<String, Object> request = invocation.getArgument(0);
+                    return Map.of("id", 12L, "modelName", request.get("modelName"), "tableName", request.get("tableName"));
+                });
+
+        Map<String, Object> result = service.handleQuestion(Map.of(
+                "question", "创建一个智能诊断销售分析模型",
+                "tableName", "loss_order",
+                "modelId", "default",
+                "modelName", "qwen-plus",
+                "modelCategory", "CONFIGURED_DEFAULT"
+        ));
+
+        org.mockito.ArgumentCaptor<Map<String, Object>> captor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(dataUploadService).createBusinessModel(captor.capture());
+        assertEquals("智能诊断销售分析模型", captor.getValue().get("modelName"));
+        assertEquals("智能诊断销售分析模型", result.get("modelName"));
+    }
+
+    @Test
+    void businessModelAgentContextualFollowUpBindingDoesNotCreateDuplicateModel() {
+        BusinessModelAgentService service = new BusinessModelAgentService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        org.mockito.Mockito.when(dataUploadService.listBusinessModels(false)).thenReturn(List.of(
+                Map.of("id", 12L, "modelName", "智能诊断销售分析模型", "tableName", "sales_order", "updatedAt", "2026-06-15")
+        ));
+        org.mockito.Mockito.when(dataUploadService.listBusinessModels(true)).thenReturn(List.of());
+        org.mockito.Mockito.when(dataUploadService.getBusinessModelDetail(12L)).thenReturn(Map.of(
+                "id", 12L,
+                "modelName", "智能诊断销售分析模型",
+                "modelRequirement", "智能诊断销售分析",
+                "tableName", "sales_order",
+                "modelJson", "{\"metricDefinitions\":[],\"dictionaryEntries\":[],\"dimensionSystem\":[]}"
+        ));
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(List.of(
+                field("sales_amt", "销售额", "销售额", "NUMBER"),
+                field("order_date", "日期", "日期", "DATE")
+        ));
+        org.mockito.Mockito.when(dataUploadService.preview("sales_order", 1, 5)).thenReturn(List.of());
+        org.mockito.Mockito.when(pythonAiService.businessModelPatch(
+                org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(),
+                org.mockito.Mockito.anyString(), org.mockito.Mockito.anyList(), org.mockito.Mockito.anyList(),
+                org.mockito.Mockito.anyList(), org.mockito.Mockito.anyList(), org.mockito.Mockito.anyList()
+        )).thenReturn(java.util.Optional.of(Map.of(
+                "intent", "BIND_FIELDS",
+                "operations", List.of(Map.of(
+                        "targetType", "fieldBinding",
+                        "bindingType", "metricDefinition",
+                        "name", "销售额",
+                        "field", "sales_amt"
+                ))
+        )));
+        org.mockito.Mockito.when(dataUploadService.updateBusinessModel(org.mockito.Mockito.eq(12L), org.mockito.Mockito.anyMap()))
+                .thenAnswer(invocation -> {
+                    Map<String, Object> request = invocation.getArgument(1);
+                    return Map.of("id", 12L, "modelName", request.get("modelName"), "modelJson", "{}");
+                });
+        String rawFollowUp = "把销售额这个指标绑定到 销售额";
+        String contextualQuestion = """
+                已有对话上下文：
+                USER: 创建一个智能诊断销售分析模型
+                ASSISTANT: 已创建业务模型「智能诊断销售分析模型」。
+
+                本轮用户追问：
+                把销售额这个指标绑定到 销售额
+
+                请在上下文一致时继承前文的模型上下文；如果本轮明确指定了新动作，以本轮为准。
+                """;
+
+        Map<String, Object> result = service.handleQuestion(Map.of(
+                "question", contextualQuestion,
+                "rawQuestion", rawFollowUp,
+                "tableName", "sales_order",
+                "activeBusinessModelId", 12L
+        ));
+
+        org.mockito.Mockito.verify(dataUploadService, org.mockito.Mockito.never())
+                .createBusinessModel(org.mockito.Mockito.anyMap());
+        org.mockito.Mockito.verify(dataUploadService).updateBusinessModel(org.mockito.Mockito.eq(12L), org.mockito.Mockito.anyMap());
+        assertEquals("BIND_FIELDS", result.get("intent"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void businessModelDictionarySynonymPhraseUpdatesSelectedModel() {
+        BusinessModelAgentService service = new BusinessModelAgentService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        org.mockito.Mockito.when(dataUploadService.listBusinessModels(false)).thenReturn(List.of(
+                Map.of("id", 6L, "modelName", "销售智能诊断模型", "tableName", "sales_order", "updatedAt", "2026-06-16")
+        ));
+        org.mockito.Mockito.when(dataUploadService.listBusinessModels(true)).thenReturn(List.of());
+        org.mockito.Mockito.when(dataUploadService.getBusinessModelDetail(6L)).thenReturn(Map.of(
+                "id", 6L,
+                "modelName", "销售智能诊断模型",
+                "modelRequirement", "销售分析",
+                "tableName", "sales_order",
+                "modelJson", "{\"metricDefinitions\":[{\"name\":\"销售额\",\"field\":\"sales_amt\",\"aggregation\":\"SUM\",\"formula\":\"sales_amt\"}],\"dictionaryEntries\":[],\"dimensionSystem\":[]}"
+        ));
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(List.of(
+                field("sales_amt", "销售额", "销售额", "NUMBER")
+        ));
+        org.mockito.Mockito.when(dataUploadService.preview("sales_order", 1, 5)).thenReturn(List.of());
+        org.mockito.Mockito.when(pythonAiService.businessModelPatch(
+                org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(),
+                org.mockito.Mockito.anyString(), org.mockito.Mockito.anyList(), org.mockito.Mockito.anyList(),
+                org.mockito.Mockito.anyList(), org.mockito.Mockito.anyList(), org.mockito.Mockito.anyList()
+        )).thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(dataUploadService.updateBusinessModel(org.mockito.Mockito.eq(6L), org.mockito.Mockito.anyMap()))
+                .thenAnswer(invocation -> Map.of("id", 6L, "modelName", "销售智能诊断模型", "modelJson", "{}"));
+
+        Map<String, Object> result = service.handleQuestion(Map.of(
+                "question", "把 GMV 作为销售额的同义词",
+                "tableName", "sales_order",
+                "activeBusinessModelId", 6L
+        ));
+
+        org.mockito.Mockito.verify(dataUploadService, org.mockito.Mockito.never())
+                .createBusinessModel(org.mockito.Mockito.anyMap());
+        org.mockito.ArgumentCaptor<Map<String, Object>> captor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(dataUploadService).updateBusinessModel(org.mockito.Mockito.eq(6L), captor.capture());
+        List<Map<String, Object>> dictionaryEntries = (List<Map<String, Object>>) captor.getValue().get("dictionaryEntries");
+        assertEquals(1, dictionaryEntries.size());
+        assertEquals("销售额", dictionaryEntries.get(0).get("term"));
+        assertEquals("sales_amt", dictionaryEntries.get(0).get("field"));
+        assertEquals("GMV", dictionaryEntries.get(0).get("synonyms"));
+        assertEquals("PATCH_MODEL", result.get("intent"));
+        assertEquals(true, result.get("handled"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void businessModelNaturalUnderstandAndMeasurePhrasesUpdateDictionary() {
+        BusinessModelAgentService service = new BusinessModelAgentService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        org.mockito.Mockito.when(dataUploadService.listBusinessModels(false)).thenReturn(List.of(
+                Map.of("id", 7L, "modelName", "销售智能诊断模型", "tableName", "sales_order", "updatedAt", "2026-06-16")
+        ));
+        org.mockito.Mockito.when(dataUploadService.listBusinessModels(true)).thenReturn(List.of());
+        org.mockito.Mockito.when(dataUploadService.getBusinessModelDetail(7L)).thenReturn(Map.of(
+                "id", 7L,
+                "modelName", "销售智能诊断模型",
+                "modelRequirement", "销售分析",
+                "tableName", "sales_order",
+                "modelJson", "{\"metricDefinitions\":[{\"name\":\"销售额\",\"field\":\"sales_amt\",\"aggregation\":\"SUM\",\"formula\":\"sales_amt\"},{\"name\":\"退货率\",\"field\":\"return_rate\",\"aggregation\":\"AVG\",\"formula\":\"return_rate\"}],\"dictionaryEntries\":[],\"dimensionSystem\":[]}"
+        ));
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(List.of(
+                field("sales_amt", "销售额", "销售额", "NUMBER"),
+                field("return_rate", "退货率", "退货率", "NUMBER")
+        ));
+        org.mockito.Mockito.when(dataUploadService.preview("sales_order", 1, 5)).thenReturn(List.of());
+        org.mockito.Mockito.when(pythonAiService.businessModelPatch(
+                org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(),
+                org.mockito.Mockito.anyString(), org.mockito.Mockito.anyList(), org.mockito.Mockito.anyList(),
+                org.mockito.Mockito.anyList(), org.mockito.Mockito.anyList(), org.mockito.Mockito.anyList()
+        )).thenReturn(java.util.Optional.empty());
+        org.mockito.Mockito.when(dataUploadService.updateBusinessModel(org.mockito.Mockito.eq(7L), org.mockito.Mockito.anyMap()))
+                .thenAnswer(invocation -> Map.of("id", 7L, "modelName", "销售智能诊断模型", "modelJson", "{}"));
+
+        service.handleQuestion(Map.of(
+                "question", "以后用户说成交额，就按销售额理解",
+                "tableName", "sales_order",
+                "activeBusinessModelId", 7L
+        ));
+        service.handleQuestion(Map.of(
+                "question", "退货水平统一一按退货率理解",
+                "tableName", "sales_order",
+                "activeBusinessModelId", 7L
+        ));
+
+        org.mockito.ArgumentCaptor<Map<String, Object>> captor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(dataUploadService, org.mockito.Mockito.times(2))
+                .updateBusinessModel(org.mockito.Mockito.eq(7L), captor.capture());
+        List<Map<String, Object>> firstDictionary = (List<Map<String, Object>>) captor.getAllValues().get(0).get("dictionaryEntries");
+        List<Map<String, Object>> secondDictionary = (List<Map<String, Object>>) captor.getAllValues().get(1).get("dictionaryEntries");
+        assertEquals("销售额", firstDictionary.get(0).get("term"));
+        assertEquals("sales_amt", firstDictionary.get(0).get("field"));
+        assertEquals("成交额", firstDictionary.get(0).get("synonyms"));
+        assertEquals("退货率", secondDictionary.get(0).get("term"));
+        assertEquals("return_rate", secondDictionary.get(0).get("field"));
+        assertEquals("退货水平", secondDictionary.get(0).get("synonyms"));
+    }
+
+    @Test
     void businessModelScopeUpdateOnlyTouchesMentionedMetric() {
         BusinessModelAgentService service = new BusinessModelAgentService();
         DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
@@ -2279,10 +2957,12 @@ class P2AcceptanceTests {
 
         service.handleQuestion(modelPatchRequest("把利润这个指标绑定到 profit"));
         service.handleQuestion(modelPatchRequest("把城市维度绑定到 city"));
-        service.handleQuestion(modelPatchRequest("新增指标公式：毛利率 = profit / sales_amt"));
+        service.handleQuestion(modelPatchRequest("创建指标公式：毛利率 = profit / sales_amt"));
         service.handleQuestion(modelPatchRequest("以后收入统一用 sales_amt"));
 
         org.mockito.ArgumentCaptor<Map<String, Object>> captor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(dataUploadService, org.mockito.Mockito.never())
+                .createBusinessModel(org.mockito.Mockito.anyMap());
         org.mockito.Mockito.verify(dataUploadService, org.mockito.Mockito.times(4))
                 .updateBusinessModel(org.mockito.Mockito.eq(2L), captor.capture());
         List<Map<String, Object>> profitMetrics = (List<Map<String, Object>>) captor.getAllValues().get(0).get("metricDefinitions");
@@ -2573,9 +3253,57 @@ class P2AcceptanceTests {
 
         assertTrue(correction.sql().contains("`profit`"));
         assertTrue(correction.sql().contains("`sales_amt`"));
-        assertTrue(correction.sql().contains("NULLIF(SUM(CAST(NULLIF(`sales_amt`, '') AS DECIMAL(18,2))), 0)"));
+        assertTrue(correction.sql().contains("NULLIF(CAST(NULLIF(`sales_amt`, '') AS DECIMAL(18,6)), 0)"));
         assertEquals(true, correction.trace().get("formulaApplied"));
         assertEquals("profit / sales_amt", correction.fieldMapping().get("formula"));
+    }
+
+    @Test
+    void businessSemanticPrefersSpecificFormulaMetricOverContainedBaseMetric() {
+        BusinessSemanticService service = businessSemanticServiceWithModels(List.of(Map.of(
+                "id", 12L,
+                "modelName", "diagnosis-sales-model",
+                "tableName", "diagnosis_order",
+                "updatedAt", "2026-06-16T10:00:00",
+                "modelJson", """
+                        {"metricDefinitions":[
+                          {"name":"销售额","field":"销售额","aggregation":"SUM","formula":"销售额"},
+                          {"name":"客单价","field":"销售额","aggregation":"AVG","formula":"销售额 / 订单量"},
+                          {"name":"有效销售额","field":"销售额","aggregation":"SUM","formula":"销售额 * (1 - 退货率)"}
+                        ],
+                         "dimensionSystem":[{"name":"产品线","field":"产品线"}],
+                         "dictionaryEntries":[
+                           {"term":"成交额","field":"销售额","synonyms":"销售额"},
+                           {"term":"GMV","field":"销售额","synonyms":"销售额"}
+                         ]}
+                        """
+        )));
+        List<Map<String, Object>> fields = List.of(
+                field("col_004", "产品线", "产品线", "TEXT"),
+                field("col_005", "销售额", "销售额", "NUMBER"),
+                field("col_006", "订单量", "订单量", "NUMBER"),
+                field("col_007", "退货率", "退货率", "NUMBER")
+        );
+        var context = service.resolveContext("diagnosis_order", Map.of("activeBusinessModelId", 12L), fields);
+        var plan = service.resolvePlan("按产品线查看有效销售额排名", context);
+        var correction = service.enforceSql("按产品线查看有效销售额排名", "diagnosis_order",
+                "SELECT `col_004` AS dim_name, SUM(`col_005`) AS metric_value FROM `diagnosis_order` GROUP BY `col_004` ORDER BY metric_value DESC LIMIT 30",
+                "bar", Map.of("dimensionKey", "col_004", "metricKey", "col_005"), plan);
+
+        assertEquals("有效销售额", correction.trace().get("matchedMetric"));
+        assertEquals(true, correction.trace().get("formulaApplied"));
+        assertTrue(correction.changed());
+        assertTrue(correction.sql().contains("`col_005`"));
+        assertTrue(correction.sql().contains("`col_007`"));
+        assertTrue(correction.sql().contains("1 - CAST(NULLIF(`col_007`, '') AS DECIMAL(18,6))"));
+        assertEquals("销售额 * (1 - 退货率)", correction.fieldMapping().get("formula"));
+
+        var basePlan = service.resolvePlan("按产品线查看成交额排名", context);
+        var baseCorrection = service.enforceSql("按产品线查看成交额排名", "diagnosis_order",
+                "SELECT `col_004` AS dim_name, SUM(`col_005`) AS metric_value FROM `diagnosis_order` GROUP BY `col_004` ORDER BY metric_value DESC LIMIT 30",
+                "bar", Map.of("dimensionKey", "col_004", "metricKey", "col_005"), basePlan);
+        assertEquals("销售额", baseCorrection.trace().get("matchedMetric"));
+        assertFalse(baseCorrection.sql().contains("`col_007`"));
     }
 
     @Test

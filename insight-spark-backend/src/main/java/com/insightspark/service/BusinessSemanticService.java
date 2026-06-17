@@ -169,9 +169,11 @@ public class BusinessSemanticService {
         String nextChartType = text(chartType).isBlank() ? "bar" : chartType;
         Map<String, Object> nextMapping = new LinkedHashMap<>(fieldMapping == null ? Map.of() : fieldMapping);
         boolean changed = false;
+        boolean formulaMetric = metric != null && !text(metric.formula()).isBlank()
+                && !isSameIdentifier(metric.formula(), metric.field());
         boolean shouldRebuild = metric != null && !sqlUsesMetric(sql, metric)
                 || dimension != null && !sqlUsesDimension(sql, dimensionColumn)
-                || metric != null && !metric.formula().isBlank() && !sqlContainsFormulaColumns(sql, metric);
+                || formulaMetric;
         if (shouldRebuild) {
             if (plan.detail()) {
                 sql = rebuildDetailSql(queryTableName, plan);
@@ -252,30 +254,69 @@ public class BusinessSemanticService {
             if (column.isBlank()) {
                 continue;
             }
-            BusinessSemanticMatch existing = findMetricByField(context.metricDefinitions(), field, column, context.fields());
+            BusinessSemanticMatch existing = findBestMetricByField(question, context.metricDefinitions(), field, column,
+                    context.fields());
             if (existing != null) {
-                matches.add(existing.withDictionary(term, score + 20));
+                matches.add(existing.withDictionary(term, Math.max(existing.score(), score + 10)));
             } else {
                 matches.add(new BusinessSemanticMatch(firstNonBlank(term, field), field, column, "SUM",
                         field, "dictionaryEntries", true, term, score + 10, context.fields()));
             }
         }
-        return matches.stream().max((a, b) -> Integer.compare(a.score(), b.score())).orElse(null);
+        return matches.stream().max(this::compareMetricMatch).orElse(null);
     }
 
-    private BusinessSemanticMatch findMetricByField(List<Map<String, Object>> metrics, String fieldRef,
-                                                    String column, List<Map<String, Object>> fields) {
+    private BusinessSemanticMatch findBestMetricByField(String question, List<Map<String, Object>> metrics,
+                                                        String fieldRef, String column,
+                                                        List<Map<String, Object>> fields) {
+        BusinessSemanticMatch best = null;
         for (Map<String, Object> metric : metrics) {
             String field = text(metric.get("field"));
             String formula = text(metric.get("formula"));
-            if (fieldRef.equals(field) || column.equals(resolveColumn(field, fields, true))
-                    || formulaTokenEquals(formula, fieldRef)) {
-                return new BusinessSemanticMatch(text(metric.get("name")), field, column,
-                        text(metric.get("aggregation")), formula, "metricDefinitions",
-                        false, "", 0, fields);
+            if (!metricMatchesField(fieldRef, column, field, formula, fields)) {
+                continue;
+            }
+            int score = scoreMention(question, List.of(text(metric.get("name")), field, formula));
+            BusinessSemanticMatch candidate = new BusinessSemanticMatch(text(metric.get("name")), field, column,
+                    text(metric.get("aggregation")), formula, "metricDefinitions",
+                    false, "", score, fields);
+            if (best == null || compareMetricMatch(candidate, best) > 0) {
+                best = candidate;
             }
         }
-        return null;
+        return best;
+    }
+
+    private boolean metricMatchesField(String fieldRef, String column, String metricField, String formula,
+                                       List<Map<String, Object>> fields) {
+        return fieldRef.equals(metricField)
+                || column.equals(resolveColumn(metricField, fields, true))
+                || formulaTokenEquals(formula, fieldRef)
+                || formulaTokenEquals(formula, column);
+    }
+
+    private int compareMetricMatch(BusinessSemanticMatch left, BusinessSemanticMatch right) {
+        int scoreCompare = Integer.compare(left.score(), right.score());
+        if (scoreCompare != 0) {
+            return scoreCompare;
+        }
+        int specificityCompare = Integer.compare(metricSpecificity(left), metricSpecificity(right));
+        if (specificityCompare != 0) {
+            return specificityCompare;
+        }
+        return Integer.compare(text(left.name()).length(), text(right.name()).length());
+    }
+
+    private int metricSpecificity(BusinessSemanticMatch match) {
+        int score = normalize(match.name()).length();
+        boolean formulaMetric = !text(match.formula()).isBlank() && !isSameIdentifier(match.formula(), match.field());
+        if (formulaMetric && match.score() > 0) {
+            score += 20;
+        }
+        if (!formulaMetric && match.score() <= 0) {
+            score += 10;
+        }
+        return score;
     }
 
     private BusinessSemanticMatch resolveDimension(String question, BusinessSemanticContext context) {
@@ -396,12 +437,12 @@ public class BusinessSemanticService {
                 continue;
             }
             columns.add(column);
-            expression = replaceToken(expression, token, aggregateColumn(column, "SUM"));
+            expression = replaceToken(expression, token, rowNumericExpression(column));
         }
         if (columns.isEmpty()) {
             return aggregateColumn(metric.column(), metric.aggregation());
         }
-        return protectDivision(expression);
+        return aggregateExpression(protectDivision(expression), metric.aggregation());
     }
 
     private String rebuildDetailSql(String queryTableName, BusinessSemanticPlan plan) {
@@ -582,16 +623,48 @@ public class BusinessSemanticService {
     private int scoreMention(String question, List<String> aliases) {
         String normalizedQuestion = normalize(question);
         int score = 0;
+        Set<String> seenAliases = new LinkedHashSet<>();
         for (String alias : aliases) {
             String normalizedAlias = normalize(alias);
             if (normalizedAlias.length() < 2) {
                 continue;
             }
-            if (normalizedQuestion.contains(normalizedAlias)) {
-                score += 100 + Math.min(normalizedAlias.length(), 20);
+            if (!seenAliases.add(normalizedAlias)) {
+                continue;
+            }
+            if (normalizedQuestion.equals(normalizedAlias)) {
+                score = Math.max(score, 400 + Math.min(normalizedAlias.length() * 4, 120));
+            } else if (normalizedQuestion.contains(normalizedAlias)) {
+                score = Math.max(score, 100 + Math.min(normalizedAlias.length() * 4, 120));
             }
         }
         return score;
+    }
+
+    private String rowNumericExpression(String column) {
+        String safeColumn = text(column);
+        if (safeColumn.isBlank()) {
+            return "";
+        }
+        return "CAST(NULLIF(`" + safeColumn + "`, '') AS DECIMAL(18,6))";
+    }
+
+    private String aggregateExpression(String rowExpression, String aggregation) {
+        String expression = text(rowExpression);
+        if (expression.isBlank()) {
+            return "";
+        }
+        String agg = text(aggregation).toUpperCase(Locale.ROOT);
+        if ("AVG".equals(agg)) {
+            return "AVG((" + expression + "))";
+        }
+        if ("MAX".equals(agg) || "MIN".equals(agg)) {
+            return agg + "((" + expression + "))";
+        }
+        if ("COUNT".equals(agg) || "COUNT_DISTINCT".equals(agg)) {
+            return "COUNT((" + expression + "))";
+        }
+        return "SUM((" + expression + "))";
     }
 
     private Map<String, Object> findBestTimeField(List<Map<String, Object>> fields) {

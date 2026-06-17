@@ -64,6 +64,9 @@ public class SmartChatService {
         String question = text(safeRequest.getQuestion());
         String rawQuestion = text(safeRequest.getFilters() == null ? null : safeRequest.getFilters().get("rawQuestion"));
         String userQuestion = rawQuestion.isBlank() ? question : rawQuestion;
+        String routingQuestion = shouldRouteByRawFollowUpQuestion(safeRequest, question, rawQuestion)
+                ? rawQuestion
+                : question;
         String actionQuestion = question;
         String tableName = resolveTableName(safeRequest);
         emit(trace, "INPUT_RECEIVED", "收到问题", userQuestion.isBlank()
@@ -74,7 +77,7 @@ public class SmartChatService {
                 : "已选择数据源 " + tableName, Map.of("tableName", tableName));
         emit(trace, "PLAN_CHECKING", "判断任务结构", "正在判断这是单一查询还是需要查询、预测、预警、看板等多步骤编排",
                 Map.of("tableName", tableName));
-        SmartActionPlan actionPlan = buildMultiStepPlan(actionQuestion, tableName, safeRequest, trace);
+        SmartActionPlan actionPlan = buildMultiStepPlan(routingQuestion, tableName, safeRequest, trace);
         if (actionPlan.isMultiStep()) {
             emit(trace, "PLAN_READY", "生成执行计划", describeActionPlan(actionPlan),
                     Map.of("actions", actionPlan.actions().stream().map(SmartActionStep::type).toList()));
@@ -87,7 +90,10 @@ public class SmartChatService {
             attachSmartRouteAudit(result, safeRequest, actionQuestion, tableName, "multi-step-orchestrator", startedAt);
             return result;
         }
-        SmartIntent intent = route(actionQuestion, tableName, trace, safeRequest.getFilters()).withContext(safeRequest.getFilters());
+        SmartIntent intent = route(routingQuestion, tableName, trace, safeRequest.getFilters()).withContext(safeRequest.getFilters());
+        if (shouldUseRawAlertRuleActionQuestion(intent, actionQuestion, rawQuestion)) {
+            actionQuestion = rawQuestion;
+        }
         emit(trace, "ROUTE_DECIDED", "识别意图", describeIntent(intent),
                 Map.of("intent", intent.primaryIntent(), "confidence", intent.confidence(), "fallbackUsed", intent.fallbackUsed()));
         Map<String, Object> result;
@@ -103,7 +109,7 @@ public class SmartChatService {
                     result = executeAlertRuleLifecycleAction(actionQuestion, tableName, intent, trace);
             case "WHAT_IF" -> result = buildWhatIfDraft(actionQuestion, tableName, intent);
             case "BUSINESS_MODEL_CREATE", "BUSINESS_MODEL_PATCH", "BUSINESS_MODEL_APPLY", "BUSINESS_MODEL_PUBLISH" ->
-                    result = executeBusinessModelAgent(actionQuestion, tableName, intent, trace);
+                    result = executeBusinessModelAgent(userQuestion, tableName, intent, trace);
             case "DASHBOARD_PIN" -> result = executeDashboardPin(actionQuestion, tableName, intent, safeRequest, trace);
             case "DASHBOARD_CREATE", "CHART_RULE_UPDATE", "FIELD_SEMANTIC_FIX",
                     "FEDERATED_QUERY", "PERMISSION_POLICY_CREATE", "AUDIT_QUERY", "REPORT_GENERATE",
@@ -116,6 +122,32 @@ public class SmartChatService {
                 Map.of("responseType", firstText(result.get("responseType"), intent.primaryIntent())));
         attachSmartRouteAudit(result, safeRequest, actionQuestion, tableName, chosenExecutor(intent.primaryIntent()), startedAt);
         return result;
+    }
+
+    private boolean shouldRouteByRawFollowUpQuestion(ChatBiService.ChatQueryRequest request,
+                                                     String executionQuestion,
+                                                     String rawQuestion) {
+        if (request == null || rawQuestion.isBlank() || rawQuestion.equals(executionQuestion)) {
+            return false;
+        }
+        if (request.getParentTurnId() != null) {
+            return true;
+        }
+        return !inferAlertLifecycleIntent(rawQuestion, rawQuestion.toLowerCase(Locale.ROOT)).isBlank();
+    }
+
+    private boolean shouldUseRawAlertRuleActionQuestion(SmartIntent intent,
+                                                        String executionQuestion,
+                                                        String rawQuestion) {
+        if (intent == null || rawQuestion.isBlank() || rawQuestion.equals(executionQuestion)) {
+            return false;
+        }
+        String primaryIntent = text(intent.primaryIntent());
+        if (!primaryIntent.startsWith("ALERT_RULE_")) {
+            return false;
+        }
+        String rawIntent = inferAlertLifecycleIntent(rawQuestion, rawQuestion.toLowerCase(Locale.ROOT));
+        return primaryIntent.equals(rawIntent) && alertRuleId(rawQuestion, Map.of()) != null;
     }
 
     private SmartIntent route(String question, String tableName) {
@@ -141,6 +173,14 @@ public class SmartChatService {
             Map<String, Object> routed = smartRoute.get();
             String primaryIntent = normalizeSmartIntent(routed.get("primaryIntent"));
             double confidence = readDouble(routed.get("confidence"), 0.0D);
+            if ("BUSINESS_MODEL_CREATE".equals(primaryIntent) && hasBusinessModelMutationIntent(q) && !hasBusinessModelCreateIntent(q)) {
+                emit(trace, "ROUTE_MODEL_RESULT_ADJUSTED", "修正语义路由",
+                        "用户本轮表达的是业务模型维护，不是新建模型，已切换为维护业务模型",
+                        Map.of("originalIntent", primaryIntent, "adjustedIntent", "BUSINESS_MODEL_PATCH"));
+                return new SmartIntent("BUSINESS_MODEL_PATCH", Math.max(confidence, 0.72D), false,
+                        "AI 路由倾向创建模型，但本轮动作语义为字段绑定/口径维护", mapValue(routed.get("slots")),
+                        readBoolean(routed.get("fallbackUsed")));
+            }
             String alertLifecycleIntent = inferAlertLifecycleIntent(q, lower);
             if (!alertLifecycleIntent.isBlank() && !alertLifecycleIntent.equals(primaryIntent)) {
                 emit(trace, "ROUTE_MODEL_RESULT_ADJUSTED", "修正语义路由",
@@ -2268,7 +2308,7 @@ public class SmartChatService {
     private boolean hasAlertTask(String question) {
         String q = text(question);
         String lower = q.toLowerCase(Locale.ROOT);
-        return containsAny(q, "预警", "告警", "警报", "提醒", "通知", "低于", "高于", "超过", "跌破", "阈值", "异常")
+        return containsAny(q, "预警", "告警", "警报", "提醒", "通知", "低于", "高于", "超过", "跌破", "阈值", "阀值", "异常")
                 || lower.contains("alert") || lower.contains("warning");
     }
 
@@ -2387,7 +2427,7 @@ public class SmartChatService {
             return q;
         }
         java.util.regex.Matcher matcher = java.util.regex.Pattern
-                .compile("(如果|若|假设|低于|高于|超过|跌破|预警|告警|提醒|通知|阈值|异常).*$")
+                .compile("(如果|若|假设|低于|高于|超过|跌破|预警|告警|提醒|通知|阈值|阀值|异常).*$")
                 .matcher(q);
         String alert = matcher.find() ? q.substring(matcher.start()) : q;
         alert = alert.replaceAll("^(并|然后|再|同时|顺便|接着|之后|并且)[，,\\s]*", "").trim();
@@ -2872,7 +2912,7 @@ public class SmartChatService {
     private Object inferThreshold(String question) {
         String normalized = text(question).replace(",", "");
         java.util.regex.Matcher contextualMatcher = java.util.regex.Pattern
-                .compile("(?:阈值|门槛|报警线|预警线|改成|改为|调整为|设置为|设为|变成|降到|升到|提高到|低于|高于|超过|跌破)[^\\d]{0,12}(\\d+(?:\\.\\d+)?)(\\s*)(亿|万|千|k|K)?")
+                .compile("(?:阈值|阀值|门槛|报警线|预警线|改成|改为|调整为|设置为|设为|变成|降到|升到|提高到|低于|高于|超过|跌破)[^\\d]{0,12}(\\d+(?:\\.\\d+)?)(\\s*)(亿|万|千|k|K)?")
                 .matcher(normalized);
         if (contextualMatcher.find()) {
             return parseAmount(contextualMatcher.group(1), contextualMatcher.group(3));
@@ -2910,11 +2950,13 @@ public class SmartChatService {
     private boolean isBusinessModelIntent(String q) {
         return containsAny(q, "建模", "业务模型", "模型", "业务字典", "业务公式", "字段绑定", "绑定字段", "字段修正",
                 "绑定到", "绑定为", "绑定至", "映射到", "映射为", "对应到", "对应为", "公式", "口径", "同义词",
-                "企业模型库", "套用", "发布模型", "含税", "不含税", "统一用", "统一按", "算作", "当作")
+                "企业模型库", "套用", "发布模型", "含税", "不含税", "统一用", "统一按", "理解为", "视为", "归到", "归为",
+                "算作", "当作")
                 || q.matches(".*[\\u4e00-\\u9fa5A-Za-z0-9_]{1,30}(指标|维度).*(绑定到|绑定为|绑定至|映射到|映射为|对应到|对应为)\\s*[A-Za-z_][A-Za-z0-9_]*.*")
                 || q.matches(".*[\\u4e00-\\u9fa5A-Za-z0-9_]{1,30}\\s*(=|＝)\\s*.*[A-Za-z_][A-Za-z0-9_]*.*")
                 || q.matches(".*(以后|后续|之后).*(统一用|统一按|就按|按|按照)\\s*[A-Za-z_][A-Za-z0-9_]*.*")
-                || q.matches(".*[\\u4e00-\\u9fa5A-Za-z0-9_]{1,30}(按|按照).*(除以|乘以|加上|减去|/|\\*|\\+|-).*");
+                || q.matches(".*[\\u4e00-\\u9fa5A-Za-z0-9_]{1,30}(按|按照).*(除以|乘以|加上|减去|/|\\*|\\+|-).*")
+                || hasBusinessDictionaryAliasIntent(q);
     }
 
     private boolean isExplicitQueryIntent(String q) {
@@ -2942,7 +2984,7 @@ public class SmartChatService {
     }
 
     private boolean isAlertIntent(String q, String lower) {
-        return containsAny(q, "预警", "告警", "报警", "警报", "提醒", "通知", "低于", "高于", "超过", "跌破", "阈值", "异常")
+        return containsAny(q, "预警", "告警", "报警", "警报", "提醒", "通知", "低于", "高于", "超过", "跌破", "阈值", "阀值", "异常")
                 || lower.contains("alert") || lower.contains("warning");
     }
 
@@ -2956,7 +2998,7 @@ public class SmartChatService {
         if (!isAlertIntent(text, lower) && !containsAny(text, "报警", "告警", "警报") && !ruleDetectText) {
             return "";
         }
-        boolean ruleText = containsAny(text, "规则", "阈值", "检测周期", "通知渠道", "渠道");
+        boolean ruleText = containsAny(text, "规则", "阈值", "阀值", "检测周期", "通知渠道", "渠道");
         boolean createRuleText = containsAny(text, "提醒我", "通知我", "创建", "新建", "新增", "建一个")
                 || (containsAny(text, "低于", "高于", "超过", "跌破") && containsAny(text, "提醒", "通知", "预警", "告警"));
         boolean eventActionText = containsAny(text, "预警事件", "报警事件", "告警事件", "这个报警", "这条报警", "该报警",
@@ -3005,7 +3047,7 @@ public class SmartChatService {
         boolean explicitRuleCreate = containsAny(text, "提醒我", "通知我", "帮我提醒", "邮件提醒", "钉钉提醒")
                 || (containsAny(text, "创建", "新建", "新增", "建一个", "配置", "设置")
                 && containsAny(text, "预警", "告警", "报警", "警报", "规则"))
-                || (containsAny(text, "低于", "高于", "超过", "跌破", "阈值")
+                || (containsAny(text, "低于", "高于", "超过", "跌破", "阈值", "阀值")
                 && containsAny(text, "提醒", "通知", "预警", "告警", "报警", "警报"));
         return explicitRuleCreate ? "ALERT_RULE_CREATE" : "";
     }
@@ -3065,8 +3107,91 @@ public class SmartChatService {
     private String inferBusinessModelIntent(String q) {
         if (containsAny(q, "套用", "应用", "复用")) return "BUSINESS_MODEL_APPLY";
         if (containsAny(q, "发布", "企业模型库")) return "BUSINESS_MODEL_PUBLISH";
-        if (containsAny(q, "创建", "新建", "生成", "建立", "搭建", "建模")) return "BUSINESS_MODEL_CREATE";
+        if (hasBusinessModelCreateIntent(q)) return "BUSINESS_MODEL_CREATE";
         return "BUSINESS_MODEL_PATCH";
+    }
+
+    private boolean hasBusinessModelCreateIntent(String q) {
+        String text = text(q);
+        if (text.isBlank()) {
+            return false;
+        }
+        if (containsAny(text, "新增模型", "新增业务模型", "增加模型", "增加业务模型", "添加模型", "添加业务模型",
+                "创建模型", "创建业务模型", "新建模型", "新建业务模型", "建立模型", "建立业务模型",
+                "搭建模型", "搭建业务模型", "构建模型", "构建业务模型", "生成模型", "生成业务模型")) {
+            return true;
+        }
+        boolean lifecycleVerb = containsAny(text, "创建", "新建", "生成", "建立", "搭建", "构建", "做一个", "做个", "建一个");
+        boolean namesModel = containsAny(text, "业务模型", "模型");
+        if (lifecycleVerb && namesModel) {
+            return true;
+        }
+        if (containsAny(text, "建模")) {
+            return !hasBusinessModelContentMutationIntent(text);
+        }
+        boolean analysisObject = containsAny(text, "分析模型", "分析主题", "分析专题");
+        return lifecycleVerb && analysisObject && !hasBusinessModelContentMutationIntent(text);
+    }
+
+    private boolean hasBusinessModelMutationIntent(String q) {
+        String text = text(q);
+        boolean hasMutationVerb = containsAny(text,
+                "修改", "更新", "编辑", "调整", "补充", "完善", "新增", "增加", "添加", "创建", "新建", "改一下", "改成", "修正",
+                "删除", "移除", "去掉", "取消",
+                "绑定到", "绑定为", "绑定至",
+                "映射到", "映射为", "映射至",
+                "对应到", "对应为", "对应至",
+                "改绑", "重新绑定",
+                "口径", "含税", "不含税", "统一用", "统一按", "就按",
+                "作为", "理解为", "视为", "归到", "归为", "归入", "等同于", "算作", "当作",
+                "按", "按照", "除以", "乘以", "加上", "减去", "计算", "来算");
+        boolean hasBusinessTarget = containsAny(text,
+                "模型", "业务字典", "字典", "词典", "同义词", "术语", "映射",
+                "业务公式", "指标公式", "公式", "指标", "维度", "字段", "销售额", "收入", "利润", "GMV", "毛利率");
+        boolean hasFormulaExpression = text.matches(".*[一-龥A-Za-z0-9_]+\\s*(=|＝)\\s*.*")
+                || text.matches(".*[一-龥A-Za-z0-9_]+\\s*(按|按照).*(除以|乘以|加上|减去|/|\\*|\\+|-).*")
+                || text.matches(".*[一-龥A-Za-z0-9_]+率.*(除以|/).*");
+        return (hasMutationVerb && hasBusinessTarget) || hasFormulaExpression || hasBusinessDictionaryAliasIntent(text);
+    }
+
+    private boolean hasBusinessModelContentMutationIntent(String q) {
+        String text = text(q);
+        if (text.isBlank()) {
+            return false;
+        }
+        boolean explicitFieldBinding = containsAny(text,
+                "字段绑定", "绑定字段", "字段修正", "改绑", "重新绑定",
+                "绑定到", "绑定为", "绑定至",
+                "映射到", "映射为", "映射至",
+                "对应到", "对应为", "对应至");
+        boolean explicitDictionary = containsAny(text,
+                "新增业务字典", "增加业务字典", "添加业务字典", "创建业务字典",
+                "新增字典", "增加字典", "添加字典", "创建字典",
+                "新增词典", "新增同义词", "新增术语",
+                "作为", "理解为", "视为", "归到", "归为", "归入", "等同于", "同义词", "别名")
+                || hasBusinessDictionaryAliasIntent(text);
+        boolean explicitFormula = containsAny(text,
+                "新增业务公式", "增加业务公式", "添加业务公式", "创建业务公式",
+                "新增指标公式", "增加指标公式", "添加指标公式", "创建指标公式",
+                "新增公式", "增加公式", "添加公式", "创建公式");
+        boolean explicitScope = containsAny(text, "口径", "以后", "统一用", "统一按", "改成按", "改为按",
+                "按含税", "按不含税", "就按", "算作", "当作", "来算");
+        boolean formulaExpression = text.matches(".*[一-龥A-Za-z0-9_]+\\s*(=|＝)\\s*.*")
+                || text.matches(".*[一-龥A-Za-z0-9_]+\\s*(按|按照).*(除以|乘以|加上|减去|/|\\*|\\+|-).*")
+                || text.matches(".*[一-龥A-Za-z0-9_]+率.*(除以|/).*");
+        return explicitFieldBinding || explicitDictionary || explicitFormula || explicitScope || formulaExpression;
+    }
+
+    private boolean hasBusinessDictionaryAliasIntent(String q) {
+        String text = text(q);
+        if (text.isBlank()) {
+            return false;
+        }
+        if (containsAny(text, "同义词", "别名", "业务术语", "术语", "叫法", "理解为", "视为", "等同于", "归到", "归为", "归入")) {
+            return true;
+        }
+        return text.matches(".*(?:以后|后续|之后)?(?:用户|大家)?(?:说|提到|输入)?\\s*[\\u4e00-\\u9fa5A-Za-z0-9_]{1,30}\\s*[，,]?\\s*(?:就)?(?:统一\\S?按|统一用|按|按照)\\s*[\\u4e00-\\u9fa5A-Za-z0-9_]{1,30}(?:理解|处理|统计|计算|衡量|来看|来查|来分析).*")
+                || text.matches(".*[\\u4e00-\\u9fa5A-Za-z0-9_]{1,30}\\s*(?:统一\\S?按|统一用|按|按照)\\s*[\\u4e00-\\u9fa5A-Za-z0-9_]{1,30}(?:理解|处理|统计|计算|衡量).*");
     }
 
     private String clarificationMessage(SmartIntent intent) {

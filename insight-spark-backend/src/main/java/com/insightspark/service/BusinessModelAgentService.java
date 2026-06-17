@@ -5,6 +5,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -26,6 +27,16 @@ public class BusinessModelAgentService {
     private static final Pattern MODEL_NAME_CONJUNCTION_PATTERN = Pattern.compile("(并|然后|之后).*$");
     private static final Pattern MODEL_NAME_PUNCT_PREFIX_PATTERN = Pattern.compile("^[,，;；。:：\\-\\s]+");
     private static final Pattern MODEL_NAME_PUNCT_SUFFIX_PATTERN = Pattern.compile("[,，;；。:：\\-\\s]+$");
+    private static final Set<String> INFRASTRUCTURE_MODEL_NAMES = Set.of(
+            "default", "openai-default", "commercial-default", "local-private",
+            "默认", "默认模型", "闭源商用", "闭源商用模型", "本地私有化", "本地私有化模型",
+            "qwen-plus", "qwen-max", "qwen-turbo", "deepseek-chat", "deepseek-reasoner",
+            "gpt-4", "gpt-4o", "gpt-4o-mini"
+    );
+    private static final Pattern INFRASTRUCTURE_MODEL_NAME_PATTERN = Pattern.compile(
+            "^(?:qwen|deepseek|gpt|glm|llama|claude|kimi|doubao|ernie|wenxin|chatglm|baichuan|minimax|mistral|gemini|moonshot|ollama|openai|dashscope)(?:[\\w.:-]*)?$",
+            Pattern.CASE_INSENSITIVE
+    );
 
     @Autowired
     private DataUploadService dataUploadService;
@@ -38,6 +49,7 @@ public class BusinessModelAgentService {
         if (question.isBlank()) {
             throw new IllegalArgumentException("问题不能为空");
         }
+        String actionQuestion = resolveActionQuestion(request, question);
         String tableName = trim(Objects.toString(request.get("tableName"), ""));
         if (tableName.isBlank()) {
             tableName = trim(Objects.toString(request.get("selectedTableName"), ""));
@@ -49,30 +61,30 @@ public class BusinessModelAgentService {
         List<Map<String, Object>> userModels = safeList(dataUploadService.listBusinessModels(false));
         List<Map<String, Object>> enterpriseModels = safeList(dataUploadService.listBusinessModels(true));
 
-        if (looksLikeCreate(question)) {
-            return createModel(question, tableName, request);
+        if (looksLikeCreate(actionQuestion)) {
+            return createModel(actionQuestion, tableName, request);
         }
-        if (looksLikePublish(question)) {
-            return togglePublish(question, tableName, userModels, activeBusinessModelId, lastCreatedBusinessModelId, lastAppliedBusinessModelId, true);
+        if (looksLikePublish(actionQuestion)) {
+            return togglePublish(actionQuestion, tableName, userModels, activeBusinessModelId, lastCreatedBusinessModelId, lastAppliedBusinessModelId, true);
         }
-        if (looksLikeUnpublish(question)) {
-            return togglePublish(question, tableName, userModels, activeBusinessModelId, lastCreatedBusinessModelId, lastAppliedBusinessModelId, false);
+        if (looksLikeUnpublish(actionQuestion)) {
+            return togglePublish(actionQuestion, tableName, userModels, activeBusinessModelId, lastCreatedBusinessModelId, lastAppliedBusinessModelId, false);
         }
-        if (looksLikeApply(question)) {
-            return applyEnterpriseModel(question, tableName, request, userModels, enterpriseModels,
+        if (looksLikeApply(actionQuestion)) {
+            return applyEnterpriseModel(actionQuestion, tableName, request, userModels, enterpriseModels,
                     activeBusinessModelId, lastCreatedBusinessModelId, lastAppliedBusinessModelId);
         }
-        if (looksLikePatch(question)) {
-            return patchCurrentModel(question, tableName, request, userModels, activeBusinessModelId, lastCreatedBusinessModelId, lastAppliedBusinessModelId);
+        if (looksLikePatch(actionQuestion)) {
+            return patchCurrentModel(actionQuestion, tableName, request, userModels, activeBusinessModelId, lastCreatedBusinessModelId, lastAppliedBusinessModelId);
         }
-        if (looksLikeExplain(question)) {
-            return focusCurrentModel(question, tableName, userModels, activeBusinessModelId, lastCreatedBusinessModelId, lastAppliedBusinessModelId);
+        if (looksLikeExplain(actionQuestion)) {
+            return focusCurrentModel(actionQuestion, tableName, userModels, activeBusinessModelId, lastCreatedBusinessModelId, lastAppliedBusinessModelId);
         }
-        if (looksLikeDashboard(question)) {
-            return dashboardNotReady(question, tableName, userModels, activeBusinessModelId, lastCreatedBusinessModelId, lastAppliedBusinessModelId);
+        if (looksLikeDashboard(actionQuestion)) {
+            return dashboardNotReady(actionQuestion, tableName, userModels, activeBusinessModelId, lastCreatedBusinessModelId, lastAppliedBusinessModelId);
         }
 
-        Map<String, Object> response = baseResponse(question, tableName);
+        Map<String, Object> response = baseResponse(actionQuestion, tableName);
         response.put("message", "暂未识别到业务模型指令");
         return response;
     }
@@ -147,7 +159,7 @@ public class BusinessModelAgentService {
         if (!semanticRequirement.isBlank()) {
             requirement = semanticRequirement;
         }
-        String requestedModelName = trim(Objects.toString(request.get("modelName"), ""));
+        String requestedModelName = requestedBusinessModelName(request);
         String semanticModelName = trim(Objects.toString(semantic.get("modelName"), ""));
         String modelName = inferBusinessModelName(requestedModelName, semanticModelName, requirement, question);
 
@@ -620,9 +632,78 @@ public class BusinessModelAgentService {
         return score;
     }
 
+    private String resolveActionQuestion(Map<String, Object> request, String fallbackQuestion) {
+        String explicit = firstNonBlank(
+                request == null ? null : request.get("rawQuestion"),
+                request == null ? null : request.get("userQuestion"),
+                request == null ? null : request.get("currentQuestion")
+        );
+        if (!explicit.isBlank()) {
+            return explicit;
+        }
+        String extracted = extractCurrentTurnQuestion(fallbackQuestion);
+        return extracted.isBlank() ? fallbackQuestion : extracted;
+    }
+
+    private String extractCurrentTurnQuestion(String text) {
+        String value = trim(text);
+        if (value.isBlank()) {
+            return "";
+        }
+        String[] markers = {"本轮用户追问", "本轮用户问题", "用户本轮输入", "当前用户问题", "当前输入"};
+        int markerIndex = -1;
+        String matchedMarker = "";
+        for (String marker : markers) {
+            int index = value.lastIndexOf(marker);
+            if (index >= 0 && index >= markerIndex) {
+                markerIndex = index;
+                matchedMarker = marker;
+            }
+        }
+        if (markerIndex < 0) {
+            return "";
+        }
+        String tail = value.substring(markerIndex + matchedMarker.length()).replaceFirst("^[：:\\s]+", "").trim();
+        if (tail.isBlank()) {
+            return "";
+        }
+        List<String> lines = new ArrayList<>();
+        for (String rawLine : tail.split("\\R")) {
+            String line = trim(rawLine);
+            if (line.isBlank()) {
+                if (!lines.isEmpty()) {
+                    break;
+                }
+                continue;
+            }
+            if (!lines.isEmpty() && line.startsWith("请") && line.contains("上下文")) {
+                break;
+            }
+            lines.add(line);
+        }
+        return String.join(" ", lines).trim();
+    }
+
     private boolean looksLikeCreate(String question) {
-        return containsAny(question, "创建", "新建", "生成", "搭建", "构建", "建模", "做一个", "做个", "建一个")
-                && containsAny(question, "模型", "业务", "字典", "公式", "指标", "维度");
+        String text = trim(question);
+        if (text.isBlank()) {
+            return false;
+        }
+        if (containsAny(text, "新增模型", "新增业务模型", "增加模型", "增加业务模型", "添加模型", "添加业务模型",
+                "创建模型", "创建业务模型", "新建模型", "新建业务模型", "建立模型", "建立业务模型",
+                "搭建模型", "搭建业务模型", "构建模型", "构建业务模型", "生成模型", "生成业务模型")) {
+            return true;
+        }
+        boolean lifecycleVerb = containsAny(text, "创建", "新建", "生成", "建立", "搭建", "构建", "做一个", "做个", "建一个");
+        boolean namesModel = containsAny(text, "业务模型", "模型");
+        if (lifecycleVerb && namesModel) {
+            return true;
+        }
+        if (containsAny(text, "建模")) {
+            return !looksLikeModelContentMutation(text);
+        }
+        boolean analysisObject = containsAny(text, "分析模型", "分析主题", "分析专题");
+        return lifecycleVerb && analysisObject && !looksLikeModelContentMutation(text);
     }
 
     private boolean looksLikePublish(String question) {
@@ -639,20 +720,38 @@ public class BusinessModelAgentService {
     }
 
     private boolean looksLikePatch(String question) {
-        boolean hasPatchVerb = containsAny(question, "修改", "更新", "编辑", "调整", "补充", "完善", "新增", "改一下", "改成", "修正",
+        boolean hasPatchVerb = containsAny(question, "修改", "更新", "编辑", "调整", "补充", "完善", "新增", "增加", "添加",
+                "创建", "新建", "改一下", "改成", "修正",
                 "删除", "移除", "去掉", "取消",
                 "绑定到", "绑定为", "绑定至",
                 "映射到", "映射为", "映射至",
                 "对应到", "对应为", "对应至",
                 "改绑", "重新绑定",
-                "口径", "含税", "不含税", "统一用", "统一按", "就按", "按含税收入算", "按收入算", "算作", "当作",
+                "口径", "含税", "不含税", "统一用", "统一按", "就按", "按含税收入算", "按收入算",
+                "作为", "理解为", "视为", "归到", "归为", "归入", "等同于", "算作", "当作",
                 "按", "按照", "除以", "乘以", "加上", "减去", "计算", "来算");
         boolean hasFormulaExpression = question.matches(".*[一-龥A-Za-z0-9_]+\\s*(按|按照).*(除以|乘以|加上|减去|/|\\*|\\+|-).*")
                 || question.matches(".*[一-龥A-Za-z0-9_]+率.*(除以|/).*")
                 || question.matches(".*[一-龥A-Za-z0-9_]+\\s*(=|＝)\\s*.*[A-Za-z_][A-Za-z0-9_]*.*");
-        boolean hasPatchTarget = containsAny(question, "模型", "字典", "公式", "指标", "维度", "业务", "字段", "销售额", "收入", "利润", "GMV", "含税", "毛利率")
-                || hasFormulaExpression;
+        boolean hasPatchTarget = containsAny(question, "模型", "字典", "词典", "术语", "同义词", "别名", "映射",
+                "公式", "指标", "维度", "业务", "字段", "销售额", "收入", "利润", "GMV", "含税", "毛利率")
+                || hasFormulaExpression
+                || looksLikeDictionaryAliasExpression(question);
         return hasPatchVerb && (hasPatchTarget || looksLikeExplicitFieldBindingMutation(question));
+    }
+
+    private boolean looksLikeModelContentMutation(String question) {
+        return looksLikeExplicitFieldBindingMutation(question)
+                || looksLikeExplicitDictionaryMutation(question)
+                || looksLikeExplicitFormulaMutation(question)
+                || looksLikeExplicitMetricScopeMutation(question)
+                || looksLikeMetricFormulaExpression(question)
+                || looksLikeDimensionBindingIntent(question);
+    }
+
+    private boolean looksLikeExplicitMetricScopeMutation(String question) {
+        return containsAny(question, "口径", "以后", "统一用", "统一按", "改成按", "改为按",
+                "按含税", "按不含税", "就按", "算作", "当作", "来算");
     }
 
     private boolean looksLikeExplain(String question) {
@@ -689,26 +788,61 @@ public class BusinessModelAgentService {
 
     private String inferBusinessModelName(String requestModelName, String semanticModelName, String requirement, String question) {
         String cleanedRequestName = cleanBusinessModelName(requestModelName);
-        if (!cleanedRequestName.isBlank()) {
+        if (isBusinessModelNameCandidate(cleanedRequestName)) {
             return ensureModelSuffix(cleanedRequestName);
         }
 
         String cleanedSemanticName = cleanBusinessModelName(semanticModelName);
-        if (!cleanedSemanticName.isBlank()) {
+        if (isBusinessModelNameCandidate(cleanedSemanticName)) {
             return ensureModelSuffix(cleanedSemanticName);
         }
 
         String requirementSubject = extractBusinessSubject(requirement);
-        if (!requirementSubject.isBlank()) {
+        if (isBusinessModelNameCandidate(requirementSubject)) {
             return ensureModelSuffix(requirementSubject);
         }
 
         String questionSubject = extractBusinessSubject(question);
-        if (!questionSubject.isBlank()) {
+        if (isBusinessModelNameCandidate(questionSubject)) {
             return ensureModelSuffix(questionSubject);
         }
 
         return "零代码业务模型";
+    }
+
+    private String requestedBusinessModelName(Map<String, Object> request) {
+        if (request == null || request.isEmpty()) {
+            return "";
+        }
+        String explicitName = firstNonBlank(
+                request.get("businessModelName"),
+                request.get("requestedBusinessModelName"),
+                request.get("targetModelName"),
+                request.get("newModelName")
+        );
+        if (!explicitName.isBlank()) {
+            return explicitName;
+        }
+        return firstNonBlank(request.get("modelName"));
+    }
+
+    private boolean isBusinessModelNameCandidate(String text) {
+        String value = trim(text);
+        return !value.isBlank() && !isInfrastructureModelName(value);
+    }
+
+    private boolean isInfrastructureModelName(String text) {
+        String value = trim(text);
+        if (value.isBlank()) {
+            return false;
+        }
+        String compact = value.replaceAll("[“”\"'`<>\\s]+", "");
+        String strippedSuffix = compact.endsWith("模型") ? compact.substring(0, compact.length() - 2) : compact;
+        String lowerCompact = compact.toLowerCase(Locale.ROOT);
+        String lowerStripped = strippedSuffix.toLowerCase(Locale.ROOT);
+        return INFRASTRUCTURE_MODEL_NAMES.contains(lowerCompact)
+                || INFRASTRUCTURE_MODEL_NAMES.contains(lowerStripped)
+                || INFRASTRUCTURE_MODEL_NAME_PATTERN.matcher(lowerStripped).matches();
     }
 
     private String extractBusinessSubject(String text) {
@@ -887,10 +1021,24 @@ public class BusinessModelAgentService {
             if ("DELETE".equals(action)) {
                 merged.remove(key);
             } else {
-                merged.put(key, normalized);
+                merged.put(key, mergeDictionaryEntryValue(merged.get(key), normalized));
             }
         }
         return new ArrayList<>(merged.values());
+    }
+
+    private Map<String, Object> mergeDictionaryEntryValue(Map<String, Object> existing, Map<String, Object> incoming) {
+        if (existing == null || existing.isEmpty()) {
+            return incoming;
+        }
+        Map<String, Object> merged = new LinkedHashMap<>(existing);
+        String incomingField = trim(Objects.toString(incoming.get("field"), ""));
+        if (!incomingField.isBlank()) {
+            merged.put("field", incomingField);
+        }
+        String mergedSynonyms = mergeSynonyms(existing.get("synonyms"), incoming.get("synonyms"));
+        merged.put("synonyms", mergedSynonyms);
+        return merged;
     }
 
     private List<Map<String, Object>> mergeMetricDefinitions(List<Map<String, Object>> existingEntries,
@@ -1114,6 +1262,7 @@ public class BusinessModelAgentService {
         List<Map<String, Object>> result = new ArrayList<>(operations == null ? List.of() : operations);
         boolean hasMetricUpdate = result.stream().anyMatch(item -> "metricDefinition".equals(trim(Objects.toString(item.get("targetType"), ""))));
         boolean hasFieldBinding = result.stream().anyMatch(item -> "fieldBinding".equals(trim(Objects.toString(item.get("targetType"), ""))));
+        boolean hasDictionaryUpsert = result.stream().anyMatch(item -> "dictionaryEntry".equals(trim(Objects.toString(item.get("targetType"), ""))));
         boolean hasDimensionBinding = result.stream().anyMatch(item ->
                 "dimensionDefinition".equals(trim(Objects.toString(item.get("targetType"), "")))
                         || ("fieldBinding".equals(trim(Objects.toString(item.get("targetType"), "")))
@@ -1128,13 +1277,21 @@ public class BusinessModelAgentService {
                 }
             }
         }
+        boolean dictionaryAliasIntent = looksLikeDictionaryAliasExpression(question);
+        if (!hasDictionaryUpsert && (looksLikeExplicitDictionaryMutation(question) || dictionaryAliasIntent)) {
+            Map<String, Object> operation = buildDictionaryEntryFallback(question, fields, existingMetricDefinitions);
+            if (!operation.isEmpty()) {
+                result.add(operation);
+                hasDictionaryUpsert = true;
+            }
+        }
         if (!hasDimensionBinding && looksLikeDimensionBindingIntent(question)) {
             Map<String, Object> operation = buildDimensionBindingFallback(question, fields);
             if (!operation.isEmpty()) {
                 result.add(operation);
             }
         }
-        if (!hasMetricUpdate && (isMetricScopeExpression(question) || looksLikeMetricFormulaExpression(question))) {
+        if (!hasMetricUpdate && !dictionaryAliasIntent && (isMetricScopeExpression(question) || looksLikeMetricFormulaExpression(question))) {
             String metricName = extractPrimaryMetricTarget(question, existingMetricDefinitions);
             String formula = resolveMetricFormulaFromQuestion(question, Map.of(), fields, existingMetricDefinitions, metricName);
             if (!metricName.isBlank() && !formula.isBlank()) {
@@ -1189,6 +1346,128 @@ public class BusinessModelAgentService {
         return operation;
     }
 
+    private Map<String, Object> buildDictionaryEntryFallback(String question,
+                                                            List<Map<String, Object>> fields,
+                                                            List<Map<String, Object>> existingMetricDefinitions) {
+        String text = trim(question);
+        if (text.isBlank()) {
+            return Map.of();
+        }
+
+        java.util.regex.Matcher explicit = Pattern.compile(
+                "(?:新增|增加|添加|创建)?(?:业务)?(?:字典|词典|术语)\\s*[：:]\\s*(.+?)\\s*(?:对应|对应到|映射到|指向|归到|归为|理解为)\\s*([^，。；;\\n]+)(?:[，,；;]\\s*(?:同义词|别名)(?:是|为|包括)?\\s*([^。；;\\n]+))?"
+        ).matcher(text);
+        if (explicit.find()) {
+            String term = cleanDictionaryPhrase(explicit.group(1));
+            String target = cleanDictionaryPhrase(explicit.group(2));
+            List<String> synonyms = splitBusinessTerms(explicit.group(3));
+            return buildDictionaryOperation(term, target, synonyms, fields, existingMetricDefinitions);
+        }
+
+        java.util.regex.Matcher synonymOf = Pattern.compile(
+                "(?:把|将)?\\s*(.+?)\\s*(?:都)?(?:作为|当作|算作|视为|理解为|等同于|归到|归为|归入)\\s*(.+?)(?:的)?(?:同义词|别名|术语|业务术语|叫法)(?:[，,；;。\\n].*)?$"
+        ).matcher(text);
+        if (synonymOf.find()) {
+            List<String> aliases = splitBusinessTerms(synonymOf.group(1));
+            String target = cleanDictionaryPhrase(synonymOf.group(2));
+            return buildDictionaryOperation(target, target, aliases, fields, existingMetricDefinitions);
+        }
+
+        java.util.regex.Matcher understandAs = Pattern.compile(
+                "(?:以后|后续|之后)?(?:用户|大家)?(?:说|提到|输入)?\\s*(.+?)(?:，|,)?\\s*(?:就)?(?:统一\\S?按|统一用|按|按照|理解为|视为|当作|算作)\\s*(.+?)(?:理解|处理|计算|统计|衡量)?(?:[，。；;\\n]|$)"
+        ).matcher(text);
+        if (understandAs.find() && looksLikeDictionaryAliasExpression(text)) {
+            List<String> aliases = splitBusinessTerms(understandAs.group(1));
+            String target = cleanDictionaryPhrase(understandAs.group(2));
+            return buildDictionaryOperation(target, target, aliases, fields, existingMetricDefinitions);
+        }
+
+        return Map.of();
+    }
+
+    private Map<String, Object> buildDictionaryOperation(String term,
+                                                        String target,
+                                                        List<String> synonyms,
+                                                        List<Map<String, Object>> fields,
+                                                        List<Map<String, Object>> existingMetricDefinitions) {
+        String cleanedTerm = cleanDictionaryPhrase(term);
+        String cleanedTarget = cleanDictionaryPhrase(target);
+        List<String> cleanedSynonyms = synonyms == null ? List.of() : synonyms.stream()
+                .map(this::cleanDictionaryPhrase)
+                .filter(value -> !value.isBlank())
+                .filter(value -> !normalize(value).equals(normalize(cleanedTerm)))
+                .distinct()
+                .toList();
+        if (cleanedTerm.isBlank() || (cleanedTarget.isBlank() && cleanedSynonyms.isEmpty())) {
+            return Map.of();
+        }
+        String field = resolveDictionaryTargetField(cleanedTarget.isBlank() ? cleanedTerm : cleanedTarget, fields, existingMetricDefinitions);
+        Map<String, Object> operation = new LinkedHashMap<>();
+        operation.put("semanticAction", "DICTIONARY_UPSERT");
+        operation.put("targetType", "dictionaryEntry");
+        operation.put("action", "UPSERT");
+        operation.put("term", cleanedTerm);
+        operation.put("field", field);
+        operation.put("synonyms", cleanedSynonyms);
+        return operation;
+    }
+
+    private String cleanDictionaryPhrase(String text) {
+        String value = cleanBusinessItemName(text);
+        value = value.replaceFirst("^(把|将|让|用户说|用户提到|用户输入|大家说|大家提到|以后|后续|之后|就按|按|按照|统一用|统一按)+", "");
+        value = value.replaceFirst("(的同义词|同义词|的别名|别名|业务术语|术语|叫法|理解|处理|衡量|统计|计算|来看|来查|来分析)$", "");
+        value = value.replace("都", "").trim();
+        value = MODEL_NAME_PUNCT_PREFIX_PATTERN.matcher(value).replaceFirst("");
+        value = MODEL_NAME_PUNCT_SUFFIX_PATTERN.matcher(value).replaceFirst("");
+        return value.trim();
+    }
+
+    private List<String> splitBusinessTerms(String rawText) {
+        String text = trim(Objects.toString(rawText, ""));
+        if (text.isBlank()) {
+            return List.of();
+        }
+        text = text.replace("以及", ",")
+                .replace("并且", ",")
+                .replace("还有", ",")
+                .replace("和", ",")
+                .replace("与", ",")
+                .replace("及", ",");
+        List<String> terms = new ArrayList<>();
+        for (String token : text.split("[,，;；、\\s]+")) {
+            String value = cleanDictionaryPhrase(token);
+            if (!value.isBlank() && terms.stream().noneMatch(item -> normalize(item).equals(normalize(value)))) {
+                terms.add(value);
+            }
+        }
+        return terms;
+    }
+
+    private String resolveDictionaryTargetField(String target,
+                                                List<Map<String, Object>> fields,
+                                                List<Map<String, Object>> existingMetricDefinitions) {
+        String cleanedTarget = cleanDictionaryPhrase(target);
+        if (cleanedTarget.isBlank()) {
+            return "";
+        }
+        Map<String, Object> metric = findByName(existingMetricDefinitions, "name", cleanedTarget);
+        if (metric != null) {
+            String field = trim(Objects.toString(metric.get("field"), ""));
+            if (!field.isBlank()) {
+                return field;
+            }
+            String formula = trim(Objects.toString(metric.get("formula"), ""));
+            if (!formula.isBlank() && isSingleFieldScopeExpression(formula)) {
+                return formula;
+            }
+        }
+        Map<String, Object> field = resolveUniqueField(cleanedTarget, fields);
+        if (field != null) {
+            return trim(Objects.toString(field.get("columnName"), ""));
+        }
+        return cleanedTarget;
+    }
+
     private String inferBindingTypeFromQuestion(String question, String name) {
         String text = trim(question) + " " + trim(name);
         if (containsAny(text, "维度", "省份", "城市", "区域", "地区")) {
@@ -1230,7 +1509,8 @@ public class BusinessModelAgentService {
                                                                  List<Map<String, Object>> existingDictionaryEntries,
                                                                  List<Map<String, Object>> existingMetricDefinitions,
                                                                  List<Map<String, Object>> existingDimensionDefinitions) {
-        boolean scopeOrFormulaIntent = isMetricScopeExpression(question) || looksLikeMetricFormulaExpression(question);
+        boolean dictionaryAliasIntent = looksLikeDictionaryAliasExpression(question);
+        boolean scopeOrFormulaIntent = !dictionaryAliasIntent && (isMetricScopeExpression(question) || looksLikeMetricFormulaExpression(question));
         List<String> mentionedMetricNames = extractMentionedNames(question, existingMetricDefinitions, "name");
         if (scopeOrFormulaIntent) {
             String metricTarget = extractMetricTargetBySyntax(question);
@@ -1945,7 +2225,21 @@ public class BusinessModelAgentService {
         return containsAny(question,
                 "新增业务字典", "增加业务字典", "添加业务字典", "创建业务字典",
                 "新增字典", "增加字典", "添加字典", "创建字典",
-                "新增词典", "新增同义词", "新增术语");
+                "新增词典", "新增同义词", "新增术语",
+                "作为", "理解为", "视为", "归到", "归为", "归入", "等同于", "同义词", "别名")
+                || looksLikeDictionaryAliasExpression(question);
+    }
+
+    private boolean looksLikeDictionaryAliasExpression(String question) {
+        String text = trim(question);
+        if (text.isBlank()) {
+            return false;
+        }
+        if (containsAny(text, "同义词", "别名", "业务术语", "术语", "叫法", "理解为", "视为", "等同于", "归到", "归为", "归入")) {
+            return true;
+        }
+        return text.matches(".*(?:以后|后续|之后)?(?:用户|大家)?(?:说|提到|输入)?\\s*[\\u4e00-\\u9fa5A-Za-z0-9_]{1,30}\\s*[，,]?\\s*(?:就)?(?:统一\\S?按|统一用|按|按照)\\s*[\\u4e00-\\u9fa5A-Za-z0-9_]{1,30}(?:理解|处理|统计|计算|衡量|来看|来查|来分析).*")
+                || text.matches(".*[\\u4e00-\\u9fa5A-Za-z0-9_]{1,30}\\s*(?:统一\\S?按|统一用|按|按照)\\s*[\\u4e00-\\u9fa5A-Za-z0-9_]{1,30}(?:理解|处理|统计|计算|衡量).*");
     }
 
     private boolean looksLikeExplicitFormulaMutation(String question) {
@@ -2017,6 +2311,22 @@ public class BusinessModelAgentService {
         return String.join(",", items);
     }
 
+    private String mergeSynonyms(Object existingValue, Object incomingValue) {
+        Set<String> items = new LinkedHashSet<>();
+        String existing = normalizeSynonyms(existingValue);
+        if (!existing.isBlank()) {
+            items.addAll(Arrays.asList(existing.split(",")));
+        }
+        String incoming = normalizeSynonyms(incomingValue);
+        if (!incoming.isBlank()) {
+            items.addAll(Arrays.asList(incoming.split(",")));
+        }
+        return items.stream()
+                .map(this::trim)
+                .filter(value -> !value.isBlank())
+                .collect(java.util.stream.Collectors.joining(","));
+    }
+
     private Long toLong(Object value) {
         if (value == null) {
             return null;
@@ -2054,12 +2364,25 @@ public class BusinessModelAgentService {
             return Map.of();
         }
         Map<String, Object> options = new LinkedHashMap<>();
-        putModelOption(options, "modelId", request.get("modelId"));
-        putModelOption(options, "modelName", request.get("modelName"));
-        putModelOption(options, "modelCategory", request.get("modelCategory"));
+        putModelOption(options, "modelId", firstNonBlank(request.get("llmModelId"), request.get("modelId")));
+        putModelOption(options, "modelName", firstNonBlank(request.get("llmModelName")));
+        putModelOption(options, "modelCategory", firstNonBlank(request.get("llmModelCategory"), request.get("modelCategory")));
         putModelOption(options, "temperature", request.get("temperature"));
         putModelOption(options, "timeoutSeconds", request.get("timeoutSeconds"));
         return options.isEmpty() ? Map.of() : options;
+    }
+
+    private String firstNonBlank(Object... values) {
+        if (values == null) {
+            return "";
+        }
+        for (Object value : values) {
+            String text = trim(Objects.toString(value, ""));
+            if (!text.isBlank()) {
+                return text;
+            }
+        }
+        return "";
     }
 
     private void putModelOption(Map<String, Object> target, String key, Object value) {

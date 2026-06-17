@@ -4249,15 +4249,17 @@ const resolveFieldBindingCardTitle = (question, intent, entries) => {
 }
 
 const handleBusinessModelAgentQuestion = async ({ question, tableName, semanticDraft }) => {
+  const selectedModelPayload = chatModelPayload.value
   const payload = {
     question,
     tableName,
     selectedTableName: selectedTableName.value,
     activeBusinessModelId: activeBusinessModelId.value,
     lastCreatedBusinessModelId: lastCreatedBusinessModelId.value,
-    lastAppliedBusinessModelId: lastAppliedBusinessModelId.value,
-    ...chatModelPayload.value
+    lastAppliedBusinessModelId: lastAppliedBusinessModelId.value
   }
+  if (selectedModelPayload.modelId) payload.modelId = selectedModelPayload.modelId
+  if (selectedModelPayload.modelCategory) payload.modelCategory = selectedModelPayload.modelCategory
   if (semanticDraft) {
     payload.requirement = semanticDraft.requirement
     if (Array.isArray(semanticDraft.dictionaryEntries) && semanticDraft.dictionaryEntries.length > 0) {
@@ -4287,7 +4289,6 @@ const streamBusinessModelAgentQuestion = async ({ question, tableName, onThinkin
   })
   const selectedModelPayload = chatModelPayload.value
   if (selectedModelPayload.modelId) params.set('modelId', selectedModelPayload.modelId)
-  if (selectedModelPayload.modelName) params.set('modelName', selectedModelPayload.modelName)
   if (selectedModelPayload.modelCategory) params.set('modelCategory', selectedModelPayload.modelCategory)
   const response = await fetch(`${API_BASE}/api/chat/business-model-agent-stream?${params.toString()}`, {
     method: 'GET',

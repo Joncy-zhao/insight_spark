@@ -439,6 +439,7 @@ public class ChatController {
         String executionQuestion = safeBuildExecutionQuestion(activeConversationId, userTurnId, question);
         Map<String, Object> executionContext = new LinkedHashMap<>(requestContext == null ? Map.of() : requestContext);
         executionContext.put("rawQuestion", question);
+        attachFollowUpContext(executionContext, parentTurnId);
         long startedAt = System.currentTimeMillis();
         CompletableFuture<Map<String, Object>> queryFuture = new CompletableFuture<>();
         AtomicBoolean clientDisconnected = new AtomicBoolean(false);
@@ -567,6 +568,7 @@ public class ChatController {
         String executionQuestion = safeBuildExecutionQuestion(activeConversationId, userTurnId, question);
         Map<String, Object> executionContext = new LinkedHashMap<>(requestContext == null ? Map.of() : requestContext);
         executionContext.put("rawQuestion", question);
+        attachFollowUpContext(executionContext, parentTurnId);
         try {
             boolean smartRoute = shouldUseSmartRouteForHttpQuestion(question);
             ChatBiService.ChatQueryRequest queryRequest = buildChatQueryRequest(
@@ -645,6 +647,7 @@ public class ChatController {
         putIfPresent(filters, "lastCreatedBusinessModelId", requestContext == null ? null : requestContext.get("lastCreatedBusinessModelId"));
         putIfPresent(filters, "lastAppliedBusinessModelId", requestContext == null ? null : requestContext.get("lastAppliedBusinessModelId"));
         putIfPresent(filters, "rawQuestion", requestContext == null ? null : requestContext.get("rawQuestion"));
+        putObjectIfPresent(filters, "followUpContext", requestContext == null ? null : requestContext.get("followUpContext"));
         putIfPresent(filters, "pinChartId", requestContext == null ? null : requestContext.get("pinChartId"));
         putIfPresent(filters, "pinArtifactId", requestContext == null ? null : requestContext.get("pinArtifactId"));
         putIfPresent(filters, "pinTurnId", requestContext == null ? null : requestContext.get("pinTurnId"));
@@ -821,6 +824,7 @@ public class ChatController {
         String executionQuestion = safeBuildExecutionQuestion(activeConversationId, userTurnId, question);
         Map<String, Object> executionContext = new LinkedHashMap<>(requestContext == null ? Map.of() : requestContext);
         executionContext.put("rawQuestion", question);
+        attachFollowUpContext(executionContext, parentTurnId);
         try {
             Map<String, Object> result = smartChatService.executeSmart(buildChatQueryRequest(
                     executionQuestion, tableName, activeConversationId, parentTurnId, executionContext
@@ -888,6 +892,72 @@ public class ChatController {
             target.put(key, text);
         }
     }
+
+    private void putObjectIfPresent(Map<String, Object> target, String key, Object value) {
+        if (target == null || key == null || key.isBlank() || value == null) {
+            return;
+        }
+        if (value instanceof String text && text.trim().isBlank()) {
+            return;
+        }
+        if (value instanceof Map<?, ?> map && map.isEmpty()) {
+            return;
+        }
+        if (value instanceof Collection<?> collection && collection.isEmpty()) {
+            return;
+        }
+        target.put(key, value);
+    }
+
+    private void attachFollowUpContext(Map<String, Object> executionContext, Long parentTurnId) {
+        if (executionContext == null || parentTurnId == null || executionContext.containsKey("followUpContext")) {
+            return;
+        }
+        try {
+            Map<String, Object> artifactRow = chatConversationService.latestChartArtifactForTurn(parentTurnId);
+            Map<String, Object> artifact = asMap(artifactRow.get("artifact"));
+            Map<String, Object> fieldMapping = asMap(artifact.get("fieldMapping"));
+            String sql = firstNonBlankText(artifact.get("sql"), artifactRow.get("sqlText"));
+            if (artifact.isEmpty() || (fieldMapping.isEmpty() && sql.isBlank())) {
+                return;
+            }
+            Map<String, Object> followUpContext = new LinkedHashMap<>();
+            followUpContext.put("parentTurnId", parentTurnId);
+            putObjectIfPresent(followUpContext, "artifactId", artifactRow.get("id"));
+            putObjectIfPresent(followUpContext, "historyId", artifactRow.get("historyId"));
+            putObjectIfPresent(followUpContext, "tableName", firstNonBlankText(artifact.get("tableName"), artifactRow.get("tableName")));
+            putObjectIfPresent(followUpContext, "chartType", firstNonBlankText(artifact.get("chartType"), artifactRow.get("chartType")));
+            putObjectIfPresent(followUpContext, "fieldMapping", fieldMapping);
+            putObjectIfPresent(followUpContext, "sql", sql);
+            putObjectIfPresent(followUpContext, "dimensions", artifact.get("dimensions"));
+            putObjectIfPresent(followUpContext, "sourceQuestion", firstNonBlankText(artifact.get("sourceQuestion"), artifact.get("question")));
+            executionContext.put("followUpContext", followUpContext);
+        } catch (Exception ignored) {
+            // Follow-up metadata is a best-effort hint; query execution should still work without it.
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> asMap(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            return new LinkedHashMap<>((Map<String, Object>) map);
+        }
+        return Map.of();
+    }
+
+    private String firstNonBlankText(Object... values) {
+        if (values == null) {
+            return "";
+        }
+        for (Object value : values) {
+            String text = text(value).trim();
+            if (!text.isBlank()) {
+                return text;
+            }
+        }
+        return "";
+    }
+
     private Long safeEnsureConversation(Long conversationId, String question, String tableName) {
         try {
             return chatConversationService.ensureConversation(conversationId, question, tableName);

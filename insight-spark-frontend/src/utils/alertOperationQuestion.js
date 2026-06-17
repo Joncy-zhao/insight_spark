@@ -29,6 +29,7 @@ export const isAlertOperationQuestion = (text = '') => {
     '警报规则',
     '规则',
     '阈值',
+    '阀值',
     '检测周期',
     '通知渠道',
     '推送渠道',
@@ -37,6 +38,7 @@ export const isAlertOperationQuestion = (text = '') => {
   ])
   const hasRuleField = hasAnyToken(content, [
     '阈值',
+    '阀值',
     '检测周期',
     '通知渠道',
     '推送渠道',

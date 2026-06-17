@@ -94,6 +94,8 @@ public class PythonAiService {
         request.put("graphContext", graphPath == null ? List.of() : graphPath.getOrDefault("ragContext", List.of()));
         request.put("graphSqlHints", graphSqlHints == null ? Map.of() : graphSqlHints);
         appendModelOptions(request, modelOptions);
+        putIfPresent(request, "rawQuestion", modelOptions == null ? null : modelOptions.get("rawQuestion"));
+        putIfPresent(request, "followUpContext", modelOptions == null ? null : modelOptions.get("followUpContext"));
         request.putIfAbsent("modelConfig", Map.of());
         request.putIfAbsent("modelId", "default");
         request.putIfAbsent("temperature", 0.2D);

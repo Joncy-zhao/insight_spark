@@ -145,6 +145,8 @@ public class ChatBiService {
         log.info("Received chat question: {}", question);
         ensureNotCancelled("请求初始化");
         Map<String, Object> safeOptions = executionOptions == null ? Map.of() : executionOptions;
+        String rawQuestion = Objects.toString(safeOptions.get("rawQuestion"), "").trim();
+        Map<String, Object> followUpContext = safeMap(safeOptions.get("followUpContext"));
         ProgressListener progress = progressListener(safeOptions.get("progressListener"));
         String selectedModelId = Objects.toString(safeOptions.getOrDefault("modelId", "default"), "default").trim();
         String selectedModelName = Objects.toString(safeOptions.getOrDefault("modelName", selectedModelId), selectedModelId).trim();
@@ -156,6 +158,9 @@ public class ChatBiService {
         List<String> generationTrace = new ArrayList<>();
         generationTrace.add("activeTable=" + activeTable);
         generationTrace.add("selectedModel=" + selectedModelId);
+        if (!followUpContext.isEmpty()) {
+            generationTrace.add("followUpContext=LOADED");
+        }
         boolean officialSource = datasourceService.isOfficialSource(activeTable);
         String queryTableName = officialSource ? datasourceService.physicalTableName(activeTable) : activeTable;
         dataUploadService.assertKnownTable(activeTable);
@@ -345,6 +350,11 @@ public class ChatBiService {
         chartType = sortCorrection.chartType();
         fieldMapping = sortCorrection.fieldMapping();
         fieldMapping = alignFieldMappingWithSql(question, fields, generatedSql, fieldMapping, generationTrace);
+        SemanticSqlCorrection followUpMetricCorrection = applyFollowUpMetricInheritance(question, rawQuestion,
+                followUpContext, fields, generatedSql, chartType, fieldMapping, generationTrace);
+        generatedSql = followUpMetricCorrection.sql();
+        chartType = followUpMetricCorrection.chartType();
+        fieldMapping = followUpMetricCorrection.fieldMapping();
         graphContext = filterGraphContextForCurrentQuery(question, activeTable, fields, generatedSql, graphContext);
 
         log.info("Generated SQL: {}", generatedSql);
@@ -2443,6 +2453,298 @@ public class ChatBiService {
         return aligned;
     }
 
+    private SemanticSqlCorrection applyFollowUpMetricInheritance(String executionQuestion,
+            String rawQuestion,
+            Map<String, Object> followUpContext,
+            List<Map<String, Object>> fields,
+            String generatedSql,
+            String chartType,
+            Map<String, Object> fieldMapping,
+            List<String> generationTrace) {
+        String raw = Objects.toString(rawQuestion, "").trim();
+        String execution = Objects.toString(executionQuestion, "").trim();
+        if (raw.isBlank() || raw.equals(execution)) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        SemanticSqlCorrection dimensionCorrection = applyFollowUpDimensionInheritance(raw, followUpContext, fields,
+                generatedSql, chartType, fieldMapping, generationTrace);
+        generatedSql = dimensionCorrection.sql();
+        chartType = dimensionCorrection.chartType();
+        fieldMapping = dimensionCorrection.fieldMapping();
+
+        Map<String, Object> inheritedMetricField = inheritedMetricFieldFromStructuredContext(followUpContext, fields);
+        String inheritanceSource = inheritedMetricField == null ? "text" : "artifact";
+        if (inheritedMetricField == null) {
+            inheritedMetricField = inheritedMetricFieldFromFollowUpContext(execution, fields);
+        }
+        if (inheritedMetricField == null) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        String inheritedMetricColumn = fieldColumn(inheritedMetricField);
+        if (inheritedMetricColumn.isBlank()
+                || rawFollowUpMentionsDifferentMetric(raw, fields, inheritedMetricColumn)) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+
+        SqlSelectMapping selectMapping = parseSqlSelectMapping(generatedSql);
+        String currentMetricColumn = firstTextValue(selectMapping.metricColumn(),
+                fieldMapping == null ? null : fieldMapping.get("metricKey"));
+        if (currentMetricColumn.isBlank() || inheritedMetricColumn.equals(currentMetricColumn)) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        String rewrittenSql = replaceBacktickColumn(generatedSql, currentMetricColumn, inheritedMetricColumn);
+        if (rewrittenSql.equals(Objects.toString(generatedSql, ""))) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+
+        Map<String, Object> correctedMapping = new LinkedHashMap<>(fieldMapping == null ? Map.of() : fieldMapping);
+        correctedMapping.put("metric", fieldDisplayName(inheritedMetricField));
+        correctedMapping.put("metricKey", inheritedMetricColumn);
+        String inheritedMetricExpr = replaceBacktickColumn(selectMapping.metricExpression(),
+                currentMetricColumn, inheritedMetricColumn);
+        if (!inheritedMetricExpr.isBlank()) {
+            correctedMapping.put("metricExpr", inheritedMetricExpr);
+        }
+        if (generationTrace != null) {
+            generationTrace.add("followUpMetricInheritance=APPLIED;metric=" + inheritedMetricColumn
+                    + ";previous=" + currentMetricColumn + ";source=" + inheritanceSource);
+        }
+        return new SemanticSqlCorrection(rewrittenSql, chartType, correctedMapping);
+    }
+
+    private SemanticSqlCorrection applyFollowUpDimensionInheritance(String rawQuestion,
+            Map<String, Object> followUpContext,
+            List<Map<String, Object>> fields,
+            String generatedSql,
+            String chartType,
+            Map<String, Object> fieldMapping,
+            List<String> generationTrace) {
+        Map<String, Object> inheritedDimensionField = inheritedDimensionFieldFromStructuredContext(followUpContext,
+                fields);
+        if (inheritedDimensionField == null) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        String inheritedDimensionColumn = fieldColumn(inheritedDimensionField);
+        if (inheritedDimensionColumn.isBlank()
+                || rawFollowUpMentionsDifferentDimension(rawQuestion, fields, inheritedDimensionColumn)) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+
+        SqlSelectMapping selectMapping = parseSqlSelectMapping(generatedSql);
+        String currentDimensionColumn = firstTextValue(selectMapping.dimensionColumn(),
+                fieldMapping == null ? null : fieldMapping.get("dimensionKey"));
+        if (currentDimensionColumn.isBlank() || inheritedDimensionColumn.equals(currentDimensionColumn)) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        String rewrittenSql = replaceDimensionColumn(generatedSql, selectMapping,
+                currentDimensionColumn, inheritedDimensionColumn);
+        if (rewrittenSql.equals(Objects.toString(generatedSql, ""))) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+
+        Map<String, Object> correctedMapping = new LinkedHashMap<>(fieldMapping == null ? Map.of() : fieldMapping);
+        correctedMapping.put("dimension", fieldDisplayName(inheritedDimensionField));
+        correctedMapping.put("dimensionKey", inheritedDimensionColumn);
+        String inheritedDimensionExpr = "`" + inheritedDimensionColumn + "`";
+        correctedMapping.put("dimensionExpr", inheritedDimensionExpr);
+        if (generationTrace != null) {
+            generationTrace.add("followUpDimensionInheritance=APPLIED;dimension=" + inheritedDimensionColumn
+                    + ";previous=" + currentDimensionColumn + ";source=artifact");
+        }
+        return new SemanticSqlCorrection(rewrittenSql, chartType, correctedMapping);
+    }
+
+    private Map<String, Object> inheritedDimensionFieldFromStructuredContext(Map<String, Object> followUpContext,
+            List<Map<String, Object>> fields) {
+        Map<String, Object> parentMapping = safeMap(followUpContext == null ? null : followUpContext.get("fieldMapping"));
+        for (Object candidate : new Object[] {
+                parentMapping.get("dimensionKey"),
+                parentMapping.get("dimensionField"),
+                parentMapping.get("dimension"),
+                parentMapping.get("dimensionLabel"),
+                parentMapping.get("timeField")}) {
+            Map<String, Object> field = findDimensionFieldByReference(fields, Objects.toString(candidate, ""));
+            if (field != null) {
+                return field;
+            }
+        }
+        return null;
+    }
+
+    private boolean rawFollowUpMentionsDifferentDimension(String rawQuestion, List<Map<String, Object>> fields,
+            String inheritedDimensionColumn) {
+        String raw = Objects.toString(rawQuestion, "");
+        for (Map<String, Object> field : fields == null ? List.<Map<String, Object>>of() : fields) {
+            if (isNumericField(field)) {
+                continue;
+            }
+            String column = fieldColumn(field);
+            if (column.isBlank() || column.equals(inheritedDimensionColumn)) {
+                continue;
+            }
+            if (timeFieldScore(field) > 0 && isTimeSeriesLikeQuestion(raw)) {
+                return true;
+            }
+            if (dimensionFieldScore(field, raw) > 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Map<String, Object> findDimensionFieldByReference(List<Map<String, Object>> fields, String reference) {
+        String normalized = normalizeFieldReference(reference);
+        if (normalized.isBlank()) {
+            return null;
+        }
+        for (Map<String, Object> field : fields == null ? List.<Map<String, Object>>of() : fields) {
+            if (isNumericField(field)) {
+                continue;
+            }
+            for (String candidate : List.of(
+                    fieldColumn(field),
+                    fieldDisplayName(field),
+                    Objects.toString(field.get("sourceFieldName"), "").trim())) {
+                if (normalized.equals(normalizeFieldReference(candidate))) {
+                    return field;
+                }
+            }
+        }
+        return null;
+    }
+
+    private String replaceDimensionColumn(String sql, SqlSelectMapping selectMapping,
+            String fromColumn, String toColumn) {
+        String source = Objects.toString(sql, "");
+        String from = Objects.toString(fromColumn, "").trim();
+        String to = Objects.toString(toColumn, "").trim();
+        if (source.isBlank() || from.isBlank() || to.isBlank() || from.equals(to)) {
+            return source;
+        }
+        String dimensionExpression = selectMapping == null ? "" : selectMapping.dimensionExpression();
+        if (!dimensionExpression.isBlank() && !dimensionExpression.equals("`" + from + "`")) {
+            source = source.replace(dimensionExpression, "`" + to + "`");
+        }
+        return replaceBacktickColumn(source, from, to);
+    }
+
+    private Map<String, Object> inheritedMetricFieldFromStructuredContext(Map<String, Object> followUpContext,
+            List<Map<String, Object>> fields) {
+        Map<String, Object> parentMapping = safeMap(followUpContext == null ? null : followUpContext.get("fieldMapping"));
+        for (Object candidate : new Object[] {
+                parentMapping.get("metricKey"),
+                parentMapping.get("metricField"),
+                parentMapping.get("metric"),
+                parentMapping.get("metricLabel")}) {
+            Map<String, Object> field = findFieldByReference(fields, Objects.toString(candidate, ""), true);
+            if (field != null) {
+                return field;
+            }
+        }
+        return null;
+    }
+
+    private Map<String, Object> inheritedMetricFieldFromFollowUpContext(String executionQuestion,
+            List<Map<String, Object>> fields) {
+        String context = Objects.toString(executionQuestion, "");
+        int followUpIndex = context.indexOf("本轮用户追问");
+        if (followUpIndex >= 0) {
+            context = context.substring(0, followUpIndex);
+        }
+        Matcher matcher = Pattern.compile("(?:指标|度量|数值字段)\\s*[「『【\\[]\\s*([^」』】\\]]{1,80})\\s*[」』】\\]]")
+                .matcher(context);
+        List<String> metricRefs = new ArrayList<>();
+        while (matcher.find()) {
+            metricRefs.add(matcher.group(1));
+        }
+        for (int i = metricRefs.size() - 1; i >= 0; i -= 1) {
+            Map<String, Object> field = findFieldByReference(fields, metricRefs.get(i), true);
+            if (field != null) {
+                return field;
+            }
+        }
+        return null;
+    }
+
+    private boolean rawFollowUpMentionsDifferentMetric(String rawQuestion, List<Map<String, Object>> fields,
+            String inheritedMetricColumn) {
+        String raw = Objects.toString(rawQuestion, "");
+        for (Map<String, Object> field : fields == null ? List.<Map<String, Object>>of() : fields) {
+            if (!isNumericField(field)) {
+                continue;
+            }
+            String column = fieldColumn(field);
+            if (column.isBlank() || column.equals(inheritedMetricColumn)) {
+                continue;
+            }
+            if (rawMentionsFieldReference(raw, field)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean rawMentionsFieldReference(String rawQuestion, Map<String, Object> field) {
+        String raw = Objects.toString(rawQuestion, "");
+        String lower = raw.toLowerCase(Locale.ROOT);
+        for (String candidate : List.of(
+                fieldDisplayName(field),
+                fieldColumn(field),
+                Objects.toString(field.get("sourceFieldName"), "").trim(),
+                Objects.toString(field.get("fieldComment"), "").trim())) {
+            String text = Objects.toString(candidate, "").trim();
+            if (!text.isBlank() && (raw.contains(text) || lower.contains(text.toLowerCase(Locale.ROOT)))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Map<String, Object> findFieldByReference(List<Map<String, Object>> fields, String reference,
+            boolean numericOnly) {
+        String normalized = normalizeFieldReference(reference);
+        if (normalized.isBlank()) {
+            return null;
+        }
+        for (Map<String, Object> field : fields == null ? List.<Map<String, Object>>of() : fields) {
+            if (numericOnly && !isNumericField(field)) {
+                continue;
+            }
+            for (String candidate : List.of(
+                    fieldColumn(field),
+                    fieldDisplayName(field),
+                    Objects.toString(field.get("sourceFieldName"), "").trim())) {
+                if (normalized.equals(normalizeFieldReference(candidate))) {
+                    return field;
+                }
+            }
+        }
+        return null;
+    }
+
+    private String normalizeFieldReference(String value) {
+        return Objects.toString(value, "")
+                .replace("`", "")
+                .replace("「", "")
+                .replace("」", "")
+                .replace("【", "")
+                .replace("】", "")
+                .replace("[", "")
+                .replace("]", "")
+                .trim()
+                .toLowerCase(Locale.ROOT);
+    }
+
+    private String replaceBacktickColumn(String sql, String fromColumn, String toColumn) {
+        String source = Objects.toString(sql, "");
+        String from = Objects.toString(fromColumn, "").trim();
+        String to = Objects.toString(toColumn, "").trim();
+        if (source.isBlank() || from.isBlank() || to.isBlank() || from.equals(to)) {
+            return source;
+        }
+        return source.replace("`" + from + "`", "`" + to + "`");
+    }
+
     private boolean applySqlSelectMapping(String question, List<Map<String, Object>> fields,
             SqlSelectMapping selectMapping, Map<String, Object> aligned) {
         boolean changed = false;
@@ -2464,19 +2766,35 @@ public class ChatBiService {
         String metricExpression = selectMapping.metricExpression();
         if (!metricExpression.isBlank()) {
             String previousKey = Objects.toString(aligned.get("metricKey"), "").trim();
-            String metricKey = firstTextValue(selectMapping.metricAlias(), selectMapping.metricColumn(), previousKey);
-            String metricLabel = sqlMetricLabel(fields, selectMapping, previousKey);
-            if (!metricKey.equals(previousKey)) {
-                aligned.put("metricKey", metricKey);
-                changed = true;
-            }
-            if (!metricLabel.isBlank() && !metricLabel.equals(Objects.toString(aligned.get("metric"), ""))) {
-                aligned.put("metric", metricLabel);
-                changed = true;
+            if (hasBusinessFormulaMetric(aligned)) {
+                if (previousKey.isBlank() && !selectMapping.metricAlias().isBlank()) {
+                    aligned.put("metricKey", selectMapping.metricAlias());
+                    changed = true;
+                }
+            } else {
+                String metricKey = firstTextValue(selectMapping.metricAlias(), selectMapping.metricColumn(), previousKey);
+                String metricLabel = sqlMetricLabel(fields, selectMapping, previousKey);
+                if (!metricKey.equals(previousKey)) {
+                    aligned.put("metricKey", metricKey);
+                    changed = true;
+                }
+                if (!metricLabel.isBlank() && !metricLabel.equals(Objects.toString(aligned.get("metric"), ""))) {
+                    aligned.put("metric", metricLabel);
+                    changed = true;
+                }
             }
             aligned.put("metricExpr", metricExpression);
         }
         return changed;
+    }
+
+    private boolean hasBusinessFormulaMetric(Map<String, Object> fieldMapping) {
+        if (fieldMapping == null) {
+            return false;
+        }
+        String formula = Objects.toString(fieldMapping.getOrDefault("formula", ""), "").trim();
+        String metricField = Objects.toString(fieldMapping.getOrDefault("metricField", ""), "").trim();
+        return !formula.isBlank() && !formula.equalsIgnoreCase(metricField);
     }
 
     private SqlSelectMapping parseSqlSelectMapping(String sql) {
@@ -3098,6 +3416,11 @@ public class ChatBiService {
     }
 
     private Map<String, Object> safeFieldMapping(Object raw) {
+        return safeMap(raw);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> safeMap(Object raw) {
         if (!(raw instanceof Map<?, ?> rawMap)) {
             return Map.of();
         }

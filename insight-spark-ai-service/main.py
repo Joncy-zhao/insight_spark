@@ -79,6 +79,8 @@ class TextToSqlRequest(BaseModel):
     graphPath: dict[str, Any] = {}
     graphContext: list[dict[str, Any]] = []
     graphSqlHints: dict[str, Any] = {}
+    rawQuestion: str = ""
+    followUpContext: dict[str, Any] = {}
     modelId: str = ""
     modelConfig: dict[str, Any] = {}
     temperature: float | int | None = None
@@ -1521,7 +1523,7 @@ def call_openai_business_model_semantic(payload: BusinessModelSemanticRequest) -
             return None
         parsed.setdefault("model", model_config["model"])
         parsed.setdefault("modelId", model_config["id"])
-        parsed.setdefault("modelName", model_config["name"])
+        parsed.setdefault("llmModelName", model_config["name"])
         parsed.setdefault("provider", model_config["provider"])
         parsed.setdefault("reasoning", ["由大模型完成业务模型语义拆解"])
         return parsed
@@ -1573,7 +1575,7 @@ def call_openai_business_model_patch(payload: BusinessModelPatchRequest) -> dict
             return None
         parsed.setdefault("model", model_config["model"])
         parsed.setdefault("modelId", model_config["id"])
-        parsed.setdefault("modelName", model_config["name"])
+        parsed.setdefault("llmModelName", model_config["name"])
         parsed.setdefault("provider", model_config["provider"])
         parsed.setdefault("reasoning", ["由大模型完成业务模型修改语义拆解"])
         return parsed
@@ -1801,7 +1803,7 @@ def build_smart_chat_route_prompt(payload: SmartChatRouteRequest) -> str:
         "分类准则：\n"
         "1. 查询排名、分组、明细、占比、对比、分布、汇总，选 QUERY_SQL；不要附带预测。\n"
         "2. 只有用户明确要求预测、预估未来数值、未来走势外推，才选 FORECAST。\n"
-        "3. 创建阈值提醒、异常通知、告警规则，选 ALERT_RULE_CREATE 且 requiresConfirmation=true。\n"
+        "3. 创建阈值提醒、异常通知、告警规则，选 ALERT_RULE_CREATE 且 requiresConfirmation=true；“阀值”按“阈值”理解。\n"
         "4. 假设变量变化并测算结果，选 WHAT_IF；普通查询中的“增长/下降”不等于 WHAT_IF。\n"
         "5. 字段绑定、术语映射、业务字典、指标口径、公式、以后按某口径计算，选 BUSINESS_MODEL_PATCH。\n"
         "6. 新建业务模型，选 BUSINESS_MODEL_CREATE；套用/发布模型分别选 APPLY/PUBLISH。\n"
@@ -1875,7 +1877,7 @@ def has_alert_semantics(question: str) -> bool:
     if not q:
         return False
     has_notify_action = re.search(r"提醒|通知|预警|告警|警报|alert|warning|钉钉|邮件", q, re.I) is not None
-    has_threshold_condition = re.search(r"低于|高于|超过|跌破|小于|大于|以下|以上|阈值|异常|z-?score", q, re.I) is not None
+    has_threshold_condition = re.search(r"低于|高于|超过|跌破|小于|大于|以下|以上|阈值|阀值|异常|z-?score", q, re.I) is not None
     return has_notify_action and has_threshold_condition
 
 
@@ -1955,7 +1957,7 @@ def build_rule_based_advanced_analysis_parse_result(payload: AdvancedAnalysisPar
     question = payload.question or ""
     lowered = question.lower()
     intent = "none"
-    if re.search(r"预警|提醒|告警|低于|高于|超过|跌破|异常|阈值|通知|钉钉|邮件|z-?score", lowered):
+    if re.search(r"预警|提醒|告警|低于|高于|超过|跌破|异常|阈值|阀值|通知|钉钉|邮件|z-?score", lowered):
         intent = "alert"
     elif re.search(r"预测|预估|未来|走势外推|forecast|prophet|holt", lowered):
         intent = "forecast"
@@ -1994,7 +1996,7 @@ def build_rule_based_smart_chat_route_result(payload: SmartChatRouteRequest) -> 
     dashboard_words = r"看板|仪表盘|大屏|驾驶舱"
     pin_words = r"钉|固定|保存|放到|放入|加入|添加|挂到"
     forecast_words = r"预测|预估|推算|估一下|大概会|会到多少|还会继续|未来(?:\d+|一|二|三|四|五|六|七|八|九|十|下个|下月|下季度|下半年|一年)|下个月|下季度|走势外推|forecast|prediction"
-    alert_words = r"预警|告警|警报|提醒|通知|低于|高于|超过|跌破|阈值|异常|alert|warning"
+    alert_words = r"预警|告警|警报|提醒|通知|低于|高于|超过|跌破|阈值|阀值|异常|alert|warning"
     what_if_words = r"what-?if|如果|若|假设|推演|模拟|测算"
 
     if re.search(model_words, question, re.I):
@@ -2507,14 +2509,55 @@ def infer_patch_intent(raw_intent: Any, operations: list[dict[str, Any]]) -> str
     return "PATCH_MODEL"
 
 
+INFRASTRUCTURE_MODEL_NAMES = {
+    "default",
+    "openai-default",
+    "commercial-default",
+    "local-private",
+    "默认",
+    "默认模型",
+    "闭源商用",
+    "闭源商用模型",
+    "本地私有化",
+    "本地私有化模型",
+    "qwen-plus",
+    "qwen-max",
+    "qwen-turbo",
+    "deepseek-chat",
+    "deepseek-reasoner",
+    "gpt-4",
+    "gpt-4o",
+    "gpt-4o-mini",
+}
+
+INFRASTRUCTURE_MODEL_NAME_RE = re.compile(
+    r"^(?:qwen|deepseek|gpt|glm|llama|claude|kimi|doubao|ernie|wenxin|chatglm|baichuan|minimax|mistral|gemini|moonshot|ollama|openai|dashscope)(?:[\w.:-]*)?$",
+    re.IGNORECASE,
+)
+
+
+def is_infrastructure_model_name(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    compact = re.sub(r"[“”\"'`<>\s]+", "", value)
+    stripped = compact[:-2] if compact.endswith("模型") else compact
+    candidates = {compact.lower(), stripped.lower()}
+    return any(
+        candidate in INFRASTRUCTURE_MODEL_NAMES
+        or bool(INFRASTRUCTURE_MODEL_NAME_RE.fullmatch(candidate))
+        for candidate in candidates
+    )
+
+
 def infer_business_model_name(ai_name: str, requirement: str, question: str) -> str:
     candidate = clean_business_model_name(ai_name)
-    if candidate:
+    if candidate and not is_infrastructure_model_name(candidate):
         return ensure_model_suffix(candidate)
 
     for source in [requirement, question]:
         candidate = extract_business_subject(source)
-        if candidate:
+        if candidate and not is_infrastructure_model_name(candidate):
             return ensure_model_suffix(candidate)
 
     return "零代码业务模型"
@@ -2610,7 +2653,9 @@ def build_text_to_sql_prompt(payload: TextToSqlRequest) -> str:
     ) or "暂无预览样本"
     examples = get_prompt_examples(payload.fields)
     graph_hint_text = build_graph_hint_prompt(payload)
+    follow_up_text = build_follow_up_context_prompt(payload)
     return (
+        f"Follow-up structured context:\n{follow_up_text}\n\n"
         f"用户问题：{payload.question}\n"
         f"目标表：{payload.tableName}\n"
         f"字段信息：\n{fields_text}\n\n"
@@ -2631,6 +2676,32 @@ def build_text_to_sql_prompt(payload: TextToSqlRequest) -> str:
         "如果是时间维度字符串，优先使用 DATE_FORMAT / STR_TO_DATE / CAST 等兼容 MySQL 的方式，并避免使用 DATE(...) 直接包裹非日期列。"
         "如果图谱映射提示提供了推荐维度/指标/业务公式，优先按该提示生成字段映射和聚合表达式；若冲突，需要在 reasoning 说明。"
     )
+
+
+def build_follow_up_context_prompt(payload: TextToSqlRequest) -> str:
+    context = payload.followUpContext if isinstance(payload.followUpContext, dict) else {}
+    if not context:
+        return "none"
+    mapping = context.get("fieldMapping") if isinstance(context.get("fieldMapping"), dict) else {}
+    lines = [
+        "- rule: Treat rawQuestion as the user's delta. Inherit previous dimension, metric, chart type, table, time range and filters unless rawQuestion explicitly names a replacement."
+    ]
+    raw_question = str(getattr(payload, "rawQuestion", "") or "").strip()
+    if raw_question:
+        lines.append(f"- rawQuestion: {raw_question}")
+    for key in ["parentTurnId", "tableName", "chartType", "sourceQuestion"]:
+        value = str(context.get(key) or "").strip()
+        if value:
+            lines.append(f"- {key}: {value}")
+    if mapping:
+        for key in ["dimensionKey", "dimension", "metricKey", "metric", "timeField", "filterExpression"]:
+            value = str(mapping.get(key) or "").strip()
+            if value:
+                lines.append(f"- fieldMapping.{key}: {value}")
+    sql = str(context.get("sql") or "").strip()
+    if sql:
+        lines.append(f"- previousSql: {sql[:1200]}")
+    return "\n".join(lines) if lines else "none"
 
 
 def get_prompt_examples(fields: list[FieldMeta]) -> str:
@@ -3121,10 +3192,54 @@ def resolve_graph_sql_plan(payload: TextToSqlRequest) -> dict[str, Any]:
     }
 
 
+def resolve_follow_up_sql_plan(payload: TextToSqlRequest) -> dict[str, Any]:
+    context = payload.followUpContext if isinstance(payload.followUpContext, dict) else {}
+    mapping = context.get("fieldMapping") if isinstance(context.get("fieldMapping"), dict) else {}
+    if not mapping:
+        return {"used": False, "dimension_field": None, "metric_field": None}
+
+    field_by_col = {field.columnName.lower(): field for field in payload.fields}
+    field_by_display = {field.displayName.lower(): field for field in payload.fields if field.displayName}
+
+    dimension_field = None
+    for ref in [
+        mapping.get("dimensionKey"),
+        mapping.get("dimensionField"),
+        mapping.get("dimension"),
+        mapping.get("dimensionLabel"),
+    ]:
+        dimension_field = match_field_by_ref(str(ref or ""), field_by_col, field_by_display)
+        if dimension_field and dimension_field.fieldType != "NUMBER":
+            break
+        dimension_field = None
+
+    metric_field = None
+    for ref in [
+        mapping.get("metricKey"),
+        mapping.get("metricField"),
+        mapping.get("metric"),
+        mapping.get("metricLabel"),
+    ]:
+        metric_field = match_field_by_ref(str(ref or ""), field_by_col, field_by_display)
+        if metric_field and metric_field.fieldType == "NUMBER":
+            break
+        metric_field = None
+
+    return {
+        "used": bool(dimension_field or metric_field),
+        "dimension_field": dimension_field,
+        "metric_field": metric_field,
+    }
+
+
 def build_graph_guided_sql_result(payload: TextToSqlRequest, graph_plan: dict[str, Any], chart_type: str) -> dict[str, Any]:
-    dimension = choose_dimension(payload.question, payload.fields, graph_plan.get("dimension_field"))
-    metric = choose_metric(payload.question, payload.fields, graph_plan.get("metric_field"))
-    final_chart_type = chart_type if chart_type in {"bar", "line", "pie"} else choose_chart_type(payload.question, dimension)
+    follow_up_plan = resolve_follow_up_sql_plan(payload)
+    semantic_question = (payload.rawQuestion or payload.question or "").strip()
+    preferred_dimension = graph_plan.get("dimension_field") or follow_up_plan.get("dimension_field")
+    preferred_metric = graph_plan.get("metric_field") or follow_up_plan.get("metric_field")
+    dimension = choose_dimension(semantic_question, payload.fields, preferred_dimension)
+    metric = choose_metric(semantic_question, payload.fields, preferred_metric)
+    final_chart_type = chart_type if chart_type in {"bar", "line", "pie"} else choose_chart_type(semantic_question, dimension)
 
     if metric and graph_plan.get("metric_formula"):
         formula_expr = build_formula_expression(str(graph_plan.get("metric_formula")), payload.fields)
@@ -3145,13 +3260,13 @@ def build_graph_guided_sql_result(payload: TextToSqlRequest, graph_plan: dict[st
         metric_name = "记录数"
         metric_key = "value"
 
-    dimension_expr = build_dimension_expression(payload.question, dimension)
-    limit = parse_nl_limit(payload.question, 30)
+    dimension_expr = build_dimension_expression(semantic_question, dimension)
+    limit = parse_nl_limit(semantic_question, 30)
     if final_chart_type == "line":
         order_expr = "dim_name ASC"
     else:
-        order_expr = "metric_value ASC" if wants_ascending_rank(payload.question) else "metric_value DESC"
-    where_expr = " AND ".join(build_semantic_filters(payload.question, dimension, payload.fields))
+        order_expr = "metric_value ASC" if wants_ascending_rank(semantic_question) else "metric_value DESC"
+    where_expr = " AND ".join(build_semantic_filters(semantic_question, dimension, payload.fields))
     sql = (
         f"SELECT {dimension_expr} AS dim_name, {value_expr} AS metric_value "
         f"FROM `{payload.tableName}` "
@@ -3201,12 +3316,13 @@ def should_override_sql_with_graph_plan(sql: str, graph_plan: dict[str, Any], pa
 
 def should_override_sql_with_semantic_plan(sql: str, ai_result: dict[str, Any], payload: TextToSqlRequest) -> bool:
     sql_lower = str(sql or "").lower()
-    question = payload.question or ""
+    question = (payload.rawQuestion or payload.question or "").strip()
     if not sql_lower:
         return True
 
-    expected_dimension = choose_dimension(question, payload.fields)
-    expected_metric = choose_metric(question, payload.fields)
+    follow_up_plan = resolve_follow_up_sql_plan(payload)
+    expected_dimension = choose_dimension(question, payload.fields, follow_up_plan.get("dimension_field"))
+    expected_metric = choose_metric(question, payload.fields, follow_up_plan.get("metric_field"))
     mapping = ai_result.get("fieldMapping") if isinstance(ai_result.get("fieldMapping"), dict) else {}
     mapped_dimension = str(mapping.get("dimensionKey") or mapping.get("dimension") or "").strip().lower()
     mapped_metric = str(mapping.get("metricKey") or mapping.get("metric") or "").strip().lower()
