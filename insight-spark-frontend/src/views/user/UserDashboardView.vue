@@ -80,6 +80,16 @@
             <div v-if="card._previewKind === 'unavailable'" class="chart-box chart-box--empty">
               <el-empty :description="card.unavailableMessage || '图表暂不可用'" :image-size="48" />
             </div>
+            <div v-else-if="isMetricPreviewCard(card)" class="chart-box chart-box--metric">
+              <div class="preview-metric-value">
+                <span>{{ metricDisplayForCard(card).value }}</span>
+                <small v-if="metricDisplayForCard(card).unit">{{ metricDisplayForCard(card).unit }}</small>
+              </div>
+              <div class="preview-metric-label">{{ metricDisplayForCard(card).label }}</div>
+              <div v-if="metricDisplayForCard(card).compareValue" class="preview-metric-compare">
+                {{ metricDisplayForCard(card).compareLabel }} {{ metricDisplayForCard(card).compareValue }}
+              </div>
+            </div>
             <div v-else :ref="setChartRef('chart-list', card._renderKey)" class="chart-box" />
             <details
               v-if="card.sql"
@@ -194,7 +204,8 @@ import {
   previewChartDialogWidth
 } from '../../utils/dashboardGrid.js'
 import { resolveBasicWidgetEntry } from '../../utils/dashboardBasicWidgetRegistry.js'
-import { buildOptionFromHistoryRow } from '../../utils/chartOptionFromSnapshot.js'
+import { buildOptionFromHistoryRow, normalizeChartType } from '../../utils/chartOptionFromSnapshot.js'
+import { snapshotMetricDisplay } from '../../utils/dashboardChartSnapshotView.js'
 import { setCollabNav } from '../../utils/collabNav.js'
 
 const API_BASE = 'http://localhost:8080'
@@ -277,16 +288,31 @@ const parseLayout = (layoutJson) => {
   }
 }
 
-const normalizeChartType = (value) => {
-  const type = String(value || '').toLowerCase()
-  if (type === 'line' || type === 'pie') return type
-  return 'bar'
+const chartTypeLabel = (type) => {
+  const normalized = normalizeChartType(type)
+  if (normalized === 'line') return '折线图'
+  if (normalized === 'pie') return '饼图'
+  if (normalized === 'radar') return '雷达图'
+  if (normalized === 'scatter') return '散点图'
+  if (normalized === 'metric') return '指标卡'
+  if (normalized === 'map') return '地图'
+  if (normalized === 'table') return '表格'
+  return '柱状图'
 }
 
-const chartTypeLabel = (type) => {
-  if (type === 'line') return '折线图'
-  if (type === 'pie') return '饼图'
-  return '柱状图'
+const isMetricPreviewCard = (card) => normalizeChartType(card?.chartType) === 'metric'
+
+const metricDisplayForCard = (card) => {
+  if (card?.payloadRow) return snapshotMetricDisplay(card.payloadRow)
+  return snapshotMetricDisplay({
+    chartType: 'metric',
+    chartSnapshot: {
+      chartType: 'metric',
+      message: card?.title || '',
+      fieldMapping: { metric: card?.title || '' },
+      data: Array.isArray(card?.data) ? card.data : []
+    }
+  })
 }
 
 const toNumber = (value) => {
@@ -319,8 +345,22 @@ const normalizeChartItem = (item) => {
 }
 
 const buildChartOption = (card) => {
+  const chartType = normalizeChartType(card?.chartType)
+  if (chartType === 'metric') return null
+  if (['radar', 'scatter', 'map'].includes(chartType)) {
+    const shared = buildOptionFromHistoryRow({
+      chartType,
+      chartSnapshot: {
+        chartType,
+        message: card?.title || '',
+        fieldMapping: { metric: card?.title || '' },
+        data: Array.isArray(card?.data) ? card.data : []
+      }
+    }, card?.chartUi || {})
+    if (shared) return shared
+  }
   const points = Array.isArray(card.data) ? card.data.map(normalizeChartItem) : []
-  if (card.chartType === 'pie') {
+  if (chartType === 'pie') {
     const many = points.length > 10
     return {
       tooltip: { trigger: 'item', confine: true },
@@ -406,8 +446,8 @@ const buildChartOption = (card) => {
     },
     series: [
       {
-        type: card.chartType,
-        smooth: card.chartType === 'line',
+        type: chartType,
+        smooth: chartType === 'line',
         data: seriesData,
         barMaxWidth: 36,
         large: seriesData.length > 80,
@@ -494,6 +534,18 @@ const renderScopeCharts = async (scope, cards) => {
     const renderKey = String(card._renderKey || card.cardId || '')
     if (!renderKey) return
     const fullKey = `${scope}:${renderKey}`
+    if (isMetricPreviewCard(card)) {
+      const existing = chartInstances.get(fullKey)
+      if (existing) {
+        try {
+          existing.dispose()
+        } catch (error) {
+          // ignore
+        }
+        chartInstances.delete(fullKey)
+      }
+      return
+    }
     alive.add(fullKey)
     const container = refs.get(renderKey)
     if (!container) return
@@ -523,6 +575,7 @@ const renderScopeCharts = async (scope, cards) => {
         : card.payloadRow != null
         ? buildOptionFromHistoryRow(card.payloadRow, card.chartUi || {})
         : buildChartOption(card)
+    if (!option) return
     instance.setOption(option, true)
     instance.resize()
     requestAnimationFrame(() => {
@@ -1155,6 +1208,47 @@ onBeforeUnmount(() => {
   min-height: 200px;
   aspect-ratio: auto;
   width: 100%;
+}
+
+.chart-box--metric {
+  min-height: 220px;
+  padding: 18px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.preview-metric-value {
+  display: inline-flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 6px;
+  color: #0f172a;
+  font-size: 40px;
+  line-height: 1.1;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  word-break: break-word;
+}
+
+.preview-metric-value small {
+  padding-bottom: 3px;
+  color: #64748b;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.preview-metric-label,
+.preview-metric-compare {
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 .sql-wrap {

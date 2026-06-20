@@ -3876,7 +3876,11 @@ public class DiagnosisService {
             case "bar" -> "\u67f1\u72b6\u56fe";
             case "line" -> "\u6298\u7ebf\u56fe";
             case "pie" -> "\u997c\u56fe";
+            case "doughnut", "donut" -> "\u73af\u5f62\u56fe";
+            case "radar" -> "\u96f7\u8fbe\u56fe";
             case "scatter" -> "\u6563\u70b9\u56fe";
+            case "metric", "card", "kpi", "indicator" -> "\u6307\u6807\u5361";
+            case "map" -> "\u5730\u56fe";
             default -> chartType == null || chartType.isBlank() || looksMojibake(chartType) ? "\u56fe\u8868" : chartType;
         };
     }

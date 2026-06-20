@@ -2176,6 +2176,9 @@ public class StackCDashboardService {
             case "line" -> "趋势";
             case "bar" -> "统计";
             case "scatter" -> "分布";
+            case "radar" -> "画像";
+            case "metric", "card", "kpi", "indicator" -> "指标";
+            case "map" -> "地图";
             default -> "图";
         };
     }

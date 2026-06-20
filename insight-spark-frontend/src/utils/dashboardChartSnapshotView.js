@@ -42,32 +42,84 @@ export function snapshotTableColumns(payload) {
   return Object.keys(first).map((key) => ({ prop: key, label: key }))
 }
 
-/**
- * @returns {{ label: string, value: string, raw: number|null }}
- */
 export function snapshotMetricDisplay(payload) {
   const snap = snapshotFromPayload(payload)
   const fm = snap.fieldMapping && typeof snap.fieldMapping === 'object' ? snap.fieldMapping : {}
-  const label = String(fm.metric || fm.metricField || snap.message || '指标').trim() || '指标'
+  const label = String(
+    fm.metric ||
+    fm.metricLabel ||
+    fm.metricField ||
+    fm.metricKey ||
+    snap.label ||
+    snap.message ||
+    '指标'
+  ).trim() || '指标'
+  const unit = String(fm.unit || snap.unit || '').trim()
+  const compareLabel = String(fm.compareLabel || snap.compareLabel || '对比值').trim() || '对比值'
   const rows = Array.isArray(snap.data) ? snap.data : []
   const first = rows[0]
   if (first && typeof first === 'object') {
     const keys = Object.keys(first)
+    const metricKey = String(fm.metricKey || fm.valueKey || fm.metricField || '').trim()
     const valueKey =
+      (metricKey && keys.includes(metricKey) ? metricKey : '') ||
       keys.find((k) => ['value', 'count', 'amount', 'total', 'sales', 'metric', 'metric_value'].includes(k)) ||
       keys.find((k) => k !== 'name' && k !== 'label') ||
       keys[1] ||
       keys[0]
     const raw = Number(first[valueKey] ?? first.value ?? 0)
     const text = Number.isFinite(raw) ? formatMetricNumber(raw) : String(first[valueKey] ?? first.value ?? '—')
-    return { label, value: text, raw: Number.isFinite(raw) ? raw : null }
+    const compareKey = String(fm.compareMetricKey || fm.compareKey || '').trim()
+    const compareRawValue =
+      first.compareValue ??
+      first.compare_value ??
+      (compareKey && Object.prototype.hasOwnProperty.call(first, compareKey) ? first[compareKey] : undefined)
+    const compareRaw = Number(compareRawValue)
+    const trendKey = String(fm.trendKey || '').trim()
+    const explicitTrend = String(
+      first.trend ??
+      first.trend_direction ??
+      (trendKey && Object.prototype.hasOwnProperty.call(first, trendKey) ? first[trendKey] : '') ??
+      ''
+    ).trim().toLowerCase()
+    const trend = normalizeMetricTrend(explicitTrend, raw, compareRaw)
+    return {
+      label,
+      value: text,
+      raw: Number.isFinite(raw) ? raw : null,
+      unit,
+      compareLabel,
+      compareValue: Number.isFinite(compareRaw) ? formatMetricNumber(compareRaw) : '',
+      compareRaw: Number.isFinite(compareRaw) ? compareRaw : null,
+      trend,
+      note: rows.length > 1 || keys.length > 2 ? '已选取首个核心指标' : ''
+    }
   }
   const raw = Number(first)
   return {
     label,
     value: Number.isFinite(raw) ? formatMetricNumber(raw) : '—',
-    raw: Number.isFinite(raw) ? raw : null
+    raw: Number.isFinite(raw) ? raw : null,
+    unit,
+    compareLabel,
+    compareValue: '',
+    compareRaw: null,
+    trend: '',
+    note: ''
   }
+}
+
+function normalizeMetricTrend(value, raw, compareRaw) {
+  const text = String(value || '').toLowerCase()
+  if (['up', 'rise', 'increase', 'positive', '增长', '上升'].includes(text)) return 'up'
+  if (['down', 'fall', 'decrease', 'negative', '下降'].includes(text)) return 'down'
+  if (['flat', 'same', 'stable', '持平'].includes(text)) return 'flat'
+  if (Number.isFinite(raw) && Number.isFinite(compareRaw)) {
+    if (raw > compareRaw) return 'up'
+    if (raw < compareRaw) return 'down'
+    return 'flat'
+  }
+  return ''
 }
 
 function formatMetricNumber(n) {

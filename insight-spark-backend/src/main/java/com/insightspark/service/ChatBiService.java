@@ -355,6 +355,16 @@ public class ChatBiService {
         generatedSql = followUpMetricCorrection.sql();
         chartType = followUpMetricCorrection.chartType();
         fieldMapping = followUpMetricCorrection.fieldMapping();
+        SemanticSqlCorrection chartIntentCorrection = applyChartIntentShapeGuard(question, queryTableName, fields,
+                generatedSql, chartType, fieldMapping, generationTrace);
+        generatedSql = chartIntentCorrection.sql();
+        chartType = chartIntentCorrection.chartType();
+        fieldMapping = chartIntentCorrection.fieldMapping();
+        SemanticSqlCorrection detailIntentCorrection = applyExplicitDetailTableGuard(question, queryTableName,
+                fields, generatedSql, chartType, fieldMapping, generationTrace);
+        generatedSql = detailIntentCorrection.sql();
+        chartType = detailIntentCorrection.chartType();
+        fieldMapping = detailIntentCorrection.fieldMapping();
         graphContext = filterGraphContextForCurrentQuery(question, activeTable, fields, generatedSql, graphContext);
 
         log.info("Generated SQL: {}", generatedSql);
@@ -471,6 +481,20 @@ public class ChatBiService {
             }
             chartRecommendation = recommendConfiguredChart(question, fields, queryResult, chartType);
             chartType = Objects.toString(chartRecommendation.getOrDefault("chartType", chartType), chartType);
+            ChartShapeCorrection chartShapeCorrection = applyChartShapeCorrection(question, activeTable, queryTableName,
+                    fields, generatedSql, chartType, fieldMapping, queryResult, maskReport, officialSource,
+                    guard.maxRows(), generationTrace);
+            if (chartShapeCorrection.changed()) {
+                generatedSql = chartShapeCorrection.sql();
+                chartType = chartShapeCorrection.chartType();
+                fieldMapping = chartShapeCorrection.fieldMapping();
+                queryResult = chartShapeCorrection.rows();
+                maskReport = chartShapeCorrection.maskReport();
+            }
+            if (isExplicitDetailIntent(question) && !"table".equalsIgnoreCase(chartType)) {
+                chartType = "table";
+                generationTrace.add("detailTableTypeGuard=APPLIED;reason=EXPLICIT_DETAIL_INTENT");
+            }
             Map<String, Object> chartPolicyMeta = new LinkedHashMap<>();
             chartPolicyMeta.put("chartType", chartType);
             chartPolicyMeta.put("recommendationStatus", Objects.toString(chartRecommendation.get("status"), ""));
@@ -478,7 +502,7 @@ public class ChatBiService {
                     "已根据管理员图表偏好选择 " + chartName(chartType),
                     chartPolicyMeta);
             if ("table".equalsIgnoreCase(chartType) && shouldRequeryDetailTable(queryResult)
-                    && !businessSemanticPlan.hasSemanticConstraint()) {
+                    && (!businessSemanticPlan.hasSemanticConstraint() || isExplicitDetailIntent(question))) {
                 RuleBasedNl2SqlStrategy.FieldChoice detailChoice = ruleBasedNl2SqlStrategy.chooseFields(question, fields);
                 String detailSql = sqlAuditService.ensureLimit(
                         ruleBasedNl2SqlStrategy.buildSql(queryTableName, detailChoice, "table"), 200);
@@ -624,10 +648,23 @@ public class ChatBiService {
      */
     private void attachChartEncodingSpec(Map<String, Object> response, String chartType, Map<String, Object> aiRaw) {
         response.put("chartEngine", "echarts");
-        response.put("dimensions", List.of("name", "value"));
+        response.put("dimensions", defaultDimensionsForChart(response, chartType));
         Map<String, Object> encode = defaultEncodeForChartType(chartType);
+        if ("radar".equalsIgnoreCase(chartType)) {
+            encode.put("itemName", "name");
+        }
         if (aiRaw != null && aiRaw.get("encode") instanceof Map<?, ?> em) {
             encode.putAll(castToObjectMap(em));
+        }
+        if ("scatter".equalsIgnoreCase(chartType)) {
+            Map<String, Object> fieldMapping = safeMap(response == null ? null : response.get("fieldMapping"));
+            String xKey = Objects.toString(fieldMapping.getOrDefault("xMetricKey", ""), "").trim();
+            String yKey = Objects.toString(fieldMapping.getOrDefault("yMetricKey", ""), "").trim();
+            if (!xKey.isBlank() && !yKey.isBlank()) {
+                encode.put("itemName", "name");
+                encode.put("x", xKey);
+                encode.put("y", yKey);
+            }
         }
         response.put("encode", encode);
         Map<String, Object> template = defaultOptionTemplateForChartType(chartType);
@@ -635,6 +672,41 @@ public class ChatBiService {
             template = deepMergeMaps(template, castToObjectMap(tm));
         }
         response.put("optionTemplate", template);
+    }
+
+    private List<String> defaultDimensionsForChart(Map<String, Object> response, String chartType) {
+        if ("scatter".equalsIgnoreCase(chartType)) {
+            Map<String, Object> fieldMapping = safeMap(response == null ? null : response.get("fieldMapping"));
+            String xKey = Objects.toString(fieldMapping.getOrDefault("xMetricKey", ""), "").trim();
+            String yKey = Objects.toString(fieldMapping.getOrDefault("yMetricKey", ""), "").trim();
+            if (xKey.isBlank() || yKey.isBlank() || xKey.equals(yKey)) {
+                return List.of("name", "value");
+            }
+            List<Map<String, Object>> rows = asMapList(response == null ? null : response.get("data"));
+            Map<String, Object> firstRow = rows == null || rows.isEmpty() ? Map.of() : rows.get(0);
+            if (!firstRow.isEmpty() && (!firstRow.containsKey(xKey) || !firstRow.containsKey(yKey))) {
+                return List.of("name", "value");
+            }
+            return List.of("name", xKey, yKey);
+        }
+        if (!"radar".equalsIgnoreCase(chartType)) {
+            return List.of("name", "value");
+        }
+        Map<String, Object> fieldMapping = safeMap(response == null ? null : response.get("fieldMapping"));
+        List<String> metricKeys = readStringList(fieldMapping.get("metricKeys"));
+        if (metricKeys.size() < 3) {
+            return List.of("name", "value");
+        }
+        List<Map<String, Object>> rows = asMapList(response == null ? null : response.get("data"));
+        Map<String, Object> firstRow = rows == null || rows.isEmpty() ? Map.of() : rows.get(0);
+        List<String> dimensions = new ArrayList<>();
+        dimensions.add("name");
+        for (String key : metricKeys) {
+            if (!dimensions.contains(key) && (firstRow.isEmpty() || firstRow.containsKey(key))) {
+                dimensions.add(key);
+            }
+        }
+        return dimensions.size() >= 4 ? List.copyOf(dimensions) : List.of("name", "value");
     }
 
     private void applyAutoForecastIfNeeded(Map<String, Object> response,
@@ -1667,6 +1739,11 @@ public class ChatBiService {
     private record SemanticSqlCorrection(String sql, String chartType, Map<String, Object> fieldMapping) {
     }
 
+    private record ChartShapeCorrection(String sql, String chartType, Map<String, Object> fieldMapping,
+                                        List<Map<String, Object>> rows, SqlAuditService.MaskReport maskReport,
+                                        boolean changed) {
+    }
+
     private SemanticSqlCorrection applySemanticSqlGuard(String question, String queryTableName,
             List<Map<String, Object>> fields, String generatedSql, String chartType,
             Map<String, Object> fieldMapping, List<String> generationTrace) {
@@ -1940,6 +2017,642 @@ public class ChatBiService {
                 + intent.limit() + ";direction=" + (intent.ascending() ? "ASC" : "DESC")
                 + ";mode=REBUILD_AGGREGATION");
         return new SemanticSqlCorrection(rebuiltSql, "bar", correctedMapping);
+    }
+
+    private SemanticSqlCorrection applyExplicitDetailTableGuard(String question, String queryTableName,
+            List<Map<String, Object>> fields, String generatedSql, String chartType,
+            Map<String, Object> fieldMapping, List<String> generationTrace) {
+        if (!isExplicitDetailIntent(question)) {
+            return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+        }
+        RuleBasedNl2SqlStrategy.FieldChoice detailChoice = ruleBasedNl2SqlStrategy.chooseFields(question, fields);
+        String detailSql = ruleBasedNl2SqlStrategy.buildSql(queryTableName, detailChoice, "table");
+        String sql = Objects.toString(generatedSql, "").trim();
+        boolean needsDetailSql = !"table".equalsIgnoreCase(chartType)
+                || sql.isBlank()
+                || isAggregateLikeTableSql(sql)
+                || !sqlSelectsRequestedDetailColumns(sql, detailChoice.tableColumns())
+                || !sqlContainsDetailFilters(sql, detailChoice.resolutionLog());
+        if (!needsDetailSql) {
+            Map<String, Object> mergedMapping = new LinkedHashMap<>(fieldMapping == null ? Map.of() : fieldMapping);
+            if (!detailChoice.tableColumns().isEmpty()) {
+                mergedMapping.put("tableColumns", detailChoice.tableColumns());
+            }
+            mergedMapping.put("fieldResolution", detailChoice.resolutionLog());
+            return new SemanticSqlCorrection(generatedSql, "table", mergedMapping);
+        }
+        if (generationTrace != null) {
+            generationTrace.add("detailTableGuard=APPLIED;reason=EXPLICIT_DETAIL_INTENT;columns="
+                    + detailChoice.tableColumns().size());
+        }
+        return new SemanticSqlCorrection(detailSql, "table", fallbackFieldMapping(detailChoice));
+    }
+
+    private boolean isAggregateLikeTableSql(String sql) {
+        String lower = Objects.toString(sql, "").toLowerCase(Locale.ROOT);
+        return hasGroupBy(sql)
+                || lower.contains(" as dim_name")
+                || lower.contains(" as metric_value")
+                || Pattern.compile("(?is)\\b(sum|avg|count|min|max)\\s*\\(").matcher(sql).find();
+    }
+
+    private boolean sqlSelectsRequestedDetailColumns(String sql, List<String> columns) {
+        if (columns == null || columns.isEmpty()) {
+            return true;
+        }
+        String source = Objects.toString(sql, "");
+        if (Pattern.compile("(?is)\\bselect\\s+\\*\\s+from\\b").matcher(source).find()) {
+            return true;
+        }
+        for (String column : columns) {
+            String name = Objects.toString(column, "").trim();
+            if (name.isBlank()) {
+                continue;
+            }
+            if (!source.contains("`" + name + "`")) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean sqlContainsDetailFilters(String sql, Map<String, Object> resolutionLog) {
+        List<Map<String, Object>> filters = detailFiltersFromResolutionLog(resolutionLog);
+        if (filters.isEmpty()) {
+            return true;
+        }
+        String whereClause = sqlWhereClauseForFilterCheck(sql);
+        if (whereClause.isBlank()) {
+            return false;
+        }
+        for (Map<String, Object> filter : filters) {
+            String column = Objects.toString(filter.get("column"), "").trim();
+            String value = Objects.toString(filter.get("value"), "").trim();
+            if (column.isBlank() || value.isBlank()) {
+                continue;
+            }
+            if (!sqlReferencesColumn(whereClause, column) || !sqlContainsLiteralValue(whereClause, value)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private List<Map<String, Object>> detailFiltersFromResolutionLog(Map<String, Object> resolutionLog) {
+        if (resolutionLog == null || !(resolutionLog.get("detailFilters") instanceof List<?> rawFilters)) {
+            return List.of();
+        }
+        List<Map<String, Object>> filters = new ArrayList<>();
+        for (Object rawFilter : rawFilters) {
+            if (!(rawFilter instanceof Map<?, ?> rawMap)) {
+                continue;
+            }
+            Map<String, Object> filter = new LinkedHashMap<>();
+            rawMap.forEach((key, value) -> filter.put(Objects.toString(key, ""), value));
+            filters.add(filter);
+        }
+        return filters;
+    }
+
+    private String sqlWhereClauseForFilterCheck(String sql) {
+        Matcher matcher = Pattern.compile("(?is)\\bwhere\\b(.+?)(?:\\bgroup\\s+by\\b|\\border\\s+by\\b|\\blimit\\b|$)")
+                .matcher(Objects.toString(sql, ""));
+        return matcher.find() ? matcher.group(1) : "";
+    }
+
+    private boolean sqlContainsLiteralValue(String sql, String value) {
+        String literal = Objects.toString(value, "").trim();
+        if (literal.isBlank()) {
+            return false;
+        }
+        String source = Objects.toString(sql, "");
+        String singleQuoted = "'" + literal.replace("'", "''") + "'";
+        String doubleQuoted = "\"" + literal.replace("\"", "\"\"") + "\"";
+        return source.contains(singleQuoted) || source.contains(doubleQuoted) || source.contains(literal);
+    }
+
+    private SemanticSqlCorrection applyChartIntentShapeGuard(String question, String queryTableName,
+            List<Map<String, Object>> fields, String generatedSql, String chartType,
+            Map<String, Object> fieldMapping, List<String> generationTrace) {
+        if (shouldUseScatterShape(question, fields, chartType)) {
+            SemanticSqlCorrection rebuilt = rebuildScatterChartSql(question, queryTableName, fields, fieldMapping,
+                    generationTrace);
+            if (rebuilt != null && !Objects.toString(rebuilt.sql(), "").isBlank()) {
+                if (generationTrace != null) {
+                    generationTrace.add("chartIntentShapeGuard=APPLIED;chartType=scatter");
+                }
+                return rebuilt;
+            }
+        }
+        if (shouldUseRadarShape(question, fields, chartType)) {
+            SemanticSqlCorrection rebuilt = rebuildRadarChartSql(question, queryTableName, fields, fieldMapping,
+                    generationTrace);
+            if (rebuilt != null && !Objects.toString(rebuilt.sql(), "").isBlank()) {
+                if (generationTrace != null) {
+                    generationTrace.add("chartIntentShapeGuard=APPLIED;chartType=radar");
+                }
+                return rebuilt;
+            }
+        }
+        return new SemanticSqlCorrection(generatedSql, chartType, fieldMapping);
+    }
+
+    private boolean shouldUseRadarShape(String question, List<Map<String, Object>> fields, String chartType) {
+        String text = Objects.toString(question, "");
+        String lower = text.toLowerCase(Locale.ROOT);
+        if (containsAny(text, "地图", "地域", "省份", "城市") || lower.contains("map")) {
+            return false;
+        }
+        if (shouldUseScatterShape(question, fields, chartType) && !containsAny(text, "雷达")) {
+            return false;
+        }
+        int mentionedMetrics = mentionedNumericMetricCount(text, fields);
+        int numericMetrics = numericMetricCandidates(fields).size();
+        boolean explicitRadar = "radar".equalsIgnoreCase(chartType) || containsAny(text, "雷达") || lower.contains("radar");
+        boolean semanticRadar = containsAny(text, "综合表现", "综合对比", "综合评价", "综合分析", "综合差异",
+                "表现差异", "能力画像", "画像", "多指标", "多维", "多维度", "能力");
+        boolean comparison = containsAny(text, "对比", "比较", "差异", "按", "各", "之间");
+        if (explicitRadar) {
+            return numericMetrics >= 3 || mentionedMetrics >= 3;
+        }
+        return mentionedMetrics >= 3 && (semanticRadar || comparison);
+    }
+
+    private boolean shouldUseScatterShape(String question, List<Map<String, Object>> fields, String chartType) {
+        String text = Objects.toString(question, "");
+        String lower = text.toLowerCase(Locale.ROOT);
+        boolean scatterIntent = "scatter".equalsIgnoreCase(chartType)
+                || containsAny(text, "散点", "散点图", "相关", "相关性", "关系", "离群", "异常点", "异常分布点")
+                || lower.contains("scatter") || lower.contains("correlation") || lower.contains("outlier");
+        return scatterIntent && numericMetricCandidates(fields).size() >= 2;
+    }
+
+    private int mentionedNumericMetricCount(String question, List<Map<String, Object>> fields) {
+        int count = 0;
+        for (Map<String, Object> field : numericMetricCandidates(fields)) {
+            if (fieldReferenceMentionIndex(question, field) >= 0) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private ChartShapeCorrection applyChartShapeCorrection(String question, String activeTable,
+            String queryTableName, List<Map<String, Object>> fields, String generatedSql, String chartType,
+            Map<String, Object> fieldMapping, List<Map<String, Object>> rows,
+            SqlAuditService.MaskReport currentMaskReport, boolean officialSource, int maxRows,
+            List<String> generationTrace) {
+        String normalizedChartType = Objects.toString(chartType, "").trim().toLowerCase(Locale.ROOT);
+        if (!"scatter".equals(normalizedChartType) && !"radar".equals(normalizedChartType)) {
+            return new ChartShapeCorrection(generatedSql, chartType, fieldMapping, rows, currentMaskReport, false);
+        }
+        boolean hasRows = rows != null && !rows.isEmpty();
+        if (hasRows && "scatter".equals(normalizedChartType) && resolveScatterMetricKeys(rows, fieldMapping).size() >= 2) {
+            return new ChartShapeCorrection(generatedSql, chartType, fieldMapping, rows, currentMaskReport, false);
+        }
+        if (hasRows && "radar".equals(normalizedChartType) && resolveRadarMetricKeys(rows, fieldMapping).size() >= 3) {
+            return new ChartShapeCorrection(generatedSql, chartType, fieldMapping, rows, currentMaskReport, false);
+        }
+
+        SemanticSqlCorrection rebuilt = "scatter".equals(normalizedChartType)
+                ? rebuildScatterChartSql(question, queryTableName, fields, fieldMapping, generationTrace)
+                : rebuildRadarChartSql(question, queryTableName, fields, fieldMapping, generationTrace);
+        if (rebuilt == null || Objects.toString(rebuilt.sql(), "").isBlank()) {
+            if (generationTrace != null) {
+                generationTrace.add("chartShapeGuard=SKIPPED;reason=NO_REBUILD_SQL;chartType=" + normalizedChartType);
+            }
+            return new ChartShapeCorrection(generatedSql, chartType, fieldMapping, rows, currentMaskReport, false);
+        }
+
+        SqlAuditService.AuditResult rebuiltAudit = sqlAuditService.inspect(rebuilt.sql(), activeTable);
+        if (rebuiltAudit.blocked()) {
+            if (generationTrace != null) {
+                generationTrace.add("chartShapeGuard=SKIPPED;reason=" + rebuiltAudit.riskReason());
+            }
+            return new ChartShapeCorrection(generatedSql, chartType, fieldMapping, rows, currentMaskReport, false);
+        }
+        SqlAuditService.QueryGuardResult rebuiltGuard = sqlAuditService.guardSqlBeforeExecution(rebuilt.sql(),
+                activeTable, Math.max(1, maxRows));
+        if ("BLOCKED".equals(rebuiltGuard.action())) {
+            if (generationTrace != null) {
+                generationTrace.add("chartShapeGuard=SKIPPED;reason=" + rebuiltGuard.detail());
+            }
+            return new ChartShapeCorrection(generatedSql, chartType, fieldMapping, rows, currentMaskReport, false);
+        }
+
+        List<Map<String, Object>> rebuiltRows = officialSource
+                ? datasourceService.executeQueryWithinPermit(activeTable, rebuiltGuard.sql())
+                : queryUploadTable(activeTable, rebuiltGuard.sql(), rebuiltGuard.maxRows());
+        rebuiltRows = attachDimensionKey(rebuiltRows, rebuilt.fieldMapping());
+        SqlAuditService.MaskReport rebuiltMaskReport = sqlAuditService.maskRowsWithReport(activeTable, rebuiltRows);
+        rebuiltRows = rebuiltMaskReport.rows();
+        if (generationTrace != null) {
+            generationTrace.add("chartShapeGuard=APPLIED;chartType=" + rebuilt.chartType()
+                    + ";rows=" + rebuiltRows.size());
+        }
+        return new ChartShapeCorrection(rebuiltGuard.sql(), rebuilt.chartType(), rebuilt.fieldMapping(),
+                rebuiltRows, rebuiltMaskReport, true);
+    }
+
+    private SemanticSqlCorrection rebuildScatterChartSql(String question, String queryTableName,
+            List<Map<String, Object>> fields, Map<String, Object> fieldMapping, List<String> generationTrace) {
+        Map<String, Object> dimensionField = chooseScatterDimensionField(question, fields, fieldMapping);
+        Map<String, Object> groupField = chooseScatterBreakdownField(question, fields, dimensionField);
+        if (groupField == null && scatterBreakdownIntent(question)
+                && dimensionField != null && fieldReferenceMentionIndex(question, dimensionField) >= 0) {
+            Map<String, Object> pointDimension = chooseScatterPointDimension(question, fields, dimensionField);
+            if (pointDimension != null && !fieldColumn(pointDimension).isBlank()) {
+                groupField = dimensionField;
+                dimensionField = pointDimension;
+            }
+        }
+        List<Map<String, Object>> metrics = chooseScatterMetricFields(question, fields, fieldMapping);
+        if (dimensionField == null || fieldColumn(dimensionField).isBlank() || metrics.size() < 2) {
+            return new SemanticSqlCorrection("", "scatter", fieldMapping);
+        }
+        Map<String, Object> xField = metrics.get(0);
+        Map<String, Object> yField = metrics.get(1);
+        String dimensionColumn = fieldColumn(dimensionField);
+        String dimensionExpression = scatterDimensionExpression(question, dimensionField);
+        MetricProjection xProjection = metricProjection(question, xField);
+        MetricProjection yProjection = metricProjection(question, yField);
+        if (xProjection.column().isBlank() || yProjection.column().isBlank()
+                || xProjection.alias().equals(yProjection.alias())) {
+            return new SemanticSqlCorrection("", "scatter", fieldMapping);
+        }
+        StringBuilder sql = new StringBuilder();
+        String groupColumn = groupField == null ? "" : fieldColumn(groupField);
+        String groupExpression = groupColumn.isBlank() ? "" : "`" + groupColumn + "`";
+        String dimNameExpression = groupColumn.isBlank()
+                ? dimensionExpression
+                : "CONCAT(" + dimensionExpression + ", ' ', " + groupExpression + ")";
+        if (!groupColumn.isBlank()) {
+            sql.append("SELECT ").append(dimNameExpression).append(" AS dim_name, ")
+                    .append(dimensionExpression).append(" AS date_name, ")
+                    .append(groupExpression).append(" AS group_name, ");
+        } else {
+            sql.append("SELECT ").append(dimensionExpression).append(" AS dim_name, ");
+        }
+        sql.append(xProjection.expression()).append(" AS `").append(xProjection.alias()).append("`, ")
+                .append(yProjection.expression()).append(" AS `").append(yProjection.alias()).append("` ")
+                .append("FROM `").append(queryTableName).append("` WHERE `").append(dimensionColumn)
+                .append("` IS NOT NULL AND `").append(dimensionColumn).append("` <> '' ");
+        if (!groupColumn.isBlank()) {
+            sql.append("AND `").append(groupColumn).append("` IS NOT NULL AND `").append(groupColumn).append("` <> '' ")
+                    .append("GROUP BY ").append(dimNameExpression).append(", ")
+                    .append(dimensionExpression).append(", ").append(groupExpression)
+                    .append(" ORDER BY ").append(dimensionExpression).append(" ASC LIMIT 200");
+        } else {
+            sql.append("GROUP BY ").append(dimensionExpression)
+                    .append(" ORDER BY `").append(yProjection.alias()).append("` DESC LIMIT 80");
+        }
+
+        Map<String, Object> correctedMapping = new LinkedHashMap<>(fieldMapping == null ? Map.of() : fieldMapping);
+        correctedMapping.put("dimension", fieldDisplayName(dimensionField));
+        correctedMapping.put("dimensionKey", "dim_name");
+        correctedMapping.put("dimensionField", dimensionColumn);
+        correctedMapping.put("dimensionExpr", dimensionExpression);
+        if (!groupColumn.isBlank()) {
+            correctedMapping.put("group", fieldDisplayName(groupField));
+            correctedMapping.put("groupKey", "group_name");
+            correctedMapping.put("groupField", groupColumn);
+        }
+        correctedMapping.put("xMetric", fieldDisplayName(xField));
+        correctedMapping.put("xMetricKey", xProjection.alias());
+        correctedMapping.put("xMetricField", xProjection.column());
+        correctedMapping.put("xMetricExpr", xProjection.expression());
+        correctedMapping.put("yMetric", fieldDisplayName(yField));
+        correctedMapping.put("yMetricKey", yProjection.alias());
+        correctedMapping.put("yMetricField", yProjection.column());
+        correctedMapping.put("yMetricExpr", yProjection.expression());
+        correctedMapping.put("metric", fieldDisplayName(xField) + " / " + fieldDisplayName(yField));
+        correctedMapping.put("metricKey", yProjection.alias());
+        correctedMapping.put("metricField", yProjection.column());
+        correctedMapping.put("metricExpr", yProjection.expression());
+        if (generationTrace != null) {
+            generationTrace.add("chartShapeGuardRebuild=SCATTER;x=" + xProjection.column()
+                    + ";y=" + yProjection.column()
+                    + (groupColumn.isBlank() ? "" : ";group=" + groupColumn));
+        }
+        return new SemanticSqlCorrection(sql.toString(), "scatter", correctedMapping);
+    }
+
+    private Map<String, Object> chooseScatterDimensionField(String question, List<Map<String, Object>> fields,
+            Map<String, Object> fieldMapping) {
+        if (isTimeSeriesLikeQuestion(question) || containsAny(Objects.toString(question, ""), "每日", "每天", "按日", "日度")) {
+            Map<String, Object> timeField = findTimeField(fields);
+            if (timeField != null && !fieldColumn(timeField).isBlank()) {
+                return timeField;
+            }
+        }
+        return findDimensionField(fields, fieldMapping, question);
+    }
+
+    private Map<String, Object> chooseScatterBreakdownField(String question, List<Map<String, Object>> fields,
+            Map<String, Object> dimensionField) {
+        String text = Objects.toString(question, "");
+        if (!scatterBreakdownIntent(text)) {
+            return null;
+        }
+        String dimensionColumn = dimensionField == null ? "" : fieldColumn(dimensionField);
+        return (fields == null ? List.<Map<String, Object>>of() : fields).stream()
+                .filter(field -> !isNumericField(field))
+                .filter(field -> !fieldColumn(field).equals(dimensionColumn))
+                .filter(field -> fieldReferenceMentionIndex(text, field) >= 0)
+                .map(field -> Map.entry(field, dimensionFieldScore(field, text)))
+                .max(Map.Entry.comparingByValue())
+                .map(Map.Entry::getKey)
+                .orElse(null);
+    }
+
+    private boolean scatterBreakdownIntent(String question) {
+        String text = Objects.toString(question, "");
+        return containsAny(text, "区分", "分组", "按", "分类", "分颜色", "着色", "颜色", "分系列", "group", "series", "color");
+    }
+
+    private Map<String, Object> chooseScatterPointDimension(String question, List<Map<String, Object>> fields,
+            Map<String, Object> groupField) {
+        String groupColumn = groupField == null ? "" : fieldColumn(groupField);
+        List<Map<String, Object>> candidates = (fields == null ? List.<Map<String, Object>>of() : fields).stream()
+                .filter(field -> !isNumericField(field))
+                .filter(field -> !fieldColumn(field).equals(groupColumn))
+                .toList();
+        Optional<Map<String, Object>> timeField = candidates.stream()
+                .map(field -> Map.entry(field, timeFieldScore(field)))
+                .filter(entry -> entry.getValue() > 0)
+                .max(Map.Entry.comparingByValue())
+                .map(Map.Entry::getKey);
+        if (timeField.isPresent()) {
+            return timeField.get();
+        }
+        return candidates.stream()
+                .map(field -> Map.entry(field, dimensionFieldScore(field, question)))
+                .filter(entry -> entry.getValue() > 0)
+                .max(Map.Entry.comparingByValue())
+                .map(Map.Entry::getKey)
+                .orElse(candidates.isEmpty() ? null : candidates.get(0));
+    }
+
+    private String scatterDimensionExpression(String question, Map<String, Object> dimensionField) {
+        String column = fieldColumn(dimensionField);
+        if (column.isBlank()) {
+            return "dim_name";
+        }
+        if (timeFieldScore(dimensionField) <= 0) {
+            return "`" + column + "`";
+        }
+        String text = Objects.toString(question, "");
+        if (containsAny(text, "每月", "按月", "月度", "月份")) {
+            return "DATE_FORMAT(`" + column + "`, '%Y-%m')";
+        }
+        if (containsAny(text, "每年", "按年", "年度")) {
+            return "DATE_FORMAT(`" + column + "`, '%Y')";
+        }
+        if (containsAny(text, "每日", "每天", "按日", "按天", "日度")) {
+            return "DATE_FORMAT(`" + column + "`, '%Y-%m-%d')";
+        }
+        return "`" + column + "`";
+    }
+
+    private SemanticSqlCorrection rebuildRadarChartSql(String question, String queryTableName,
+            List<Map<String, Object>> fields, Map<String, Object> fieldMapping, List<String> generationTrace) {
+        Map<String, Object> dimensionField = findDimensionField(fields, fieldMapping, question);
+        List<Map<String, Object>> metrics = chooseRadarMetricFields(question, fields, fieldMapping);
+        if (dimensionField == null || fieldColumn(dimensionField).isBlank() || metrics.size() < 3) {
+            return new SemanticSqlCorrection("", "radar", fieldMapping);
+        }
+        String dimensionColumn = fieldColumn(dimensionField);
+        StringBuilder sql = new StringBuilder();
+        sql.append("SELECT `").append(dimensionColumn).append("` AS dim_name");
+        List<String> metricKeys = new ArrayList<>();
+        List<String> metricFields = new ArrayList<>();
+        Map<String, Object> metricLabels = new LinkedHashMap<>();
+        List<MetricProjection> projections = new ArrayList<>();
+        for (Map<String, Object> metric : metrics) {
+            MetricProjection projection = metricProjection(question, metric);
+            if (projection.column().isBlank() || projection.alias().isBlank()
+                    || metricKeys.contains(projection.alias())) {
+                continue;
+            }
+            projections.add(projection);
+            metricKeys.add(projection.alias());
+            metricFields.add(projection.column());
+            metricLabels.put(projection.alias(), projection.alias());
+            sql.append(", ").append(projection.expression()).append(" AS `").append(projection.alias()).append("`");
+        }
+        if (projections.size() < 3) {
+            return new SemanticSqlCorrection("", "radar", fieldMapping);
+        }
+        String orderAlias = projections.get(0).alias();
+        sql.append(" FROM `").append(queryTableName).append("` WHERE `").append(dimensionColumn)
+                .append("` IS NOT NULL AND `").append(dimensionColumn).append("` <> '' GROUP BY `")
+                .append(dimensionColumn).append("` ORDER BY `").append(orderAlias).append("` DESC LIMIT 30");
+
+        Map<String, Object> correctedMapping = new LinkedHashMap<>(fieldMapping == null ? Map.of() : fieldMapping);
+        correctedMapping.put("dimension", fieldDisplayName(dimensionField));
+        correctedMapping.put("dimensionKey", dimensionColumn);
+        correctedMapping.put("dimensionExpr", "`" + dimensionColumn + "`");
+        correctedMapping.put("metricKeys", metricKeys);
+        correctedMapping.put("metricFields", metricFields);
+        correctedMapping.put("metricLabels", metricLabels);
+        correctedMapping.put("metric", fieldDisplayName(metrics.get(0)));
+        correctedMapping.put("metricKey", projections.get(0).alias());
+        correctedMapping.put("metricField", projections.get(0).column());
+        correctedMapping.put("metricExpr", projections.get(0).expression());
+        if (generationTrace != null) {
+            generationTrace.add("chartShapeGuardRebuild=RADAR;metrics=" + String.join(",", metricFields));
+        }
+        return new SemanticSqlCorrection(sql.toString(), "radar", correctedMapping);
+    }
+
+    private record MetricProjection(String column, String alias, String aggregation, String expression) {
+    }
+
+    private MetricProjection metricProjection(String question, Map<String, Object> field) {
+        String column = fieldColumn(field);
+        if (column.isBlank()) {
+            return new MetricProjection("", "", "", "");
+        }
+        String aggregation = metricAggregation(question, field);
+        String alias = metricAlias(question, field, aggregation);
+        String expression = aggregation + "(CAST(NULLIF(`" + column + "`, '') AS DECIMAL(18,6)))";
+        return new MetricProjection(column, alias, aggregation, expression);
+    }
+
+    private List<Map<String, Object>> chooseScatterMetricFields(String question, List<Map<String, Object>> fields,
+            Map<String, Object> fieldMapping) {
+        List<Map<String, Object>> candidates = numericMetricCandidates(fields);
+        List<Map<String, Object>> ordered = new ArrayList<>();
+        for (String key : List.of(
+                Objects.toString(fieldMapping == null ? "" : fieldMapping.get("xMetricField"), "").trim(),
+                Objects.toString(fieldMapping == null ? "" : fieldMapping.get("xMetricKey"), "").trim(),
+                Objects.toString(fieldMapping == null ? "" : fieldMapping.get("yMetricField"), "").trim(),
+                Objects.toString(fieldMapping == null ? "" : fieldMapping.get("yMetricKey"), "").trim())) {
+            addMetricByReference(ordered, candidates, key);
+        }
+        candidates.stream()
+                .sorted((left, right) -> compareMetricIntent(left, right, question))
+                .forEach(field -> {
+                    if (!ordered.contains(field)) {
+                        ordered.add(field);
+                    }
+                });
+        return ordered.stream().limit(2).toList();
+    }
+
+    private List<Map<String, Object>> chooseRadarMetricFields(String question, List<Map<String, Object>> fields,
+            Map<String, Object> fieldMapping) {
+        List<Map<String, Object>> candidates = numericMetricCandidates(fields);
+        List<Map<String, Object>> ordered = new ArrayList<>();
+        List<Map<String, Object>> mentioned = candidates.stream()
+                .filter(field -> fieldReferenceMentionIndex(question, field) >= 0)
+                .sorted((left, right) -> compareMetricIntent(left, right, question))
+                .toList();
+        for (String key : readStringList(fieldMapping == null ? null : fieldMapping.get("metricFields"))) {
+            addMetricByReference(ordered, candidates, key);
+        }
+        for (String key : readStringList(fieldMapping == null ? null : fieldMapping.get("metricKeys"))) {
+            addMetricByReference(ordered, candidates, key);
+        }
+        if (mentioned.size() >= 3) {
+            for (Map<String, Object> field : mentioned) {
+                if (!ordered.contains(field)) {
+                    ordered.add(field);
+                }
+            }
+            return ordered.stream().limit(6).toList();
+        }
+        candidates.stream()
+                .sorted((left, right) -> compareMetricIntent(left, right, question))
+                .forEach(field -> {
+                    if (!ordered.contains(field)) {
+                        ordered.add(field);
+                    }
+                });
+        return ordered.stream().limit(5).toList();
+    }
+
+    private List<Map<String, Object>> numericMetricCandidates(List<Map<String, Object>> fields) {
+        return fields == null ? List.of() : fields.stream()
+                .filter(this::isNumericField)
+                .filter(field -> !isIdLikeMetricField(field))
+                .toList();
+    }
+
+    private void addMetricByReference(List<Map<String, Object>> ordered, List<Map<String, Object>> candidates,
+            String reference) {
+        Map<String, Object> matched = findFieldByReference(candidates, reference, true);
+        if (matched != null && !ordered.contains(matched)) {
+            ordered.add(matched);
+        }
+    }
+
+    private int metricIntentScore(Map<String, Object> field, String question) {
+        String text = Objects.toString(question, "");
+        String semantic = fieldSemanticText(field);
+        int score = metricFieldScore(field, question);
+        if (rawMentionsFieldReference(text, field)) {
+            score += 300;
+        }
+        if (containsAny(semantic, "rate", "ratio", "percent", "退货率", "率")) {
+            score += text.contains("率") || text.toLowerCase(Locale.ROOT).contains("rate") ? 130 : 30;
+        }
+        if (containsAny(semantic, "order", "订单量", "订单", "数量", "count", "qty")) {
+            score += containsAny(text, "订单", "数量", "order") ? 125 : 25;
+        }
+        if (containsAny(semantic, "turnover", "库存周转", "周转天数", "天数", "周期")) {
+            score += containsAny(text, "周转", "天数", "周期", "turnover") ? 125 : 25;
+        }
+        if (containsAny(semantic, "sales", "amount", "revenue", "gmv", "销售额", "销售", "收入", "营收")) {
+            score += containsAny(text, "销售", "销售额", "收入", "营收", "revenue", "sales") ? 125 : 25;
+        }
+        return score;
+    }
+
+    private int compareMetricIntent(Map<String, Object> left, Map<String, Object> right, String question) {
+        int leftIndex = fieldReferenceMentionIndex(question, left);
+        int rightIndex = fieldReferenceMentionIndex(question, right);
+        if (leftIndex >= 0 && rightIndex < 0) {
+            return -1;
+        }
+        if (leftIndex < 0 && rightIndex >= 0) {
+            return 1;
+        }
+        if (leftIndex >= 0 && leftIndex != rightIndex) {
+            return Integer.compare(leftIndex, rightIndex);
+        }
+        return Integer.compare(metricIntentScore(right, question), metricIntentScore(left, question));
+    }
+
+    private int fieldReferenceMentionIndex(String question, Map<String, Object> field) {
+        String raw = Objects.toString(question, "");
+        String lower = raw.toLowerCase(Locale.ROOT);
+        int best = Integer.MAX_VALUE;
+        for (String candidate : List.of(
+                fieldDisplayName(field),
+                fieldColumn(field),
+                Objects.toString(field.get("sourceFieldName"), "").trim(),
+                Objects.toString(field.get("fieldComment"), "").trim())) {
+            String text = Objects.toString(candidate, "").trim();
+            if (text.isBlank()) {
+                continue;
+            }
+            int index = raw.indexOf(text);
+            if (index < 0) {
+                index = lower.indexOf(text.toLowerCase(Locale.ROOT));
+            }
+            if (index >= 0) {
+                best = Math.min(best, index);
+            }
+        }
+        return best == Integer.MAX_VALUE ? -1 : best;
+    }
+
+    private String metricAggregation(String question, Map<String, Object> field) {
+        String semantic = fieldSemanticText(field);
+        if (metricAverageIntentForField(question, field)
+                || containsAny(semantic, "rate", "ratio", "percent", "率", "占比",
+                        "天数", "周转", "周期")) {
+            return "AVG";
+        }
+        return "SUM";
+    }
+
+    private boolean metricAverageIntentForField(String question, Map<String, Object> field) {
+        String raw = Objects.toString(question, "");
+        String lower = raw.toLowerCase(Locale.ROOT);
+        for (String candidate : List.of(
+                fieldDisplayName(field),
+                fieldColumn(field),
+                Objects.toString(field.get("sourceFieldName"), "").trim())) {
+            String text = Objects.toString(candidate, "").trim();
+            if (text.isBlank()) {
+                continue;
+            }
+            String lowerText = text.toLowerCase(Locale.ROOT);
+            if (raw.contains("平均" + text) || raw.contains("均值" + text)
+                    || raw.contains(text + "平均") || raw.contains(text + "均值")) {
+                return true;
+            }
+            if (lower.contains("avg " + lowerText) || lower.contains("average " + lowerText)
+                    || lower.contains(lowerText + " avg") || lower.contains(lowerText + " average")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String metricAlias(String question, Map<String, Object> field, String aggregation) {
+        String label = firstTextValue(fieldDisplayName(field), fieldColumn(field));
+        if ("AVG".equalsIgnoreCase(aggregation) && !label.startsWith("平均")) {
+            return "平均" + label;
+        }
+        return label;
+    }
+
+    private boolean isIdLikeMetricField(Map<String, Object> field) {
+        String text = fieldSemanticText(field);
+        return containsAny(text, " id", "_id", "id ", "编号", "编码", "code", "uuid");
     }
 
     private String reusableTopNWhereClause(String sql, String oldDimensionColumn, String newDimensionColumn) {
@@ -3343,6 +4056,18 @@ public class ChatBiService {
         if ("table".equalsIgnoreCase(chartType)) {
             return rows;
         }
+        if ("scatter".equalsIgnoreCase(chartType)) {
+            List<Map<String, Object>> scatterRows = normalizeScatterMetricRows(rows, fieldMapping);
+            if (scatterRows != null) {
+                return scatterRows;
+            }
+        }
+        if ("radar".equalsIgnoreCase(chartType)) {
+            List<Map<String, Object>> radarRows = normalizeRadarMultiMetricRows(rows, fieldMapping);
+            if (radarRows != null) {
+                return radarRows;
+            }
+        }
         if (rows.stream().allMatch(row -> row.containsKey("name") && row.containsKey("value"))) {
             return rows;
         }
@@ -3373,6 +4098,146 @@ public class ChatBiService {
         }).toList();
     }
 
+    private List<Map<String, Object>> normalizeScatterMetricRows(List<Map<String, Object>> rows,
+            Map<String, Object> fieldMapping) {
+        if (rows == null || rows.isEmpty()) {
+            return null;
+        }
+        List<String> metricKeys = resolveScatterMetricKeys(rows, fieldMapping);
+        if (metricKeys.size() < 2) {
+            return null;
+        }
+        String dimensionKey = Objects.toString(fieldMapping == null ? "" : fieldMapping.get("dimensionKey"), "").trim();
+        return rows.stream().map(row -> {
+            Map<String, Object> normalized = new LinkedHashMap<>(row);
+            Object dimensionValue = resolveRadarDimensionValue(row, dimensionKey);
+            if (!normalized.containsKey("name")) {
+                normalized.put("name", dimensionValue);
+            }
+            return normalized;
+        }).toList();
+    }
+
+    private List<String> resolveScatterMetricKeys(List<Map<String, Object>> rows, Map<String, Object> fieldMapping) {
+        if (rows == null || rows.isEmpty()) {
+            return List.of();
+        }
+        Map<String, Object> firstRow = rows.get(0);
+        List<String> keys = new ArrayList<>();
+        for (String key : List.of(
+                Objects.toString(fieldMapping == null ? "" : fieldMapping.get("xMetricKey"), "").trim(),
+                Objects.toString(fieldMapping == null ? "" : fieldMapping.get("yMetricKey"), "").trim())) {
+            if (!key.isBlank() && !keys.contains(key) && firstRow.containsKey(key) && isMostlyNumeric(rows, key)) {
+                keys.add(key);
+            }
+        }
+        if (keys.size() >= 2) {
+            return keys;
+        }
+        String dimensionKey = Objects.toString(fieldMapping == null ? "" : fieldMapping.get("dimensionKey"), "").trim();
+        for (String key : firstRow.keySet()) {
+            if (key == null || key.equals(dimensionKey) || isDimensionAlias(key) || "name".equalsIgnoreCase(key)) {
+                continue;
+            }
+            if (!keys.contains(key) && isMostlyNumeric(rows, key)) {
+                keys.add(key);
+            }
+            if (keys.size() >= 2) {
+                break;
+            }
+        }
+        return keys;
+    }
+
+    private List<Map<String, Object>> normalizeRadarMultiMetricRows(List<Map<String, Object>> rows,
+            Map<String, Object> fieldMapping) {
+        if (rows == null || rows.isEmpty()) {
+            return null;
+        }
+        List<String> metricKeys = resolveRadarMetricKeys(rows, fieldMapping);
+        if (metricKeys.size() < 3) {
+            return null;
+        }
+        String dimensionKey = Objects.toString(fieldMapping == null ? "" : fieldMapping.get("dimensionKey"), "").trim();
+        return rows.stream().map(row -> {
+            Map<String, Object> normalized = new LinkedHashMap<>(row);
+            Object dimensionValue = resolveRadarDimensionValue(row, dimensionKey);
+            if (!normalized.containsKey("name")) {
+                normalized.put("name", dimensionValue);
+            }
+            return normalized;
+        }).toList();
+    }
+
+    private List<String> resolveRadarMetricKeys(List<Map<String, Object>> rows, Map<String, Object> fieldMapping) {
+        if (rows == null || rows.isEmpty()) {
+            return List.of();
+        }
+        Map<String, Object> firstRow = rows.get(0);
+        String dimensionKey = Objects.toString(fieldMapping == null ? "" : fieldMapping.get("dimensionKey"), "").trim();
+        List<String> keys = new ArrayList<>();
+        for (String key : readStringList(fieldMapping == null ? null : fieldMapping.get("metricKeys"))) {
+            if (!keys.contains(key) && firstRow.containsKey(key) && isMostlyNumeric(rows, key)) {
+                keys.add(key);
+            }
+        }
+        if (keys.size() >= 3) {
+            return keys;
+        }
+        for (String key : firstRow.keySet()) {
+            if (key == null || key.equals(dimensionKey) || isDimensionAlias(key) || "name".equalsIgnoreCase(key)) {
+                continue;
+            }
+            if (!keys.contains(key) && isMostlyNumeric(rows, key)) {
+                keys.add(key);
+            }
+        }
+        return keys;
+    }
+
+    private List<String> readStringList(Object raw) {
+        List<String> result = new ArrayList<>();
+        if (raw instanceof List<?> list) {
+            for (Object item : list) {
+                String value = Objects.toString(item, "").trim();
+                if (!value.isBlank() && !result.contains(value)) {
+                    result.add(value);
+                }
+            }
+            return result;
+        }
+        String text = Objects.toString(raw, "").trim();
+        if (text.isBlank()) {
+            return result;
+        }
+        for (String item : text.split("[,，、\\s]+")) {
+            String value = Objects.toString(item, "").trim();
+            if (!value.isBlank() && !result.contains(value)) {
+                result.add(value);
+            }
+        }
+        return result;
+    }
+
+    private Object resolveRadarDimensionValue(Map<String, Object> row, String dimensionKey) {
+        if (row == null || row.isEmpty()) {
+            return "";
+        }
+        if (!dimensionKey.isBlank() && row.containsKey(dimensionKey)) {
+            return row.get(dimensionKey);
+        }
+        if (row.containsKey("dim_name")) {
+            return row.get("dim_name");
+        }
+        if (row.containsKey("name")) {
+            return row.get("name");
+        }
+        if (row.containsKey("dimension")) {
+            return row.get("dimension");
+        }
+        return row.values().stream().findFirst().orElse("");
+    }
+
     private boolean shouldRequeryDetailTable(List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) {
             return true;
@@ -3387,9 +4252,17 @@ public class ChatBiService {
     }
 
     private String chartName(String chartType) {
-        return chartType.equals("bar") ? "柱状图"
-                : chartType.equals("pie") || chartType.equals("doughnut") ? "饼图"
-                : chartType.equals("table") ? "表格" : "折线图";
+        return switch (Objects.toString(chartType, "").toLowerCase(Locale.ROOT)) {
+            case "line" -> "折线图";
+            case "pie" -> "饼图";
+            case "doughnut", "donut" -> "环形图";
+            case "table" -> "表格";
+            case "radar" -> "雷达图";
+            case "scatter" -> "散点图";
+            case "metric", "card", "kpi", "indicator" -> "指标卡";
+            case "map" -> "地图";
+            default -> "柱状图";
+        };
     }
 
     private List<Map<String, Object>> queryUploadTable(String sql) {

@@ -173,6 +173,14 @@ public class SmartChatService {
             Map<String, Object> routed = smartRoute.get();
             String primaryIntent = normalizeSmartIntent(routed.get("primaryIntent"));
             double confidence = readDouble(routed.get("confidence"), 0.0D);
+            if (isStatisticalOutlierQuery(q) && (isAlertLikeIntent(primaryIntent) || isPredictiveIntent(primaryIntent))) {
+                emit(trace, "ROUTE_MODEL_RESULT_ADJUSTED", "Adjust route",
+                        "Scatter/correlation outlier analysis is a SQL chart query, not an alert or forecast workflow.",
+                        Map.of("originalIntent", primaryIntent, "adjustedIntent", "QUERY_SQL"));
+                return new SmartIntent("QUERY_SQL", Math.max(confidence, 0.76D), false,
+                        "Statistical outlier analysis should be handled by Text-to-SQL chart query.",
+                        mapValue(routed.get("slots")), false);
+            }
             if ("BUSINESS_MODEL_CREATE".equals(primaryIntent) && hasBusinessModelMutationIntent(q) && !hasBusinessModelCreateIntent(q)) {
                 emit(trace, "ROUTE_MODEL_RESULT_ADJUSTED", "修正语义路由",
                         "用户本轮表达的是业务模型维护，不是新建模型，已切换为维护业务模型",
@@ -267,6 +275,14 @@ public class SmartChatService {
         Optional<Map<String, Object>> advanced = pythonAiService.parseAdvancedAnalysisIntent(question, tableName, context);
         if (advanced != null && advanced.isPresent()) {
             String intent = normalizeAdvancedIntent(advanced.get().get("intent"));
+            if (isStatisticalOutlierQuery(q) && (isAlertLikeIntent(intent) || isPredictiveIntent(intent))) {
+                emit(trace, "ADVANCED_ROUTE_RESULT_ADJUSTED", "Adjust advanced route",
+                        "Outlier distribution analysis should stay in SQL chart query, not forecast.",
+                        Map.of("originalIntent", intent, "adjustedIntent", "QUERY_SQL"));
+                return new SmartIntent("QUERY_SQL", 0.76D, false,
+                        "Statistical outlier analysis should not create an alert or forecast workflow.",
+                        advanced.get(), false);
+            }
             if ("FORECAST".equals(intent) && isHistoricalTrendQuery(q) && !hasForecastIntent(q, lower)) {
                 emit(trace, "ADVANCED_ROUTE_RESULT_ADJUSTED", "修正高级分析识别",
                         "用户要查看历史走势，没有要求预测未来，已回到普通查询",
@@ -1763,10 +1779,15 @@ public class SmartChatService {
 
     private String humanChartType(String chartType) {
         return switch (text(chartType).toLowerCase(Locale.ROOT)) {
+            case "bar" -> "柱状图";
             case "line" -> "折线图";
             case "pie" -> "饼图";
+            case "doughnut", "donut" -> "环形图";
             case "table" -> "表格";
+            case "radar" -> "雷达图";
             case "scatter" -> "散点图";
+            case "metric", "card", "kpi", "indicator" -> "指标卡";
+            case "map" -> "地图";
             default -> "柱状图";
         };
     }
@@ -2308,6 +2329,9 @@ public class SmartChatService {
     private boolean hasAlertTask(String question) {
         String q = text(question);
         String lower = q.toLowerCase(Locale.ROOT);
+        if (isStatisticalOutlierQuery(q)) {
+            return false;
+        }
         return containsAny(q, "预警", "告警", "警报", "提醒", "通知", "低于", "高于", "超过", "跌破", "阈值", "阀值", "异常")
                 || lower.contains("alert") || lower.contains("warning");
     }
@@ -2959,7 +2983,38 @@ public class SmartChatService {
                 || hasBusinessDictionaryAliasIntent(q);
     }
 
+    private boolean isStatisticalOutlierQuery(String q) {
+        String text = text(q);
+        String lower = text.toLowerCase(Locale.ROOT);
+        boolean chartOrCorrelation = containsAny(text, "散点", "散点图", "相关", "相关性", "关系", "分布", "离群", "异常点", "异常分布点")
+                || lower.contains("scatter") || lower.contains("correlation") || lower.contains("outlier");
+        boolean analyticAction = containsAny(text, "分析", "查看", "看看", "展示", "用", "是否存在", "找出")
+                || lower.contains("analyze") || lower.contains("show");
+        boolean alertAction = containsAny(text, "预警", "告警", "报警", "警报", "提醒", "通知", "规则", "阈值", "阀值",
+                "低于", "高于", "超过", "跌破", "邮件", "钉钉")
+                || lower.contains("alert") || lower.contains("warning");
+        boolean forecastAction = containsAny(text, "预测", "预估", "推算", "未来", "后续", "下个月", "下季度",
+                "走势外推", "趋势延伸", "往后推")
+                || lower.contains("forecast") || lower.contains("prediction");
+        return chartOrCorrelation && analyticAction && !alertAction && !forecastAction;
+    }
+
+    private boolean isAlertLikeIntent(String intent) {
+        String normalized = text(intent).toUpperCase(Locale.ROOT);
+        return normalized.startsWith("ALERT") || normalized.contains("WARNING") || normalized.contains("ANOMALY");
+    }
+
+    private boolean isPredictiveIntent(String intent) {
+        String normalized = text(intent).toUpperCase(Locale.ROOT);
+        return "FORECAST".equals(normalized)
+                || normalized.contains("PREDICTION")
+                || normalized.contains("TIME_SERIES_FORECAST");
+    }
+
     private boolean isExplicitQueryIntent(String q) {
+        if (isStatisticalOutlierQuery(q)) {
+            return true;
+        }
         return containsAny(q, "排名", "排行", "排行榜", "Top", "top", "明细", "列表", "分布", "占比", "对比", "各省", "各市", "各区域")
                 || (containsAny(q, "看一下", "查看", "查询", "统计") && !containsAny(q, "预测", "预警", "告警", "报警", "警报", "推演", "模拟"));
     }
@@ -2984,12 +3039,18 @@ public class SmartChatService {
     }
 
     private boolean isAlertIntent(String q, String lower) {
+        if (isStatisticalOutlierQuery(q)) {
+            return false;
+        }
         return containsAny(q, "预警", "告警", "报警", "警报", "提醒", "通知", "低于", "高于", "超过", "跌破", "阈值", "阀值", "异常")
                 || lower.contains("alert") || lower.contains("warning");
     }
 
     private String inferAlertLifecycleIntent(String q, String lower) {
         String text = text(q);
+        if (isStatisticalOutlierQuery(text)) {
+            return "";
+        }
         boolean ruleDetectAction = containsAny(text, "检测", "手动检测", "立即检测", "执行检测", "跑一下", "跑一次", "触发检测", "重新检测");
         boolean ruleDetectExecution = ruleDetectAction && (!text.contains("检测周期")
                 || containsAny(text, "手动检测", "立即检测", "执行检测", "跑一下", "跑一次", "触发检测", "重新检测")
@@ -3041,6 +3102,9 @@ public class SmartChatService {
 
     private String inferAlertRuleCreateIntent(String q, String lower) {
         String text = text(q);
+        if (isStatisticalOutlierQuery(text)) {
+            return "";
+        }
         if (!isAlertIntent(text, lower)) {
             return "";
         }

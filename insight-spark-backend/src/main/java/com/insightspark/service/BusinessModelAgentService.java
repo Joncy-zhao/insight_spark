@@ -135,6 +135,7 @@ public class BusinessModelAgentService {
 
         String requirement = trim(Objects.toString(request.getOrDefault("requirement", question), ""));
         List<Map<String, Object>> previewRows = safeList(dataUploadService.preview(targetTableName, 1, 5));
+        List<Map<String, Object>> fields = safeList(dataUploadService.listFields(targetTableName));
         final String fallbackRequirement = requirement;
         Map<String, Object> modelOptions = modelOptions(request);
 
@@ -143,14 +144,14 @@ public class BusinessModelAgentService {
                         question,
                         requirement,
                         targetTableName,
-                        dataUploadService.listFields(targetTableName),
+                        fields,
                         previewRows
                 )
                 : pythonAiService.businessModelSemantic(
                         question,
                         requirement,
                         targetTableName,
-                        dataUploadService.listFields(targetTableName),
+                        fields,
                         previewRows,
                         modelOptions
                 )).orElseGet(() -> buildBusinessModelSemanticFallback(question, fallbackRequirement, targetTableName));
@@ -170,11 +171,18 @@ public class BusinessModelAgentService {
 
         List<Map<String, Object>> dictionaryEntries = safeListMap(semantic.get("dictionaryEntries"));
         List<Map<String, Object>> metricDefinitions = safeListMap(semantic.get("metricDefinitions"));
+        List<Map<String, Object>> dimensionSystem = mergeDimensionDefinitions(
+                safeListMap(semantic.get("dimensionSystem")),
+                extractDimensionBindingsFromQuestion(question, fields)
+        );
         if (!dictionaryEntries.isEmpty()) {
             payload.put("dictionaryEntries", dictionaryEntries);
         }
         if (!metricDefinitions.isEmpty()) {
             payload.put("metricDefinitions", metricDefinitions);
+        }
+        if (!dimensionSystem.isEmpty()) {
+            payload.put("dimensionSystem", dimensionSystem);
         }
 
         Map<String, Object> created = dataUploadService.createBusinessModel(payload);
@@ -792,6 +800,11 @@ public class BusinessModelAgentService {
             return ensureModelSuffix(cleanedRequestName);
         }
 
+        String questionSubject = extractBusinessSubject(question);
+        if (isBusinessModelNameCandidate(questionSubject)) {
+            return ensureModelSuffix(questionSubject);
+        }
+
         String cleanedSemanticName = cleanBusinessModelName(semanticModelName);
         if (isBusinessModelNameCandidate(cleanedSemanticName)) {
             return ensureModelSuffix(cleanedSemanticName);
@@ -800,11 +813,6 @@ public class BusinessModelAgentService {
         String requirementSubject = extractBusinessSubject(requirement);
         if (isBusinessModelNameCandidate(requirementSubject)) {
             return ensureModelSuffix(requirementSubject);
-        }
-
-        String questionSubject = extractBusinessSubject(question);
-        if (isBusinessModelNameCandidate(questionSubject)) {
-            return ensureModelSuffix(questionSubject);
         }
 
         return "零代码业务模型";
@@ -962,7 +970,8 @@ public class BusinessModelAgentService {
         response.put("modelName", inferBusinessModelName("", "", requirement, question));
         response.put("dictionaryEntries", List.of());
         response.put("metricDefinitions", List.of());
-        response.put("reasoning", List.of("AI 语义拆解不可用，已保守返回空字典/空公式"));
+        response.put("dimensionSystem", List.of());
+        response.put("reasoning", List.of("AI 语义拆解不可用，已保守返回空字典/空公式/空维度"));
         response.put("confidence", 0.0);
         response.put("tableName", tableName);
         response.put("question", question);
@@ -1483,7 +1492,7 @@ public class BusinessModelAgentService {
     }
 
     private Map<String, Object> buildDimensionBindingFallback(String question, List<Map<String, Object>> fields) {
-        java.util.regex.Matcher matcher = Pattern.compile("(?:把|将)?(.+?)(?:的)?维度(?:字段)?(?:绑定到|绑定为|绑定至|映射到|映射为|映射至|对应到|对应为|对应至)\\s*([A-Za-z_][A-Za-z0-9_]*)").matcher(question);
+        java.util.regex.Matcher matcher = Pattern.compile("(?:^|[，,、：:\\s])(?:把|将)?([^，。；;、：:\\n]+?)(?:的)?维度(?:字段)?(?:绑定到|绑定为|绑定至|映射到|映射为|映射至|对应到|对应为|对应至)\\s*([\\u4e00-\\u9fa5A-Za-z_][\\u4e00-\\u9fa5A-Za-z0-9_]*)").matcher(question);
         if (!matcher.find()) {
             return Map.of();
         }
@@ -1501,6 +1510,25 @@ public class BusinessModelAgentService {
         operation.put("name", name);
         operation.put("field", field);
         return operation;
+    }
+
+    private List<Map<String, Object>> extractDimensionBindingsFromQuestion(String question, List<Map<String, Object>> fields) {
+        String text = trim(question);
+        if (text.isBlank() || !containsAny(text, "维度绑定", "维度字段", "维度")) {
+            return List.of();
+        }
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (String segment : text.split("[；;。\\n]+")) {
+            String part = trim(segment);
+            if (part.isBlank() || !part.contains("维度")) {
+                continue;
+            }
+            Map<String, Object> operation = buildDimensionBindingFallback(part, fields);
+            if (!operation.isEmpty()) {
+                result.add(operation);
+            }
+        }
+        return result;
     }
 
     private List<Map<String, Object>> enforceSemanticPatchGuards(String question,

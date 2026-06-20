@@ -10,6 +10,8 @@ import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Set;
 import java.util.LinkedHashSet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Component
 public class RuleBasedNl2SqlStrategy {
@@ -31,6 +33,14 @@ public class RuleBasedNl2SqlStrategy {
                     List.of("城市", "市")),
             new SemanticFieldRule("区域", "DIMENSION", 100, List.of("region", "area"),
                     List.of("区域", "大区")),
+            new SemanticFieldRule("渠道", "DIMENSION", 98, List.of("channel", "source", "platform"),
+                    List.of("渠道", "来源", "平台")),
+            new SemanticFieldRule("产品线", "DIMENSION", 97, List.of("product_line", "line", "series"),
+                    List.of("产品线", "业务线", "产品系列")),
+            new SemanticFieldRule("营销活动", "DIMENSION", 82, List.of("campaign", "activity", "marketing"),
+                    List.of("营销活动", "活动", "投放活动")),
+            new SemanticFieldRule("备注", "DIMENSION", 60, List.of("remark", "memo", "note", "comment"),
+                    List.of("备注", "说明", "描述")),
             new SemanticFieldRule("时间", "TIME", 130, List.of("date", "time", "day", "month", "year", "week", "quarter",
                     "order_date", "sales_date", "biz_date", "stat_date", "trade_date", "created_at", "updated_at",
                     "日期", "时间", "订单日期", "销售日期", "月份", "年月", "年份", "年度", "月度", "季度"),
@@ -42,6 +52,12 @@ public class RuleBasedNl2SqlStrategy {
                     List.of("利润", "盈利", "毛利")),
             new SemanticFieldRule("数量", "METRIC", 116, List.of("qty", "quantity", "count", "volume"),
                     List.of("数量", "销量", "件数")),
+            new SemanticFieldRule("订单量", "METRIC", 115, List.of("order_count", "orders", "order_qty", "order_num"),
+                    List.of("订单量", "订单数", "订单")),
+            new SemanticFieldRule("退货率", "METRIC", 113, List.of("return_rate", "refund_rate", "ret_rate", "rate"),
+                    List.of("退货率", "退款率", "退货")),
+            new SemanticFieldRule("库存周转天数", "METRIC", 112, List.of("inventory_turnover_days", "turnover_days", "stock_days"),
+                    List.of("库存周转天数", "周转天数", "库存周转")),
             new SemanticFieldRule("折扣", "METRIC", 114, List.of("discount"),
                     List.of("折扣", "折让"))
     );
@@ -77,6 +93,26 @@ public class RuleBasedNl2SqlStrategy {
         if (isDetailQuestion(question)) {
             return "table";
         }
+        String text = question == null ? "" : question;
+        String lower = text.toLowerCase();
+        if (text.contains("地图") || text.contains("地域") || text.contains("地区")
+                || text.contains("省份") || text.contains("城市") || lower.contains("map")
+                || lower.contains("geo")) {
+            return "map";
+        }
+        if (text.contains("散点") || text.contains("相关") || text.contains("相关性")
+                || text.contains("离群") || lower.contains("scatter") || lower.contains("correlation")) {
+            return "scatter";
+        }
+        if (text.contains("雷达") || text.contains("能力") || text.contains("评分")
+                || text.contains("画像") || text.contains("多指标") || lower.contains("radar")) {
+            return "radar";
+        }
+        if (text.contains("指标卡") || text.contains("核心指标") || text.contains("当前值")
+                || text.contains("总量") || text.contains("总额") || lower.contains("kpi")
+                || lower.contains("metric")) {
+            return "metric";
+        }
         if (isTimeSeriesQuestion(question) && isTimeDimensionType(dimensionType)) {
             return "line";
         }
@@ -102,16 +138,54 @@ public class RuleBasedNl2SqlStrategy {
                     .map(column -> "`" + column + "`")
                     .reduce((left, right) -> left + ", " + right)
                     .orElse("*");
-            return "SELECT " + selectColumns + " FROM `" + tableName + "` LIMIT 100";
+            String whereClause = detailWhereClause(fieldChoice);
+            String orderClause = detailOrderClause(fieldChoice);
+            return "SELECT " + selectColumns + " FROM `" + tableName + "`" + whereClause + orderClause
+                    + " LIMIT " + detailLimit(fieldChoice);
         }
         String valueExpr = fieldChoice.metricColumn() == null
                 ? "COUNT(1)"
                 : "SUM(CAST(NULLIF(`" + fieldChoice.metricColumn() + "`, '') AS DECIMAL(18,2)))";
+        if ("metric".equalsIgnoreCase(chartType)) {
+            String label = fieldChoice.metricDisplayName() == null || fieldChoice.metricDisplayName().isBlank()
+                    ? "记录数"
+                    : fieldChoice.metricDisplayName();
+            return "SELECT '" + metricCardLabel(label).replace("'", "''") + "' AS name, "
+                    + metricCardValueExpression(fieldChoice) + " AS value FROM `"
+                    + tableName + "` LIMIT 1";
+        }
         String orderExpr = "line".equals(chartType) ? "name ASC" : "value DESC";
         return "SELECT `" + fieldChoice.dimensionColumn() + "` AS name, " + valueExpr + " AS value FROM `"
                 + tableName + "` WHERE `" + fieldChoice.dimensionColumn() + "` IS NOT NULL AND `"
                 + fieldChoice.dimensionColumn() + "` <> '' GROUP BY `" + fieldChoice.dimensionColumn()
                 + "` ORDER BY " + orderExpr + " LIMIT 30";
+    }
+
+    private String metricCardValueExpression(FieldChoice fieldChoice) {
+        if (fieldChoice.metricColumn() == null) {
+            return "COUNT(1)";
+        }
+        String label = Objects.toString(fieldChoice.metricDisplayName(), "");
+        String castExpr = "CAST(NULLIF(`" + fieldChoice.metricColumn() + "`, '') AS DECIMAL("
+                + (isAverageMetricLabel(label) ? "18,6" : "18,2") + "))";
+        return (isAverageMetricLabel(label) ? "AVG(" : "SUM(") + castExpr + ")";
+    }
+
+    private String metricCardLabel(String label) {
+        if (label == null || label.isBlank()) {
+            return "记录数";
+        }
+        return isAverageMetricLabel(label) && !label.startsWith("平均") && !label.startsWith("均值")
+                ? "平均" + label
+                : label;
+    }
+
+    private boolean isAverageMetricLabel(String label) {
+        String text = Objects.toString(label, "").toLowerCase();
+        return text.contains("率") || text.contains("ratio") || text.contains("rate")
+                || text.contains("percent") || text.contains("天数") || text.contains("时长")
+                || text.contains("周期") || text.contains("周转") || text.contains("客单价")
+                || text.contains("单价") || text.startsWith("平均") || text.startsWith("均值");
     }
 
     private Map<String, Object> findBestField(String question, List<Map<String, Object>> fields, String preferredType) {
@@ -179,8 +253,23 @@ public class RuleBasedNl2SqlStrategy {
 
     private List<String> chooseTableColumns(String question, List<Map<String, Object>> fields) {
         Set<String> selected = new LinkedHashSet<>();
+        List<Map.Entry<Map<String, Object>, Integer>> explicitlyMentioned = new ArrayList<>();
+        for (Map<String, Object> field : fields) {
+            int position = firstMentionPosition(question, field);
+            if (position >= 0) {
+                explicitlyMentioned.add(Map.entry(field, position));
+            }
+        }
+        explicitlyMentioned.sort((left, right) -> Integer.compare(left.getValue(), right.getValue()));
+        for (Map.Entry<Map<String, Object>, Integer> entry : explicitlyMentioned) {
+            String column = Objects.toString(entry.getKey().get("columnName"), "").trim();
+            if (!column.isBlank()) {
+                selected.add(column);
+            }
+        }
         List<SemanticFieldRule> rules = new ArrayList<>(matchedRulesForQuestion(question, "TEXT"));
         rules.addAll(matchedRulesForQuestion(question, "NUMBER"));
+        rules.addAll(matchedRulesForQuestion(question, "DATE"));
         for (SemanticFieldRule rule : rules) {
             for (Map<String, Object> field : fields) {
                 if (!matchesRuleToField(rule, field)) {
@@ -204,6 +293,73 @@ public class RuleBasedNl2SqlStrategy {
             }
         }
         return List.copyOf(selected);
+    }
+
+    private String detailOrderClause(FieldChoice fieldChoice) {
+        if (fieldChoice == null || fieldChoice.resolutionLog() == null) {
+            return "";
+        }
+        String orderColumn = Objects.toString(fieldChoice.resolutionLog().get("detailOrderColumn"), "").trim();
+        if (orderColumn.isBlank()) {
+            return "";
+        }
+        String direction = Objects.toString(fieldChoice.resolutionLog().getOrDefault("detailOrderDirection", "ASC"), "ASC")
+                .trim().toUpperCase(Locale.ROOT);
+        if (!"DESC".equals(direction)) {
+            direction = "ASC";
+        }
+        return " ORDER BY `" + orderColumn + "` " + direction;
+    }
+
+    private String detailWhereClause(FieldChoice fieldChoice) {
+        List<Map<String, Object>> filters = detailFilters(fieldChoice);
+        if (filters.isEmpty()) {
+            return "";
+        }
+        List<String> predicates = new ArrayList<>();
+        for (Map<String, Object> filter : filters) {
+            String column = Objects.toString(filter.get("column"), "").trim();
+            String value = Objects.toString(filter.get("value"), "").trim();
+            if (column.isBlank() || value.isBlank()) {
+                continue;
+            }
+            String escaped = escapeSqlLiteral(value);
+            predicates.add("(`" + column + "` = '" + escaped + "' OR `" + column + "` LIKE '%" + escaped + "%')");
+        }
+        return predicates.isEmpty() ? "" : " WHERE " + String.join(" AND ", predicates);
+    }
+
+    private List<Map<String, Object>> detailFilters(FieldChoice fieldChoice) {
+        if (fieldChoice == null || fieldChoice.resolutionLog() == null) {
+            return List.of();
+        }
+        Object raw = fieldChoice.resolutionLog().get("detailFilters");
+        if (!(raw instanceof List<?> list)) {
+            return List.of();
+        }
+        List<Map<String, Object>> filters = new ArrayList<>();
+        for (Object item : list) {
+            if (item instanceof Map<?, ?> map) {
+                Map<String, Object> safe = new LinkedHashMap<>();
+                map.forEach((key, value) -> safe.put(Objects.toString(key, ""), value));
+                filters.add(safe);
+            }
+        }
+        return filters;
+    }
+
+    private int detailLimit(FieldChoice fieldChoice) {
+        Object raw = fieldChoice == null || fieldChoice.resolutionLog() == null
+                ? null
+                : fieldChoice.resolutionLog().get("detailLimit");
+        if (raw instanceof Number number) {
+            return clampLimit(number.intValue());
+        }
+        try {
+            return clampLimit(Integer.parseInt(Objects.toString(raw, "").trim()));
+        } catch (Exception ignored) {
+            return 100;
+        }
     }
 
     private boolean matchesRuleToField(SemanticFieldRule rule, Map<String, Object> field) {
@@ -315,8 +471,239 @@ public class RuleBasedNl2SqlStrategy {
         log.put("metricName", metric == null ? "记录数" : Objects.toString(metric.get("displayName"), ""));
         log.put("tableColumns", chooseTableColumns(question, fields));
         log.put("tableColumnLabels", buildTableColumnLabels(fields));
+        Map<String, Object> orderField = resolveDetailOrderField(question, fields);
+        if (!orderField.isEmpty()) {
+            log.put("detailOrderColumn", Objects.toString(orderField.get("columnName"), ""));
+            log.put("detailOrderLabel", bestDisplayLabel(orderField));
+            log.put("detailOrderDirection", resolveDetailOrderDirection(question));
+        }
+        List<Map<String, Object>> detailFilters = resolveDetailFilters(question, fields);
+        if (!detailFilters.isEmpty()) {
+            log.put("detailFilters", detailFilters);
+        }
+        log.put("detailLimit", resolveDetailLimit(question));
         log.put("reason", "基于用户原话、字段展示名、物理字段名和内置业务同义词匹配。");
         return log;
+    }
+
+    private List<Map<String, Object>> resolveDetailFilters(String question, List<Map<String, Object>> fields) {
+        String text = Objects.toString(question, "");
+        Map<String, Map<String, Object>> filtersByColumn = new LinkedHashMap<>();
+        for (Map<String, Object> field : fields) {
+            if (!isFilterableDetailField(field)) {
+                continue;
+            }
+            String value = resolveExplicitFilterValue(text, field);
+            if (value.isBlank()) {
+                continue;
+            }
+            String column = Objects.toString(field.get("columnName"), "").trim();
+            if (column.isBlank()) {
+                continue;
+            }
+            Map<String, Object> filter = new LinkedHashMap<>();
+            filter.put("column", column);
+            filter.put("label", bestDisplayLabel(field));
+            filter.put("value", value);
+            filtersByColumn.put(column, filter);
+        }
+        addKnownValueFilter(text, fields, filtersByColumn, "区域", List.of(
+                "华东", "华南", "华北", "华中", "中南", "西南", "西北", "东北", "东南", "港澳台"));
+        return List.copyOf(filtersByColumn.values());
+    }
+
+    private void addKnownValueFilter(String question, List<Map<String, Object>> fields,
+                                     Map<String, Map<String, Object>> filtersByColumn,
+                                     String fieldKeyword, List<String> values) {
+        Map<String, Object> field = findTextFieldByKeyword(fields, fieldKeyword);
+        if (field == null) {
+            return;
+        }
+        String column = Objects.toString(field.get("columnName"), "").trim();
+        if (column.isBlank() || filtersByColumn.containsKey(column)) {
+            return;
+        }
+        for (String value : values) {
+            if (question.contains(value)) {
+                Map<String, Object> filter = new LinkedHashMap<>();
+                filter.put("column", column);
+                filter.put("label", bestDisplayLabel(field));
+                filter.put("value", value);
+                filtersByColumn.put(column, filter);
+                return;
+            }
+        }
+    }
+
+    private String resolveExplicitFilterValue(String question, Map<String, Object> field) {
+        for (String label : fieldLabels(field)) {
+            if (label.isBlank() || isPhysicalColumnCode(label)) {
+                continue;
+            }
+            String valueBefore = valueBeforeLabel(question, label);
+            if (isLikelyDetailFilterValue(valueBefore, label)) {
+                return valueBefore;
+            }
+            String valueAfter = valueAfterLabel(question, label);
+            if (isLikelyDetailFilterValue(valueAfter, label)) {
+                return valueAfter;
+            }
+        }
+        return "";
+    }
+
+    private String valueBeforeLabel(String question, String label) {
+        int index = question.indexOf(label);
+        if (index <= 0) {
+            return "";
+        }
+        String prefix = question.substring(0, index);
+        Matcher matcher = Pattern.compile("([\\u4e00-\\u9fa5A-Za-z0-9_-]{1,24})\\s*(?:的)?$").matcher(prefix);
+        if (!matcher.find()) {
+            return "";
+        }
+        return cleanDetailFilterValue(matcher.group(1));
+    }
+
+    private String valueAfterLabel(String question, String label) {
+        int index = question.indexOf(label);
+        if (index < 0) {
+            return "";
+        }
+        String suffix = question.substring(index + label.length());
+        Matcher matcher = Pattern.compile("^(?:\\s*(?:为|是|=|等于|包含|包括|选择|筛选|过滤为|限定为|设为|在|只看|仅看)\\s*)([\\u4e00-\\u9fa5A-Za-z0-9_-]{1,24})")
+                .matcher(suffix);
+        if (!matcher.find()) {
+            return "";
+        }
+        return cleanDetailFilterValue(matcher.group(1));
+    }
+
+    private String cleanDetailFilterValue(String value) {
+        return Objects.toString(value, "").trim()
+                .replaceAll("^(?:请|帮我|查询|查看|列出|筛选|过滤|只看|仅看|展示|生成|统计|分析|当前|数据中|数据里|所有|全部|按|在)+", "")
+                .replaceAll("(?:的|中|下|里)$", "")
+                .trim();
+    }
+
+    private boolean isLikelyDetailFilterValue(String value, String label) {
+        String text = Objects.toString(value, "").trim();
+        if (text.isBlank() || text.length() > 20 || text.equals(label)) {
+            return false;
+        }
+        return !Set.of("字段", "包括", "包含", "明细", "明细表", "数据", "当前数据", "销售", "销售明细", "统计", "分析")
+                .contains(text);
+    }
+
+    private boolean isFilterableDetailField(Map<String, Object> field) {
+        String type = Objects.toString(field.get("fieldType"), "").toUpperCase(Locale.ROOT);
+        return !"NUMBER".equals(type) && !isTimeLikeField(field);
+    }
+
+    private Map<String, Object> findTextFieldByKeyword(List<Map<String, Object>> fields, String keyword) {
+        String target = normalizeForFieldMatch(keyword);
+        return fields.stream()
+                .filter(this::isFilterableDetailField)
+                .filter(field -> fieldLabels(field).stream()
+                        .map(this::normalizeForFieldMatch)
+                        .anyMatch(label -> label.contains(target) || target.contains(label)))
+                .findFirst()
+                .orElse(null);
+    }
+
+    private Map<String, Object> resolveDetailOrderField(String question, List<Map<String, Object>> fields) {
+        String text = Objects.toString(question, "");
+        if (!containsAny(text, "排序", "升序", "降序", "正序", "倒序", "按", "order", "sort")) {
+            return Map.of();
+        }
+        for (Map<String, Object> field : fields) {
+            for (String label : fieldLabels(field)) {
+                if (label.isBlank()) {
+                    continue;
+                }
+                if (text.contains("按" + label) || text.contains("以" + label)
+                        || text.contains("根据" + label) || text.contains(label + "排序")
+                        || text.contains(label + "升序") || text.contains(label + "降序")) {
+                    return field;
+                }
+            }
+        }
+        if (containsAny(text, "日期", "时间", "按日", "每日")) {
+            return fields.stream().filter(this::isTimeLikeField).findFirst().orElse(Map.of());
+        }
+        return Map.of();
+    }
+
+    private String resolveDetailOrderDirection(String question) {
+        String text = Objects.toString(question, "");
+        String lower = text.toLowerCase(Locale.ROOT);
+        return containsAny(text, "降序", "倒序", "从高到低", "由高到低", "从大到小", "由大到小")
+                || lower.contains(" desc") || lower.contains("descending")
+                ? "DESC"
+                : "ASC";
+    }
+
+    private int resolveDetailLimit(String question) {
+        String text = Objects.toString(question, "");
+        Matcher matcher = Pattern.compile("(?i)(?:前|最多|限制|显示|列出|limit\\s*)\\s*(\\d{1,4})\\s*(?:条|行|rows?)?")
+                .matcher(text);
+        if (matcher.find()) {
+            return clampLimit(Integer.parseInt(matcher.group(1)));
+        }
+        return 100;
+    }
+
+    private int clampLimit(int value) {
+        return Math.max(1, Math.min(value, 200));
+    }
+
+    private int firstMentionPosition(String question, Map<String, Object> field) {
+        String source = Objects.toString(question, "");
+        String normalizedSource = normalizeForFieldMatch(source);
+        int best = Integer.MAX_VALUE;
+        for (String label : fieldLabels(field)) {
+            if (label.isBlank() || isPhysicalColumnCode(label)) {
+                continue;
+            }
+            int position = source.indexOf(label);
+            if (position >= 0) {
+                best = Math.min(best, position);
+                continue;
+            }
+            String normalizedLabel = normalizeForFieldMatch(label);
+            if (normalizedLabel.length() >= 2 && normalizedSource.contains(normalizedLabel)) {
+                best = Math.min(best, normalizedSource.indexOf(normalizedLabel));
+            }
+        }
+        return best == Integer.MAX_VALUE ? -1 : best;
+    }
+
+    private List<String> fieldLabels(Map<String, Object> field) {
+        List<String> labels = new ArrayList<>();
+        labels.add(Objects.toString(field.get("displayName"), "").trim());
+        labels.add(Objects.toString(field.get("sourceFieldName"), "").trim());
+        labels.add(Objects.toString(field.get("fieldComment"), "").trim());
+        labels.add(Objects.toString(field.get("columnName"), "").trim());
+        return labels.stream().filter(label -> !label.isBlank()).distinct().toList();
+    }
+
+    private String bestDisplayLabel(Map<String, Object> field) {
+        String displayName = Objects.toString(field.get("displayName"), "");
+        String sourceFieldName = Objects.toString(field.get("sourceFieldName"), "");
+        String fieldComment = Objects.toString(field.get("fieldComment"), "");
+        String columnName = Objects.toString(field.get("columnName"), "");
+        return isPhysicalColumnCode(displayName)
+                ? firstNonBlank(sourceFieldName, fieldComment, columnName)
+                : firstNonBlank(displayName, sourceFieldName, fieldComment, columnName);
+    }
+
+    private String normalizeForFieldMatch(String value) {
+        return Objects.toString(value, "").toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9\\u4e00-\\u9fa5]+", "");
+    }
+
+    private String escapeSqlLiteral(String value) {
+        return Objects.toString(value, "").replace("'", "''");
     }
 
     private Map<String, Object> buildTableColumnLabels(List<Map<String, Object>> fields) {

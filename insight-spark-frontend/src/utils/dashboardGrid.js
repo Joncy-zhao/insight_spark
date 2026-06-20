@@ -212,7 +212,7 @@ export function extractLegacyChartCards(layoutJson, scope = 'layout') {
         _renderKey: `${scope}-${id}-${index}`,
         cardId: id,
         title: String(raw.title || `图表${index + 1}`),
-        chartType: String(raw.chartType || 'bar').toLowerCase(),
+        chartType: normalizeChartType(raw.chartType || 'bar'),
         tableName: String(raw.tableName || ''),
         sql: String(raw.sql || ''),
         data

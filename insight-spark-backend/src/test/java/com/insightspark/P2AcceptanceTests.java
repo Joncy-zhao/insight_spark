@@ -2641,6 +2641,100 @@ class P2AcceptanceTests {
     }
 
     @Test
+    void businessModelCreateNamePrefersExplicitQuestionNameOverAiScenarioName() {
+        BusinessModelAgentService service = new BusinessModelAgentService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        org.mockito.Mockito.when(dataUploadService.listBusinessModels(false)).thenReturn(List.of());
+        org.mockito.Mockito.when(dataUploadService.listBusinessModels(true)).thenReturn(List.of());
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(lossOrderFields());
+        org.mockito.Mockito.when(dataUploadService.preview("sales_order", 1, 5)).thenReturn(List.of());
+        org.mockito.Mockito.when(pythonAiService.businessModelSemantic(
+                org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(),
+                org.mockito.Mockito.anyList(), org.mockito.Mockito.anyList(), org.mockito.Mockito.anyMap()
+        )).thenReturn(java.util.Optional.of(Map.of(
+                "requirement", "创建销售运营分析模型",
+                "modelName", "销售运营分析模型",
+                "dictionaryEntries", List.of(),
+                "metricDefinitions", List.of(),
+                "reasoning", List.of("模拟 AI 根据数据场景生成通用模型名")
+        )));
+        org.mockito.Mockito.when(dataUploadService.createBusinessModel(org.mockito.Mockito.anyMap()))
+                .thenAnswer(invocation -> {
+                    Map<String, Object> request = invocation.getArgument(0);
+                    return Map.of("id", 13L, "modelName", request.get("modelName"), "tableName", request.get("tableName"));
+                });
+
+        Map<String, Object> result = service.handleQuestion(Map.of(
+                "question", "帮我创建test模型",
+                "tableName", "sales_order",
+                "modelId", "default",
+                "modelCategory", "CONFIGURED_DEFAULT"
+        ));
+
+        org.mockito.ArgumentCaptor<Map<String, Object>> captor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(dataUploadService).createBusinessModel(captor.capture());
+        assertEquals("test模型", captor.getValue().get("modelName"));
+        assertEquals("test模型", result.get("modelName"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void businessModelCreateKeepsDimensionBindingInCompositeInstruction() {
+        BusinessModelAgentService service = new BusinessModelAgentService();
+        DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);
+        PythonAiService pythonAiService = org.mockito.Mockito.mock(PythonAiService.class);
+        ReflectionTestUtils.setField(service, "dataUploadService", dataUploadService);
+        ReflectionTestUtils.setField(service, "pythonAiService", pythonAiService);
+        List<Map<String, Object>> fields = List.of(
+                field("col_002", "区域", "区域", "TEXT"),
+                field("col_005", "销售额", "销售额", "NUMBER"),
+                field("col_006", "订单量", "订单量", "NUMBER"),
+                field("col_007", "退货率", "退货率", "NUMBER")
+        );
+        org.mockito.Mockito.when(dataUploadService.listBusinessModels(false)).thenReturn(List.of());
+        org.mockito.Mockito.when(dataUploadService.listBusinessModels(true)).thenReturn(List.of());
+        org.mockito.Mockito.when(dataUploadService.listFields("sales_order")).thenReturn(fields);
+        org.mockito.Mockito.when(dataUploadService.preview("sales_order", 1, 5)).thenReturn(List.of());
+        org.mockito.Mockito.when(pythonAiService.businessModelSemantic(
+                org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(), org.mockito.Mockito.anyString(),
+                org.mockito.Mockito.anyList(), org.mockito.Mockito.anyList(), org.mockito.Mockito.anyMap()
+        )).thenReturn(java.util.Optional.of(Map.of(
+                "requirement", "创建销售测试test模型并维护公式和字典",
+                "modelName", "销售测试test模型",
+                "dictionaryEntries", List.of(Map.of("term", "成交额", "field", "销售额", "synonyms", "收入,GMV")),
+                "metricDefinitions", List.of(Map.of(
+                        "name", "客单价",
+                        "field", "销售额",
+                        "aggregation", "AVG",
+                        "formula", "销售额 / 订单量"
+                )),
+                "reasoning", List.of("模拟 AI 未返回 dimensionSystem")
+        )));
+        org.mockito.Mockito.when(dataUploadService.createBusinessModel(org.mockito.Mockito.anyMap()))
+                .thenAnswer(invocation -> {
+                    Map<String, Object> request = invocation.getArgument(0);
+                    return Map.of("id", 14L, "modelName", request.get("modelName"), "tableName", request.get("tableName"));
+                });
+
+        service.handleQuestion(Map.of(
+                "question", "帮我创建销售测试test模型，并在这个模型里完成以下配置：把区域维度绑定到 区域；新增指标公式：客单价 = 销售额 / 订单量；新增业务字典：成交额、收入、GMV 都按 销售额 理解。",
+                "tableName", "sales_order",
+                "modelId", "default",
+                "modelCategory", "CONFIGURED_DEFAULT"
+        ));
+
+        org.mockito.ArgumentCaptor<Map<String, Object>> captor = org.mockito.ArgumentCaptor.forClass(Map.class);
+        org.mockito.Mockito.verify(dataUploadService).createBusinessModel(captor.capture());
+        List<Map<String, Object>> dimensionSystem = (List<Map<String, Object>>) captor.getValue().get("dimensionSystem");
+        assertEquals(1, dimensionSystem.size());
+        assertEquals("区域", dimensionSystem.get(0).get("name"));
+        assertEquals("col_002", dimensionSystem.get(0).get("field"));
+    }
+
+    @Test
     void businessModelAgentContextualFollowUpBindingDoesNotCreateDuplicateModel() {
         BusinessModelAgentService service = new BusinessModelAgentService();
         DataUploadService dataUploadService = org.mockito.Mockito.mock(DataUploadService.class);

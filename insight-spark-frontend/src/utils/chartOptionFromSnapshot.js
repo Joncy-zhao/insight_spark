@@ -1,3 +1,6 @@
+import * as echarts from 'echarts'
+import chinaProvinceGeoJson from '../assets/maps/china-provinces.json' with { type: 'json' }
+
 /** 从对话历史 chart_snapshot + chartType 构建 ECharts option（与看板预览逻辑对齐） */
 
 function toNumber(value) {
@@ -65,6 +68,7 @@ export function normalizeChartType(value) {
   const type = String(value || '').toLowerCase()
   if (['line', 'pie', 'bar', 'table', 'radar', 'scatter', 'map', 'metric'].includes(type)) return type
   if (type === 'doughnut' || type === 'donut') return 'pie'
+  if (type === 'card' || type === 'kpi' || type === 'indicator') return 'metric'
   if (type.includes('饼')) return 'pie'
   if (type.includes('环')) return 'pie'
   if (type.includes('折')) return 'line'
@@ -74,6 +78,7 @@ export function normalizeChartType(value) {
   if (type.includes('散点')) return 'scatter'
   if (type.includes('地图')) return 'map'
   if (type.includes('指标')) return 'metric'
+  if (type.includes('kpi') || type.includes('card') || type.includes('indicator')) return 'metric'
   return 'bar'
 }
 
@@ -840,6 +845,9 @@ export function applyDynamicInteractionDefaults(option, template, context = {}) 
     applyDynamicSeries(out.series, dynamic, categoryCount),
     out.animation !== false
   )
+  if (chartType === 'map') {
+    return sanitizeMapChartOption(out)
+  }
   return out
 }
 
@@ -872,6 +880,569 @@ function buildRadarFromPoints(points, ui) {
         lineStyle: barColor ? { color: barColor, width: 2 } : { width: 2 },
         itemStyle: barColor ? { color: barColor } : undefined,
         symbolSize: 4
+      }
+    ]
+  }
+}
+
+function normalizeGeoName(value) {
+  const raw = String(value ?? '').trim()
+  if (!raw) return ''
+  return raw
+    .replace(/^(中国|中华人民共和国)/, '')
+    .replace(/(维吾尔自治区|壮族自治区|回族自治区|特别行政区|自治区|省|市|区域|大区|地区|盟|州)$/u, '')
+    .trim() || raw
+}
+
+const INSIGHT_CHINA_PROVINCE_MAP_NAME = 'insight-china-provinces'
+const INSIGHT_CHINA_REGION_NAMES = ['东北', '华北', '华东', '华中', '华南', '西南', '西北', '港澳台']
+const INSIGHT_CHINA_REGION_PROVINCES = {
+  华北: ['北京市', '天津市', '河北省', '山西省', '内蒙古自治区'],
+  东北: ['辽宁省', '吉林省', '黑龙江省'],
+  华东: ['上海市', '江苏省', '浙江省', '安徽省', '福建省', '江西省', '山东省'],
+  华中: ['河南省', '湖北省', '湖南省'],
+  华南: ['广东省', '广西壮族自治区', '海南省'],
+  西南: ['重庆市', '四川省', '贵州省', '云南省', '西藏自治区'],
+  西北: ['陕西省', '甘肃省', '青海省', '宁夏回族自治区', '新疆维吾尔自治区'],
+  港澳台: ['香港特别行政区', '澳门特别行政区', '台湾省']
+}
+const INSIGHT_CHINA_REGION_LABEL_PROVINCE = {
+  华北: '河北省',
+  东北: '吉林省',
+  华东: '安徽省',
+  华中: '湖北省',
+  华南: '广东省',
+  西南: '四川省',
+  西北: '甘肃省',
+  港澳台: '台湾省'
+}
+const INSIGHT_CHINA_REGION_ALIAS_MAP = new Map([
+  ['北京', '华北'], ['天津', '华北'], ['河北', '华北'], ['山西', '华北'], ['内蒙古', '华北'],
+  ['辽宁', '东北'], ['吉林', '东北'], ['黑龙江', '东北'],
+  ['上海', '华东'], ['江苏', '华东'], ['浙江', '华东'], ['安徽', '华东'], ['福建', '华东'], ['江西', '华东'], ['山东', '华东'],
+  ['河南', '华中'], ['湖北', '华中'], ['湖南', '华中'],
+  ['广东', '华南'], ['广西', '华南'], ['海南', '华南'],
+  ['重庆', '西南'], ['四川', '西南'], ['贵州', '西南'], ['云南', '西南'], ['西藏', '西南'],
+  ['陕西', '西北'], ['甘肃', '西北'], ['青海', '西北'], ['宁夏', '西北'], ['新疆', '西北'],
+  ['香港', '港澳台'], ['澳门', '港澳台'], ['台湾', '港澳台']
+])
+const INSIGHT_CHINA_PROVINCE_GEOJSON = {
+  ...chinaProvinceGeoJson,
+  features: Array.isArray(chinaProvinceGeoJson?.features) ? chinaProvinceGeoJson.features : []
+}
+const INSIGHT_CHINA_PROVINCE_NAMES = INSIGHT_CHINA_PROVINCE_GEOJSON.features
+  .map(feature => String(feature?.properties?.name || '').trim())
+  .filter(Boolean)
+const INSIGHT_CHINA_PROVINCE_BY_NORMALIZED_NAME = new Map()
+
+for (const provinceName of INSIGHT_CHINA_PROVINCE_NAMES) {
+  INSIGHT_CHINA_PROVINCE_BY_NORMALIZED_NAME.set(provinceName, provinceName)
+  INSIGHT_CHINA_PROVINCE_BY_NORMALIZED_NAME.set(normalizeGeoName(provinceName), provinceName)
+}
+
+let insightChinaRegionMapRegistered = false
+
+function ensureInsightChinaRegionMapRegistered() {
+  if (insightChinaRegionMapRegistered) return true
+  try {
+    if (typeof echarts.getMap === 'function' && echarts.getMap(INSIGHT_CHINA_PROVINCE_MAP_NAME)) {
+      insightChinaRegionMapRegistered = true
+      return true
+    }
+    if (typeof echarts.registerMap !== 'function') return false
+    echarts.registerMap(INSIGHT_CHINA_PROVINCE_MAP_NAME, INSIGHT_CHINA_PROVINCE_GEOJSON)
+    insightChinaRegionMapRegistered = true
+    return true
+  } catch {
+    return false
+  }
+}
+
+function normalizeMapRegionName(value) {
+  const text = normalizeGeoName(value).replace(/\s+/g, '')
+  if (!text) return ''
+  if (INSIGHT_CHINA_REGION_NAMES.includes(text)) return text
+  for (const region of INSIGHT_CHINA_REGION_NAMES) {
+    if (text.includes(region)) return region
+  }
+  for (const [alias, region] of INSIGHT_CHINA_REGION_ALIAS_MAP.entries()) {
+    if (text === alias || text.includes(alias)) return region
+  }
+  return text
+}
+
+function normalizeMapProvinceName(value) {
+  const raw = String(value ?? '').trim().replace(/\s+/g, '')
+  if (!raw) return ''
+  const normalized = normalizeGeoName(raw)
+  return INSIGHT_CHINA_PROVINCE_BY_NORMALIZED_NAME.get(raw) ||
+    INSIGHT_CHINA_PROVINCE_BY_NORMALIZED_NAME.get(normalized) ||
+    ''
+}
+
+function expandMapPointToProvinceItems(point) {
+  const rawName = String(point?.name ?? '').trim()
+  const regionName = normalizeMapRegionName(rawName)
+  const provinceName = normalizeMapProvinceName(rawName)
+  const value = Number(point?.value)
+  const safeValue = Number.isFinite(value) ? value : 0
+  const base = {
+    ...point,
+    value: safeValue,
+    sourceValue: Number.isFinite(Number(point?.sourceValue)) ? Number(point.sourceValue) : safeValue,
+    sourceName: String(point?.sourceName || rawName).trim(),
+    regionName: String(point?.regionName || (
+      INSIGHT_CHINA_REGION_NAMES.includes(regionName)
+        ? regionName
+        : (provinceName ? normalizeMapRegionName(provinceName) : regionName)
+    )).trim()
+  }
+
+  if ((point?.sourceName || point?.regionName) && provinceName) {
+    return [{ ...base, name: provinceName }]
+  }
+
+  if (INSIGHT_CHINA_REGION_PROVINCES[regionName]) {
+    return INSIGHT_CHINA_REGION_PROVINCES[regionName].map(province => ({
+      ...base,
+      name: province,
+      sourceName: rawName || regionName,
+      regionName
+    }))
+  }
+
+  if (provinceName) {
+    return [{ ...base, name: provinceName }]
+  }
+
+  return rawName ? [{ ...base, name: rawName }] : []
+}
+
+function normalizeMapPoints(points) {
+  const aggregated = new Map()
+  for (const point of Array.isArray(points) ? points : []) {
+    const provinceItems = expandMapPointToProvinceItems(point)
+    for (const item of provinceItems) {
+      const name = item.name
+      if (!name) continue
+      const existing = aggregated.get(name)
+      if (existing) {
+        existing.value += Number(item.value) || 0
+        existing.sourceName = existing.sourceName || item.sourceName
+        existing.regionName = existing.regionName || item.regionName
+        continue
+      }
+      aggregated.set(name, item)
+    }
+  }
+  return Array.from(aggregated.values())
+}
+
+function buildMapRegionLabelMap(mapData) {
+  const groups = new Map()
+  for (const item of Array.isArray(mapData) ? mapData : []) {
+    const regionName = String(item?.regionName || normalizeMapRegionName(item?.name)).trim()
+    if (!regionName) continue
+    const value = Number(item?.value)
+    const sourceValue = Number(item?.sourceValue)
+    const group = groups.get(regionName) || {
+      regionName,
+      provinceNames: [],
+      values: [],
+      sourceValues: []
+    }
+    group.provinceNames.push(String(item?.name || '').trim())
+    if (Number.isFinite(value)) group.values.push(value)
+    if (Number.isFinite(sourceValue)) group.sourceValues.push(sourceValue)
+    groups.set(regionName, group)
+  }
+
+  const result = new Map()
+  for (const group of groups.values()) {
+    const preferredProvince = INSIGHT_CHINA_REGION_LABEL_PROVINCE[group.regionName]
+    const provinceName = group.provinceNames.includes(preferredProvince)
+      ? preferredProvince
+      : group.provinceNames[0]
+    if (!provinceName) continue
+    const distinctSourceValues = [...new Set(group.sourceValues.map(value => Number(value).toPrecision(12)))]
+    const displayValue = distinctSourceValues.length === 1
+      ? group.sourceValues[0]
+      : group.values.reduce((sum, value) => sum + value, 0)
+    result.set(provinceName, {
+      regionName: group.regionName,
+      value: Number.isFinite(displayValue) ? displayValue : 0
+    })
+  }
+  return result
+}
+
+function objectRowsFromSnapshot(snap) {
+  return (Array.isArray(snap?.data) ? snap.data : [])
+    .filter((row) => row && typeof row === 'object' && !Array.isArray(row))
+}
+
+function normalizeKeyCandidates(...groups) {
+  return groups
+    .flat()
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+}
+
+function firstNumericObjectKey(rows, candidates = [], exclude = []) {
+  const sourceRows = Array.isArray(rows) ? rows : []
+  const first = sourceRows.find((row) => row && typeof row === 'object' && !Array.isArray(row)) || {}
+  const keys = Object.keys(first)
+  if (!keys.length) return ''
+  const excluded = new Set(exclude.map((key) => String(key || '').trim()).filter(Boolean))
+  const numericKeys = keys.filter((key) =>
+    !excluded.has(key) &&
+    sourceRows.some((row) => Number.isFinite(Number(row?.[key])))
+  )
+  if (!numericKeys.length) return ''
+  const candidateSet = new Set(candidates.map((key) => String(key || '').trim()).filter(Boolean))
+  return numericKeys.find((key) => candidateSet.has(key)) || numericKeys[0] || ''
+}
+
+function firstTextObjectKey(rows, candidates = [], exclude = []) {
+  const first = (Array.isArray(rows) ? rows : [])
+    .find((row) => row && typeof row === 'object' && !Array.isArray(row)) || {}
+  const keys = Object.keys(first)
+  if (!keys.length) return ''
+  const excluded = new Set(exclude.map((key) => String(key || '').trim()).filter(Boolean))
+  const candidateSet = new Set(candidates.map((key) => String(key || '').trim()).filter(Boolean))
+  return keys.find((key) => !excluded.has(key) && candidateSet.has(key)) ||
+    keys.find((key) => !excluded.has(key) && !Number.isFinite(Number(first[key]))) ||
+    ''
+}
+
+function normalizeListCandidates(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || '').trim()).filter(Boolean)
+  }
+  return String(value || '')
+    .split(/[,，、\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function metricLabelForKey(fm, key, index, metricKeys = []) {
+  const labels = fm?.metricLabels
+  if (labels && typeof labels === 'object' && !Array.isArray(labels)) {
+    const label = String(labels[key] || '').trim()
+    if (label) return label
+  }
+  if (Array.isArray(labels)) {
+    const label = String(labels[index] || '').trim()
+    if (label) return label
+  }
+  const metricNames = normalizeListCandidates(fm?.metricNames || fm?.metrics)
+  if (metricNames[index]) return metricNames[index]
+  const configuredIndex = metricKeys.indexOf(key)
+  if (configuredIndex >= 0 && metricNames[configuredIndex]) return metricNames[configuredIndex]
+  return key
+}
+
+function resolveRadarMetricKeysFromRows(rows, snap) {
+  const sourceRows = Array.isArray(rows) ? rows : []
+  const first = sourceRows.find((row) => row && typeof row === 'object' && !Array.isArray(row)) || {}
+  const keys = Object.keys(first)
+  if (!keys.length) return []
+  const fm = snap?.fieldMapping && typeof snap.fieldMapping === 'object' ? snap.fieldMapping : {}
+  const configured = normalizeListCandidates(fm.metricKeys)
+  const dimensionCandidates = new Set(normalizeKeyCandidates(
+    fm.dimensionKey,
+    fm.dimension,
+    snap?.encode?.itemName,
+    snap?.encode?.x,
+    'name',
+    'dim_name',
+    'dimension',
+    'label'
+  ))
+  const result = []
+  for (const key of configured) {
+    if (keys.includes(key) && sourceRows.some((row) => Number.isFinite(Number(row?.[key])))) {
+      result.push(key)
+    }
+  }
+  for (const key of keys) {
+    if (result.includes(key) || dimensionCandidates.has(key)) continue
+    if (sourceRows.some((row) => Number.isFinite(Number(row?.[key])))) {
+      result.push(key)
+    }
+  }
+  return result
+}
+
+function buildRadarFromMetricRows(rows, snap, ui, itemOv = {}) {
+  const sourceRows = (Array.isArray(rows) ? rows : [])
+    .filter((row) => row && typeof row === 'object' && !Array.isArray(row))
+  if (!sourceRows.length) return null
+  const fm = snap?.fieldMapping && typeof snap.fieldMapping === 'object' ? snap.fieldMapping : {}
+  const metricKeys = resolveRadarMetricKeysFromRows(sourceRows, snap)
+  if (metricKeys.length < 3) return null
+
+  const nameKey = firstTextObjectKey(sourceRows, normalizeKeyCandidates(
+    fm.dimensionKey,
+    fm.dimension,
+    snap?.encode?.itemName,
+    snap?.encode?.x,
+    'name',
+    'dim_name'
+  ), metricKeys)
+  const maxima = metricKeys.map((key) => {
+    const values = sourceRows.map((row) => Number(row?.[key])).filter((value) => Number.isFinite(value))
+    const max = values.length ? Math.max(...values, 0) : 0
+    return max > 0 ? Number((max * 1.15).toPrecision(12)) : 1
+  })
+  const indicator = metricKeys.map((key, index) => ({
+    name: metricLabelForKey(fm, key, index, metricKeys),
+    max: maxima[index]
+  }))
+  const data = sourceRows.map((row, index) => {
+    const name = String(row?.[nameKey] ?? row?.name ?? row?.dim_name ?? row?.dimension ?? index + 1)
+    const item = {
+      name,
+      value: metricKeys.map((key) => {
+        const value = Number(row?.[key])
+        return Number.isFinite(value) ? value : 0
+      })
+    }
+    const col = itemOv[index]?.color
+    if (col) item.itemStyle = { color: col }
+    return item
+  })
+  const { barColor } = readBarUi(ui)
+  const singleSeriesColor = data.length <= 1 && barColor ? barColor : ''
+  return {
+    tooltip: {
+      trigger: 'item',
+      confine: true,
+      formatter: (params) => {
+        const values = Array.isArray(params?.data?.value) ? params.data.value : []
+        const lines = [params?.data?.name ? `${params.data.name}` : '']
+        indicator.forEach((item, index) => {
+          lines.push(`${item.name}: ${values[index] ?? '-'}`)
+        })
+        return lines.filter(Boolean).join('<br/>')
+      }
+    },
+    legend: {
+      type: 'scroll',
+      bottom: 0,
+      textStyle: { fontSize: 11 },
+      itemWidth: 10,
+      itemHeight: 10
+    },
+    radar: {
+      indicator,
+      radius: '58%',
+      center: ['50%', '46%'],
+      splitLine: { lineStyle: { color: '#eef2f7' } },
+      axisName: { fontSize: 11, color: '#64748b' }
+    },
+    series: [
+      {
+        type: 'radar',
+        data,
+        areaStyle: { opacity: 0.12 },
+        lineStyle: singleSeriesColor ? { color: singleSeriesColor, width: 2 } : { width: 2 },
+        itemStyle: singleSeriesColor ? { color: singleSeriesColor } : undefined,
+        symbolSize: 4
+      }
+    ]
+  }
+}
+
+function buildScatterFromRows(rows, snap, ui, itemOv = {}) {
+  const sourceRows = Array.isArray(rows) ? rows : []
+  if (!sourceRows.length) return null
+  const fm = snap?.fieldMapping && typeof snap.fieldMapping === 'object' ? snap.fieldMapping : {}
+  const xCandidates = normalizeKeyCandidates(
+    fm.xMetricKey,
+    fm.xMetric,
+    fm.xField,
+    fm.metricX,
+    snap?.encode?.x
+  )
+  const yCandidates = normalizeKeyCandidates(
+    fm.yMetricKey,
+    fm.yMetric,
+    fm.yField,
+    fm.metricY,
+    snap?.encode?.y,
+    snap?.encode?.value
+  )
+  const xKey = firstNumericObjectKey(sourceRows, xCandidates)
+  const yKey = firstNumericObjectKey(sourceRows, yCandidates, [xKey])
+  if (!xKey || !yKey || xKey === yKey) return null
+
+  const groupKey = firstTextObjectKey(sourceRows, normalizeKeyCandidates(
+    fm.groupKey,
+    fm.group,
+    fm.dimension,
+    fm.dimensionKey,
+    snap?.encode?.itemName,
+    snap?.encode?.group
+  ), [xKey, yKey])
+  const sizeKey = firstNumericObjectKey(sourceRows, normalizeKeyCandidates(
+    fm.sizeMetricKey,
+    fm.sizeMetric,
+    fm.sizeKey
+  ), [xKey, yKey])
+  const { barColor } = readBarUi(ui)
+  const points = sourceRows.map((row, index) => {
+    const x = Number(row?.[xKey])
+    const y = Number(row?.[yKey])
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null
+    const size = sizeKey ? Number(row?.[sizeKey]) : Number.NaN
+    const value = Number.isFinite(size) ? [x, y, size] : [x, y]
+    const item = {
+      name: groupKey ? String(row?.[groupKey] ?? '') : String(row?.name ?? row?.label ?? index + 1),
+      value
+    }
+    const col = itemOv[index]?.color
+    if (col) item.itemStyle = { color: col }
+    return item
+  }).filter(Boolean)
+  if (!points.length) return null
+
+  const sizeValues = points
+    .map((point) => Number(point.value?.[2]))
+    .filter((value) => Number.isFinite(value))
+  const minSize = sizeValues.length ? Math.min(...sizeValues) : 0
+  const maxSize = sizeValues.length ? Math.max(...sizeValues) : 0
+  const resolveSymbolSize = (value) => {
+    const size = Number(Array.isArray(value) ? value[2] : NaN)
+    if (!Number.isFinite(size) || maxSize === minSize) return 11
+    return Math.max(8, Math.min(28, 8 + ((size - minSize) / (maxSize - minSize)) * 20))
+  }
+
+  return {
+    tooltip: {
+      trigger: 'item',
+      confine: true,
+      formatter: (params) => {
+        const arr = Array.isArray(params?.data?.value) ? params.data.value : []
+        const rows = [
+          params?.data?.name ? `${params.data.name}` : '',
+          `${fm.xMetric || xKey}: ${arr[0] ?? '-'}`,
+          `${fm.yMetric || yKey}: ${arr[1] ?? '-'}`
+        ]
+        if (sizeKey && arr.length > 2) rows.push(`${fm.sizeMetric || sizeKey}: ${arr[2]}`)
+        return rows.filter(Boolean).join('<br/>')
+      }
+    },
+    grid: { left: 54, right: 18, top: 18, bottom: 44, containLabel: true },
+    xAxis: {
+      type: 'value',
+      name: fm.xMetric || xKey,
+      splitLine: { lineStyle: { color: '#eef2f7' } },
+      axisLabel: { fontSize: 11 }
+    },
+    yAxis: {
+      type: 'value',
+      name: fm.yMetric || yKey,
+      splitLine: { lineStyle: { color: '#eef2f7' } },
+      axisLabel: { fontSize: 11 }
+    },
+    series: [
+      {
+        type: 'scatter',
+        data: points,
+        symbolSize: sizeKey ? resolveSymbolSize : 11,
+        itemStyle: barColor ? { color: barColor, opacity: 0.82 } : { opacity: 0.82 },
+        large: points.length > 120,
+        largeThreshold: 120
+      }
+    ]
+  }
+}
+
+function sourceValueAt(row, index, name) {
+  if (Array.isArray(row)) return row[index]
+  return row?.[name]
+}
+
+function firstNumericDatasetIndex(dimensions, source, candidates = [], exclude = []) {
+  const excluded = new Set(exclude)
+  const numeric = dimensions
+    .map((name, index) => ({ name, index }))
+    .filter(({ index, name }) =>
+      !excluded.has(index) &&
+      source.some((row) => Number.isFinite(Number(sourceValueAt(row, index, name))))
+    )
+  if (!numeric.length) return -1
+  const candidateSet = new Set(candidates.map((item) => String(item || '').trim()).filter(Boolean))
+  return (numeric.find(({ name }) => candidateSet.has(name)) || numeric[0]).index
+}
+
+function buildScatterFromEncodeDataset(snap, dimensions, source, ui) {
+  const enc = snap.encode || {}
+  const fm = snap?.fieldMapping && typeof snap.fieldMapping === 'object' ? snap.fieldMapping : {}
+  const xIndex = firstNumericDatasetIndex(dimensions, source, normalizeKeyCandidates(
+    fm.xMetricKey,
+    fm.xMetric,
+    fm.xField,
+    enc.x
+  ))
+  const yIndex = firstNumericDatasetIndex(dimensions, source, normalizeKeyCandidates(
+    fm.yMetricKey,
+    fm.yMetric,
+    fm.yField,
+    enc.y,
+    enc.value
+  ), [xIndex])
+  if (xIndex < 0 || yIndex < 0 || xIndex === yIndex) return null
+  const xName = dimensions[xIndex]
+  const yName = dimensions[yIndex]
+  const itemName = String(enc.itemName ?? enc.name ?? dimensions[0] ?? '')
+  const itemIndex = dimensions.indexOf(itemName)
+  const data = source.map((row, index) => {
+    const x = Number(sourceValueAt(row, xIndex, xName))
+    const y = Number(sourceValueAt(row, yIndex, yName))
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null
+    return {
+      name: itemIndex >= 0 ? String(sourceValueAt(row, itemIndex, itemName) ?? '') : String(index + 1),
+      value: [x, y]
+    }
+  }).filter(Boolean)
+  if (!data.length) return null
+  const { barColor } = readBarUi(ui)
+  return {
+    tooltip: {
+      trigger: 'item',
+      confine: true,
+      formatter: (params) => {
+        const arr = Array.isArray(params?.data?.value) ? params.data.value : []
+        return [
+          params?.data?.name ? `${params.data.name}` : '',
+          `${fm.xMetric || xName}: ${arr[0] ?? '-'}`,
+          `${fm.yMetric || yName}: ${arr[1] ?? '-'}`
+        ].filter(Boolean).join('<br/>')
+      }
+    },
+    grid: { left: 54, right: 18, top: 18, bottom: 44, containLabel: true },
+    xAxis: {
+      type: 'value',
+      name: fm.xMetric || xName,
+      splitLine: { lineStyle: { color: '#eef2f7' } },
+      axisLabel: { fontSize: 11 }
+    },
+    yAxis: {
+      type: 'value',
+      name: fm.yMetric || yName,
+      splitLine: { lineStyle: { color: '#eef2f7' } },
+      axisLabel: { fontSize: 11 }
+    },
+    series: [
+      {
+        type: 'scatter',
+        data,
+        symbolSize: 11,
+        itemStyle: barColor ? { color: barColor, opacity: 0.82 } : { opacity: 0.82 },
+        large: data.length > 120,
+        largeThreshold: 120
       }
     ]
   }
@@ -936,7 +1507,212 @@ function buildScatterFromPoints(points, ui, itemOv = {}) {
   return option
 }
 
+function shortNumberText(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return String(value ?? '-')
+  if (Math.abs(n) >= 100000000) return `${(n / 100000000).toFixed(1)}亿`
+  if (Math.abs(n) >= 10000) return `${(n / 10000).toFixed(1)}万`
+  return `${n}`
+}
+
+function buildMapFromPoints(points, snap, ui, itemOv = {}) {
+  const mapData = normalizeMapPoints((Array.isArray(points) ? points : []).map((point, index) => {
+    const item = { ...point }
+    const col = itemOv[index]?.color
+    if (col) item.itemStyle = { ...(item.itemStyle || {}), areaColor: col, color: col }
+    return item
+  }))
+  if (!mapData.length) return null
+
+  ensureInsightChinaRegionMapRegistered()
+  const values = mapData.map(item => Number(item.value)).filter(Number.isFinite)
+  const maxValue = values.length ? Math.max(...values, 0) : 1
+  const minValue = values.length ? Math.min(...values, 0) : 0
+  const fm = snap?.fieldMapping && typeof snap.fieldMapping === 'object' ? snap.fieldMapping : {}
+  const metricLabel = String(fm.metric || fm.metricLabel || '指标值')
+  const regionLabelMap = buildMapRegionLabelMap(mapData)
+  const { barColor } = readBarUi(ui)
+
+  return {
+    tooltip: {
+      trigger: 'item',
+      confine: true,
+      formatter: (params) => {
+        const name = String(params?.name || params?.data?.name || '')
+        const sourceName = String(params?.data?.sourceName || '').trim()
+        const regionName = String(params?.data?.regionName || '').trim()
+        const value = params?.data?.value ?? params?.value
+        return [
+          name,
+          regionName && regionName !== name ? `所属大区: ${regionName}` : '',
+          sourceName && sourceName !== name && sourceName !== regionName ? `来源: ${sourceName}` : '',
+          `${metricLabel}: ${shortNumberText(value)}`
+        ].filter(Boolean).join('<br/>')
+      }
+    },
+    visualMap: {
+      min: Math.min(0, minValue),
+      max: maxValue > minValue ? maxValue : Math.max(maxValue, 1),
+      left: 8,
+      bottom: 8,
+      itemWidth: 10,
+      itemHeight: 80,
+      text: ['高', '低'],
+      calculable: true,
+      realtime: true,
+      inRange: {
+        color: barColor
+          ? ['#eff6ff', barColor]
+          : ['#eff6ff', '#93c5fd', '#2563eb']
+      },
+      textStyle: { color: '#64748b', fontSize: 11 }
+    },
+    series: [
+      {
+        name: metricLabel,
+        type: 'map',
+        map: INSIGHT_CHINA_PROVINCE_MAP_NAME,
+        mapType: INSIGHT_CHINA_PROVINCE_MAP_NAME,
+        roam: false,
+        selectedMode: false,
+        showLegendSymbol: false,
+        data: mapData,
+        layoutCenter: ['50%', '50%'],
+        layoutSize: '106%',
+        label: {
+          show: true,
+          color: '#0f172a',
+          fontSize: 12,
+          fontWeight: 700,
+          lineHeight: 17,
+          formatter: (params) => {
+            const meta = regionLabelMap.get(String(params?.name || '').trim())
+            if (!meta) return ''
+            return `${meta.regionName}\n${metricLabel} ${shortNumberText(meta.value)}`
+          }
+        },
+        itemStyle: {
+          areaColor: '#f8fafc',
+          borderColor: 'rgba(148, 163, 184, 0.46)',
+          borderWidth: 0.8
+        },
+        emphasis: {
+          label: { show: true, color: '#0f172a', fontWeight: 800, fontSize: 12 },
+          itemStyle: { areaColor: '#f59e0b', borderColor: '#92400e', borderWidth: 1.1 }
+        }
+      }
+    ]
+  }
+}
+
+function buildMapFromEncodeDataset(snap, dimensions, source, ui) {
+  const rows = source.map((row) => {
+    const item = {}
+    dimensions.forEach((name, index) => {
+      item[name] = sourceValueAt(row, index, name)
+    })
+    return item
+  })
+  const fm = snap?.fieldMapping && typeof snap.fieldMapping === 'object' ? snap.fieldMapping : {}
+  const enc = snap?.encode && typeof snap.encode === 'object' ? snap.encode : {}
+  const geoKey = firstTextObjectKey(rows, normalizeKeyCandidates(
+    fm.geoKey,
+    fm.regionKey,
+    fm.dimensionKey,
+    fm.dimension,
+    enc.itemName,
+    enc.x,
+    'name',
+    'dim_name',
+    'dimension',
+    'region',
+    'province',
+    'city'
+  ))
+  const metricKey = firstNumericObjectKey(rows, normalizeKeyCandidates(
+    fm.metricKey,
+    fm.metric,
+    enc.value,
+    enc.y,
+    'value',
+    'metric_value'
+  ), [geoKey])
+  if (!geoKey || !metricKey) return null
+  const points = rows.map(row => ({
+    name: row?.[geoKey],
+    value: row?.[metricKey]
+  }))
+  return buildMapFromPoints(points, snap, ui)
+}
+
+function sanitizeMapChartOption(option) {
+  if (!option || typeof option !== 'object') return option
+  ensureInsightChinaRegionMapRegistered()
+  const out = { ...option }
+  delete out.grid
+  delete out.xAxis
+  delete out.yAxis
+  delete out.dataZoom
+  out.tooltip = mergeObjects(out.tooltip, { trigger: 'item', confine: true })
+
+  const sourceSeries = Array.isArray(out.series) ? out.series : []
+  const mapSeriesIndex = sourceSeries.findIndex(series => String(series?.type || '').toLowerCase() === 'map')
+  out.series = sourceSeries.map((series, index) => {
+    if (!series || typeof series !== 'object') return series
+    if (index !== 0 && index !== mapSeriesIndex && String(series.type || '').toLowerCase() !== 'map') return series
+    const data = normalizeMapPoints(series.data)
+    const regionLabelMap = buildMapRegionLabelMap(data)
+    const metricLabel = String(series.name || '指标值')
+    return mergeObjects(series, {
+      type: 'map',
+      map: INSIGHT_CHINA_PROVINCE_MAP_NAME,
+      mapType: INSIGHT_CHINA_PROVINCE_MAP_NAME,
+      showLegendSymbol: false,
+      data,
+      tooltip: { trigger: 'item' },
+      label: {
+        show: true,
+        color: '#0f172a',
+        fontSize: 12,
+        fontWeight: 700,
+        lineHeight: 17,
+        formatter: (params) => {
+          const meta = regionLabelMap.get(String(params?.name || '').trim())
+          if (!meta) return ''
+          return `${meta.regionName}\n${metricLabel} ${shortNumberText(meta.value)}`
+        }
+      }
+    })
+  })
+  if (!out.series.length) {
+    out.series = [{
+      type: 'map',
+      map: INSIGHT_CHINA_PROVINCE_MAP_NAME,
+      mapType: INSIGHT_CHINA_PROVINCE_MAP_NAME,
+      showLegendSymbol: false,
+      data: []
+    }]
+  }
+  if (out.geo && typeof out.geo === 'object' && !Array.isArray(out.geo)) {
+    out.geo = mergeObjects(out.geo, { map: INSIGHT_CHINA_PROVINCE_MAP_NAME })
+  }
+  if (out.visualMap && typeof out.visualMap === 'object' && !Array.isArray(out.visualMap)) {
+    out.visualMap = mergeObjects({ seriesIndex: 0 }, out.visualMap)
+  }
+  return out
+}
+
 function buildRadarFromEncodeDataset(snap, dimensions, source, ui) {
+  const rows = source.map((row) => {
+    const item = {}
+    dimensions.forEach((name, index) => {
+      item[name] = sourceValueAt(row, index, name)
+    })
+    return item
+  })
+  const multiMetricRadar = buildRadarFromMetricRows(rows, snap, ui)
+  if (multiMetricRadar) return multiMetricRadar
+
   const enc = snap.encode || {}
   const nameKey = String(enc.x ?? enc.itemName ?? dimensions[0] ?? 'name')
   const valKey = String(enc.y ?? enc.value ?? dimensions[1] ?? 'value')
@@ -946,7 +1722,7 @@ function buildRadarFromEncodeDataset(snap, dimensions, source, ui) {
     name: String(ni >= 0 ? row[nameKey] ?? row[ni] : row[dimensions[0]] ?? ''),
     value: Number(vi >= 0 ? row[valKey] ?? row[vi] : row[dimensions[1]] ?? 0)
   }))
-  return buildRadarFromPoints(points, ui)
+  return points.length >= 3 ? buildRadarFromPoints(points, ui) : null
 }
 
 function buildOptionFromEncodeDataset(snap, chartType, ui) {
@@ -957,10 +1733,23 @@ function buildOptionFromEncodeDataset(snap, chartType, ui) {
   const manyPie = n > 10
 
   if (chartType === 'radar') {
-    return buildRadarFromEncodeDataset(snap, dimensions, source, ui)
+    const radarOption = buildRadarFromEncodeDataset(snap, dimensions, source, ui)
+    if (radarOption) return radarOption
   }
 
-  if (chartType === 'pie') {
+  if (chartType === 'scatter') {
+    const scatterOption = buildScatterFromEncodeDataset(snap, dimensions, source, ui)
+    if (scatterOption) return scatterOption
+  }
+
+  if (chartType === 'map') {
+    const mapOption = buildMapFromEncodeDataset(snap, dimensions, source, ui)
+    if (mapOption) return mapOption
+  }
+
+  const effectiveChartType = ['radar', 'scatter', 'map'].includes(chartType) ? 'bar' : chartType
+
+  if (effectiveChartType === 'pie') {
     const itemName = String(enc.itemName ?? 'name')
     const valDim = String(enc.value ?? 'value')
     return {
@@ -1029,29 +1818,29 @@ function buildOptionFromEncodeDataset(snap, chartType, ui) {
   const endPct = n ? Math.min(100, Math.ceil((14 / n) * 100)) : 100
 
   const series0 = {
-    type: chartType,
+    type: effectiveChartType,
     datasetIndex: 0,
     encode: {
       x: xi >= 0 ? xKey : dimensions[0],
       y: yi >= 0 ? yKey : dimensions[1]
     },
-    smooth: chartType === 'line',
-    barMaxWidth: chartType === 'bar' ? barW : 32,
+    smooth: effectiveChartType === 'line',
+    barMaxWidth: effectiveChartType === 'bar' ? barW : 32,
     large: n > 80,
     largeThreshold: 80
   }
 
-  if (chartType === 'bar' && barColor) {
+  if (effectiveChartType === 'bar' && barColor) {
     series0.itemStyle = { color: barColor, borderRadius: [4, 4, 0, 0] }
-  } else if (chartType === 'bar') {
+  } else if (effectiveChartType === 'bar') {
     series0.itemStyle = { borderRadius: [4, 4, 0, 0] }
   }
 
-  if (chartType === 'line' && barColor) {
+  if (effectiveChartType === 'line' && barColor) {
     series0.lineStyle = { color: barColor, width: 2 }
   }
 
-  if (chartType === 'scatter') {
+  if (effectiveChartType === 'scatter') {
     series0.symbolSize = 10
     series0.itemStyle = barColor ? { color: barColor, opacity: 0.85 } : { opacity: 0.85 }
   }
@@ -1059,7 +1848,7 @@ function buildOptionFromEncodeDataset(snap, chartType, ui) {
   const option = {
     tooltip: {
       trigger: 'axis',
-      axisPointer: { type: chartType === 'scatter' ? 'cross' : 'shadow' },
+      axisPointer: { type: effectiveChartType === 'scatter' ? 'cross' : 'shadow' },
       confine: true
     },
     grid: {
@@ -1112,17 +1901,30 @@ function buildOptionFromEncodeDataset(snap, chartType, ui) {
 
 function buildOptionLegacyFromPoints(snap, chartType, ui, itemOv) {
   const data = Array.isArray(snap.data) ? snap.data : []
-  const points = data.map(normalizeChartItem)
+  const basePoints = data.map(normalizeChartItem)
+  const points = basePoints
 
   if (chartType === 'radar') {
-    return buildRadarFromPoints(points, ui)
+    const multiMetricRadar = buildRadarFromMetricRows(objectRowsFromSnapshot(snap), snap, ui, itemOv)
+    if (multiMetricRadar) return multiMetricRadar
+    if (points.length >= 3) {
+      return buildRadarFromPoints(points, ui)
+    }
   }
 
   if (chartType === 'scatter') {
-    return buildScatterFromPoints(points, ui, itemOv)
+    const scatterOption = buildScatterFromRows(objectRowsFromSnapshot(snap), snap, ui, itemOv)
+    if (scatterOption) return scatterOption
   }
 
-  if (chartType === 'pie') {
+  if (chartType === 'map') {
+    const mapOption = buildMapFromPoints(points, snap, ui, itemOv)
+    if (mapOption) return mapOption
+  }
+
+  const effectiveChartType = ['radar', 'scatter', 'map'].includes(chartType) ? 'bar' : chartType
+
+  if (effectiveChartType === 'pie') {
     const many = points.length > 10
     const pieData = points.map((p, i) => {
       const piece = { name: p.name, value: p.value }
@@ -1183,12 +1985,12 @@ function buildOptionLegacyFromPoints(snap, chartType, ui, itemOv) {
   const endPct = xAxisData.length ? Math.min(100, Math.ceil((14 / xAxisData.length) * 100)) : 100
 
   const { barW, barColor } = readBarUi(ui)
-  const lineGlobal = chartType === 'line' && barColor ? barColor : ''
+  const lineGlobal = effectiveChartType === 'line' && barColor ? barColor : ''
 
   const hasItemOverrides = Object.keys(itemOv).length > 0
 
   let mappedSeriesData = seriesData
-  if (chartType === 'bar' && hasItemOverrides) {
+  if (effectiveChartType === 'bar' && hasItemOverrides) {
     mappedSeriesData = seriesData.map((v, i) => {
       const per = itemOv[i]?.color
       const col = per || barColor || ''
@@ -1196,7 +1998,7 @@ function buildOptionLegacyFromPoints(snap, chartType, ui, itemOv) {
       if (col) style.color = col
       return { value: v, itemStyle: style }
     })
-  } else if (chartType === 'line' && hasItemOverrides) {
+  } else if (effectiveChartType === 'line' && hasItemOverrides) {
     mappedSeriesData = seriesData.map((v, i) => {
       const col = itemOv[i]?.color
       if (col) return { value: v, itemStyle: { color: col } }
@@ -1205,9 +2007,9 @@ function buildOptionLegacyFromPoints(snap, chartType, ui, itemOv) {
   }
 
   const barSeriesItemStyle =
-    chartType === 'bar' && !hasItemOverrides && barColor
+    effectiveChartType === 'bar' && !hasItemOverrides && barColor
       ? { color: barColor, borderRadius: [4, 4, 0, 0] }
-      : chartType === 'bar' && !hasItemOverrides
+      : effectiveChartType === 'bar' && !hasItemOverrides
         ? { borderRadius: [4, 4, 0, 0] }
         : undefined
 
@@ -1242,12 +2044,12 @@ function buildOptionLegacyFromPoints(snap, chartType, ui, itemOv) {
     },
     series: [
       {
-        type: chartType,
-        smooth: chartType === 'line',
+        type: effectiveChartType,
+        smooth: effectiveChartType === 'line',
         data: mappedSeriesData,
-        barMaxWidth: chartType === 'bar' ? barW : 32,
+        barMaxWidth: effectiveChartType === 'bar' ? barW : 32,
         itemStyle: barSeriesItemStyle,
-        lineStyle: chartType === 'line' && lineGlobal ? { color: lineGlobal, width: 2 } : undefined,
+        lineStyle: effectiveChartType === 'line' && lineGlobal ? { color: lineGlobal, width: 2 } : undefined,
         large: seriesData.length > 80,
         largeThreshold: 80
       }
@@ -1421,6 +2223,17 @@ export function applyChartUiStyle(option, style, chartType) {
           })
         })
       out.geo = applyAxisPatch(out.geo, geoPatch)
+      if (Array.isArray(out.series)) {
+        out.series = out.series.map((s) => {
+          if (String(s?.type || '').toLowerCase() !== 'map') return s
+          return mergeObjects(s, {
+            itemStyle: mergeObjects(s.itemStyle, {
+              ...(area ? { areaColor: area } : {}),
+              ...(border ? { borderColor: border } : {})
+            })
+          })
+        })
+      }
     }
     if (emph && Array.isArray(out.series)) {
       out.series = out.series.map((s) => {

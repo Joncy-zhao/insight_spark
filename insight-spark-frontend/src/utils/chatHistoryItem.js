@@ -45,11 +45,16 @@ export function normalizeChatHistoryItem(item) {
 }
 
 export function historyChartTypeLabel(type) {
-  const text = String(type || '').trim()
+  const text = String(type || '').trim().toLowerCase()
   if (text === 'bar') return '柱状图'
   if (text === 'line') return '折线图'
-  if (text === 'pie') return '饼图'
+  if (text === 'pie' || text === 'doughnut' || text === 'donut') return '饼图'
+  if (text === 'radar') return '雷达图'
+  if (text === 'scatter') return '散点图'
+  if (text === 'metric' || text === 'card' || text === 'kpi' || text === 'indicator') return '指标卡'
+  if (text === 'map') return '地图'
   if (text === 'table') return '表格'
+  if (text === 'alert' || text === 'advanced_alert') return '智能预警'
   return text || '图表'
 }
 

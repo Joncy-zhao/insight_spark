@@ -836,7 +836,12 @@ public class AdminChatQueryService {
             case "bar" -> "柱状图";
             case "line" -> "折线图";
             case "pie" -> "饼图";
+            case "doughnut", "donut" -> "环形图";
             case "table" -> "表格";
+            case "radar" -> "雷达图";
+            case "scatter" -> "散点图";
+            case "metric", "card", "kpi", "indicator" -> "指标卡";
+            case "map" -> "地图";
             case "" -> "";
             default -> text(value);
         };
@@ -959,6 +964,10 @@ public class AdminChatQueryService {
             case "line" -> "结果适合按时间或有序维度观察趋势，推荐折线图。";
             case "pie" -> "结果适合观察分类占比，推荐饼图。";
             case "table" -> "结果以明细为主，推荐表格。";
+            case "radar" -> "结果适合观察多指标画像或综合评分，推荐雷达图。";
+            case "scatter" -> "结果适合观察两个数值指标的相关性或离群分布，推荐散点图。";
+            case "metric" -> "结果适合突出单个核心 KPI 或总量，推荐指标卡。";
+            case "map" -> "结果适合观察地域维度上的指标分布，推荐地图。";
             default -> "结果适合比较不同维度的指标大小，推荐柱状图。";
         };
     }

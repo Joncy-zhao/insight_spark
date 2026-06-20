@@ -120,6 +120,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
 import axios from 'axios'
+import html2canvas from 'html2canvas'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ChatDotRound,
@@ -177,12 +178,15 @@ import { useVoiceInteraction } from './composables/useVoiceInteraction'
 import {
   applyDynamicInteractionDefaults,
   applyOptionTemplateDefaults,
+  buildOptionFromHistoryRow,
   buildAnimationReplayStartOption,
   buildForecastChartOption,
   getChartAnimationMeta,
   hasForecastSeriesRows,
+  normalizeChartType,
   normalizeInteractiveDataZoom
 } from './utils/chartOptionFromSnapshot'
+import { snapshotMetricDisplay } from './utils/dashboardChartSnapshotView'
 import { isAlertOperationQuestion } from './utils/alertOperationQuestion'
 
 const API_BASE = 'http://localhost:8080'
@@ -515,15 +519,21 @@ const previewColumns = computed(() => previewRows.value.length ? Object.keys(pre
 const uploadTables = computed(() => tables.value.filter(item => String(item?.sourceType || '').toUpperCase() !== 'OFFICIAL'))
 const officialQueryTables = computed(() => tables.value.filter(item => String(item?.sourceType || '').toUpperCase() === 'OFFICIAL'))
 const chartTypeText = (value) => {
-  const type = String(value || '').toLowerCase()
+  const raw = String(value || '').toLowerCase()
+  if (!raw) return '图表'
+  if (raw === 'doughnut') return '环形图'
+  if (raw === 'forecast') return '预测'
+  if (raw === 'whatif' || raw === 'what_if') return '情景推演'
+  if (raw === 'alert' || raw === 'advanced_alert') return '预警'
+  const type = normalizeChartType(value)
   if (type === 'bar') return '柱状图'
   if (type === 'pie') return '饼图'
-  if (type === 'doughnut') return '环形图'
   if (type === 'line') return '折线图'
+  if (type === 'radar') return '雷达图'
+  if (type === 'scatter') return '散点图'
+  if (type === 'metric') return '指标卡'
+  if (type === 'map') return '地图'
   if (type === 'table') return '表格'
-  if (type === 'forecast') return '预测'
-  if (type === 'whatif' || type === 'what_if') return '情景推演'
-  if (type === 'alert') return '预警'
   return String(value || '图表')
 }
 const chartTypeLabel = computed(() => {
@@ -532,11 +542,16 @@ const chartTypeLabel = computed(() => {
 const chartTypeSwitchOptions = [
   { label: '柱状图', value: 'bar' },
   { label: '折线图', value: 'line' },
-  { label: '饼图', value: 'pie' }
+  { label: '饼图', value: 'pie' },
+  { label: '雷达图', value: 'radar' },
+  { label: '散点图', value: 'scatter' },
+  { label: '指标卡', value: 'metric' },
+  { label: '地图', value: 'map' }
 ]
 const isAiRecommendedChartType = (type) => {
-  const recommendedType = String(lastAnalysis.value?.recommendedChartType || lastAnalysis.value?.aiRecommendedChartType || '').toLowerCase()
-  return Boolean(recommendedType && recommendedType === String(type || '').toLowerCase())
+  const rawRecommended = lastAnalysis.value?.recommendedChartType || lastAnalysis.value?.aiRecommendedChartType || ''
+  const recommendedType = normalizeChartType(rawRecommended)
+  return Boolean(rawRecommended && recommendedType === normalizeChartType(type))
 }
 const numericFields = computed(() => fields.value.filter(field => field.fieldType === 'NUMBER'))
 const dateFields = computed(() => fields.value.filter(field => field.fieldType === 'DATE'))
@@ -545,7 +560,9 @@ const canDiagnoseLastAnalysis = computed(() => Boolean(lastAnalysis.value && num
 const canRegenerateLastAnalysis = computed(() => Boolean(String(lastAnalysis.value?.sourceQuestion || '').trim()))
 const canPinLastAnalysis = computed(() => Boolean(lastAnalysis.value?.data?.length))
 const hasVoiceConclusion = computed(() => Boolean(lastAnalysis.value?.data?.length || lastAnalysis.value?.message))
-const isLastAnalysisTable = computed(() => String(lastAnalysis.value?.chartType || currentChartType.value || '').toLowerCase() === 'table')
+const lastAnalysisChartType = computed(() => normalizeChartType(lastAnalysis.value?.chartType || currentChartType.value || ''))
+const isLastAnalysisTable = computed(() => lastAnalysisChartType.value === 'table')
+const isLastAnalysisMetric = computed(() => lastAnalysisChartType.value === 'metric')
 const lastAnalysisTableRows = computed(() => {
   if (!isLastAnalysisTable.value) return []
   return Array.isArray(lastAnalysis.value?.tableRows)
@@ -570,6 +587,25 @@ const lastAnalysisTableColumns = computed(() => {
   }
   const first = lastAnalysisTableRows.value.find(row => row && typeof row === 'object') || {}
   return Object.keys(first).map(key => ({ prop: key, label: key }))
+})
+const buildLiveMetricPayload = (analysis = lastAnalysis.value) => {
+  const snap = analysis?.chartSnapshot && typeof analysis.chartSnapshot === 'object' ? analysis.chartSnapshot : {}
+  return {
+    chartType: 'metric',
+    chartSnapshot: {
+      ...snap,
+      ...analysis,
+      chartType: 'metric',
+      data: Array.isArray(analysis?.data) ? analysis.data : [],
+      fieldMapping: analysis?.fieldMapping || snap.fieldMapping || {}
+    }
+  }
+}
+const lastAnalysisMetricDisplay = computed(() => {
+  if (!isLastAnalysisMetric.value) {
+    return { label: '指标', value: '—', raw: null, unit: '', compareLabel: '', compareValue: '', trend: '', note: '' }
+  }
+  return snapshotMetricDisplay(buildLiveMetricPayload())
 })
 const isVoicePhysicalColumnCode = (value) => /^col_\d+$/i.test(String(value || '').trim())
 
@@ -5953,23 +5989,7 @@ const dataUrlToBlob = (dataUrl) => {
   return new Blob([bytes], { type: mime })
 }
 
-const exportChartAsImage = () => {
-  if (isLastAnalysisTable.value) {
-    ElMessage.warning('当前结果是表格，请使用表格数据查看')
-    return
-  }
-  const instance = ensureChatChartInstance()
-  if (!instance || !lastAnalysis.value?.data?.length) {
-    ElMessage.warning('暂无可导出的图表')
-    return
-  }
-  instance.resize()
-  const url = instance.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#fff' })
-  if (!url) {
-    ElMessage.error('导出失败，请稍后重试')
-    return
-  }
-  const filename = buildChartFilename()
+const downloadDataUrl = (url, filename) => {
   try {
     const blob = dataUrlToBlob(url)
     if (window.navigator?.msSaveOrOpenBlob) {
@@ -5994,6 +6014,44 @@ const exportChartAsImage = () => {
   }
 }
 
+const exportChartAsImage = async () => {
+  if (isLastAnalysisTable.value) {
+    ElMessage.warning('当前结果是表格，请使用表格数据查看')
+    return
+  }
+  if (isLastAnalysisMetric.value) {
+    const target = document.getElementById('analysis-metric-card')
+    if (!target) {
+      ElMessage.warning('暂无可导出的指标卡')
+      return
+    }
+    try {
+      const canvas = await html2canvas(target, {
+        backgroundColor: '#ffffff',
+        scale: Math.max(2, window.devicePixelRatio || 1),
+        useCORS: true
+      })
+      downloadDataUrl(canvas.toDataURL('image/png'), buildChartFilename())
+    } catch (error) {
+      ElMessage.error('导出失败，请稍后重试')
+    }
+    return
+  }
+  const instance = ensureChatChartInstance()
+  if (!instance || !lastAnalysis.value?.data?.length) {
+    ElMessage.warning('暂无可导出的图表')
+    return
+  }
+  instance.resize()
+  const url = instance.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#fff' })
+  if (!url) {
+    ElMessage.error('导出失败，请稍后重试')
+    return
+  }
+  const filename = buildChartFilename()
+  downloadDataUrl(url, filename)
+}
+
 watch(activeModule, (nextModule) => {
   if (nextModule !== 'chat') {
     stopVoiceQuestionInput()
@@ -6003,8 +6061,29 @@ watch(activeModule, (nextModule) => {
   }
 })
 
+const buildLiveChartOptionPayload = (rows, chartType) => {
+  const analysis = lastAnalysis.value || {}
+  const snap = analysis.chartSnapshot && typeof analysis.chartSnapshot === 'object' ? analysis.chartSnapshot : {}
+  return {
+    chartType,
+    chartSnapshot: {
+      ...snap,
+      chartType,
+      data: Array.isArray(rows) ? rows : [],
+      fieldMapping: analysis.fieldMapping || snap.fieldMapping || {},
+      encode: analysis.encode || snap.encode,
+      dimensions: analysis.dimensions || snap.dimensions,
+      message: analysis.message || snap.message || '',
+      tableName: analysis.tableName || analysis.sourceTableName || snap.tableName || '',
+      generatedSql: analysis.sql || analysis.sourceSql || snap.generatedSql || '',
+      optionTemplate: null
+    }
+  }
+}
+
 const renderChart = (data, type) => {
-  if (String(type || '').toLowerCase() === 'table') {
+  const chartType = normalizeChartType(type)
+  if (chartType === 'table' || chartType === 'metric') {
     chartRenderVersion += 1
     if (chartInstance) {
       chartInstance.clear()
@@ -6023,14 +6102,14 @@ const renderChart = (data, type) => {
   const seriesData = normalizedData.map(item => Number(item.value ?? 0))
   let option = {}
 
-  if (type === 'line' && hasForecastSeriesRows(rawRows)) {
+  if (chartType === 'line' && hasForecastSeriesRows(rawRows)) {
     const prediction = template?.prediction || {}
     option = buildForecastChartOption(rawRows, {
       metricLabel: lastAnalysis.value?.fieldMapping?.metric || lastAnalysis.value?.forecastMeta?.metricField || '预测值',
       confidenceLabel: prediction.confidenceLabel || lastAnalysis.value?.forecastMeta?.confidence || '95%',
       legendConfig: prediction.legendConfig
     })
-  } else if (type === 'bar' || type === 'line') {
+  } else if (chartType === 'bar' || chartType === 'line') {
     const shouldUseZoom = normalizedData.length > 12
     option = {
       tooltip: {
@@ -6078,17 +6157,24 @@ const renderChart = (data, type) => {
         : [],
       series: [{
         data: seriesData,
-        type,
-        smooth: type === 'line',
+        type: chartType,
+        smooth: chartType === 'line',
         barMaxWidth: 28,
         itemStyle: { borderRadius: [4, 4, 0, 0] }
       }]
     }
-  } else {
+  } else if (chartType === 'pie') {
     option = {
       tooltip: { trigger: 'item' },
       legend: { bottom: 4 },
       series: [{ type: 'pie', radius: ['42%', '68%'], data: normalizedData }]
+    }
+  } else {
+    option = buildOptionFromHistoryRow(buildLiveChartOptionPayload(rawRows, chartType)) || {}
+    if (!option || !Object.keys(option).length) {
+      instance.clear()
+      chartAnimationMeta.value = null
+      return
     }
   }
 
@@ -6112,7 +6198,7 @@ const renderChart = (data, type) => {
 }
 
 const changeLastAnalysisChartType = (type) => {
-  const nextType = String(type || '').toLowerCase()
+  const nextType = normalizeChartType(type)
   if (!chartTypeSwitchOptions.some(option => option.value === nextType)) return
   if (!lastAnalysis.value?.data?.length) return
   const recommendedType = lastAnalysis.value.recommendedChartType || lastAnalysis.value.aiRecommendedChartType || lastAnalysis.value.chartType || currentChartType.value
@@ -6267,8 +6353,10 @@ provide('workbench', {
   currentChartType,
   chartTypeSwitchOptions,
   isLastAnalysisTable,
+  isLastAnalysisMetric,
   lastAnalysisTableColumns,
   lastAnalysisTableRows,
+  lastAnalysisMetricDisplay,
   chartSortMode,
   lastAnalysis,
   chartAnimationMeta,

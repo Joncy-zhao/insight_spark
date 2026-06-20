@@ -1606,7 +1606,10 @@ function chartTypeTitleSuffix(chartType) {
   if (text === 'pie') return '占比'
   if (text === 'line') return '趋势'
   if (text === 'bar') return '统计'
+  if (text === 'radar') return '画像'
   if (text === 'scatter') return '分布'
+  if (text === 'metric') return '指标'
+  if (text === 'map') return '地域分布'
   return '图'
 }
 
@@ -2585,6 +2588,10 @@ onBeforeUnmount(() => {
 .dge-side-type--line { color: #047857; background: #ecfdf5; }
 .dge-side-type--pie { color: #b45309; background: #fffbeb; }
 .dge-side-type--table { color: #6d28d9; background: #f5f3ff; }
+.dge-side-type--radar { color: #0f766e; background: #f0fdfa; }
+.dge-side-type--scatter { color: #be123c; background: #fff1f2; }
+.dge-side-type--metric { color: #334155; background: #f1f5f9; }
+.dge-side-type--map { color: #15803d; background: #f0fdf4; }
 .dge-side-status {
   font-size: 10px;
   font-weight: 600;

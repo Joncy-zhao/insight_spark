@@ -25,8 +25,18 @@
     </div>
 
     <div v-else-if="isMetricView" class="dc-metric" :style="metricStyleVars">
-      <div class="dc-metric-value">{{ metricDisplay.value }}</div>
+      <div class="dc-metric-value">
+        <span>{{ metricDisplay.value }}</span>
+        <small v-if="metricDisplay.unit">{{ metricDisplay.unit }}</small>
+      </div>
       <div class="dc-metric-label">{{ metricDisplay.label }}</div>
+      <div v-if="metricDisplay.compareValue || metricDisplay.trend" class="dc-metric-compare">
+        <span v-if="metricDisplay.trend" :class="['dc-metric-trend', `dc-metric-trend--${metricDisplay.trend}`]">
+          {{ metricTrendText(metricDisplay.trend) }}
+        </span>
+        <span v-if="metricDisplay.compareValue">{{ metricDisplay.compareLabel }} {{ metricDisplay.compareValue }}</span>
+      </div>
+      <div v-if="metricDisplay.note" class="dc-metric-note">{{ metricDisplay.note }}</div>
     </div>
 
     <div
@@ -105,6 +115,14 @@ const metricStyleVars = computed(() => ({
   '--dc-metric-label-size': `${Number(chartStyle.value.metricLabelFontSize) || 13}px`,
   '--dc-metric-value-color': chartStyle.value.metricValueColor || '#0f172a'
 }))
+
+function metricTrendText(trend) {
+  const text = String(trend || '').toLowerCase()
+  if (text === 'up') return '上升'
+  if (text === 'down') return '下降'
+  if (text === 'flat') return '持平'
+  return ''
+}
 
 function bindResizeObserver() {
   if (typeof ResizeObserver === 'undefined' || !isEchartsView.value) return
@@ -269,11 +287,55 @@ onBeforeUnmount(() => {
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
   word-break: break-all;
+  display: inline-flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.dc-metric-value small {
+  padding-bottom: 3px;
+  font-size: 0.42em;
+  font-weight: 700;
+  color: #64748b;
 }
 .dc-metric-label {
   font-size: var(--dc-metric-label-size, 13px);
   color: #64748b;
   line-height: 1.4;
+}
+.dc-metric-compare {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.dc-metric-trend {
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.dc-metric-trend--up {
+  color: #047857;
+  background: #ecfdf5;
+}
+.dc-metric-trend--down {
+  color: #b91c1c;
+  background: #fef2f2;
+}
+.dc-metric-trend--flat {
+  color: #475569;
+  background: #f1f5f9;
+}
+.dc-metric-note {
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.35;
 }
 .dc-empty {
   flex: 1;

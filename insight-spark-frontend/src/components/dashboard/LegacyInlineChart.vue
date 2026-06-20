@@ -1,13 +1,22 @@
 <template>
   <div class="lic-root">
     <div v-if="title" class="lic-title">{{ title }}</div>
-    <div ref="host" class="lic-host" />
+    <div v-if="isMetricView" class="lic-metric">
+      <div class="lic-metric-value">
+        <span>{{ metricDisplay.value }}</span>
+        <small v-if="metricDisplay.unit">{{ metricDisplay.unit }}</small>
+      </div>
+      <div class="lic-metric-label">{{ metricDisplay.label }}</div>
+    </div>
+    <div v-else ref="host" class="lic-host" />
   </div>
 </template>
 
 <script setup>
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as echarts from 'echarts'
+import { buildOptionFromHistoryRow, normalizeChartType } from '../../utils/chartOptionFromSnapshot.js'
+import { snapshotMetricDisplay } from '../../utils/dashboardChartSnapshotView.js'
 
 const props = defineProps({
   title: { type: String, default: '' },
@@ -18,11 +27,20 @@ const props = defineProps({
 const host = ref(null)
 let chart = null
 
-function normalizeChartType(value) {
-  const t = String(value || '').toLowerCase()
-  if (t === 'line' || t === 'pie') return t
-  return 'bar'
-}
+const normalizedType = computed(() => normalizeChartType(props.chartType))
+const isMetricView = computed(() => normalizedType.value === 'metric')
+
+const metricPayload = computed(() => ({
+  chartType: 'metric',
+  chartSnapshot: {
+    chartType: 'metric',
+    message: props.title,
+    fieldMapping: { metric: props.title },
+    data: Array.isArray(props.data) ? props.data : []
+  }
+}))
+
+const metricDisplay = computed(() => snapshotMetricDisplay(metricPayload.value))
 
 function toNumber(value) {
   const n = Number(value)
@@ -54,7 +72,18 @@ function normalizeChartItem(item) {
 }
 
 function buildOption() {
-  const type = normalizeChartType(props.chartType)
+  const type = normalizedType.value
+  const shared = buildOptionFromHistoryRow({
+    chartType: type,
+    chartSnapshot: {
+      chartType: type,
+      message: props.title,
+      fieldMapping: { metric: props.title },
+      data: Array.isArray(props.data) ? props.data : []
+    }
+  })
+  if (shared) return shared
+
   const points = Array.isArray(props.data) ? props.data.map(normalizeChartItem) : []
   if (type === 'pie') {
     return {
@@ -79,6 +108,17 @@ function buildOption() {
 }
 
 function render() {
+  if (isMetricView.value) {
+    if (chart) {
+      try {
+        chart.dispose()
+      } catch {
+        // ignore
+      }
+      chart = null
+    }
+    return
+  }
   if (!host.value) return
   if (!chart) {
     chart = echarts.getInstanceByDom(host.value) || echarts.init(host.value)
@@ -128,5 +168,38 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 0;
   width: 100%;
+}
+.lic-metric {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+}
+.lic-metric-value {
+  display: inline-flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 5px;
+  color: #0f172a;
+  font-size: 30px;
+  line-height: 1.1;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  word-break: break-word;
+}
+.lic-metric-value small {
+  padding-bottom: 2px;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 700;
+}
+.lic-metric-label {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.4;
 }
 </style>

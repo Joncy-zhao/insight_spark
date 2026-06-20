@@ -669,8 +669,12 @@ public class DataUploadService {
         if (request.containsKey("metricDefinitions")) {
             modelJson.put("metricDefinitions", sanitizeMetricDefinitions(request.get("metricDefinitions"), tableName));
         }
+        if (request.containsKey("dimensionSystem")) {
+            modelJson.put("dimensionSystem", sanitizeDimensionSystem(request.get("dimensionSystem"), tableName));
+        }
         modelJson.putIfAbsent("dictionaryEntries", List.of());
         modelJson.putIfAbsent("metricDefinitions", List.of());
+        modelJson.putIfAbsent("dimensionSystem", List.of());
         return saveBusinessModel(modelName, requirement, tableName, modelJson);
     }
 

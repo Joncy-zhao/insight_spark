@@ -613,7 +613,7 @@
                 </span>
                 <span class="chart-panel-title-text">
                   <h2>智能可视化呈现</h2>
-                  <p>AI 将理解您的意图并推荐最合适的 ECharts 图表类型</p>
+                  <p>AI 将理解您的意图并推荐最合适的可视化类型</p>
                 </span>
               </div>
               <div class="chart-actions">
@@ -653,6 +653,7 @@
               </div>
             </div>
 
+            <div class="chart-panel-scroll">
             <div v-if="lastAnalysis && !isLastAnalysisTable" class="chart-control-bar">
               <el-select
                   v-if="currentChartType"
@@ -684,6 +685,7 @@
                 </el-option>
               </el-select>
               <el-select
+                  v-if="!isLastAnalysisMetric"
                   v-model="chartSortMode"
                   class="chart-control-select"
                   popper-class="chart-control-select-popper"
@@ -746,7 +748,33 @@
                 </div>
               </div>
             </div>
-            <div v-show="lastAnalysis && !isLastAnalysisTable" id="echarts-container" class="chart-canvas" @mousedown.stop @touchstart.stop @pointerdown.stop></div>
+            <div v-show="lastAnalysis && !isLastAnalysisTable && !isLastAnalysisMetric" id="echarts-container" class="chart-canvas" @mousedown.stop @touchstart.stop @pointerdown.stop></div>
+            <div v-if="lastAnalysis && isLastAnalysisMetric" id="analysis-metric-card" class="analysis-metric-card">
+              <div class="analysis-metric-main">
+                <div class="analysis-metric-value">
+                  <span>{{ lastAnalysisMetricDisplay.value }}</span>
+                  <small v-if="lastAnalysisMetricDisplay.unit">{{ lastAnalysisMetricDisplay.unit }}</small>
+                </div>
+                <div class="analysis-metric-label">{{ lastAnalysisMetricDisplay.label }}</div>
+              </div>
+              <div
+                  v-if="lastAnalysisMetricDisplay.compareValue || lastAnalysisMetricDisplay.trend"
+                  class="analysis-metric-compare"
+              >
+                <span
+                    v-if="lastAnalysisMetricDisplay.trend"
+                    :class="['analysis-metric-trend', `analysis-metric-trend--${lastAnalysisMetricDisplay.trend}`]"
+                >
+                  {{ metricTrendText(lastAnalysisMetricDisplay.trend) }}
+                </span>
+                <span v-if="lastAnalysisMetricDisplay.compareValue">
+                  {{ lastAnalysisMetricDisplay.compareLabel }} {{ lastAnalysisMetricDisplay.compareValue }}
+                </span>
+              </div>
+              <div v-if="lastAnalysisMetricDisplay.note" class="analysis-metric-note">
+                {{ lastAnalysisMetricDisplay.note }}
+              </div>
+            </div>
             <div v-if="lastAnalysis && isLastAnalysisTable" class="analysis-table-wrap">
               <el-table
                   :data="lastAnalysisTableRows"
@@ -878,6 +906,7 @@
                 </div>
               </div>
             </section>
+            </div>
 
           </div>
           <div v-if="lastAnalysis" class="panel graph-context-panel">
@@ -1116,6 +1145,10 @@
                     <el-option label="柱状图" value="bar" />
                     <el-option label="折线图" value="line" />
                     <el-option label="饼图" value="pie" />
+                    <el-option label="雷达图" value="radar" />
+                    <el-option label="散点图" value="scatter" />
+                    <el-option label="指标卡" value="metric" />
+                    <el-option label="地图" value="map" />
                     <el-option label="表格" value="table" />
                     <el-option label="智能预警" value="alert" />
                   </el-select>
@@ -2114,8 +2147,10 @@ const {
   currentChartType,
   currentDiagnosis,
   isLastAnalysisTable,
+  isLastAnalysisMetric,
   lastAnalysisTableColumns,
   lastAnalysisTableRows,
+  lastAnalysisMetricDisplay,
   data,
   datasourceForm,
   dateFields,
@@ -2297,6 +2332,14 @@ const {
   userQuestion,
   xAxisData
 } = inject('workbench')
+
+const metricTrendText = (trend) => {
+  const text = String(trend || '').toLowerCase()
+  if (text === 'up') return '上升'
+  if (text === 'down') return '下降'
+  if (text === 'flat') return '持平'
+  return ''
+}
 
 const lastAnalysisChartLinkId = computed(() => {
   const analysis = lastAnalysis.value
@@ -5782,12 +5825,16 @@ const toggleHistorySortDirection = async () => {
 }
 
 const historyChartTypeLabel = (type) => {
-  const text = String(type || '').trim()
+  const text = String(type || '').trim().toLowerCase()
   if (text === 'bar') return '柱状图'
   if (text === 'line') return '折线图'
-  if (text === 'pie') return '饼图'
+  if (text === 'pie' || text === 'doughnut' || text === 'donut') return '饼图'
+  if (text === 'radar') return '雷达图'
+  if (text === 'scatter') return '散点图'
+  if (text === 'metric' || text === 'card' || text === 'kpi' || text === 'indicator') return '指标卡'
+  if (text === 'map') return '地图'
   if (text === 'table') return '表格'
-  if (text === 'alert' || text === 'ADVANCED_ALERT') return '智能预警'
+  if (text === 'alert' || text === 'advanced_alert') return '智能预警'
   return text || '图表'
 }
 
@@ -6545,11 +6592,38 @@ onBeforeUnmount(() => {
 .chart-panel {
   min-width: 0;
   min-height: 0;
+  max-height: calc(142vh - 96px);
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
 }
 .chart-panel .panel-header {
   align-items: center;
   gap: 12px;
+  flex: 0 0 auto;
+}
+.chart-panel-scroll {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 4px;
+  padding-bottom: 12px;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.chart-panel-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+.chart-panel-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.chart-panel-scroll::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: #cbd5e1;
+}
+.chart-panel-scroll::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
 }
 .chart-panel-title {
   min-width: 0;
@@ -6817,6 +6891,93 @@ onBeforeUnmount(() => {
   height: 360px;
   min-height: 360px;
   margin-top: 4px;
+}
+.analysis-metric-card {
+  min-height: 360px;
+  margin-top: 4px;
+  padding: 28px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  text-align: center;
+  box-sizing: border-box;
+}
+.analysis-metric-main {
+  display: grid;
+  gap: 10px;
+  justify-items: center;
+}
+.analysis-metric-value {
+  display: inline-flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 8px;
+  color: #0f172a;
+  font-size: 64px;
+  line-height: 1;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  word-break: break-word;
+}
+.analysis-metric-value small {
+  padding-bottom: 8px;
+  color: #475569;
+  font-size: 18px;
+  line-height: 1;
+  font-weight: 700;
+}
+.analysis-metric-label {
+  max-width: min(520px, 100%);
+  color: #475569;
+  font-size: 16px;
+  line-height: 1.5;
+  font-weight: 600;
+}
+.analysis-metric-compare {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.4;
+  flex-wrap: wrap;
+}
+.analysis-metric-trend {
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.analysis-metric-trend--up {
+  color: #047857;
+  background: #ecfdf5;
+}
+.analysis-metric-trend--down {
+  color: #b91c1c;
+  background: #fef2f2;
+}
+.analysis-metric-trend--flat {
+  color: #475569;
+  background: #f1f5f9;
+}
+.analysis-metric-note {
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 1.4;
+}
+@media (max-width: 640px) {
+  .analysis-metric-card {
+    padding: 20px;
+  }
+  .analysis-metric-value {
+    font-size: 44px;
+  }
 }
 .pin-dialog-hint {
   margin: 0 0 12px;
@@ -8232,7 +8393,7 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 .analysis-meta {
-  margin-top: -34px;
+  margin-top: 16px;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
   background: #fff;

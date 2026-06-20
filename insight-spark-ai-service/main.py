@@ -88,6 +88,7 @@ class TextToSqlRequest(BaseModel):
 
 
 class ChartRecommendRequest(BaseModel):
+    question: str = ""
     columns: list[str] = []
     rows: list[dict[str, Any]] = []
 
@@ -501,6 +502,8 @@ def build_dimension_expression(question: str, dimension: FieldMeta) -> str:
     column = f"`{dimension.columnName}`"
     if dimension.fieldType == "DATE":
         return date_expression(column, question)
+    if not time_field_match(dimension):
+        return column
     if any(token in question for token in ["按月", "每月", "每个月", "月份", "月度"]):
         return f"DATE_FORMAT({column}, '%Y-%m')"
     if any(token in question for token in ["按年", "年度"]):
@@ -533,13 +536,125 @@ def date_expression(column: str, question: str) -> str:
     return column
 
 
+def normalize_match_text(value: Any) -> str:
+    return re.sub(r"[^a-zA-Z0-9_\u4e00-\u9fa5]+", "", str(value or "").strip().lower())
+
+
+RADAR_SEMANTIC_TERMS = [
+    "雷达", "能力", "画像", "评分", "多指标", "综合评价", "综合表现", "综合对比",
+    "综合分析", "综合差异", "综合能力", "表现差异", "多维", "多维度", "radar",
+]
+
+COMPARISON_TERMS = ["对比", "比较", "差异", "评估", "评价", "分析", "排名", "表现", "compare"]
+SCATTER_TERMS = ["散点", "相关", "相关性", "关系", "离群", "异常点", "异常分布点", "scatter", "correlation"]
+
+
+def mentioned_numeric_column_count(question: str, columns: list[str], rows: list[dict[str, Any]]) -> int:
+    q = normalize_match_text(question)
+    count = 0
+    for column in columns:
+        if not column or not looks_numeric_column(column, rows):
+            continue
+        normalized = normalize_match_text(column)
+        if normalized and normalized in q:
+            count += 1
+    return count
+
+
+def is_column_multi_metric_radar_intent(
+    question: str,
+    columns: list[str],
+    rows: list[dict[str, Any]],
+    numeric_count: int | None = None,
+    mentioned_count: int | None = None,
+) -> bool:
+    q = str(question or "").lower()
+    numeric_total = numeric_count if numeric_count is not None else sum(1 for col in columns if looks_numeric_column(col, rows))
+    mentioned_total = mentioned_count if mentioned_count is not None else mentioned_numeric_column_count(question, columns, rows)
+    explicit_radar = has_any(q, ["雷达", "radar"])
+    semantic_radar = has_any(q, RADAR_SEMANTIC_TERMS)
+    comparison = has_any(q, COMPARISON_TERMS)
+    if explicit_radar and numeric_total >= 3:
+        return True
+    if mentioned_total >= 3 and (semantic_radar or comparison):
+        return True
+    return semantic_radar and comparison and numeric_total >= 3
+
+
 @app.post("/ai/chart-recommend")
 def chart_recommend(payload: ChartRecommendRequest) -> dict[str, str]:
-    if len(payload.columns) >= 2 and any("date" in col.lower() or "time" in col.lower() for col in payload.columns):
+    question = str(payload.question or "")
+    columns = [str(col or "") for col in payload.columns]
+    intent_text = (question + " " + " ".join(columns)).lower()
+    numeric_count = sum(1 for col in columns if looks_numeric_column(col, payload.rows))
+    geo_count = sum(1 for col in columns if looks_geo_column(col, payload.rows))
+    time_count = sum(1 for col in columns if looks_time_column(col, payload.rows))
+    mentioned_metric_count = mentioned_numeric_column_count(question, columns, payload.rows)
+
+    if has_any(intent_text, ["地图", "地域", "地区", "省份", "城市", "区域分布", "geo", "map"]) and geo_count > 0 and numeric_count > 0:
+        return {"chartType": "map"}
+    if has_any(intent_text, ["散点", "相关", "相关性", "关系", "离群", "异常点", "异常分布点", "scatter", "correlation"]) and numeric_count >= 2:
+        return {"chartType": "scatter"}
+    if is_column_multi_metric_radar_intent(question, columns, payload.rows, numeric_count, mentioned_metric_count):
+        return {"chartType": "radar"}
+    if has_any(intent_text, ["指标卡", "kpi", "核心指标", "当前值", "总量", "总额", "单指标", "metric"]) and numeric_count >= 1:
+        return {"chartType": "metric"}
+    if len(columns) >= 2 and time_count > 0:
         return {"chartType": "line"}
-    if len(payload.rows) <= 8:
+    if has_any(intent_text, ["占比", "比例", "构成", "份额", "占有率", "share", "ratio"]) or len(payload.rows) <= 8:
         return {"chartType": "pie"}
     return {"chartType": "bar"}
+
+
+def has_any(text: str, tokens: list[str]) -> bool:
+    source = str(text or "").lower()
+    return any(token.lower() in source for token in tokens)
+
+
+def looks_numeric_column(column: str, rows: list[dict[str, Any]]) -> bool:
+    text = str(column or "").lower()
+    if has_any(text, [
+        "amount", "amt", "sales", "sale", "revenue", "gmv", "profit", "margin", "qty", "quantity", "count", "num",
+        "rate", "ratio", "percent", "days", "duration",
+        "金额", "销售额", "销售", "收入", "营收", "利润", "数量", "销量", "客单价", "复购率", "转化率",
+        "退货率", "周转", "天数", "周期", "评分", "得分", "指标", "总量", "率"
+    ]):
+        return True
+    samples = [row.get(column) for row in rows[:20] if isinstance(row, dict) and column in row]
+    if not samples:
+        return False
+    numeric = 0
+    for value in samples:
+        try:
+            float(str(value).replace(",", "").replace("%", ""))
+            numeric += 1
+        except (TypeError, ValueError):
+            pass
+    return numeric >= max(1, len(samples) // 2)
+
+
+def looks_time_column(column: str, rows: list[dict[str, Any]]) -> bool:
+    text = str(column or "").lower()
+    return has_any(text, [
+        "date", "time", "day", "month", "year", "week", "quarter",
+        "日期", "时间", "月份", "年月", "年份", "年度", "月度", "季度", "创建", "下单", "订单"
+    ])
+
+
+def looks_geo_column(column: str, rows: list[dict[str, Any]]) -> bool:
+    text = str(column or "").lower()
+    if has_any(text, [
+        "province", "city", "region", "area", "country", "geo", "location",
+        "省", "省份", "城市", "地区", "区域", "大区", "地域", "地市", "国家"
+    ]):
+        return True
+    geo_samples = [
+        "北京", "上海", "天津", "重庆", "广东", "浙江", "江苏", "山东", "河南", "四川", "湖北", "湖南", "福建", "安徽",
+        "河北", "山西", "陕西", "辽宁", "吉林", "黑龙江", "江西", "广西", "云南", "贵州", "新疆", "西藏", "内蒙古", "甘肃",
+        "青海", "宁夏", "海南", "香港", "澳门", "台湾"
+    ]
+    samples = [str(row.get(column) or "") for row in rows[:20] if isinstance(row, dict) and column in row]
+    return any(any(name in sample for name in geo_samples) for sample in samples)
 
 
 @app.post("/ai/diagnose")
@@ -1592,6 +1707,7 @@ def call_openai_advanced_analysis_parse(payload: AdvancedAnalysisParseRequest) -
         "只输出严格 JSON，不要输出 Markdown 或解释文本。\n"
         "intent 只能是 forecast、whatIf、alert 或 none。\n"
         "forecast 需要尽量给出 metric、horizon(7d/30d/3m/6m)、algorithm(Prophet/Holt-Winters)、confidence。\n"
+        "只有用户明确要求未来外推、预测未来数值或后续走势时才返回 forecast；散点图、相关性、关系、离群点、异常分布点分析属于普通 SQL 图表查询，此接口应返回 none。\n"
         "如果上下文提供 fields/timeFields/numericFields，请优先返回真实 columnName：timeField、metricField、targetMetricField。\n"
         "whatIf 需要给出 metric、variables 数组，变量项包含 name 与 change，change 表示百分比变化，可为负数。\n"
         "whatIf 的 variables 如能匹配真实字段，请给出 field。\n"
@@ -1803,6 +1919,7 @@ def build_smart_chat_route_prompt(payload: SmartChatRouteRequest) -> str:
         "分类准则：\n"
         "1. 查询排名、分组、明细、占比、对比、分布、汇总，选 QUERY_SQL；不要附带预测。\n"
         "2. 只有用户明确要求预测、预估未来数值、未来走势外推，才选 FORECAST。\n"
+        "2.1 散点图、相关性、离群点、异常分布点分析属于 QUERY_SQL；不要仅因“每日/异常点/异常分布”选择 FORECAST 或 ALERT_RULE_CREATE。\n"
         "3. 创建阈值提醒、异常通知、告警规则，选 ALERT_RULE_CREATE 且 requiresConfirmation=true；“阀值”按“阈值”理解。\n"
         "4. 假设变量变化并测算结果，选 WHAT_IF；普通查询中的“增长/下降”不等于 WHAT_IF。\n"
         "5. 字段绑定、术语映射、业务字典、指标口径、公式、以后按某口径计算，选 BUSINESS_MODEL_PATCH。\n"
@@ -1843,6 +1960,8 @@ def normalize_smart_chat_intent(value: Any) -> str:
 
 def normalize_smart_chat_route_result(parsed: dict[str, Any], payload: SmartChatRouteRequest) -> dict[str, Any]:
     intent = normalize_smart_chat_intent(parsed.get("primaryIntent") or parsed.get("intent") or parsed.get("type"))
+    if intent in {"ALERT_RULE_CREATE", "ALERT_EVENT_QUERY", "ALERT_EVENT_EXPLAIN", "FORECAST"} and is_statistical_outlier_query(payload.question):
+        intent = "QUERY_SQL"
     if has_alert_semantics(payload.question):
         intent = "ALERT_RULE_CREATE"
     slots = parsed.get("slots") if isinstance(parsed.get("slots"), dict) else {}
@@ -1876,13 +1995,28 @@ def has_alert_semantics(question: str) -> bool:
     q = str(question or "").strip().lower()
     if not q:
         return False
+    if is_statistical_outlier_query(q):
+        return False
     has_notify_action = re.search(r"提醒|通知|预警|告警|警报|alert|warning|钉钉|邮件", q, re.I) is not None
     has_threshold_condition = re.search(r"低于|高于|超过|跌破|小于|大于|以下|以上|阈值|阀值|异常|z-?score", q, re.I) is not None
     return has_notify_action and has_threshold_condition
 
 
+def is_statistical_outlier_query(question: str) -> bool:
+    q = str(question or "").strip().lower()
+    if not q:
+        return False
+    chart_or_correlation = re.search(r"散点|散点图|相关|相关性|关系|分布|离群|异常点|异常分布点|scatter|correlation|outlier", q, re.I) is not None
+    analytic_action = re.search(r"分析|查看|看看|展示|用|是否存在|找出|analy[sz]e|show", q, re.I) is not None
+    alert_action = re.search(r"预警|告警|报警|警报|提醒|通知|规则|阈值|阀值|低于|高于|超过|跌破|邮件|钉钉|alert|warning", q, re.I) is not None
+    forecast_action = re.search(r"预测|预估|推算|未来|后续|下个月|下季度|走势外推|趋势延伸|往后推|forecast|prediction", q, re.I) is not None
+    return chart_or_correlation and analytic_action and not alert_action and not forecast_action
+
+
 def normalize_advanced_analysis_parse_result(parsed: dict[str, Any], payload: AdvancedAnalysisParseRequest) -> dict[str, Any]:
     intent = normalize_advanced_intent(parsed.get("intent") or parsed.get("type"))
+    if intent in {"alert", "forecast"} and is_statistical_outlier_query(payload.question):
+        intent = "none"
     explicit_formula_intent = has_explicit_advanced_formula_intent(payload.question)
     parsed_formula = normalize_advanced_formula(parsed.get("formula") or parsed.get("businessFormula") or "") if explicit_formula_intent else ""
     result = {
@@ -1957,7 +2091,9 @@ def build_rule_based_advanced_analysis_parse_result(payload: AdvancedAnalysisPar
     question = payload.question or ""
     lowered = question.lower()
     intent = "none"
-    if re.search(r"预警|提醒|告警|低于|高于|超过|跌破|异常|阈值|阀值|通知|钉钉|邮件|z-?score", lowered):
+    if is_statistical_outlier_query(question):
+        intent = "none"
+    elif re.search(r"预警|提醒|告警|低于|高于|超过|跌破|异常|阈值|阀值|通知|钉钉|邮件|z-?score", lowered):
         intent = "alert"
     elif re.search(r"预测|预估|未来|走势外推|forecast|prophet|holt", lowered):
         intent = "forecast"
@@ -1999,7 +2135,11 @@ def build_rule_based_smart_chat_route_result(payload: SmartChatRouteRequest) -> 
     alert_words = r"预警|告警|警报|提醒|通知|低于|高于|超过|跌破|阈值|阀值|异常|alert|warning"
     what_if_words = r"what-?if|如果|若|假设|推演|模拟|测算"
 
-    if re.search(model_words, question, re.I):
+    if is_statistical_outlier_query(question):
+        intent = "QUERY_SQL"
+        slots["autoForecastEnabled"] = False
+        reasoning += "，识别为散点/相关性离群点图表分析"
+    elif re.search(model_words, question, re.I):
         intent = "BUSINESS_MODEL_CREATE" if re.search(r"创建|新建|生成|建立|搭建", question) else "BUSINESS_MODEL_PATCH"
         physical = re.search(r"[A-Za-z_][A-Za-z0-9_]*", question)
         if physical:
@@ -2337,6 +2477,7 @@ def build_business_model_semantic_prompt(payload: BusinessModelSemanticRequest) 
         '  "modelName": "",\n'
         '  "dictionaryEntries": [{"term": "", "field": "", "synonyms": ""}],\n'
         '  "metricDefinitions": [{"name": "", "field": "", "aggregation": "SUM|COUNT|AVG|MAX|MIN", "formula": ""}],\n'
+        '  "dimensionSystem": [{"name": "", "field": ""}],\n'
         '  "reasoning": ["", ""],\n'
         '  "confidence": 0.0\n'
         "}\n"
@@ -2344,10 +2485,11 @@ def build_business_model_semantic_prompt(payload: BusinessModelSemanticRequest) 
         "0. modelName 必须是根据用户真实业务主题提炼出的简短模型名，通常 6 到 14 个中文字符，不要照抄整句需求，不要包含“基于当前表”“帮我”“创建一个”等动作描述。\n"
         "1. 如果用户明确写了“业务字典/字典/同义词/映射/术语”，就抽取 dictionaryEntries。\n"
         "2. 如果用户明确写了“业务公式/指标公式/新增公式/利润率/转化率/同比/环比/核心指标包含”，就抽取 metricDefinitions。\n"
-        "3. 如果用户只是在描述分析目标，没有明确要求字典/公式，则对应数组返回空数组。\n"
-        "4. 支持中文逗号、顿号、分号分隔的多条词条/多条公式。\n"
-        "5. field 请尽量绑定到真实 columnName，例如 sales_amt、profit、qty、region。\n"
-        "6. formula 请使用真实 columnName，例如 profit / sales_amt。"
+        "3. 如果用户明确写了“维度绑定/业务维度/按某字段作为维度/把A维度绑定到B”，就抽取 dimensionSystem。\n"
+        "4. 如果用户只是在描述分析目标，没有明确要求字典/公式/维度绑定，则对应数组返回空数组。\n"
+        "5. 支持中文逗号、顿号、分号分隔的多条词条/多条公式/多条维度绑定。\n"
+        "6. field 请尽量绑定到真实 columnName，例如 sales_amt、profit、qty、region。\n"
+        "7. formula 请使用真实 columnName，例如 profit / sales_amt。"
     )
 
 
@@ -2408,6 +2550,7 @@ def normalize_business_model_semantic_result(parsed: dict[str, Any], payload: Bu
     )
     dictionary_entries = normalize_dictionary_entries(parsed.get("dictionaryEntries"), payload.fields)
     metric_definitions = normalize_metric_definitions(parsed.get("metricDefinitions"), payload.fields)
+    dimension_system = normalize_dimension_system(parsed.get("dimensionSystem"), payload.fields)
     reasoning = parsed.get("reasoning") if isinstance(parsed.get("reasoning"), list) else []
     confidence = read_float(parsed.get("confidence"))
     return {
@@ -2415,6 +2558,7 @@ def normalize_business_model_semantic_result(parsed: dict[str, Any], payload: Bu
         "modelName": model_name,
         "dictionaryEntries": dictionary_entries,
         "metricDefinitions": metric_definitions,
+        "dimensionSystem": dimension_system,
         "reasoning": [str(item) for item in reasoning if str(item).strip()][:6],
         "confidence": confidence,
         "model": parsed.get("model") or OPENAI_MODEL,
@@ -2665,12 +2809,16 @@ def build_text_to_sql_prompt(payload: TextToSqlRequest) -> str:
         "请输出严格 JSON，格式如下：\n"
         "{\n"
         '  "sql": "SELECT ...",\n'
-        '  "chartType": "bar|line|pie",\n'
-        '  "fieldMapping": {"dimension": "", "metric": "", "dimensionKey": "", "metricKey": ""},\n'
+        '  "chartType": "bar|line|pie|radar|scatter|metric|map",\n'
+        '  "fieldMapping": {"dimension": "", "metric": "", "dimensionKey": "", "metricKey": "", "xMetricKey": "", "yMetricKey": "", "geoKey": "", "metricKeys": []},\n'
         '  "reasoning": ["", ""],\n'
         '  "confidence": 0.0\n'
         "}\n"
         "要求：只输出 JSON，不要输出多余文本；SQL 必须只读；优先使用用户语义最匹配的维度和指标；"
+        "图表类型选择规则：趋势/时间序列用 line，占比/构成用 pie，分类对比用 bar，多指标评分/画像用 radar，两个数值指标相关性/离群分布用 scatter，单一 KPI/总量/当前值用 metric，地域/省份/城市分布用 map。"
+        "当用户要求综合表现、综合对比、能力画像、多指标评价，或同一句中按一个维度对比 3 个及以上数值指标时，即使没有明确说“雷达图”，也优先使用 radar。"
+        "radar SQL 必须选择一个分组维度，并为每个数值指标输出独立聚合列；fieldMapping.metricKeys 必须列出这些聚合列名，不能只输出 metric_value 单列。"
+        "scatter SQL 必须输出两个独立数值指标列作为 X/Y 轴；fieldMapping.xMetricKey 和 fieldMapping.yMetricKey 必须分别指向这两个列名，不能只输出 metric_value 单列。"
         "如果用户问题里出现‘按省份/地区/城市/分类/品类/产品名/订单日期/月份’等模式，请尽量选择语义对应字段。"
         "如果预览样本中字段值明显像地区、省份、日期或金额，请优先结合样本值判断，而不是只看列名。"
         "如果是时间维度字符串，优先使用 DATE_FORMAT / STR_TO_DATE / CAST 等兼容 MySQL 的方式，并避免使用 DATE(...) 直接包裹非日期列。"
@@ -2904,6 +3052,381 @@ def choose_metric(question: str, fields: list[FieldMeta], preferred: FieldMeta |
     return first_by_type(fields, "NUMBER")
 
 
+def field_aliases(field: FieldMeta) -> list[str]:
+    aliases = [
+        field.columnName or "",
+        field.displayName or "",
+        field.sourceFieldName or "",
+        field.fieldComment or "",
+    ]
+    if field.synonyms:
+        aliases.extend(re.split(r"[,，;；、\s]+", field.synonyms))
+    return [str(alias or "").strip() for alias in aliases if str(alias or "").strip()]
+
+
+def question_mentions_field(question: str, field: FieldMeta) -> bool:
+    q = normalize_match_text(question)
+    if not q:
+        return False
+    for alias in field_aliases(field):
+        normalized = normalize_match_text(alias)
+        if normalized and normalized in q:
+            return True
+    return False
+
+
+def field_mention_position(question: str, field: FieldMeta) -> int:
+    q = normalize_match_text(question)
+    if not q:
+        return 10**9
+    positions = []
+    for alias in field_aliases(field):
+        normalized = normalize_match_text(alias)
+        if normalized and normalized in q:
+            positions.append(q.find(normalized))
+    return min(positions) if positions else 10**9
+
+
+def radar_metric_aggregation(question: str, field: FieldMeta) -> str:
+    q = str(question or "").lower()
+    aliases = " ".join(field_aliases(field)).lower()
+    display = str(field.displayName or field.columnName or "")
+    if display and (f"平均{display}" in question or f"均值{display}" in question):
+        return "AVG"
+    if display and (f"{display}平均" in question or f"{display}均值" in question):
+        return "AVG"
+    if has_any_term(aliases, [
+        "avg", "average", "mean", "率", "rate", "ratio", "percent",
+        "占比", "比例", "天数", "时长", "周期", "周转", "客单价", "单价",
+    ]):
+        return "AVG"
+    return "SUM"
+
+
+def radar_metric_label(question: str, field: FieldMeta) -> str:
+    label = str(field.displayName or field.sourceFieldName or field.columnName or "").strip()
+    if not label:
+        return field.columnName
+    aggregation = radar_metric_aggregation(question, field)
+    if aggregation == "AVG" and not label.startswith(("平均", "均值")):
+        return f"平均{label}"
+    return label
+
+
+def choose_radar_metric_fields(
+    question: str,
+    fields: list[FieldMeta],
+    preferred: FieldMeta | None = None,
+    fill_to_min: bool = True,
+    max_metrics: int = 8,
+) -> list[FieldMeta]:
+    numeric_fields = [
+        field for field in fields
+        if field.fieldType == "NUMBER" and not is_id_like_field(field)
+    ]
+    if not numeric_fields:
+        return []
+
+    scored: list[tuple[int, int, FieldMeta]] = []
+    for index, field in enumerate(numeric_fields):
+        score = score_field_with_type_preference(question, field, "NUMBER")
+        mentioned = question_mentions_field(question, field)
+        if mentioned:
+            score += 120
+        if preferred and preferred.columnName == field.columnName:
+            score += 30
+        scored.append((score, -index, field))
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+
+    selected: list[FieldMeta] = []
+    for score, _, field in scored:
+        if question_mentions_field(question, field) and field not in selected:
+            selected.append(field)
+    if not selected:
+        for score, _, field in scored:
+            if score > 0 and field not in selected:
+                selected.append(field)
+    if fill_to_min and len(selected) < 3:
+        for _, _, field in scored:
+            if field not in selected:
+                selected.append(field)
+            if len(selected) >= 3:
+                break
+    return selected[:max_metrics]
+
+
+def is_scatter_intent(question: str, chart_type: str = "") -> bool:
+    q = str(question or "").lower()
+    return chart_type == "scatter" or has_any(q, SCATTER_TERMS)
+
+
+def choose_scatter_metric_fields(
+    question: str,
+    fields: list[FieldMeta],
+    preferred: FieldMeta | None = None,
+) -> list[FieldMeta]:
+    numeric_fields = [
+        field for field in fields
+        if field.fieldType == "NUMBER" and not is_id_like_field(field)
+    ]
+    if len(numeric_fields) < 2:
+        return []
+
+    mentioned = [
+        field for field in numeric_fields
+        if question_mentions_field(question, field)
+    ]
+    mentioned.sort(key=lambda field: (field_mention_position(question, field), -score_field_with_type_preference(question, field, "NUMBER")))
+    selected: list[FieldMeta] = []
+    for field in mentioned:
+        if field not in selected:
+            selected.append(field)
+        if len(selected) >= 2:
+            return selected
+
+    scored: list[tuple[int, int, FieldMeta]] = []
+    for index, field in enumerate(numeric_fields):
+        score = score_field_with_type_preference(question, field, "NUMBER")
+        if preferred and preferred.columnName == field.columnName:
+            score += 30
+        scored.append((score, -index, field))
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    for _, _, field in scored:
+        if field not in selected:
+            selected.append(field)
+        if len(selected) >= 2:
+            break
+    return selected[:2]
+
+
+def wants_scatter_group_dimension(question: str) -> bool:
+    q = str(question or "").lower()
+    return has_any(q, ["区分", "分组", "分类", "分颜色", "分系列", "按", "group", "series", "color"])
+
+
+def choose_scatter_group_dimension(
+    question: str,
+    fields: list[FieldMeta],
+    primary_dimension: FieldMeta,
+) -> FieldMeta | None:
+    if not wants_scatter_group_dimension(question):
+        return None
+    candidates = [
+        field for field in fields
+        if field.fieldType != "NUMBER" and field.columnName != primary_dimension.columnName
+    ]
+    mentioned = [field for field in candidates if question_mentions_field(question, field)]
+    if mentioned:
+        mentioned.sort(key=lambda field: (
+            field_mention_position(question, field),
+            -score_field_with_type_preference(question, field, "TEXT"),
+        ))
+        return mentioned[0]
+    return None
+
+
+def choose_scatter_point_dimension(
+    question: str,
+    fields: list[FieldMeta],
+    group_dimension: FieldMeta | None,
+) -> FieldMeta | None:
+    excluded_column = group_dimension.columnName if group_dimension else ""
+    candidates = [field for field in fields if field.fieldType != "NUMBER" and field.columnName != excluded_column]
+    time_field = first_by_type(candidates, "DATE") or first_date_like_field(candidates)
+    if time_field:
+        return time_field
+    ranked = [
+        (score_field_with_type_preference(question, field, "TEXT"), field)
+        for field in candidates
+    ]
+    ranked = [(score, field) for score, field in ranked if score > 0]
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return ranked[0][1] if ranked else (candidates[0] if candidates else None)
+
+
+def is_multi_metric_radar_intent(question: str, fields: list[FieldMeta] | None = None, chart_type: str = "") -> bool:
+    q = str(question or "").lower()
+    if has_any(q, ["地图", "地域", "省份", "城市", "区域分布", "geo", "map"]) and "雷达" not in q and "radar" not in q:
+        return False
+    if has_any(q, ["散点", "相关", "相关性", "离群", "scatter", "correlation"]) and "雷达" not in q and "radar" not in q:
+        return False
+    explicit_radar = chart_type == "radar" or has_any(q, ["雷达", "radar"])
+    semantic_radar = has_any(q, RADAR_SEMANTIC_TERMS)
+    comparison = has_any(q, COMPARISON_TERMS)
+    if fields:
+        mentioned_metrics = choose_radar_metric_fields(q, fields, fill_to_min=False)
+        filled_metrics = choose_radar_metric_fields(q, fields, fill_to_min=True)
+        if explicit_radar and len(filled_metrics) >= 3:
+            return True
+        if len(mentioned_metrics) >= 3 and (semantic_radar or comparison):
+            return True
+        return semantic_radar and comparison and len(filled_metrics) >= 3
+    return explicit_radar or (semantic_radar and comparison)
+
+
+def quote_identifier(identifier: str) -> str:
+    return "`" + str(identifier or "").replace("`", "``") + "`"
+
+
+def sql_literal(value: Any) -> str:
+    return "'" + str(value or "").replace("'", "''") + "'"
+
+
+def metric_cast_expression(field: FieldMeta, aggregation: str) -> str:
+    precision = "18,6" if aggregation == "AVG" else "18,2"
+    return f"CAST(NULLIF({quote_identifier(field.columnName)}, '') AS DECIMAL({precision}))"
+
+
+def build_multi_metric_radar_sql_result(
+    payload: TextToSqlRequest,
+    dimension: FieldMeta,
+    metric_fields: list[FieldMeta],
+) -> dict[str, Any]:
+    semantic_question = (payload.rawQuestion or payload.question or "").strip()
+    dimension_expr = build_dimension_expression(semantic_question, dimension)
+    limit = parse_nl_limit(semantic_question, 30)
+    select_parts: list[str] = []
+    metric_keys: list[str] = []
+    metric_labels: dict[str, str] = {}
+    metric_aggs: dict[str, str] = {}
+    metric_exprs: dict[str, str] = {}
+
+    for field in metric_fields:
+        alias = field.columnName
+        aggregation = radar_metric_aggregation(semantic_question, field)
+        value_expr = f"{aggregation}({metric_cast_expression(field, aggregation)})"
+        select_parts.append(f"{value_expr} AS {quote_identifier(alias)}")
+        metric_keys.append(alias)
+        metric_labels[alias] = radar_metric_label(semantic_question, field)
+        metric_aggs[alias] = aggregation
+        metric_exprs[alias] = value_expr
+
+    first_metric = metric_keys[0] if metric_keys else "metric_value"
+    order_expr = f"{quote_identifier(first_metric)} ASC" if wants_ascending_rank(semantic_question) else f"{quote_identifier(first_metric)} DESC"
+    where_expr = " AND ".join(build_semantic_filters(semantic_question, dimension, payload.fields))
+    sql = (
+        f"SELECT {dimension_expr} AS dim_name, {', '.join(select_parts)} "
+        f"FROM {quote_identifier(payload.tableName)} "
+        f"WHERE {where_expr} "
+        f"GROUP BY {dimension_expr} "
+        f"ORDER BY {order_expr} LIMIT {limit}"
+    )
+
+    metric_names = [metric_labels.get(key, key) for key in metric_keys]
+    return {
+        "sql": sql,
+        "chartType": "radar",
+        "fieldMapping": {
+            "dimension": dimension.displayName,
+            "metric": metric_names[0] if metric_names else "指标",
+            "dimensionKey": dimension.columnName,
+            "metricKey": first_metric,
+            "dimensionExpr": dimension_expr,
+            "metricKeys": metric_keys,
+            "metricLabels": metric_labels,
+            "metricAggs": metric_aggs,
+            "metricExprs": metric_exprs,
+        },
+        "reasoning": [
+            f"识别维度字段：{dimension.displayName}",
+            "识别多指标雷达字段：" + "、".join(metric_names),
+            "雷达图使用一个分组维度和多个独立指标列，避免压缩为单一 metric_value",
+            "推荐图表类型：radar",
+        ],
+    }
+
+
+def build_scatter_sql_result(
+    payload: TextToSqlRequest,
+    dimension: FieldMeta,
+    metric_fields: list[FieldMeta],
+) -> dict[str, Any]:
+    semantic_question = (payload.rawQuestion or payload.question or "").strip()
+    group_dimension = choose_scatter_group_dimension(semantic_question, payload.fields, dimension)
+    if not group_dimension and wants_scatter_group_dimension(semantic_question) and question_mentions_field(semantic_question, dimension):
+        point_dimension = choose_scatter_point_dimension(semantic_question, payload.fields, dimension)
+        if point_dimension:
+            group_dimension = dimension
+            dimension = point_dimension
+    dimension_expr = build_dimension_expression(semantic_question, dimension)
+    limit = parse_nl_limit(semantic_question, 200 if group_dimension else 80)
+    x_field, y_field = metric_fields[0], metric_fields[1]
+    x_agg = radar_metric_aggregation(semantic_question, x_field)
+    y_agg = radar_metric_aggregation(semantic_question, y_field)
+    x_expr = f"{x_agg}({metric_cast_expression(x_field, x_agg)})"
+    y_expr = f"{y_agg}({metric_cast_expression(y_field, y_agg)})"
+    filters = build_semantic_filters(semantic_question, dimension, payload.fields)
+    if group_dimension:
+        group_expr = quote_identifier(group_dimension.columnName)
+        filters.append(f"{group_expr} IS NOT NULL AND {group_expr} <> ''")
+    where_expr = " AND ".join(filters)
+    if group_dimension:
+        group_expr = quote_identifier(group_dimension.columnName)
+        dim_name_expr = f"CONCAT({dimension_expr}, ' ', {group_expr})"
+        sql = (
+            f"SELECT {dim_name_expr} AS dim_name, "
+            f"{dimension_expr} AS date_name, "
+            f"{group_expr} AS group_name, "
+            f"{x_expr} AS {quote_identifier(x_field.columnName)}, "
+            f"{y_expr} AS {quote_identifier(y_field.columnName)} "
+            f"FROM {quote_identifier(payload.tableName)} "
+            f"WHERE {where_expr} "
+            f"GROUP BY {dim_name_expr}, {dimension_expr}, {group_expr} "
+            f"ORDER BY {dimension_expr} ASC LIMIT {limit}"
+        )
+    else:
+        sql = (
+            f"SELECT {dimension_expr} AS dim_name, "
+            f"{x_expr} AS {quote_identifier(x_field.columnName)}, "
+            f"{y_expr} AS {quote_identifier(y_field.columnName)} "
+            f"FROM {quote_identifier(payload.tableName)} "
+            f"WHERE {where_expr} "
+            f"GROUP BY {dimension_expr} "
+            f"ORDER BY {quote_identifier(y_field.columnName)} DESC LIMIT {limit}"
+        )
+    x_label = radar_metric_label(semantic_question, x_field)
+    y_label = radar_metric_label(semantic_question, y_field)
+    field_mapping = {
+        "dimension": dimension.displayName,
+        "metric": f"{x_label} / {y_label}",
+        "dimensionKey": "dim_name" if group_dimension else dimension.columnName,
+        "metricKey": y_field.columnName,
+        "dimensionExpr": dimension_expr,
+        "xMetricKey": x_field.columnName,
+        "xMetric": x_label,
+        "yMetricKey": y_field.columnName,
+        "yMetric": y_label,
+        "groupKey": "group_name" if group_dimension else "dim_name",
+        "group": group_dimension.displayName if group_dimension else dimension.displayName,
+        "metricAggs": {
+            x_field.columnName: x_agg,
+            y_field.columnName: y_agg,
+        },
+        "metricExprs": {
+            x_field.columnName: x_expr,
+            y_field.columnName: y_expr,
+        },
+    }
+    if group_dimension:
+        field_mapping.update({
+            "dimensionField": dimension.columnName,
+            "dateKey": "date_name",
+            "groupField": group_dimension.columnName,
+        })
+    return {
+        "sql": sql,
+        "chartType": "scatter",
+        "fieldMapping": field_mapping,
+        "reasoning": [
+            f"识别分组字段：{dimension.displayName}",
+            f"识别散点图 X 轴指标：{x_label}",
+            f"识别散点图 Y 轴指标：{y_label}",
+            *([f"识别散点图系列分组字段：{group_dimension.displayName}"] if group_dimension else []),
+            "散点图使用两个独立数值指标列作为点坐标，避免压缩为单一 metric_value",
+        ],
+    }
+
+
 def first_date_like_field(fields: list[FieldMeta]) -> FieldMeta | None:
     for field in fields:
         blob = " ".join([
@@ -2916,7 +3439,22 @@ def first_date_like_field(fields: list[FieldMeta]) -> FieldMeta | None:
     return None
 
 
-def choose_chart_type(question: str, dimension: FieldMeta) -> str:
+def choose_chart_type(question: str, dimension: FieldMeta, fields: list[FieldMeta] | None = None) -> str:
+    field_text = " ".join([
+        dimension.columnName or "",
+        dimension.displayName or "",
+        dimension.fieldComment or "",
+    ]).lower()
+    if has_any(question + " " + field_text, ["地图", "地域", "地区", "省份", "城市", "区域分布", "geo", "map"]):
+        return "map"
+    if has_any(question, ["散点", "相关", "相关性", "关系", "离群", "异常点", "异常分布点", "scatter", "correlation"]):
+        return "scatter"
+    if is_multi_metric_radar_intent(question, fields):
+        return "radar"
+    if has_any(question, ["雷达", "能力", "评分", "画像", "多指标", "综合评价", "radar"]):
+        return "radar"
+    if has_any(question, ["指标卡", "kpi", "核心指标", "当前值", "总量", "总额", "单指标", "metric"]):
+        return "metric"
     if any(word in question for word in ["占比", "比例", "分类", "结构", "分布"]):
         return "pie"
     if dimension.fieldType == "DATE" or any(word in question for word in ["趋势", "变化", "每日", "每月", "每个月", "月度", "年度", "季度"]):
@@ -3107,7 +3645,7 @@ def build_time_filter(question: str, fields: list[FieldMeta]) -> str:
 
 def build_semantic_filters(question: str, dimension: FieldMeta, fields: list[FieldMeta]) -> list[str]:
     filters = [build_dimension_filter(question, dimension)]
-    region_values = extract_region_values(question)
+    region_values = extract_region_values(question) if (wants_region_dimension(question) or has_macro_region_value(question)) else []
     if region_values:
         region_field = dimension if region_field_match(dimension) else choose_dimension("区域", fields)
         if region_field:
@@ -3239,7 +3777,19 @@ def build_graph_guided_sql_result(payload: TextToSqlRequest, graph_plan: dict[st
     preferred_metric = graph_plan.get("metric_field") or follow_up_plan.get("metric_field")
     dimension = choose_dimension(semantic_question, payload.fields, preferred_dimension)
     metric = choose_metric(semantic_question, payload.fields, preferred_metric)
-    final_chart_type = chart_type if chart_type in {"bar", "line", "pie"} else choose_chart_type(semantic_question, dimension)
+    final_chart_type = chart_type if chart_type in {"bar", "line", "pie", "radar", "scatter", "metric", "map"} else choose_chart_type(semantic_question, dimension, payload.fields)
+    if is_multi_metric_radar_intent(semantic_question, payload.fields, final_chart_type):
+        final_chart_type = "radar"
+    elif is_scatter_intent(semantic_question, final_chart_type):
+        final_chart_type = "scatter"
+
+    scatter_metric_fields = choose_scatter_metric_fields(semantic_question, payload.fields, metric)
+    if final_chart_type == "scatter" and len(scatter_metric_fields) >= 2:
+        return build_scatter_sql_result(payload, dimension, scatter_metric_fields)
+
+    radar_metric_fields = choose_radar_metric_fields(semantic_question, payload.fields, metric, fill_to_min=True)
+    if final_chart_type == "radar" and len(radar_metric_fields) >= 3:
+        return build_multi_metric_radar_sql_result(payload, dimension, radar_metric_fields)
 
     if metric and graph_plan.get("metric_formula"):
         formula_expr = build_formula_expression(str(graph_plan.get("metric_formula")), payload.fields)
@@ -3259,6 +3809,37 @@ def build_graph_guided_sql_result(payload: TextToSqlRequest, graph_plan: dict[st
         value_expr = "COUNT(1)"
         metric_name = "记录数"
         metric_key = "value"
+
+    if final_chart_type == "metric":
+        if metric:
+            metric_agg = radar_metric_aggregation(semantic_question, metric)
+            metric_name = radar_metric_label(semantic_question, metric) if metric_agg == "AVG" else metric_name
+            value_expr = (
+                f"AVG(CAST(NULLIF(`{metric.columnName}`, '') AS DECIMAL(18,6)))"
+                if metric_agg == "AVG"
+                else f"SUM(CAST(NULLIF(`{metric.columnName}`, '') AS DECIMAL(18,2)))"
+            )
+        where_expr = " AND ".join(build_semantic_filters(semantic_question, dimension, payload.fields))
+        metric_label = sql_literal(metric_name)
+        sql = (
+            f"SELECT {metric_label} AS dim_name, {value_expr} AS metric_value "
+            f"FROM `{payload.tableName}` "
+            f"WHERE {where_expr} LIMIT 1"
+        )
+        return {
+            "sql": sql,
+            "chartType": "metric",
+            "fieldMapping": {
+                "dimension": "指标",
+                "metric": metric_name,
+                "dimensionKey": "dim_name",
+                "metricKey": "metric_value",
+            },
+            "reasoning": [
+                f"识别指标字段：{metric_name}",
+                "识别为指标卡语义，使用单行聚合结果展示核心指标",
+            ],
+        }
 
     dimension_expr = build_dimension_expression(semantic_question, dimension)
     limit = parse_nl_limit(semantic_question, 30)
@@ -3314,6 +3895,68 @@ def should_override_sql_with_graph_plan(sql: str, graph_plan: dict[str, Any], pa
     return False
 
 
+def radar_sql_missing_metrics(sql: str, metric_fields: list[FieldMeta], field_mapping: dict[str, Any]) -> bool:
+    if len(metric_fields) < 3:
+        return False
+    sql_lower = str(sql or "").lower()
+    if not sql_lower:
+        return True
+    raw_metric_keys = field_mapping.get("metricKeys") if isinstance(field_mapping, dict) else None
+    if isinstance(raw_metric_keys, list):
+        mapped_keys = [str(item or "").strip() for item in raw_metric_keys if str(item or "").strip()]
+    else:
+        mapped_keys = [item for item in re.split(r"[,，、\s]+", str(raw_metric_keys or "")) if item]
+    mapped_norm = {normalize_match_text(item) for item in mapped_keys}
+    expected_norm = {normalize_match_text(field.columnName) for field in metric_fields}
+    if len(mapped_norm.intersection(expected_norm)) < min(3, len(expected_norm)):
+        return True
+    present_count = 0
+    for field in metric_fields:
+        column_token = quote_identifier(field.columnName).lower()
+        if column_token in sql_lower or field.columnName.lower() in sql_lower:
+            present_count += 1
+    return present_count < min(3, len(metric_fields))
+
+
+def scatter_sql_missing_metrics(sql: str, metric_fields: list[FieldMeta], field_mapping: dict[str, Any]) -> bool:
+    if len(metric_fields) < 2:
+        return False
+    sql_lower = str(sql or "").lower()
+    if not sql_lower:
+        return True
+    x_key = normalize_match_text(field_mapping.get("xMetricKey") if isinstance(field_mapping, dict) else "")
+    y_key = normalize_match_text(field_mapping.get("yMetricKey") if isinstance(field_mapping, dict) else "")
+    expected = [normalize_match_text(field.columnName) for field in metric_fields[:2]]
+    if x_key != expected[0] or y_key != expected[1]:
+        return True
+    present_count = 0
+    for field in metric_fields[:2]:
+        column_token = quote_identifier(field.columnName).lower()
+        if column_token in sql_lower or field.columnName.lower() in sql_lower:
+            present_count += 1
+    single_value_alias = "metric_value" in sql_lower and not all(f"`{field.columnName}`".lower() in sql_lower for field in metric_fields[:2])
+    return present_count < 2 or single_value_alias
+
+
+def scatter_sql_missing_group_shape(question: str, fields: list[FieldMeta], sql: str) -> bool:
+    if not wants_scatter_group_dimension(question):
+        return False
+    sql_lower = str(sql or "").lower()
+    if not sql_lower:
+        return True
+    dimension = choose_dimension(question, fields)
+    group_dimension = choose_scatter_group_dimension(question, fields, dimension)
+    if not group_dimension and question_mentions_field(question, dimension):
+        point_dimension = choose_scatter_point_dimension(question, fields, dimension)
+        if point_dimension:
+            group_dimension = dimension
+            dimension = point_dimension
+    if not group_dimension:
+        return False
+    needs_point_alias = dimension.fieldType == "DATE" or time_field_match(dimension)
+    return "group_name" not in sql_lower or (needs_point_alias and "date_name" not in sql_lower)
+
+
 def should_override_sql_with_semantic_plan(sql: str, ai_result: dict[str, Any], payload: TextToSqlRequest) -> bool:
     sql_lower = str(sql or "").lower()
     question = (payload.rawQuestion or payload.question or "").strip()
@@ -3326,6 +3969,18 @@ def should_override_sql_with_semantic_plan(sql: str, ai_result: dict[str, Any], 
     mapping = ai_result.get("fieldMapping") if isinstance(ai_result.get("fieldMapping"), dict) else {}
     mapped_dimension = str(mapping.get("dimensionKey") or mapping.get("dimension") or "").strip().lower()
     mapped_metric = str(mapping.get("metricKey") or mapping.get("metric") or "").strip().lower()
+    chart_type = normalize_chart_type(ai_result.get("chartType", "bar"))
+
+    if is_multi_metric_radar_intent(question, payload.fields, chart_type):
+        radar_metrics = choose_radar_metric_fields(question, payload.fields, expected_metric, fill_to_min=True)
+        if chart_type != "radar" or radar_sql_missing_metrics(sql, radar_metrics, mapping):
+            return True
+    if is_scatter_intent(question, chart_type):
+        scatter_metrics = choose_scatter_metric_fields(question, payload.fields, expected_metric)
+        if (chart_type != "scatter"
+                or scatter_sql_missing_metrics(sql, scatter_metrics, mapping)
+                or scatter_sql_missing_group_shape(question, payload.fields, sql)):
+            return True
 
     if expected_dimension and has_macro_region_value(question) and expected_dimension.columnName.lower() not in sql_lower:
         return True
@@ -3528,7 +4183,7 @@ def _strip_outer_aggregate(expr: str) -> str:
 def normalize_ai_sql_result(parsed: dict[str, Any], payload: TextToSqlRequest) -> dict[str, Any]:
     field_mapping = parsed.get("fieldMapping") if isinstance(parsed.get("fieldMapping"), dict) else {}
     sql = str(parsed.get("sql", ""))
-    chart_type = str(parsed.get("chartType", "bar"))
+    chart_type = normalize_chart_type(parsed.get("chartType", "bar"))
     reasoning = parsed.get("reasoning") if isinstance(parsed.get("reasoning"), list) else []
 
     dimension_key = str(field_mapping.get("dimensionKey") or field_mapping.get("dimension") or "")
@@ -3566,24 +4221,197 @@ def normalize_ai_sql_result(parsed: dict[str, Any], payload: TextToSqlRequest) -
         sql = guided["sql"]
         field_mapping = guided["fieldMapping"]
         chart_type = guided["chartType"]
+        dimension_key = str(field_mapping.get("dimensionKey") or dimension_key)
+        metric_key = str(field_mapping.get("metricKey") or metric_key)
         if isinstance(reasoning, list):
             reasoning.append("图谱提示与模型输出存在偏差，已按图谱映射自动纠偏")
+
+    if is_multi_metric_radar_intent(payload.rawQuestion or payload.question, payload.fields, chart_type):
+        radar_metrics = choose_radar_metric_fields(payload.rawQuestion or payload.question, payload.fields, metric_field, fill_to_min=True)
+        if chart_type != "radar" or radar_sql_missing_metrics(sql, radar_metrics, field_mapping):
+            guided = build_graph_guided_sql_result(payload, graph_plan, "radar")
+            sql = guided["sql"]
+            field_mapping = guided["fieldMapping"]
+            chart_type = guided["chartType"]
+            dimension_key = str(field_mapping.get("dimensionKey") or dimension_key)
+            metric_key = str(field_mapping.get("metricKey") or metric_key)
+            if isinstance(reasoning, list):
+                reasoning.append("识别到多指标综合对比语义，已自动生成多指标雷达图 SQL")
+    elif is_scatter_intent(payload.rawQuestion or payload.question, chart_type):
+        scatter_metrics = choose_scatter_metric_fields(payload.rawQuestion or payload.question, payload.fields, metric_field)
+        if (chart_type != "scatter"
+                or scatter_sql_missing_metrics(sql, scatter_metrics, field_mapping)
+                or scatter_sql_missing_group_shape(payload.rawQuestion or payload.question, payload.fields, sql)):
+            guided = build_graph_guided_sql_result(payload, graph_plan, "scatter")
+            sql = guided["sql"]
+            field_mapping = guided["fieldMapping"]
+            chart_type = guided["chartType"]
+            dimension_key = str(field_mapping.get("dimensionKey") or dimension_key)
+            metric_key = str(field_mapping.get("metricKey") or metric_key)
+            if isinstance(reasoning, list):
+                reasoning.append("识别到相关性/散点图语义，已自动生成双指标散点图 SQL")
+
+    normalized_field_mapping = {
+        "dimension": field_by_column.get(dimension_key).displayName if dimension_key in field_by_column else field_mapping.get("dimension", dimension_key),
+        "metric": field_by_column.get(metric_key).displayName if metric_key in field_by_column else field_mapping.get("metric", metric_key),
+        "dimensionKey": dimension_key,
+        "metricKey": metric_key,
+        "dimensionExpr": field_mapping.get("dimensionExpr", dimension_key),
+    }
+    normalized_field_mapping.update(build_extended_chart_field_mapping(
+        chart_type, field_mapping, payload.fields, dimension_key, metric_key))
 
     return {
         **parsed,
         "sql": sql,
         "chartType": chart_type,
-        "fieldMapping": {
-            "dimension": field_by_column.get(dimension_key).displayName if dimension_key in field_by_column else field_mapping.get("dimension", dimension_key),
-            "metric": field_by_column.get(metric_key).displayName if metric_key in field_by_column else field_mapping.get("metric", metric_key),
-            "dimensionKey": dimension_key,
-            "metricKey": metric_key,
-            "dimensionExpr": field_mapping.get("dimensionExpr", dimension_key),
-        },
+        "fieldMapping": normalized_field_mapping,
         "reasoning": reasoning,
         "graphSqlHintsUsed": graph_plan["used"],
         "graphDecision": graph_plan["decision"],
     }
+
+
+def build_extended_chart_field_mapping(
+    chart_type: str,
+    field_mapping: dict[str, Any],
+    fields: list[FieldMeta],
+    dimension_key: str,
+    metric_key: str,
+) -> dict[str, Any]:
+    field_by_column = {field.columnName: field for field in fields}
+    field_by_col_lc = {field.columnName.lower(): field for field in fields}
+    field_by_display_lc = {field.displayName.lower(): field for field in fields if field.displayName}
+    numeric_keys = [field.columnName for field in fields if field.fieldType == "NUMBER"]
+
+    def display_name(key: str) -> str:
+        field = field_by_column.get(key)
+        return field.displayName if field else key
+
+    def resolve_key(value: Any, prefer_number: bool = False) -> str:
+        if isinstance(value, list):
+            value = value[0] if value else ""
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        matched = match_field_by_ref(text, field_by_col_lc, field_by_display_lc)
+        if matched and (not prefer_number or matched.fieldType == "NUMBER"):
+            return matched.columnName
+        return text if text in field_by_column else ""
+
+    def resolve_key_list(value: Any, prefer_number: bool = False) -> list[str]:
+        if isinstance(value, list):
+            raw_items = value
+        else:
+            raw_items = re.split(r"[,，、\s]+", str(value or ""))
+        result = []
+        for item in raw_items:
+            key = resolve_key(item, prefer_number)
+            if key and key not in result:
+                result.append(key)
+        return result
+
+    result: dict[str, Any] = {}
+    if chart_type == "scatter":
+        x_key = resolve_key(field_mapping.get("xMetricKey") or field_mapping.get("xMetric") or field_mapping.get("x"), True)
+        y_key = resolve_key(field_mapping.get("yMetricKey") or field_mapping.get("yMetric") or field_mapping.get("y"), True)
+        if not x_key:
+            x_key = numeric_keys[0] if numeric_keys else metric_key
+        if not y_key:
+            y_key = next((key for key in numeric_keys if key != x_key), metric_key)
+        result.update({
+            "xMetricKey": x_key,
+            "xMetric": str(field_mapping.get("xMetric") or "").strip() or display_name(x_key),
+            "yMetricKey": y_key,
+            "yMetric": str(field_mapping.get("yMetric") or "").strip() or display_name(y_key),
+        })
+        if result["xMetric"] and result["yMetric"]:
+            result["metric"] = f"{result['xMetric']} / {result['yMetric']}"
+        raw_group_key = str(field_mapping.get("groupKey") or "").strip()
+        group_key = resolve_key(raw_group_key or field_mapping.get("group"))
+        size_key = resolve_key(field_mapping.get("sizeMetricKey") or field_mapping.get("sizeMetric"), True)
+        if raw_group_key and raw_group_key not in field_by_column:
+            result["groupKey"] = raw_group_key
+            result["group"] = str(field_mapping.get("group") or raw_group_key).strip()
+        elif group_key:
+            result["groupKey"] = group_key
+            result["group"] = display_name(group_key)
+        group_field = resolve_key(field_mapping.get("groupField") or field_mapping.get("group"), False)
+        if group_field:
+            result["groupField"] = group_field
+        for alias_key in ["dateKey", "dimensionField"]:
+            if field_mapping.get(alias_key):
+                result[alias_key] = str(field_mapping.get(alias_key))
+        if size_key:
+            result["sizeMetricKey"] = size_key
+            result["sizeMetric"] = display_name(size_key)
+    elif chart_type == "radar":
+        metric_keys = resolve_key_list(field_mapping.get("metricKeys"), True)
+        if not metric_keys:
+            metric_keys = numeric_keys[:3] or ([metric_key] if metric_key else [])
+        result["metricKeys"] = metric_keys
+        raw_labels = field_mapping.get("metricLabels")
+        metric_labels: dict[str, str] = {}
+        if isinstance(raw_labels, dict):
+            for key in metric_keys:
+                label = str(raw_labels.get(key) or raw_labels.get(display_name(key)) or "").strip()
+                metric_labels[key] = label or display_name(key)
+        elif isinstance(raw_labels, list):
+            for index, key in enumerate(metric_keys):
+                label = str(raw_labels[index] if index < len(raw_labels) else "").strip()
+                metric_labels[key] = label or display_name(key)
+        else:
+            metric_labels = {key: display_name(key) for key in metric_keys}
+        result["metricLabels"] = metric_labels
+        for carry_key in ["metricAggs", "metricExprs"]:
+            if isinstance(field_mapping.get(carry_key), dict):
+                result[carry_key] = field_mapping.get(carry_key)
+        dimension_keys = resolve_key_list(field_mapping.get("dimensionKeys"), False)
+        if dimension_keys:
+            result["dimensionKeys"] = dimension_keys
+    elif chart_type == "metric":
+        compare_key = resolve_key(field_mapping.get("compareMetricKey") or field_mapping.get("compareMetric"), True)
+        trend_key = resolve_key(field_mapping.get("trendKey") or field_mapping.get("trend"), True)
+        if compare_key:
+            result["compareMetricKey"] = compare_key
+            result["compareMetric"] = display_name(compare_key)
+        if trend_key:
+            result["trendKey"] = trend_key
+            result["trend"] = display_name(trend_key)
+        if field_mapping.get("unit"):
+            result["unit"] = str(field_mapping.get("unit"))
+    elif chart_type == "map":
+        geo_key = resolve_key(field_mapping.get("geoKey") or field_mapping.get("regionKey") or dimension_key)
+        result["geoKey"] = geo_key or dimension_key
+        result["geo"] = display_name(result["geoKey"])
+        result["geoLevel"] = str(field_mapping.get("geoLevel") or "province")
+    return result
+
+
+def normalize_chart_type(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    alias = {
+        "柱状图": "bar",
+        "柱形图": "bar",
+        "条形图": "bar",
+        "折线图": "line",
+        "趋势图": "line",
+        "饼图": "pie",
+        "环形图": "pie",
+        "doughnut": "pie",
+        "donut": "pie",
+        "雷达图": "radar",
+        "散点图": "scatter",
+        "指标卡": "metric",
+        "指标": "metric",
+        "kpi": "metric",
+        "card": "metric",
+        "indicator": "metric",
+        "地图": "map",
+        "区域地图": "map",
+    }
+    normalized = alias.get(text, text)
+    return normalized if normalized in {"bar", "line", "pie", "radar", "scatter", "metric", "map", "table"} else "bar"
 
 
 def has_dictionary_intent(question: str) -> bool:
@@ -3683,6 +4511,31 @@ def normalize_dictionary_entries(entries: Any, fields: list[FieldMeta]) -> list[
             "term": term,
             "field": field_name,
             "synonyms": synonyms,
+        })
+    return result
+
+
+def normalize_dimension_system(entries: Any, fields: list[FieldMeta]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    if not isinstance(entries, list):
+        return result
+    seen: set[str] = set()
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("term") or item.get("label") or "").strip()
+        field_ref = str(item.get("field") or item.get("columnName") or item.get("targetField") or "").strip()
+        matched = resolve_field_from_ref(field_ref or name, fields)
+        field_name = matched.columnName if matched else field_ref
+        if not name or not field_name:
+            continue
+        key = f"{name.lower()}@@{field_name.lower()}"
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({
+            "name": name,
+            "field": field_name,
         })
     return result
 

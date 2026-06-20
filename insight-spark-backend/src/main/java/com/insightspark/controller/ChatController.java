@@ -773,9 +773,15 @@ public class ChatController {
     private String humanizeChartType(String chartType) {
         String text = Objects.toString(chartType, "").trim().toLowerCase();
         return switch (text) {
+            case "bar" -> "柱状图";
             case "line" -> "折线图";
             case "pie" -> "饼图";
+            case "doughnut", "donut" -> "环形图";
             case "table" -> "表格";
+            case "radar" -> "雷达图";
+            case "scatter" -> "散点图";
+            case "metric", "card", "kpi", "indicator" -> "指标卡";
+            case "map" -> "地图";
             default -> "柱状图";
         };
     }

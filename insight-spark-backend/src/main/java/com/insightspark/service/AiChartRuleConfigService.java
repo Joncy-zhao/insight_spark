@@ -33,7 +33,7 @@ public class AiChartRuleConfigService {
             "animation", "animationDuration", "animationDurationUpdate", "animationEasing",
             "animationEasingUpdate", "animationThreshold", "smooth", "showSymbol", "barMaxWidth", "tooltip", "dataZoom", "label",
             "prediction", "voiceSummary", "dynamic", "refreshIntervalSeconds", "dynamicRefreshInterval",
-            "compare", "sort", "pagination", "sortable", "table"
+            "compare", "sort", "pagination", "sortable", "table", "radar", "scatter", "metric", "map"
     );
     private static final Set<String> RENDER_TOOLTIP_KEYS = Set.of("show", "trigger", "confine", "axisPointerType", "axisPointer");
     private static final Set<String> RENDER_AXIS_POINTER_KEYS = Set.of("type");
@@ -52,10 +52,15 @@ public class AiChartRuleConfigService {
     private static final Set<String> RENDER_PREDICTION_LEGEND_ITEM_KEYS = Set.of("show", "label");
     private static final Set<String> RENDER_VOICE_SUMMARY_KEYS = Set.of("enabled", "order", "templates", "chartTemplates", "summaryTemplate", "maxItems");
     private static final Set<String> RENDER_VOICE_FIELD_KEYS = Set.of("title", "metric", "max", "min", "trend", "anomaly");
-    private static final Set<String> RENDER_CHART_TYPE_KEYS = Set.of("line", "bar", "pie", "doughnut", "table");
+    private static final Set<String> RENDER_CHART_TYPE_KEYS = Set.of(
+            "line", "bar", "pie", "doughnut", "table", "radar", "scatter", "metric", "map");
     private static final Set<String> RENDER_COMPARE_KEYS = Set.of("mom", "yoy");
     private static final Set<String> RENDER_PAGINATION_KEYS = Set.of("pageSize");
     private static final Set<String> RENDER_TABLE_KEYS = Set.of("showHeader", "stripe", "border", "pageSize", "sortable");
+    private static final Set<String> RENDER_RADAR_KEYS = Set.of("areaOpacity", "lineWidth", "symbolSize");
+    private static final Set<String> RENDER_SCATTER_KEYS = Set.of("symbolSize", "opacity");
+    private static final Set<String> RENDER_METRIC_KEYS = Set.of("unit", "precision", "compareLabel", "trend");
+    private static final Set<String> RENDER_MAP_KEYS = Set.of("mapName", "geoLevel", "roam", "areaColor", "borderColor", "emphasisColor");
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -348,7 +353,7 @@ public class AiChartRuleConfigService {
                 "dynamicOptions", List.of("dataZoom", "incrementalRendering", "progressive", "largeThreshold",
                         "autoDataZoomThreshold", "autoLegendScrollThreshold"),
                 "voiceSummaryFields", List.of("title", "metric", "trend", "max", "min", "anomaly"),
-                "chartTypes", List.of("line", "bar", "pie", "doughnut", "table")
+                "chartTypes", List.of("line", "bar", "pie", "doughnut", "table", "radar", "scatter", "metric", "map")
         );
     }
 
@@ -602,6 +607,17 @@ public class AiChartRuleConfigService {
         if ("GROUP_COMPARE".equalsIgnoreCase(scenario) && intValue(profile.get("dimensionFieldCount"), 0) <= 0) {
             return false;
         }
+        if ("MAP".equalsIgnoreCase(scenario) && intValue(profile.get("geoFieldCount"), 0) <= 0) {
+            return false;
+        }
+        if ("SCATTER".equalsIgnoreCase(scenario) && intValue(profile.get("numericFieldCount"), 0) < 2) {
+            return false;
+        }
+        if ("RADAR".equalsIgnoreCase(scenario)
+                && intValue(profile.get("numericFieldCount"), 0) < 3
+                && intValue(profile.get("dimensionFieldCount"), 0) < 3) {
+            return false;
+        }
         if (!"DETAIL".equalsIgnoreCase(scenario) && intValue(profile.get("numericFieldCount"), 0) <= 0) {
             return false;
         }
@@ -612,6 +628,7 @@ public class AiChartRuleConfigService {
         int timeFields = 0;
         int numericFields = 0;
         int dimensionFields = 0;
+        int geoFields = 0;
         for (Map<String, Object> field : fields) {
             String name = Objects.toString(field.getOrDefault("name", field.getOrDefault("columnName", "")), "");
             String sourceName = Objects.toString(field.getOrDefault("sourceFieldName", ""), "");
@@ -630,26 +647,42 @@ public class AiChartRuleConfigService {
             } else {
                 dimensionFields++;
             }
+            if (isGeoLikeField(lower)) {
+                geoFields++;
+            }
         }
-        String detected = detectScenario(intent, timeFields, numericFields, dimensionFields, fields.size(), rows.size());
+        String detected = detectScenario(intent, timeFields, numericFields, dimensionFields, geoFields, fields.size(), rows.size());
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("rowCount", rows.size());
         result.put("fieldCount", fields.size());
         result.put("timeFieldCount", timeFields);
         result.put("numericFieldCount", numericFields);
         result.put("dimensionFieldCount", dimensionFields);
+        result.put("geoFieldCount", geoFields);
         result.put("detectedScenario", detected);
         return result;
     }
 
-    private String detectScenario(String intent, int timeFields, int numericFields, int dimensionFields, int fieldCount, int rowCount) {
+    private String detectScenario(String intent, int timeFields, int numericFields, int dimensionFields, int geoFields, int fieldCount, int rowCount) {
         if (isExplicitDetailIntent(intent)) {
             return "DETAIL";
+        }
+        String lower = Objects.toString(intent, "").toLowerCase(Locale.ROOT);
+        if (isMapIntent(intent)) {
+            return geoFields > 0 && numericFields > 0 ? "MAP" : "GROUP_COMPARE";
+        }
+        if (isScatterIntent(intent)) {
+            return numericFields >= 2 ? "SCATTER" : "GROUP_COMPARE";
+        }
+        if (isRadarIntent(intent)) {
+            return numericFields >= 3 || dimensionFields >= 3 ? "RADAR" : "GROUP_COMPARE";
+        }
+        if (isMetricIntent(intent)) {
+            return numericFields > 0 ? "METRIC" : "DETAIL";
         }
         if (isTimeSeriesIntent(intent)) {
             return timeFields > 0 ? "TIME_SERIES" : (dimensionFields > 0 && numericFields > 0 ? "GROUP_COMPARE" : "DETAIL");
         }
-        String lower = Objects.toString(intent, "").toLowerCase(Locale.ROOT);
         if (lower.contains("ratio") || lower.contains("share") || intent.contains("占比") || intent.contains("比例")) {
             return "RATIO";
         }
@@ -666,6 +699,36 @@ public class AiChartRuleConfigService {
             return "DETAIL";
         }
         return numericFields > 0 ? "GROUP_COMPARE" : "DETAIL";
+    }
+
+    private boolean isRadarIntent(String intent) {
+        String lower = Objects.toString(intent, "").toLowerCase(Locale.ROOT);
+        return lower.contains("radar") || intent.contains("雷达") || intent.contains("能力")
+                || intent.contains("评分") || intent.contains("画像") || intent.contains("多指标")
+                || intent.contains("综合评价") || intent.contains("综合表现")
+                || intent.contains("综合对比") || intent.contains("综合分析")
+                || intent.contains("综合差异") || intent.contains("表现差异");
+    }
+
+    private boolean isScatterIntent(String intent) {
+        String lower = Objects.toString(intent, "").toLowerCase(Locale.ROOT);
+        return lower.contains("scatter") || lower.contains("correlation") || intent.contains("散点")
+                || intent.contains("相关") || intent.contains("相关性") || intent.contains("关系")
+                || intent.contains("离群") || intent.contains("异常点") || intent.contains("异常分布点");
+    }
+
+    private boolean isMetricIntent(String intent) {
+        String lower = Objects.toString(intent, "").toLowerCase(Locale.ROOT);
+        return lower.contains("kpi") || lower.contains("metric") || lower.contains("indicator")
+                || intent.contains("指标卡") || intent.contains("核心指标") || intent.contains("当前值")
+                || intent.contains("总量") || intent.contains("总额") || intent.contains("单指标");
+    }
+
+    private boolean isMapIntent(String intent) {
+        String lower = Objects.toString(intent, "").toLowerCase(Locale.ROOT);
+        return lower.contains("map") || lower.contains("geo") || intent.contains("地图")
+                || intent.contains("地域") || intent.contains("地区") || intent.contains("省份")
+                || intent.contains("城市") || intent.contains("区域分布");
     }
 
     private boolean isExplicitDetailIntent(String intent) {
@@ -702,13 +765,20 @@ public class AiChartRuleConfigService {
         return hasTimeSignal && !hasStrongMetricSignal(text);
     }
 
+    private boolean isGeoLikeField(String fieldText) {
+        String text = Objects.toString(fieldText, "").toLowerCase(Locale.ROOT);
+        return containsAny(text, "province", "city", "region", "area", "country", "geo", "location",
+                "省", "省份", "城市", "地区", "区域", "大区", "地域", "地市", "国家");
+    }
+
     private boolean isNumericLikeField(String type, String fieldText) {
         String normalizedType = Objects.toString(type, "").toLowerCase(Locale.ROOT);
         String text = Objects.toString(fieldText, "").toLowerCase(Locale.ROOT);
         return normalizedType.contains("int") || normalizedType.contains("decimal") || normalizedType.contains("double")
                 || normalizedType.contains("number") || normalizedType.contains("numeric") || normalizedType.contains("float")
                 || containsAny(text, "amount", "sales", "sale", "revenue", "gmv", "profit", "margin", "qty",
-                "quantity", "discount", "金额", "销售额", "销售", "收入", "营收", "利润", "数量", "销量", "折扣", "占比");
+                "quantity", "discount", "score", "rating", "金额", "销售额", "销售", "收入", "营收", "利润",
+                "数量", "销量", "折扣", "占比", "评分", "得分", "指标", "总量");
     }
 
     private String buildFieldSearchText(Map<String, Object> field, String fallback) {
@@ -748,6 +818,14 @@ public class AiChartRuleConfigService {
         String metric = names.size() > 1 ? names.get(1) : category;
         List<Object> x = rows.stream().map(row -> row.getOrDefault(category, row.getOrDefault("category", ""))).toList();
         List<Object> y = rows.stream().map(row -> row.getOrDefault(metric, row.getOrDefault("value", 0))).toList();
+        if ("metric".equalsIgnoreCase(chartType)) {
+            Map<String, Object> metricCard = new LinkedHashMap<>();
+            metricCard.put("type", "metric");
+            metricCard.put("label", metric);
+            metricCard.put("value", y.isEmpty() ? 0 : y.get(0));
+            metricCard.put("rows", rows);
+            return metricCard;
+        }
         Map<String, Object> option = new LinkedHashMap<>();
         Map<String, Object> preference = getPreferences();
         Map<String, Object> font = mapValue(preference.get("fontConfig"));
@@ -769,6 +847,34 @@ public class AiChartRuleConfigService {
                     "label", Map.of("formatter", "{b}: {d}%"),
                     "data", data
             )));
+        } else if ("radar".equalsIgnoreCase(chartType)) {
+            List<Map<String, Object>> indicators = new ArrayList<>();
+            for (int i = 0; i < Math.min(x.size(), y.size()); i++) {
+                indicators.add(Map.of("name", Objects.toString(x.get(i), ""), "max", 100));
+            }
+            option.put("radar", Map.of("indicator", indicators));
+            option.put("series", List.of(Map.of(
+                    "type", "radar",
+                    "data", List.of(Map.of("name", metric, "value", y))
+            )));
+        } else if ("scatter".equalsIgnoreCase(chartType)) {
+            String xMetric = names.size() > 1 ? names.get(0) : category;
+            String yMetric = names.size() > 1 ? names.get(1) : metric;
+            List<List<Object>> data = rows.stream()
+                    .map(row -> List.of(
+                            chartOptionValue(firstPresent(row.get(xMetric), row.get("x")), 0),
+                            chartOptionValue(firstPresent(row.get(yMetric), row.get("y"), row.get("value")), 0)))
+                    .toList();
+            option.put("xAxis", Map.of("type", "value"));
+            option.put("yAxis", Map.of("type", "value"));
+            option.put("series", List.of(Map.of("name", yMetric, "type", "scatter", "data", data)));
+        } else if ("map".equalsIgnoreCase(chartType)) {
+            List<Map<String, Object>> data = new ArrayList<>();
+            for (int i = 0; i < Math.min(x.size(), y.size()); i++) {
+                data.add(Map.of("name", Objects.toString(x.get(i), ""), "value", chartOptionValue(y.get(i), 0)));
+            }
+            option.put("visualMap", Map.of("left", "left", "min", 0, "max", 100, "calculable", true));
+            option.put("series", List.of(Map.of("type", "map", "map", "china", "name", metric, "data", data)));
         } else {
             option.put("xAxis", Map.of("type", "category", "data", x));
             option.put("yAxis", Map.of("type", "value"));
@@ -798,6 +904,17 @@ public class AiChartRuleConfigService {
                     "showHeader", true,
                     "stripe", true,
                     "border", true
+            ));
+            return option;
+        }
+        if ("metric".equalsIgnoreCase(chartType)) {
+            Map<String, Object> metric = mapValue(renderConfig.get("metric"));
+            option.put("type", "metric");
+            option.put("metric", Map.of(
+                    "unit", Objects.toString(metric.getOrDefault("unit", ""), ""),
+                    "precision", intValue(metric.get("precision"), 2),
+                    "compareLabel", Objects.toString(metric.getOrDefault("compareLabel", "较上期"), "较上期"),
+                    "trend", boolValue(metric.get("trend"), true)
             ));
             return option;
         }
@@ -838,10 +955,44 @@ public class AiChartRuleConfigService {
             series0.put("minShowLabelAngle", intValue(label.get("minPercent"), 3));
             series0.put("label", Map.of("show", true, "formatter", "{b}: {d}%"));
             option.put("series", List.of(series0));
+        } else if ("radar".equalsIgnoreCase(chartType)) {
+            Map<String, Object> radar = mapValue(renderConfig.get("radar"));
+            Map<String, Object> series0 = new LinkedHashMap<>();
+            series0.put("type", "radar");
+            series0.put("symbolSize", intValue(radar.get("symbolSize"), 4));
+            series0.put("lineStyle", Map.of("width", intValue(radar.get("lineWidth"), 2)));
+            series0.put("areaStyle", Map.of("opacity", doubleValue(radar.get("areaOpacity"), 0.12)));
+            option.put("tooltip", buildTooltipOption("pie", renderConfig));
+            option.put("radar", Map.of(
+                    "radius", "62%",
+                    "splitArea", Map.of("show", true)
+            ));
+            option.put("series", List.of(series0));
+        } else if ("scatter".equalsIgnoreCase(chartType)) {
+            Map<String, Object> scatter = mapValue(renderConfig.get("scatter"));
+            Map<String, Object> series0 = new LinkedHashMap<>();
+            applyDynamicSeriesConfig(series0, dynamic);
+            series0.put("type", "scatter");
+            series0.put("symbolSize", intValue(scatter.get("symbolSize"), 10));
+            series0.put("itemStyle", Map.of("opacity", doubleValue(scatter.get("opacity"), 0.78)));
+            option.put("tooltip", buildTooltipOption("scatter", renderConfig));
+            option.put("grid", buildGridOption(legendPosition));
+            option.put("xAxis", Map.of("type", "value"));
+            option.put("yAxis", Map.of("type", "value"));
+            option.put("series", List.of(series0));
+        } else if ("map".equalsIgnoreCase(chartType)) {
+            Map<String, Object> map = mapValue(renderConfig.get("map"));
+            Map<String, Object> series0 = new LinkedHashMap<>();
+            series0.put("type", "map");
+            series0.put("map", Objects.toString(map.getOrDefault("mapName", "china"), "china"));
+            series0.put("roam", boolValue(map.get("roam"), false));
+            option.put("tooltip", buildTooltipOption("pie", renderConfig));
+            option.put("visualMap", Map.of("left", "left", "calculable", true));
+            option.put("series", List.of(series0));
         }
         if (shouldEnableDataZoom(renderConfig.get("dataZoom"), defaultOptions)) {
             option.put("dataZoom", buildDataZoomOption(renderConfig.get("dataZoom"), dynamic));
-        } else if ("line".equalsIgnoreCase(chartType) || "bar".equalsIgnoreCase(chartType)) {
+        } else if ("line".equalsIgnoreCase(chartType) || "bar".equalsIgnoreCase(chartType) || "scatter".equalsIgnoreCase(chartType)) {
             option.put("dataZoom", Map.of("enabled", false));
         }
         return option;
@@ -1089,6 +1240,10 @@ public class AiChartRuleConfigService {
         chartTemplates.put("pie", "查询完成，已生成饼图。当前展示{metric}的占比结构，最高项为{maxName}{maxValue}。");
         chartTemplates.put("doughnut", "查询完成，已生成环形图。当前展示{metric}的占比结构，最高项为{maxName}{maxValue}。");
         chartTemplates.put("table", "查询完成，已生成表格。当前展示{count}行明细数据，包含{dimension}和{metric}等字段。");
+        chartTemplates.put("radar", "查询完成，已生成雷达图。当前围绕{dimension}对比{metric}，用于观察多指标画像。");
+        chartTemplates.put("scatter", "查询完成，已生成散点图。当前展示{metric}的分布与相关性，最高项为{maxName}{maxValue}。");
+        chartTemplates.put("metric", "查询完成，已生成指标卡。当前核心指标为{metric}，数值为{maxValue}。");
+        chartTemplates.put("map", "查询完成，已生成地图。当前按{dimension}展示{metric}的地域分布，最高区域为{maxName}{maxValue}。");
         chartTemplates.putAll(mapValue(config.get("chartTemplates")));
         return chartTemplates;
     }
@@ -1146,6 +1301,22 @@ public class AiChartRuleConfigService {
                         Map.of("dimensionRequired", true, "numericRequired", true),
                         Map.of("label", Map.of("showPercent", true, "digits", 1, "minPercent", 3)),
                         "识别到结构占比分析场景，推荐环形图展示各分类贡献比例。"),
+                rule("radar_default", "多指标雷达默认规则", "RADAR", "radar", 240,
+                        Map.of("numericRequired", true, "minNumericFields", 3),
+                        Map.of("radar", Map.of("areaOpacity", 0.12, "lineWidth", 2, "symbolSize", 4)),
+                        "识别到多指标评分、能力画像或综合评价场景，推荐雷达图展示多个维度的相对表现。"),
+                rule("scatter_default", "相关分布散点默认规则", "SCATTER", "scatter", 230,
+                        Map.of("numericRequired", true, "minNumericFields", 2),
+                        Map.of("scatter", Map.of("symbolSize", 10, "opacity", 0.78)),
+                        "识别到两个数值指标的相关性、分布或离群点分析场景，推荐散点图。"),
+                rule("metric_card_default", "核心指标卡默认规则", "METRIC", "metric", 220,
+                        Map.of("numericRequired", true, "singleMetric", true),
+                        Map.of("metric", Map.of("precision", 2, "compareLabel", "较上期", "trend", true)),
+                        "识别到单指标、KPI、总量或当前值展示场景，推荐指标卡突出核心数值。"),
+                rule("geo_map_default", "地域分布地图默认规则", "MAP", "map", 210,
+                        Map.of("geoRequired", true, "numericRequired", true),
+                        Map.of("map", Map.of("mapName", "china", "geoLevel", "province", "roam", false)),
+                        "识别到省份、城市、地区等地域分布场景，推荐地图展示空间分布。"),
                 rule("detail_default", "明细数据默认规则", "DETAIL", "table", 100,
                         Map.of("fallback", true, "minFields", 5),
                         Map.of("pagination", Map.of("pageSize", 20), "sortable", true),
@@ -1190,6 +1361,10 @@ public class AiChartRuleConfigService {
             case "TIME_SERIES" -> "line";
             case "GROUP_COMPARE" -> "bar";
             case "RATIO" -> "doughnut";
+            case "RADAR" -> "radar";
+            case "SCATTER" -> "scatter";
+            case "METRIC" -> "metric";
+            case "MAP" -> "map";
             default -> "table";
         };
         Map<String, Object> rule = new LinkedHashMap<>();
@@ -1447,6 +1622,10 @@ public class AiChartRuleConfigService {
             case "compare" -> RENDER_COMPARE_KEYS;
             case "pagination" -> RENDER_PAGINATION_KEYS;
             case "table" -> RENDER_TABLE_KEYS;
+            case "radar" -> RENDER_RADAR_KEYS;
+            case "scatter" -> RENDER_SCATTER_KEYS;
+            case "metric" -> RENDER_METRIC_KEYS;
+            case "map" -> RENDER_MAP_KEYS;
             default -> Set.of();
         };
     }
@@ -1585,6 +1764,33 @@ public class AiChartRuleConfigService {
         } catch (Exception ignored) {
             return fallback;
         }
+    }
+
+    private static double doubleValue(Object value, double fallback) {
+        if (value instanceof Number number) {
+            return number.doubleValue();
+        }
+        try {
+            return Double.parseDouble(Objects.toString(value, String.valueOf(fallback)));
+        } catch (Exception ignored) {
+            return fallback;
+        }
+    }
+
+    private static Object firstPresent(Object... values) {
+        if (values == null) {
+            return null;
+        }
+        for (Object value : values) {
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private static Object chartOptionValue(Object value, Object fallback) {
+        return value == null ? fallback : value;
     }
 
     private static int boundedInt(Object value, int fallback, int min, int max) {
