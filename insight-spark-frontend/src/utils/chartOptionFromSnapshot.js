@@ -138,6 +138,226 @@ function isForecastSnapshot(snap) {
   )
 }
 
+function normalizeAdvancedSnapshotType(value) {
+  const text = String(value || '').replace(/[-_\s]/g, '').toLowerCase()
+  if (text.includes('what')) return 'whatIf'
+  if (text.includes('alert') || text.includes('warning') || text.includes('prewarning')) return 'alert'
+  if (text.includes('forecast') || text.includes('predict')) return 'forecast'
+  return ''
+}
+
+function advancedAnalysisFromSnapshot(snap) {
+  const raw = snap?.advancedAnalysis && typeof snap.advancedAnalysis === 'object'
+    ? snap.advancedAnalysis
+    : (snap?.advancedAnalysisResult && typeof snap.advancedAnalysisResult === 'object' ? snap.advancedAnalysisResult : {})
+  const type = normalizeAdvancedSnapshotType(
+    raw?.type
+    || snap?.advancedAnalysisType
+    || snap?.type
+    || snap?.responseType
+    || snap?.fieldMapping?.mappingType
+    || snap?.chartType
+  )
+  if (!type) return null
+  const rows = Array.isArray(raw?.series)
+    ? raw.series
+    : (Array.isArray(raw?.data)
+      ? raw.data
+      : (Array.isArray(snap?.series) ? snap.series : (Array.isArray(snap?.data) ? snap.data : [])))
+  return {
+    ...snap,
+    ...raw,
+    type,
+    params: {
+      ...(snap?.params && typeof snap.params === 'object' ? snap.params : {}),
+      ...(raw?.params && typeof raw.params === 'object' ? raw.params : {})
+    },
+    fieldMapping: raw?.fieldMapping || snap?.fieldMapping || {},
+    series: rows,
+    data: rows
+  }
+}
+
+function formatAdvancedAxisValue(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return value
+  if (Math.abs(n) >= 100000000) return `${(n / 100000000).toFixed(1)}\u4ebf`
+  if (Math.abs(n) >= 10000) return `${(n / 10000).toFixed(1)}\u4e07`
+  return `${n}`
+}
+
+function alertSnapshotAxisName(item, index) {
+  const candidates = [
+    item?.bucketName,
+    item?.bucket,
+    item?.period,
+    item?.date,
+    item?.time,
+    item?.triggeredAt,
+    item?.createdAt,
+    item?.category,
+    item?.x,
+    item?.name
+  ]
+  for (const value of candidates) {
+    const text = String(value ?? '').trim()
+    if (text) return text
+  }
+  return `\u7b2c${index + 1}\u671f`
+}
+
+function alertSnapshotValue(item) {
+  return item?.value ?? item?.actualValue ?? item?.metricValue ?? item?.currentValue ?? item?.history ?? 0
+}
+
+function alertSnapshotIsAbnormal(item, threshold = 0, operator = 'lt') {
+  if (typeof item?.triggered === 'boolean') return item.triggered
+  const value = toNumber(alertSnapshotValue(item))
+  const limit = Number(threshold)
+  if (!Number.isFinite(value)) return false
+  if (operator === 'gt') return Number.isFinite(limit) && value > limit
+  if (operator === 'zscore') return Math.abs(Number(item?.zScore ?? item?.z_score ?? 0)) >= 3
+  return Number.isFinite(limit) && value < limit
+}
+
+function alertSnapshotPoint(item, threshold = 0, operator = 'lt') {
+  const abnormal = alertSnapshotIsAbnormal(item, threshold, operator)
+  return {
+    value: toNumber(alertSnapshotValue(item)),
+    abnormal,
+    symbolSize: abnormal ? 11 : 6,
+    itemStyle: abnormal
+      ? {
+          color: '#dc2626',
+          borderColor: '#ffffff',
+          borderWidth: 2,
+          shadowBlur: 8,
+          shadowColor: 'rgba(220, 38, 38, 0.35)'
+        }
+      : undefined,
+    emphasis: { scale: abnormal ? 1.45 : 1.2 }
+  }
+}
+
+function alertSnapshotTooltipFormatter(params = []) {
+  const items = Array.isArray(params) ? params : [params]
+  const title = items[0]?.axisValueLabel || items[0]?.name || ''
+  const lines = items.map(item => {
+    const data = item?.data && typeof item.data === 'object' ? item.data : {}
+    const value = data.value ?? item?.value ?? '--'
+    const suffix = data.abnormal ? ' <span style="color:#dc2626;font-weight:600;">\u5f02\u5e38</span>' : ''
+    return `${item?.marker || ''}${item?.seriesName || '\u68c0\u6d4b\u503c'}\uff1a${formatAdvancedAxisValue(value)}${suffix}`
+  })
+  return [title, ...lines].filter(Boolean).join('<br/>')
+}
+
+function alertSnapshotYAxisMax(rows = [], threshold = 0) {
+  const values = rows
+    .map(item => toNumber(alertSnapshotValue(item)))
+    .filter(value => Number.isFinite(value))
+  const limit = Number(threshold)
+  if (Number.isFinite(limit) && limit > 0) values.push(limit)
+  if (!values.length) return undefined
+  const max = Math.max(...values)
+  if (max <= 0) return undefined
+  return Math.ceil(max * 1.12)
+}
+
+function buildAlertOptionFromAdvancedSnapshot(analysis) {
+  const rows = Array.isArray(analysis?.series) ? analysis.series : []
+  if (!rows.length) return null
+  const threshold = toNumber(analysis?.params?.threshold ?? analysis?.threshold)
+  const operator = String(analysis?.params?.operator ?? analysis?.operator ?? 'lt').toLowerCase()
+  const hasThreshold = Number.isFinite(threshold) && threshold > 0
+  return {
+    tooltip: { trigger: 'axis', confine: true, formatter: alertSnapshotTooltipFormatter },
+    legend: { top: 4, left: 'center', data: ['\u68c0\u6d4b\u503c'] },
+    grid: { left: 54, right: 24, top: 58, bottom: 42, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: rows.map(alertSnapshotAxisName),
+      axisLabel: { hideOverlap: true, interval: 'auto', rotate: rows.length > 18 ? 25 : 0 }
+    },
+    yAxis: {
+      type: 'value',
+      max: alertSnapshotYAxisMax(rows, threshold),
+      axisLabel: { formatter: formatAdvancedAxisValue }
+    },
+    series: [{
+      name: '\u68c0\u6d4b\u503c',
+      type: 'line',
+      smooth: true,
+      data: rows.map(item => alertSnapshotPoint(item, threshold, operator)),
+      markLine: hasThreshold
+        ? {
+            symbol: 'none',
+            silent: true,
+            data: [{ yAxis: threshold, name: '\u9608\u503c' }],
+            lineStyle: { color: '#ef4444', type: 'dashed' },
+            label: { formatter: '\u9608\u503c', color: '#ef4444' }
+          }
+        : undefined,
+      lineStyle: { color: '#f97316', width: 2 },
+      itemStyle: { color: '#f97316' },
+      areaStyle: { color: 'rgba(249, 115, 22, 0.10)' }
+    }]
+  }
+}
+
+function buildWhatIfOptionFromAdvancedSnapshot(analysis) {
+  const rows = Array.isArray(analysis?.series) ? analysis.series : []
+  if (!rows.length) return null
+  return {
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, confine: true },
+    legend: { top: 4 },
+    grid: { left: 54, right: 24, top: 48, bottom: 34, containLabel: true },
+    xAxis: { type: 'category', data: rows.map(item => item?.name) },
+    yAxis: { type: 'value', axisLabel: { formatter: formatAdvancedAxisValue } },
+    series: [{
+      name: '\u4e1a\u52a1\u7ed3\u679c',
+      type: 'bar',
+      barMaxWidth: 34,
+      data: rows.map(item => ({
+        value: toNumber(item?.value),
+        itemStyle: {
+          color: toNumber(item?.value) < 0 ? '#f97316' : '#14b8a6',
+          borderRadius: toNumber(item?.value) < 0 ? [0, 0, 5, 5] : [5, 5, 0, 0]
+        }
+      }))
+    }]
+  }
+}
+
+function buildAdvancedOptionFromSnapshot(snap) {
+  const analysis = advancedAnalysisFromSnapshot(snap)
+  if (!analysis) return null
+  if (analysis.type === 'alert') return buildAlertOptionFromAdvancedSnapshot(analysis)
+  if (analysis.type === 'whatIf') return buildWhatIfOptionFromAdvancedSnapshot(analysis)
+  if (analysis.type === 'forecast') {
+    const rows = Array.isArray(analysis.series) ? analysis.series : []
+    if (!rows.length) return null
+    const total = rows.length
+    const forecastCount = rows.filter(item => item && item.forecast != null).length
+    const visibleCount = Math.min(total, Math.max(24, forecastCount + 18))
+    const zoomRange = {
+      startValue: total > 24 ? Math.max(0, total - visibleCount) : 0,
+      endValue: Math.max(0, total - 1)
+    }
+    const prediction = analysis?.optionTemplate?.prediction || {}
+    const option = buildForecastChartOption(rows, {
+      metricLabel: analysis?.metricField || analysis?.params?.metricField || analysis?.fieldMapping?.metric || '\u9884\u6d4b\u503c',
+      confidenceLabel: prediction.confidenceLabel || analysis?.confidence || analysis?.params?.confidence || '95%',
+      legendConfig: prediction.legendConfig
+    })
+    option.dataZoom = [
+      { type: 'inside', startValue: zoomRange.startValue, endValue: zoomRange.endValue },
+      { type: 'slider', height: 16, bottom: 8, startValue: zoomRange.startValue, endValue: zoomRange.endValue }
+    ]
+    return option
+  }
+  return null
+}
+
 function forecastPointHistoryValue(row) {
   if (!row || typeof row !== 'object') return null
   if (row.history != null) return row.history
@@ -2264,6 +2484,15 @@ export function buildOptionFromHistoryRow(row, ui = {}) {
   const hasItemOverrides = Object.keys(itemOv).length > 0
   const template =
     snap.optionTemplate && typeof snap.optionTemplate === 'object' ? snap.optionTemplate : null
+
+  const advancedBuilt = buildAdvancedOptionFromSnapshot(snap)
+  if (advancedBuilt) {
+    const advancedType = advancedAnalysisFromSnapshot(snap)?.type
+    const advancedChartType = advancedType === 'whatIf' ? 'bar' : 'line'
+    return template
+      ? applyDynamicInteractionDefaults(applyOptionTemplateDefaults(advancedBuilt, template), template, { chartType: advancedChartType })
+      : applyDynamicInteractionDefaults(advancedBuilt, null, { chartType: advancedChartType })
+  }
 
   if (isForecastSnapshot(snap)) {
     const built = buildForecastOptionFromSnapshot(snap)

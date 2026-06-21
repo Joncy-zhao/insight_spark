@@ -4,13 +4,22 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.insightspark.core.auth.AuthContext;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
+import org.apache.poi.xwpf.usermodel.ParagraphAlignment;
+import org.apache.poi.xwpf.usermodel.TableRowAlign;
+import org.apache.poi.xwpf.usermodel.TextAlignment;
 import org.apache.poi.xwpf.usermodel.XWPFParagraph;
 import org.apache.poi.xwpf.usermodel.XWPFRun;
 import org.apache.poi.xwpf.usermodel.XWPFTable;
 import org.apache.poi.xwpf.usermodel.XWPFTableCell;
 import org.apache.poi.xwpf.usermodel.XWPFTableRow;
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTShd;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTTblWidth;
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTTcPr;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STBorder;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STJcTable;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STTblLayoutType;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STTblWidth;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STVerticalJc;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
@@ -18,6 +27,7 @@ import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Service;
 
 import java.io.ByteArrayOutputStream;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.sql.PreparedStatement;
 import java.sql.Statement;
@@ -38,6 +48,7 @@ public class AdminChatQueryService {
     private static final String DOC_LIGHT_GRAY = "F8FAFC";
     private static final String DOC_TEXT = "17213B";
     private static final String DOC_MUTED = "64748B";
+    private static final int DOC_TABLE_WIDTH_DXA = 9524; // 16.8cm
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -526,6 +537,12 @@ public class AdminChatQueryService {
     private byte[] buildSessionDocx(Map<String, Object> session, boolean reasoningOnly) {
         try (XWPFDocument document = new XWPFDocument();
             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            if (reasoningOnly) {
+                appendReasoningLogDocument(document, session);
+                document.write(out);
+                return out.toByteArray();
+            }
+
             appendDocTitle(document, reasoningOnly ? "管理员对话查询推理日志" : "管理员对话查询测试记录");
             appendDocMeta(document, "导出时间：" + LocalDateTime.now() + "    会话编号：" + text(session.get("id")));
             appendQuestionBlock(document, text(session.get("question")));
@@ -579,8 +596,213 @@ public class AdminChatQueryService {
         }
     }
 
+    private void appendReasoningLogDocument(XWPFDocument document, Map<String, Object> session) {
+        appendReasoningDocTitle(document, "管理员对话查询推理日志");
+        appendReasoningDocMeta(document, "导出时间：" + LocalDateTime.now() + "    会话编号：" + text(session.get("id")));
+        appendReasoningSectionHeading(document, "测试指令");
+        appendReasoningQuestion(document, text(session.get("question")));
+
+        Map<String, Object> sqlArtifact = firstArtifact(session, "SQL");
+        appendReasoningSectionHeading(document, "测试概览");
+        appendReasoningTableCaption(document, 1, "测试概览表");
+        appendReasoningKeyValueTable(document, List.of(
+                row("测试人", session.get("testerUserId")),
+                row("测试角色", session.get("testerRole")),
+                row("状态", session.get("status")),
+                row("风险等级", session.get("riskLevel")),
+                row("使用模型", sqlArtifact.getOrDefault("modelName", modelValue(session, "modelId", "未记录"))),
+                row("数据源范围", readableDatasourceScope(session.get("datasourceScope"))),
+                row("耗时", text(session.get("durationMs")) + " ms"),
+                row("创建时间", session.get("createdAt"))
+        ));
+
+        appendReasoningSectionHeading(document, "推理过程");
+        appendReasoningTableCaption(document, 2, "推理过程表");
+        appendReasoningStepTable(document, safeListMap(session.get("steps")));
+    }
+
+    private void appendReasoningDocTitle(XWPFDocument document, String text) {
+        XWPFParagraph paragraph = document.createParagraph();
+        paragraph.setAlignment(ParagraphAlignment.CENTER);
+        paragraph.setSpacingBefore(0);
+        paragraph.setSpacingAfter(0);
+        paragraph.setSpacingLineRule(org.apache.poi.xwpf.usermodel.LineSpacingRule.AUTO);
+        paragraph.setSpacingBetween(1.5);
+        XWPFRun run = paragraph.createRun();
+        run.setBold(true);
+        run.setFontFamily("SimSun");
+        run.setFontSize(16);
+        run.setColor("000000");
+        run.setText(text);
+    }
+
+    private void appendReasoningDocMeta(XWPFDocument document, String text) {
+        XWPFParagraph paragraph = document.createParagraph();
+        paragraph.setAlignment(ParagraphAlignment.CENTER);
+        paragraph.setSpacingBetween(1.5);
+        XWPFRun run = paragraph.createRun();
+        run.setBold(true);
+        run.setFontFamily("SimSun");
+        run.setFontSize(9);
+        run.setColor("000000");
+        run.setText(text);
+    }
+
+    private void appendReasoningSectionHeading(XWPFDocument document, String text) {
+        XWPFParagraph paragraph = document.createParagraph();
+        paragraph.setSpacingBefore(0);
+        paragraph.setSpacingAfter(0);
+        paragraph.setSpacingBetween(1.5);
+        XWPFRun run = paragraph.createRun();
+        run.setBold(true);
+        run.setFontFamily("SimSun");
+        run.setFontSize(14);
+        run.setColor("000000");
+        run.setText(text);
+    }
+
+    private void appendReasoningQuestion(XWPFDocument document, String question) {
+        XWPFParagraph paragraph = document.createParagraph();
+        paragraph.setSpacingBetween(1.5);
+        XWPFRun run = paragraph.createRun();
+        run.setBold(true);
+        run.setFontFamily("SimSun");
+        run.setFontSize(12);
+        run.setColor(DOC_TEXT);
+        run.setText(question == null || question.isBlank() ? "-" : question);
+    }
+
+    private void appendReasoningTableCaption(XWPFDocument document, int tableNo, String title) {
+        XWPFParagraph paragraph = document.createParagraph();
+        paragraph.setAlignment(ParagraphAlignment.CENTER);
+        paragraph.setSpacingAfter(0);
+        XWPFRun run = paragraph.createRun();
+        run.setFontFamily("SimSun");
+        run.setFontSize(10);
+        run.setColor("000000");
+        run.setText("表 " + tableNo + " " + title);
+    }
+
+    private void appendReasoningKeyValueTable(XWPFDocument document, List<Map<String, Object>> rows) {
+        XWPFTable table = document.createTable(Math.max(1, rows.size()), 2);
+        applyReasoningTableStyle(table, List.of(1900, 7624));
+        for (int i = 0; i < rows.size(); i++) {
+            XWPFTableRow tableRow = table.getRow(i);
+            centerTableRow(tableRow);
+            setReasoningCellText(tableRow.getCell(0), text(rows.get(i).get("key")), 1900, ParagraphAlignment.CENTER);
+            setReasoningCellText(tableRow.getCell(1), docValue(rows.get(i).get("value")), 7624, ParagraphAlignment.CENTER);
+        }
+    }
+
+    private void appendReasoningStepTable(XWPFDocument document, List<Map<String, Object>> steps) {
+        if (steps.isEmpty()) {
+            appendReasoningQuestion(document, "暂无推理步骤。");
+            return;
+        }
+        XWPFTable table = document.createTable(steps.size() + 1, 4);
+        applyReasoningTableStyle(table, List.of(500, 1800, 700, 6524));
+        XWPFTableRow header = table.getRow(0);
+        centerTableRow(header);
+        setReasoningCellText(header.getCell(0), "序号", 500, ParagraphAlignment.CENTER);
+        setReasoningCellText(header.getCell(1), "步骤", 1800, ParagraphAlignment.CENTER);
+        setReasoningCellText(header.getCell(2), "状态", 700, ParagraphAlignment.CENTER);
+        setReasoningCellText(header.getCell(3), "内容摘要", 6524, ParagraphAlignment.CENTER);
+        for (int i = 0; i < steps.size(); i++) {
+            Map<String, Object> step = steps.get(i);
+            XWPFTableRow row = table.getRow(i + 1);
+            centerTableRow(row);
+            setReasoningCellText(row.getCell(0), String.valueOf(i + 1), 500, ParagraphAlignment.CENTER);
+            setReasoningCellText(row.getCell(1), text(firstNonBlank(step.get("stepTitle"), step.get("stepType"))), 1800, ParagraphAlignment.CENTER);
+            setReasoningCellText(row.getCell(2), statusName(step.get("stepStatus")), 700, ParagraphAlignment.CENTER);
+            setReasoningCellText(row.getCell(3), readableStepPayload(step), 6524, ParagraphAlignment.CENTER);
+        }
+    }
+
+    private void applyReasoningTableStyle(XWPFTable table, List<Integer> widths) {
+        applyFixedDocxTableStyle(table, widths);
+    }
+
+    private void applyFixedDocxTableStyle(XWPFTable table, List<Integer> widths) {
+        table.setTableAlignment(TableRowAlign.CENTER);
+        var tblPr = table.getCTTbl().getTblPr();
+        CTTblWidth tblW = tblPr.isSetTblW() ? tblPr.getTblW() : tblPr.addNewTblW();
+        tblW.setW(BigInteger.valueOf(DOC_TABLE_WIDTH_DXA));
+        tblW.setType(STTblWidth.DXA);
+        var tblLayout = tblPr.isSetTblLayout() ? tblPr.getTblLayout() : tblPr.addNewTblLayout();
+        tblLayout.setType(STTblLayoutType.FIXED);
+        var borders = tblPr.isSetTblBorders() ? tblPr.getTblBorders() : tblPr.addNewTblBorders();
+        borders.addNewTop().setVal(STBorder.SINGLE);
+        borders.getTop().setSz(BigInteger.valueOf(4));
+        borders.getTop().setColor("000000");
+        borders.addNewBottom().setVal(STBorder.SINGLE);
+        borders.getBottom().setSz(BigInteger.valueOf(4));
+        borders.getBottom().setColor("000000");
+        borders.addNewLeft().setVal(STBorder.SINGLE);
+        borders.getLeft().setSz(BigInteger.valueOf(4));
+        borders.getLeft().setColor("000000");
+        borders.addNewRight().setVal(STBorder.SINGLE);
+        borders.getRight().setSz(BigInteger.valueOf(4));
+        borders.getRight().setColor("000000");
+        borders.addNewInsideH().setVal(STBorder.SINGLE);
+        borders.getInsideH().setSz(BigInteger.valueOf(4));
+        borders.getInsideH().setColor("000000");
+        borders.addNewInsideV().setVal(STBorder.SINGLE);
+        borders.getInsideV().setSz(BigInteger.valueOf(4));
+        borders.getInsideV().setColor("000000");
+        if (!widths.isEmpty()) {
+            var grid = table.getCTTbl().getTblGrid() != null ? table.getCTTbl().getTblGrid() : table.getCTTbl().addNewTblGrid();
+            while (grid.sizeOfGridColArray() > 0) {
+                grid.removeGridCol(0);
+            }
+            for (Integer width : widths) {
+                grid.addNewGridCol().setW(BigInteger.valueOf(width));
+            }
+        }
+        for (XWPFTableRow row : table.getRows()) {
+            centerTableRow(row);
+            for (int i = 0; i < row.getTableCells().size(); i++) {
+                int width = widths.isEmpty()
+                        ? DOC_TABLE_WIDTH_DXA
+                        : widths.get(Math.min(i, widths.size() - 1));
+                applyCellWidthAndVerticalCenter(row.getCell(i), width);
+            }
+        }
+    }
+
+    private void centerTableRow(XWPFTableRow row) {
+        var trPr = row.getCtRow().isSetTrPr() ? row.getCtRow().getTrPr() : row.getCtRow().addNewTrPr();
+        var jc = trPr.sizeOfJcArray() > 0 ? trPr.getJcArray(0) : trPr.addNewJc();
+        jc.setVal(STJcTable.CENTER);
+    }
+
+    private void setReasoningCellText(XWPFTableCell cell, String text, int width, ParagraphAlignment alignment) {
+        shadeCell(cell, "FFFFFF");
+        applyCellWidthAndVerticalCenter(cell, width);
+        XWPFParagraph paragraph = cell.getParagraphs().isEmpty() ? cell.addParagraph() : cell.getParagraphs().get(0);
+        paragraph.setAlignment(alignment);
+        paragraph.setVerticalAlignment(TextAlignment.AUTO);
+        paragraph.setSpacingAfter(0);
+        paragraph.setSpacingBetween(1.0);
+        XWPFRun run = paragraph.createRun();
+        run.setBold(false);
+        run.setFontFamily("SimSun");
+        run.setFontSize(10);
+        run.setColor("000000");
+        run.setText(text == null || text.isBlank() ? "-" : trim(text, 1000));
+    }
+
+    private void applyCellWidthAndVerticalCenter(XWPFTableCell cell, int width) {
+        CTTcPr tcPr = cell.getCTTc().isSetTcPr() ? cell.getCTTc().getTcPr() : cell.getCTTc().addNewTcPr();
+        var tcW = tcPr.isSetTcW() ? tcPr.getTcW() : tcPr.addNewTcW();
+        tcW.setW(BigInteger.valueOf(width));
+        tcW.setType(STTblWidth.DXA);
+        var vAlign = tcPr.isSetVAlign() ? tcPr.getVAlign() : tcPr.addNewVAlign();
+        vAlign.setVal(STVerticalJc.CENTER);
+    }
+
     private void appendDocTitle(XWPFDocument document, String text) {
         XWPFParagraph paragraph = document.createParagraph();
+        paragraph.setAlignment(ParagraphAlignment.CENTER);
         XWPFRun run = paragraph.createRun();
         run.setBold(true);
         run.setFontSize(22);
@@ -608,15 +830,19 @@ public class AdminChatQueryService {
 
     private void appendQuestionBlock(XWPFDocument document, String question) {
         XWPFTable table = document.createTable(1, 1);
+        applyFixedDocxTableStyle(table, List.of(DOC_TABLE_WIDTH_DXA));
         XWPFTableCell cell = table.getRow(0).getCell(0);
         shadeCell(cell, DOC_LIGHT_BLUE);
         XWPFParagraph label = cell.getParagraphs().isEmpty() ? cell.addParagraph() : cell.getParagraphs().get(0);
+        label.setAlignment(ParagraphAlignment.CENTER);
         XWPFRun labelRun = label.createRun();
         labelRun.setBold(true);
         labelRun.setColor(DOC_BLUE);
         labelRun.setFontSize(10);
         labelRun.setText("测试指令");
         XWPFParagraph body = cell.addParagraph();
+        body.setAlignment(ParagraphAlignment.CENTER);
+        body.setVerticalAlignment(TextAlignment.AUTO);
         XWPFRun bodyRun = body.createRun();
         bodyRun.setColor(DOC_TEXT);
         bodyRun.setFontSize(11);
@@ -633,9 +859,12 @@ public class AdminChatQueryService {
 
     private void appendDocCode(XWPFDocument document, String code) {
         XWPFTable table = document.createTable(1, 1);
+        applyFixedDocxTableStyle(table, List.of(DOC_TABLE_WIDTH_DXA));
         XWPFTableCell cell = table.getRow(0).getCell(0);
         shadeCell(cell, "0F172A");
         XWPFParagraph paragraph = cell.getParagraphs().isEmpty() ? cell.addParagraph() : cell.getParagraphs().get(0);
+        paragraph.setAlignment(ParagraphAlignment.CENTER);
+        paragraph.setVerticalAlignment(TextAlignment.AUTO);
         XWPFRun run = paragraph.createRun();
         run.setFontFamily("Consolas");
         run.setFontSize(9);
@@ -652,8 +881,10 @@ public class AdminChatQueryService {
 
     private void appendKeyValueTable(XWPFDocument document, List<Map<String, Object>> rows) {
         XWPFTable table = document.createTable(Math.max(1, rows.size()), 2);
+        applyFixedDocxTableStyle(table, List.of(1900, 7624));
         for (int i = 0; i < rows.size(); i++) {
             XWPFTableRow tableRow = table.getRow(i);
+            centerTableRow(tableRow);
             setCellText(tableRow.getCell(0), text(rows.get(i).get("key")), true, DOC_LIGHT_BLUE);
             setCellText(tableRow.getCell(1), docValue(rows.get(i).get("value")), false, i % 2 == 0 ? "FFFFFF" : DOC_LIGHT_GRAY);
         }
@@ -665,7 +896,9 @@ public class AdminChatQueryService {
             return;
         }
         XWPFTable table = document.createTable(steps.size() + 1, 4);
+        applyFixedDocxTableStyle(table, List.of(500, 1800, 700, 6524));
         XWPFTableRow header = table.getRow(0);
+        centerTableRow(header);
         setCellText(header.getCell(0), "序号", true, DOC_LIGHT_BLUE);
         setCellText(header.getCell(1), "步骤", true, DOC_LIGHT_BLUE);
         setCellText(header.getCell(2), "状态", true, DOC_LIGHT_BLUE);
@@ -673,6 +906,7 @@ public class AdminChatQueryService {
         for (int i = 0; i < steps.size(); i++) {
             Map<String, Object> step = steps.get(i);
             XWPFTableRow row = table.getRow(i + 1);
+            centerTableRow(row);
             String fill = i % 2 == 0 ? "FFFFFF" : DOC_LIGHT_GRAY;
             setCellText(row.getCell(0), String.valueOf(i + 1), false, fill);
             setCellText(row.getCell(1), text(firstNonBlank(step.get("stepTitle"), step.get("stepType"))), false, fill);
@@ -689,12 +923,15 @@ public class AdminChatQueryService {
         List<String> columns = rows.get(0).keySet().stream().limit(8).toList();
         int rowCount = Math.min(rows.size(), 30);
         XWPFTable table = document.createTable(rowCount + 1, Math.max(1, columns.size()));
+        applyFixedDocxTableStyle(table, equalColumnWidths(columns.size()));
         XWPFTableRow header = table.getRow(0);
+        centerTableRow(header);
         for (int i = 0; i < columns.size(); i++) {
             setCellText(header.getCell(i), columns.get(i), true, DOC_LIGHT_BLUE);
         }
         for (int r = 0; r < rowCount; r++) {
             XWPFTableRow row = table.getRow(r + 1);
+            centerTableRow(row);
             Map<String, Object> data = rows.get(r);
             String fill = r % 2 == 0 ? "FFFFFF" : DOC_LIGHT_GRAY;
             for (int c = 0; c < columns.size(); c++) {
@@ -708,12 +945,35 @@ public class AdminChatQueryService {
 
     private void setCellText(XWPFTableCell cell, String text, boolean bold, String fill) {
         shadeCell(cell, fill);
+        applyCellVerticalCenter(cell);
         XWPFParagraph paragraph = cell.getParagraphs().isEmpty() ? cell.addParagraph() : cell.getParagraphs().get(0);
+        paragraph.setAlignment(ParagraphAlignment.CENTER);
+        paragraph.setVerticalAlignment(TextAlignment.AUTO);
+        paragraph.setSpacingAfter(0);
+        paragraph.setSpacingBetween(1.0);
         XWPFRun run = paragraph.createRun();
         run.setBold(bold);
+        run.setFontFamily("SimSun");
         run.setFontSize(9);
         run.setColor(DOC_TEXT);
         run.setText(text == null || text.isBlank() ? "-" : trim(text, 1000));
+    }
+
+    private List<Integer> equalColumnWidths(int columnCount) {
+        int safeCount = Math.max(1, columnCount);
+        int base = DOC_TABLE_WIDTH_DXA / safeCount;
+        int remainder = DOC_TABLE_WIDTH_DXA - base * safeCount;
+        List<Integer> widths = new ArrayList<>();
+        for (int i = 0; i < safeCount; i++) {
+            widths.add(base + (i == safeCount - 1 ? remainder : 0));
+        }
+        return widths;
+    }
+
+    private void applyCellVerticalCenter(XWPFTableCell cell) {
+        CTTcPr tcPr = cell.getCTTc().isSetTcPr() ? cell.getCTTc().getTcPr() : cell.getCTTc().addNewTcPr();
+        var vAlign = tcPr.isSetVAlign() ? tcPr.getVAlign() : tcPr.addNewVAlign();
+        vAlign.setVal(STVerticalJc.CENTER);
     }
 
     private void shadeCell(XWPFTableCell cell, String fill) {

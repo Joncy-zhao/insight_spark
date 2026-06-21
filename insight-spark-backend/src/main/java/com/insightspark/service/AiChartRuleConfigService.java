@@ -1279,8 +1279,8 @@ public class AiChartRuleConfigService {
         if (!template.isBlank()) {
             return template;
         }
-        return "Matched " + rule.get("scenarioType") + " by " + profile.get("fieldCount") + " fields and "
-                + profile.get("rowCount") + " rows.";
+        return "已命中" + fallbackScenarioLabel(Objects.toString(rule.get("scenarioType"), "")) + "推荐规则，基于 "
+                + profile.get("fieldCount") + " 个字段和 " + profile.get("rowCount") + " 行数据完成匹配。";
     }
 
     private void seedRules() {
@@ -1374,8 +1374,25 @@ public class AiChartRuleConfigService {
         rule.put("scenarioType", scenario);
         rule.put("chartType", chart);
         rule.put("priority", 0);
-        rule.put("explainTemplate", "No configured rule matched, so the engine used a safe fallback.");
+        rule.put("explainTemplate", "未匹配到已配置的图表推荐规则，系统已使用" + fallbackScenarioLabel(scenario) + "兜底方案生成图表。");
         return rule;
+    }
+
+    private String fallbackScenarioLabel(String scenario) {
+        return switch (Objects.toString(scenario, "").toUpperCase(Locale.ROOT)) {
+            case "TIME_SERIES" -> "时序趋势";
+            case "GROUP_COMPARE" -> "分组对比";
+            case "RATIO" -> "占比分析";
+            case "RADAR" -> "雷达分析";
+            case "SCATTER" -> "散点分析";
+            case "METRIC" -> "指标概览";
+            case "MAP" -> "地图分析";
+            case "DETAIL" -> "明细数据";
+            case "SCENARIO_SIMULATION" -> "情景推演";
+            case "ADVANCED_ALERT" -> "智能预警";
+            case "CUSTOM" -> "自定义规则";
+            default -> "安全";
+        };
     }
 
     private Map<String, Object> findRuleByCode(String ruleCode) {

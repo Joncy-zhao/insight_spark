@@ -295,6 +295,7 @@ import { ElMessage } from 'element-plus'
 import { QuestionFilled } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 import { applyDynamicInteractionDefaults, applyOptionTemplateDefaults, buildForecastChartOption } from '../utils/chartOptionFromSnapshot'
+import { formatChartRecommendationExplain } from '../utils/chartRecommendationText'
 
 const props = defineProps({
   analysis: {
@@ -410,7 +411,10 @@ const ruleMeta = computed(() => {
   const ruleName = String(props.analysis?.chartRuleName || recommendation.ruleName || '').trim()
   const scenarioType = String(props.analysis?.chartScenarioType || recommendation.scenarioType || '').trim()
   const status = String(props.analysis?.chartRecommendationStatus || recommendation.status || '').trim()
-  const explain = String(props.analysis?.chartRecommendationExplain || recommendation.explain || '').trim()
+  const explain = formatChartRecommendationExplain(
+    props.analysis?.chartRecommendationExplain || recommendation.explain,
+    { ruleCode, ruleName, scenarioType, status }
+  )
   return {
     has: Boolean(ruleCode || ruleName || scenarioType || explain),
     ruleCode,
@@ -656,6 +660,81 @@ const formatAxisValue = (value) => {
   return `${number}`
 }
 
+const alertAxisName = (item, index) => {
+  const candidates = [
+    item?.bucketName,
+    item?.bucket,
+    item?.period,
+    item?.date,
+    item?.time,
+    item?.triggeredAt,
+    item?.createdAt,
+    item?.category,
+    item?.x,
+    item?.name
+  ]
+  for (const value of candidates) {
+    const text = String(value ?? '').trim()
+    if (text) return text
+  }
+  return `第${index + 1}期`
+}
+
+const alertSeriesValue = (item) => item?.value ?? item?.actualValue ?? item?.metricValue ?? item?.currentValue ?? item?.history ?? 0
+
+const alertIsAbnormal = (item, threshold = draft.threshold, operator = draft.operator) => {
+  if (typeof item?.triggered === 'boolean') return item.triggered
+  const value = Number(alertSeriesValue(item))
+  const limit = Number(threshold)
+  if (!Number.isFinite(value)) return false
+  if (operator === 'gt') return Number.isFinite(limit) && value > limit
+  if (operator === 'zscore') return Math.abs(Number(item?.zScore ?? item?.z_score ?? 0)) >= 3
+  return Number.isFinite(limit) && value < limit
+}
+
+const alertSeriesPoint = (item) => {
+  const abnormal = alertIsAbnormal(item)
+  return {
+    value: alertSeriesValue(item),
+    abnormal,
+    symbolSize: abnormal ? 11 : 6,
+    itemStyle: abnormal
+      ? {
+          color: '#dc2626',
+          borderColor: '#ffffff',
+          borderWidth: 2,
+          shadowBlur: 8,
+          shadowColor: 'rgba(220, 38, 38, 0.35)'
+        }
+      : undefined,
+    emphasis: { scale: abnormal ? 1.45 : 1.2 }
+  }
+}
+
+const alertTooltipFormatter = (params = []) => {
+  const items = Array.isArray(params) ? params : [params]
+  const title = items[0]?.axisValueLabel || items[0]?.name || ''
+  const lines = items.map(item => {
+    const data = item?.data && typeof item.data === 'object' ? item.data : {}
+    const value = data.value ?? item?.value ?? '--'
+    const suffix = data.abnormal ? ' <span style="color:#dc2626;font-weight:600;">异常</span>' : ''
+    return `${item?.marker || ''}${item?.seriesName || '检测值'}：${formatAxisValue(value)}${suffix}`
+  })
+  return [title, ...lines].filter(Boolean).join('<br/>')
+}
+
+const alertYAxisMax = (rows = [], threshold = 0) => {
+  const values = rows
+    .map(item => Number(alertSeriesValue(item)))
+    .filter(value => Number.isFinite(value))
+  const limit = Number(threshold)
+  if (Number.isFinite(limit) && limit > 0) values.push(limit)
+  if (!values.length) return undefined
+  const max = Math.max(...values)
+  if (max <= 0) return undefined
+  return Math.ceil(max * 1.12)
+}
+
 const getForecastZoomRange = (rows) => {
   const total = Array.isArray(rows) ? rows.length : 0
   if (total <= 24) {
@@ -712,22 +791,33 @@ const buildWhatIfOption = () => {
 
 const buildAlertOption = () => {
   const rows = props.analysis.series || []
+  const threshold = Number(draft.threshold)
   return {
-    tooltip: { trigger: 'axis' },
-    grid: { left: 54, right: 24, top: 34, bottom: 34 },
-    xAxis: { type: 'category', data: rows.map(item => item.name) },
-    yAxis: { type: 'value', axisLabel: { formatter: formatAxisValue } },
+    tooltip: { trigger: 'axis', formatter: alertTooltipFormatter },
+    legend: { top: 4, left: 'center', data: ['检测值'] },
+    grid: { left: 54, right: 24, top: 58, bottom: 42, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: rows.map(alertAxisName),
+      axisLabel: { hideOverlap: true, interval: 'auto', rotate: rows.length > 18 ? 25 : 0 }
+    },
+    yAxis: {
+      type: 'value',
+      max: alertYAxisMax(rows, threshold),
+      axisLabel: { formatter: formatAxisValue }
+    },
     series: [
       {
         name: '检测值',
         type: 'line',
         smooth: true,
-        data: rows.map(item => item.value),
+        data: rows.map(alertSeriesPoint),
         markLine: {
           symbol: 'none',
-          data: [{ yAxis: draft.threshold, name: '阈值' }],
+          silent: true,
+          data: Number.isFinite(threshold) && threshold > 0 ? [{ yAxis: threshold, name: '阈值' }] : [],
           lineStyle: { color: '#ef4444', type: 'dashed' },
-          label: { formatter: '阈值' }
+          label: { formatter: '阈值', color: '#ef4444' }
         },
         lineStyle: { color: '#f97316', width: 2 },
         itemStyle: { color: '#f97316' },

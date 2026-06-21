@@ -182,7 +182,9 @@ const render = () => {
     chart = echarts.getInstanceByDom(host.value) || echarts.init(host.value)
   }
   const ui = props.chartUi || {}
-  const option = buildOptionFromHistoryRow(props.payload, ui)
+  const option = props.payload?.option && typeof props.payload.option === 'object'
+    ? props.payload.option
+    : buildOptionFromHistoryRow(props.payload, ui)
   if (!option) {
     chart?.clear?.()
     return

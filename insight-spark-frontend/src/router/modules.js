@@ -39,7 +39,7 @@ export const menuGroups = [
         role: 'USER',
         permissionCode: 'menu:chat-analysis',
         index: '3',
-        title: '对话查询（自然语言生成图表）',
+        title: '灵犀智能洞察',
         subtitle: '自然语言生成 SQL，经 GraphRAG、SQL 审计和权限校验后渲染 ECharts 图表。'
       },
       {
@@ -123,7 +123,7 @@ export const menuGroups = [
         key: 'adminChatHistory',
         role: 'ADMIN',
         index: '7',
-        title: '管理员对话历史',
+        title: '对话历史',
         subtitle: '查看全平台对话查询、SQL 生成、知识图谱匹配、推理过程和性能审计。'
       },
       {

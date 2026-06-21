@@ -1324,6 +1324,7 @@ import { API_BASE, http } from '../../api/http'
 import AdvancedAnalysisCard from '../../components/AdvancedAnalysisCard.vue'
 import DashboardChart from '../../components/dashboard/DashboardChart.vue'
 import LegacyInlineChart from '../../components/dashboard/LegacyInlineChart.vue'
+import { formatChartRecommendationExplain } from '../../utils/chartRecommendationText'
 import chatPeopleAvatar from '../../assets/chat-people.png'
 import chatQueryAvatar from '../../assets/chat-query-avatar.png'
 import {
@@ -1902,7 +1903,8 @@ const conversationAdvancedRuleInfo = (artifact) => {
   const ruleCode = firstText(raw.ruleCode, raw.code)
   const ruleName = firstText(raw.ruleName, raw.name)
   const scenarioType = firstText(raw.scenarioType, raw.scenario, alertInfo ? 'ADVANCED_ALERT' : '')
-  const explain = firstText(raw.explain, raw.description, raw.reason)
+  const rawExplain = firstText(raw.explain, raw.description, raw.reason)
+  const explain = formatChartRecommendationExplain(rawExplain, { ruleCode, ruleName, scenarioType })
   return {
     has: Boolean(ruleCode || ruleName || scenarioType || explain || alertInfo?.ruleCode || alertInfo?.ruleName),
     ruleCode: ruleCode || alertInfo?.ruleCode || alertInfo?.ruleId || '',

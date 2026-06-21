@@ -335,13 +335,6 @@
                         </el-button>
                       </div>
                     </div>
-                    <div v-else-if="msg.alertRuleCreated" class="alert-created-card">
-                      <div>
-                        <div class="alert-created-card__eyebrow">预警规则已创建</div>
-                        <div class="alert-created-card__title">{{ msg.alertRuleCreated.title || '预警规则' }}</div>
-                      </div>
-                      <el-tag size="small" type="success" effect="light">已保存</el-tag>
-                    </div>
                     <div v-if="alertEventRowsForMessage(msg).length" class="alert-event-table-card">
                       <div class="alert-event-table-card__header">
                         <div>
@@ -826,16 +819,19 @@
                 {{ lastAnalysis.chartRuleCode }}
               </el-descriptions-item>
               <el-descriptions-item v-if="lastAnalysis.chartScenarioType" label="推荐场景">
-                {{ lastAnalysis.chartScenarioType }}
+                {{ chartRecommendationScenarioLabel(lastAnalysis.chartScenarioType) }}
               </el-descriptions-item>
               <el-descriptions-item v-if="lastAnalysis.chartRecommendationStatus" label="推荐状态">
                 <el-tag :type="String(lastAnalysis.chartRecommendationStatus).toUpperCase() === 'FALLBACK' ? 'warning' : 'success'" size="small">
-                  {{ lastAnalysis.chartRecommendationStatus }}
+                  {{ formatChartRecommendationStatus(lastAnalysis.chartRecommendationStatus) }}
                 </el-tag>
               </el-descriptions-item>
               <el-descriptions-item v-if="lastAnalysis.chartRecommendationExplain" label="推荐说明" :span="2">
-                <span class="analysis-meta-long-text" :title="lastAnalysis.chartRecommendationExplain">
-                  {{ lastAnalysis.chartRecommendationExplain }}
+                <span
+                  class="analysis-meta-long-text"
+                  :title="formatChartRecommendationExplain(lastAnalysis.chartRecommendationExplain, lastAnalysis)"
+                >
+                  {{ formatChartRecommendationExplain(lastAnalysis.chartRecommendationExplain, lastAnalysis) }}
                 </span>
               </el-descriptions-item>
             </el-descriptions>
@@ -927,11 +923,17 @@
                 <p>{{ semanticEvidencePanelDescription }}</p>
               </div>
             </div>
-            <div v-if="semanticEvidenceItems.length" class="graph-context-list">
+            <div
+                v-if="semanticEvidenceItems.length"
+                class="semantic-evidence-hit-note"
+            >
+              实际命中：以下 {{ semanticEvidenceItems.length }} 项语义依据参与了本次字段识别、指标口径或 SQL 生成；下方知识图谱为相关召回关系，用于辅助核验。
+            </div>
+            <div v-if="semanticEvidenceItems.length" class="graph-context-list semantic-evidence-hit-list">
               <div
                   v-for="(item, index) in semanticEvidenceItems"
                   :key="item.field || item.label || index"
-                  class="graph-context-item"
+                  class="graph-context-item semantic-evidence-hit-card"
               >
                 <div class="graph-context-meta">
                   <div class="graph-context-name">{{ formatSemanticEvidenceTitle(item) }}</div>
@@ -942,7 +944,17 @@
                 <div class="graph-context-content">{{ formatSemanticEvidenceContent(item) }}</div>
               </div>
             </div>
-            <el-collapse v-else-if="graphContextFallbackItems.length" class="graph-context-collapse">
+            <div v-if="semanticKnowledgeGraphVisible" class="semantic-kg-card">
+              <div class="semantic-kg-card__head">
+                <div>
+                  <strong>知识图谱关系</strong>
+                  <span>{{ semanticKnowledgeGraphData.sourceLabel }}，用于展示相关节点关系</span>
+                </div>
+                <small>{{ semanticKnowledgeGraphData.nodes.length }} 个节点 / {{ semanticKnowledgeGraphData.edges.length }} 条关系</small>
+              </div>
+              <div ref="semanticKnowledgeGraphRef" class="semantic-kg-chart" aria-label="本次语义依据知识图谱"></div>
+            </div>
+            <el-collapse v-if="!semanticEvidenceItems.length && graphContextFallbackItems.length" class="graph-context-collapse">
               <el-collapse-item name="graph-context">
                 <template #title>
                   <span class="graph-context-collapse-title">
@@ -968,7 +980,7 @@
               </el-collapse-item>
             </el-collapse>
             <el-empty
-                v-else
+                v-if="!semanticEvidenceItems.length && !graphContextFallbackItems.length && !semanticKnowledgeGraphVisible"
                 class="semantic-evidence-empty"
                 description="本次未命中可解释语义依据"
                 :image-size="72"
@@ -2117,6 +2129,11 @@ import {
   updateAdvancedAlertRuleStatus
 } from '../../api/advancedAnalysis'
 import { isAlertOperationQuestion } from '../../utils/alertOperationQuestion'
+import {
+  chartRecommendationScenarioLabel,
+  formatChartRecommendationExplain,
+  formatChartRecommendationStatus
+} from '../../utils/chartRecommendationText'
 
 const localVoiceGenderOptions = [
   { label: '男声', value: 'male' },
@@ -2427,6 +2444,207 @@ const businessModelEmptyHint = computed(() => {
 const semanticEvidenceItems = computed(() =>
   Array.isArray(lastAnalysis?.value?.semanticEvidence) ? lastAnalysis.value.semanticEvidence : []
 )
+
+const semanticKnowledgeGraphRef = ref(null)
+let semanticKnowledgeGraphInstance = null
+
+const semanticGraphText = (...values) => values
+  .map(value => String(value ?? '').trim())
+  .find(Boolean) || ''
+
+const semanticGraphNodeCategory = (type = '') => {
+  const value = String(type || '').replace(/[-_\s]/g, '').toLowerCase()
+  if (value.includes('table') || value.includes('datasource') || value.includes('source')) return 0
+  if (value.includes('field') || value.includes('column')) return 1
+  if (value.includes('metric') || value.includes('indicator') || value.includes('formula')) return 2
+  if (value.includes('dimension') || value.includes('dict') || value.includes('business') || value.includes('semantic')) return 3
+  return 4
+}
+
+const semanticGraphNodeTypeLabel = (type = '') => {
+  const value = String(type || '').replace(/[-_\s]/g, '').toLowerCase()
+  if (value.includes('table') || value.includes('datasource') || value.includes('source')) return '数据表'
+  if (value.includes('field') || value.includes('column')) return '字段'
+  if (value.includes('metric') || value.includes('indicator') || value.includes('formula')) return '业务指标'
+  if (value.includes('dimension')) return '业务维度'
+  if (value.includes('dict')) return '业务字典'
+  if (value.includes('business') || value.includes('semantic')) return '语义依据'
+  return type || '节点'
+}
+
+const semanticGraphNodeKey = (node = {}, index = 0, prefix = 'node') =>
+  semanticGraphText(node.nodeKey, node.id, node.key, node.sourceId, node.field, node.label, node.name, `${prefix}-${index}`)
+
+const semanticGraphLabel = (node = {}, fallback = '') =>
+  semanticGraphText(node.label, node.name, node.displayName, node.fieldDisplayName, node.field, node.nodeKey, node.sourceId, fallback)
+
+const semanticGraphRelationLabel = (value = '') => {
+  const raw = String(value || '').trim()
+  const normalized = raw.replace(/[-\s]/g, '_').toUpperCase()
+  const relationMap = {
+    HAS_FIELD: '包含字段',
+    CONTAINS_FIELD: '包含字段',
+    FIELD_OF: '所属字段',
+    USES_FIELD: '使用字段',
+    USE_FIELD: '使用字段',
+    DEFINES_METRIC: '定义指标',
+    DEFINE_METRIC: '定义指标',
+    METRIC_OF: '所属指标',
+    HAS_METRIC: '包含指标',
+    HAS_DIMENSION: '包含维度',
+    USES_DIMENSION: '使用维度',
+    MAPS_TO: '映射到',
+    MAPPED_TO: '映射到',
+    ALIAS_OF: '别名',
+    SAME_AS: '等同于',
+    RELATED_TO: '关联',
+    RELATED: '关联',
+    DERIVED_FROM: '派生自',
+    CALCULATED_BY: '计算公式',
+    DEPENDS_ON: '依赖',
+    BELONGS_TO: '属于',
+    PART_OF: '属于',
+    SOURCE_OF: '来源',
+    REFERENCES: '引用',
+    REFERS_TO: '引用',
+    FILTERS_BY: '筛选条件',
+    GROUPS_BY: '分组维度',
+    ORDERS_BY: '排序依据',
+    JOINS_WITH: '关联表'
+  }
+  if (relationMap[normalized]) return relationMap[normalized]
+  if (/^[A-Z0-9_]+$/.test(normalized)) {
+    return normalized
+      .toLowerCase()
+      .split('_')
+      .filter(Boolean)
+      .map(part => relationMap[part.toUpperCase()] || part)
+      .join(' ')
+      .replace(/^has field$/, '包含字段')
+      .replace(/^uses field$/, '使用字段')
+      .replace(/^defines metric$/, '定义指标')
+      .replace(/^related to$/, '关联')
+  }
+  return raw || '关联'
+}
+
+const buildSemanticKnowledgeGraph = (analysis = {}) => {
+  const nodes = []
+  const edges = []
+  const nodeMap = new Map()
+  const edgeKeys = new Set()
+  const graphPath = analysis?.graphPath && typeof analysis.graphPath === 'object' ? analysis.graphPath : {}
+  const rawGraphNodes = Array.isArray(graphPath.nodes)
+    ? graphPath.nodes
+    : (Array.isArray(graphPath.ragContext) ? graphPath.ragContext : [])
+  const rawGraphEdges = Array.isArray(graphPath.edges) ? graphPath.edges : []
+  const fallbackContext = Array.isArray(analysis?.graphContext) ? analysis.graphContext : []
+  const evidence = Array.isArray(analysis?.semanticEvidence) ? analysis.semanticEvidence : []
+  const mapping = analysis?.fieldMapping && typeof analysis.fieldMapping === 'object' ? analysis.fieldMapping : {}
+  const tableName = semanticGraphText(analysis?.tableName, analysis?.sourceTableName, selectedTableName?.value)
+  const tableKey = tableName ? `table:${tableName}` : ''
+
+  const addNode = (key, name, type = 'node', extra = {}) => {
+    const safeKey = semanticGraphText(key, name)
+    if (!safeKey || nodeMap.has(safeKey) || nodes.length >= 18) return safeKey
+    const label = semanticGraphText(name, safeKey)
+    const node = {
+      id: safeKey,
+      name: label.length > 18 ? `${label.slice(0, 18)}...` : label,
+      value: label,
+      category: semanticGraphNodeCategory(type),
+      symbolSize: semanticGraphNodeCategory(type) === 0 ? 58 : semanticGraphNodeCategory(type) === 2 ? 52 : 44,
+      nodeType: semanticGraphNodeTypeLabel(type),
+      rawType: type,
+      ...extra
+    }
+    nodes.push(node)
+    nodeMap.set(safeKey, node)
+    return safeKey
+  }
+
+  const addEdge = (source, target, label = '关联') => {
+    if (!source || !target || source === target || !nodeMap.has(source) || !nodeMap.has(target)) return
+    const displayLabel = semanticGraphRelationLabel(label)
+    const key = `${source}->${target}:${displayLabel}`
+    if (edgeKeys.has(key) || edges.length >= 28) return
+    edgeKeys.add(key)
+    edges.push({ source, target, value: displayLabel, label: displayLabel, rawLabel: label })
+  }
+
+  if (tableKey) {
+    addNode(tableKey, tableName, 'table', { fixed: false })
+  }
+
+  const graphNodes = rawGraphNodes.length ? rawGraphNodes : fallbackContext
+  graphNodes.slice(0, 12).forEach((node, index) => {
+    if (!node || typeof node !== 'object') return
+    const key = semanticGraphNodeKey(node, index, 'graph')
+    const label = semanticGraphLabel(node, key)
+    const type = semanticGraphText(node.nodeType, node.type, node.sourceType)
+    addNode(key, label, type, {
+      content: semanticGraphText(node.content, node.description, node.summary),
+      weight: Number(node.weight || 1)
+    })
+  })
+
+  rawGraphEdges.slice(0, 24).forEach(edge => {
+    const source = semanticGraphText(edge?.fromKey, edge?.source, edge?.sourceKey, edge?.sourceNodeKey, edge?.from)
+    const target = semanticGraphText(edge?.toKey, edge?.target, edge?.targetKey, edge?.targetNodeKey, edge?.to)
+    addEdge(source, target, semanticGraphText(edge?.relationType, edge?.type, edge?.label, '关联'))
+  })
+
+  const fieldNodes = [
+    { key: mapping.dimensionKey || mapping.dimensionField || mapping.xField, label: mapping.dimension, type: 'dimension', relation: '维度字段' },
+    { key: mapping.metricKey || mapping.metricField || mapping.yField, label: mapping.metric, type: 'metric', relation: '指标字段' },
+    { key: mapping.timeField, label: mapping.timeFieldLabel || mapping.timeField, type: 'field', relation: '时间字段' }
+  ].filter(item => semanticGraphText(item.key, item.label))
+
+  fieldNodes.forEach((item, index) => {
+    const key = `field:${semanticGraphText(item.key, item.label, index)}`
+    const display = item.label && item.key && item.label !== item.key ? `${item.label} (${item.key})` : semanticGraphText(item.label, item.key)
+    addNode(key, display, item.type)
+    if (tableKey) addEdge(tableKey, key, item.relation || '包含字段')
+  })
+
+  evidence.slice(0, 8).forEach((item, index) => {
+    const label = semanticGraphText(item?.label, item?.fieldDisplayName, item?.field, item?.role, `语义依据${index + 1}`)
+    const key = `evidence:${semanticGraphText(item?.field, item?.label, index)}`
+    addNode(key, label, item?.fieldType || item?.semanticAction || 'semantic', {
+      content: semanticGraphText(item?.reason, item?.formula, item?.expression, item?.source)
+    })
+    if (tableKey) addEdge(tableKey, key, '命中依据')
+    const fieldKey = semanticGraphText(item?.field)
+    if (fieldKey) {
+      const target = `field:${fieldKey}`
+      if (nodeMap.has(target)) addEdge(key, target, '引用字段')
+    }
+  })
+
+  if (tableKey && !rawGraphEdges.length) {
+    for (const node of nodes) {
+      if (node.id !== tableKey) addEdge(tableKey, node.id, node.category === 1 ? '包含字段' : '关联')
+    }
+  } else if (!edges.length && nodes.length > 1) {
+    const root = nodes[0].id
+    nodes.slice(1).forEach(node => addEdge(root, node.id, '关联'))
+  }
+
+  return {
+    nodes,
+    edges,
+    sourceLabel: rawGraphNodes.length
+      ? '来自 GraphRAG 本次召回路径'
+      : '由本次命中的字段与语义依据生成'
+  }
+}
+
+const semanticKnowledgeGraphData = computed(() => buildSemanticKnowledgeGraph(lastAnalysis?.value || {}))
+const semanticKnowledgeGraphVisible = computed(() => semanticKnowledgeGraphData.value.nodes.length > 1)
+const semanticKnowledgeGraphSignature = computed(() => JSON.stringify({
+  nodes: semanticKnowledgeGraphData.value.nodes.map(node => [node.id, node.name, node.category]),
+  edges: semanticKnowledgeGraphData.value.edges.map(edge => [edge.source, edge.target, edge.label])
+}))
 
 const normalizeAuditList = (value) => {
   if (Array.isArray(value)) {
@@ -2931,7 +3149,10 @@ const advancedRuleInfo = (analysis = {}) => {
   const ruleName = String(analysis?.chartRuleName || recommendation.ruleName || '').trim()
   const scenarioType = String(analysis?.chartScenarioType || recommendation.scenarioType || '').trim()
   const status = String(analysis?.chartRecommendationStatus || recommendation.status || '').trim()
-  const explain = String(analysis?.chartRecommendationExplain || recommendation.explain || '').trim()
+  const explain = formatChartRecommendationExplain(
+    analysis?.chartRecommendationExplain || recommendation.explain,
+    { ruleCode, ruleName, scenarioType, status }
+  )
   return {
     has: Boolean(ruleCode || ruleName || scenarioType || explain),
     ruleCode,
@@ -2949,15 +3170,16 @@ const withAdvancedChartRecommendation = (analysis = {}) => {
   const current = analysis.chartRecommendation && typeof analysis.chartRecommendation === 'object'
     ? analysis.chartRecommendation
     : {}
+  const rawExplain = analysis.chartRecommendationExplain || current.explain || fallback.explain
   const recommendation = {
     ...fallback,
     ...current,
     ruleCode: String(analysis.chartRuleCode || current.ruleCode || fallback.ruleCode || '').trim(),
     ruleName: String(analysis.chartRuleName || current.ruleName || fallback.ruleName || '').trim(),
     scenarioType: String(analysis.chartScenarioType || current.scenarioType || fallback.scenarioType || '').trim(),
-    status: String(analysis.chartRecommendationStatus || current.status || fallback.status || '').trim(),
-    explain: String(analysis.chartRecommendationExplain || current.explain || fallback.explain || '').trim()
+    status: String(analysis.chartRecommendationStatus || current.status || fallback.status || '').trim()
   }
+  recommendation.explain = formatChartRecommendationExplain(rawExplain, recommendation)
   return {
     ...analysis,
     chartRecommendation: recommendation,
@@ -3402,6 +3624,89 @@ const buildAlertSeries = (threshold = 100000) => {
   })
 }
 
+const normalizeFieldKey = (value) => String(value || '').trim().toLowerCase()
+
+const fieldKeyCandidates = (...values) => {
+  const result = []
+  const push = (value) => {
+    const text = String(value ?? '').trim()
+    if (!text) return
+    result.push(text)
+    const displayName = text.replace(/[（(].*$/, '').trim()
+    if (displayName && displayName !== text) result.push(displayName)
+    const columnMatch = text.match(/\bcol[_-]?\d+\b/i)
+    if (columnMatch) result.push(columnMatch[0])
+    const wrappedMatches = [...text.matchAll(/[（(]\s*([^()（）]+?)\s*[)）]/g)]
+    wrappedMatches.forEach(match => {
+      const inner = String(match[1] || '').trim()
+      if (inner) result.push(inner)
+    })
+  }
+  values.forEach(push)
+  return [...new Set(result.map(item => String(item || '').trim()).filter(Boolean))]
+}
+
+const alertPointMatches = (item = {}, operator = 'lt', threshold = 0) => {
+  const value = Number(item?.value)
+  if (!Number.isFinite(value)) return false
+  if (operator === 'gt') return value > threshold
+  if (operator === 'zscore') return Math.abs(Number(item?.zScore || 0)) >= 3
+  return value < threshold
+}
+
+const buildAlertSeriesFromCurrentChart = ({ tableName = '', timeField = '', metricField = '', operator = 'lt', threshold = 0 } = {}) => {
+  const analysis = lastAnalysis?.value
+  if (!analysis) return []
+  const analysisTable = String(analysis.tableName || '').trim()
+  if (tableName && analysisTable && tableName !== analysisTable) return []
+  const rows = resolveLastAnalysisTimeSeries({ timeField, metricField })
+  if (rows.length < 3) return []
+  return rows.slice(-24).map(item => ({
+    name: item.name,
+    bucketName: item.name,
+    value: item.value,
+    triggered: alertPointMatches(item, operator, Number(threshold))
+  }))
+}
+
+const normalizeAlertPreviewSeries = (rows = [], operator = 'lt', threshold = 0) => {
+  if (!Array.isArray(rows)) return []
+  return rows.map(item => {
+    const name = String(item?.name || item?.bucketName || item?.bucket_name || item?.date || '').trim()
+    const value = parseChartNumber(item?.value ?? item?.history ?? item?.metric_value ?? item?.metricValue ?? item?.actualValue)
+    return {
+      name,
+      bucketName: name,
+      value,
+      triggered: alertPointMatches({ value, zScore: item?.zScore }, operator, Number(threshold))
+    }
+  }).filter(item => item.name && item.value != null)
+}
+
+const fetchAlertRulePreviewSeries = async (rule = {}, params = {}, sourceQuestion = '', signal) => {
+  const tableName = String(rule?.tableName || params.tableName || selectedTableName?.value || '').trim()
+  const timeField = String(rule?.timeField || params.timeField || '').trim()
+  const metricField = String(rule?.metricField || params.metricField || '').trim()
+  if (!tableName || !timeField || !metricField) return []
+  const operator = String(rule?.operator || params.operator || 'lt').toLowerCase()
+  const threshold = Number(rule?.threshold ?? params.threshold ?? 0)
+  const result = await runAdvancedForecast({
+    tableName,
+    timeField,
+    metricField,
+    filterExpression: rule?.filterExpression || params.filterExpression || '',
+    granularity: rule?.granularity || params.granularity || 'day',
+    horizon: 1,
+    algorithm: 'Holt-Winters',
+    sourceQuestion
+  }, signal ? { signal } : undefined)
+  return normalizeAlertPreviewSeries(
+    Array.isArray(result?.series) ? result.series.filter(item => item?.history != null) : [],
+    operator,
+    threshold
+  )
+}
+
 const normalizeAdvancedIntentType = (type) => {
   const value = String(type || '').trim()
   if (['forecast', 'timeSeriesForecast', 'prediction'].includes(value)) return 'forecast'
@@ -3445,7 +3750,9 @@ const normalizeHorizonCount = (horizon, granularity = 'month', sourceText = '') 
 
 const parseChartNumber = (value) => {
   if (typeof value === 'number') return Number.isFinite(value) ? value : null
-  const parsed = Number(String(value ?? '').replace(/,/g, '').trim())
+  const text = String(value ?? '').replace(/,/g, '').trim()
+  if (!text) return null
+  const parsed = Number(text)
   return Number.isFinite(parsed) ? parsed : null
 }
 
@@ -3487,18 +3794,29 @@ const getRowValueByCandidates = (row, candidates = []) => {
       return row[key]
     }
   }
+  const normalizedCandidates = candidates.map(normalizeFieldKey).filter(Boolean)
+  for (const [key, value] of Object.entries(row)) {
+    const normalizedKey = normalizeFieldKey(key)
+    if (normalizedCandidates.some(candidate => normalizedKey === candidate || normalizedKey.includes(candidate) || candidate.includes(normalizedKey))) {
+      return value
+    }
+  }
   return undefined
 }
 
-const resolveLastAnalysisTimeSeries = () => {
+const resolveLastAnalysisTimeSeries = ({ timeField = '', metricField = '' } = {}) => {
   const analysis = lastAnalysis?.value
   const rows = Array.isArray(analysis?.data) ? analysis.data : []
   if (rows.length < 3) return []
   const mapping = analysis?.fieldMapping || {}
   const dimensionKey = String(mapping.dimensionKey || '').trim()
   const metricKey = String(mapping.metricKey || '').trim()
-  const dimensionCandidates = [
+  const dimensionCandidates = fieldKeyCandidates(
+    timeField,
     dimensionKey,
+    mapping.dimension,
+    mapping.dimensionField,
+    mapping.xField,
     'name',
     'dim_name',
     'dimension',
@@ -3506,16 +3824,20 @@ const resolveLastAnalysisTimeSeries = () => {
     'date',
     'month',
     'time'
-  ].filter(Boolean)
-  const metricCandidates = [
+  )
+  const metricCandidates = fieldKeyCandidates(
+    metricField,
     metricKey,
+    mapping.metric,
+    mapping.metricField,
+    mapping.yField,
     'value',
     'metric_value',
     'metric',
     'sales_amt',
     'amount',
     'total'
-  ].filter(Boolean)
+  )
   return rows.map((row, index) => {
     const name = String(getRowValueByCandidates(row, dimensionCandidates) ?? '').trim()
     const value = parseChartNumber(getRowValueByCandidates(row, metricCandidates))
@@ -4068,12 +4390,20 @@ const confirmChatAlertDraft = async (draft = {}, msg = {}) => {
       ...confirmedAlert,
       sourceQuestion: draft.sourceQuestion || msg.sourceQuestion || ''
     })
+    let previewSeries = []
+    try {
+      previewSeries = await fetchAlertRulePreviewSeries(savedRule, confirmedAlert, draft.sourceQuestion || msg.sourceQuestion || '')
+    } catch (previewError) {
+      console.warn('load alert preview series failed:', previewError)
+      ElMessage.warning('预警规则已创建，但真实检测曲线预览加载失败，将尝试使用当前图表数据')
+    }
     const analysis = buildAnalysisFromSavedAlertRule(
       savedRule,
       draft.sourceQuestion || msg.sourceQuestion || '预警规则',
       confirmedAlert,
       { metricField: confirmedAlert.metricField },
-      fieldMeta
+      fieldMeta,
+      { previewSeries, previewSource: previewSeries.length ? 'backend-series' : '' }
     )
     const record = withAdvancedChartRecommendation(analysis)
     advancedAnalysisHistory.value = [record, ...advancedAnalysisHistory.value.filter(item => item.id !== record.id)].slice(0, 20)
@@ -4118,7 +4448,12 @@ const buildAnalysisFromRealForecast = (result, text, params, llmIntent, fieldMet
     chartRuleName: result?.chartRuleName,
     chartScenarioType: result?.chartScenarioType,
     chartRecommendationStatus: result?.chartRecommendationStatus,
-    chartRecommendationExplain: result?.chartRecommendationExplain,
+    chartRecommendationExplain: formatChartRecommendationExplain(result?.chartRecommendationExplain, {
+      ruleCode: result?.chartRuleCode,
+      ruleName: result?.chartRuleName,
+      scenarioType: result?.chartScenarioType,
+      status: result?.chartRecommendationStatus
+    }),
     params: {
       horizon: params.horizon,
       algorithm: result?.algorithm || params.algorithm || 'Holt-Winters',
@@ -4192,18 +4527,31 @@ const buildAnalysisFromRealWhatIf = (result, text, params, llmIntent, fieldMeta 
   }
 }
 
-const buildAnalysisFromSavedAlertRule = (rule, text, params, llmIntent, fieldMeta = {}) => {
+const buildAnalysisFromSavedAlertRule = (rule, text, params, llmIntent, fieldMeta = {}, options = {}) => {
   const metric = formatAnalysisMetricLabel(rule?.metricField || params.metricField || llmIntent?.metric || inferMetricFromQuestion(text), inferMetricFromQuestion(text), fieldMeta?.numericFields)
   const threshold = Number(rule?.threshold ?? params.threshold ?? inferAlertThreshold(text))
   const operator = rule?.operator || params.operator || 'lt'
-  const series = buildAlertSeries(Number.isFinite(threshold) ? threshold : inferAlertThreshold(text))
-  const abnormalCount = series.filter(item => operator === 'gt' ? item.value > threshold : operator === 'lt' ? item.value < threshold : Math.abs(item.zScore || 0) >= 3).length
+  const tableName = rule?.tableName || params.tableName || selectedTableName?.value || ''
+  const timeField = rule?.timeField || params.timeField || ''
+  const metricField = rule?.metricField || params.metricField || ''
+  const backendSeries = normalizeAlertPreviewSeries(options.previewSeries || [], operator, threshold)
+  const currentChartSeries = backendSeries.length ? [] : buildAlertSeriesFromCurrentChart({
+    tableName,
+    timeField,
+    metricField,
+    operator,
+    threshold
+  })
+  const realSeries = backendSeries.length ? backendSeries : currentChartSeries
+  const usingRealSeries = realSeries.length > 0
+  const series = usingRealSeries ? realSeries : buildAlertSeries(Number.isFinite(threshold) ? threshold : inferAlertThreshold(text))
+  const abnormalCount = series.filter(item => alertPointMatches(item, operator, threshold)).length
   return {
     id: `advanced-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     type: 'alert',
     title: `${metric}预警规则`,
     summary: '预警规则已保存，后续离线 Agent 可按检测周期轮询数据并生成预警事件。',
-    tableName: rule?.tableName || params.tableName || selectedTableName?.value || '',
+    tableName,
     metric,
     timeRange: alertCycleLabel(rule?.detectionCycle || params.detectionCycle),
     status: rule?.status === 'ACTIVE' ? '已启用' : '已保存',
@@ -4216,8 +4564,9 @@ const buildAnalysisFromSavedAlertRule = (rule, text, params, llmIntent, fieldMet
       channels: Array.isArray(rule?.channels) ? rule.channels : params.channels || [],
       channel: formatAlertChannel(Array.isArray(rule?.channels) ? rule.channels : params.channels || []),
       filterExpression: rule?.filterExpression || params.filterExpression || '',
-      timeField: rule?.timeField || params.timeField || '',
-      metricField: rule?.metricField || params.metricField || ''
+      timeField,
+      metricField,
+      previewSource: backendSeries.length ? 'backend-series' : (usingRealSeries ? 'current-chart' : 'simulated')
     },
     explanation: buildAlertCardExplanation({
       operator,
@@ -4229,7 +4578,7 @@ const buildAnalysisFromSavedAlertRule = (rule, text, params, llmIntent, fieldMet
     insights: [
       { label: '规则ID', value: rule?.id || '-' },
       { label: '阈值', value: operator === 'zscore' ? 'Z-Score >= 3' : formatAdvancedNumber(threshold) },
-      { label: '模拟异常', value: `${abnormalCount} 次` },
+      { label: usingRealSeries ? '命中点' : '模拟异常', value: `${abnormalCount} 次` },
       { label: '通知渠道', value: formatAlertChannel(Array.isArray(rule?.channels) ? rule.channels : params.channels || []) }
     ]
   }
@@ -4385,7 +4734,17 @@ const createAdvancedAnalysisAsync = async (type, text, params = {}, llmIntent = 
         throw new Error('已取消预警规则确认')
       }
       const savedRule = await saveAdvancedAlertRule(confirmedAlert, signal ? { signal } : undefined)
-      return buildAnalysisFromSavedAlertRule(savedRule, text, confirmedAlert, llmIntent, fieldMeta)
+      let previewSeries = []
+      try {
+        previewSeries = await fetchAlertRulePreviewSeries(savedRule, confirmedAlert, text, signal)
+      } catch (previewError) {
+        console.warn('load alert preview series failed:', previewError)
+        ElMessage.warning('预警规则已保存，但真实检测曲线预览加载失败，将尝试使用当前图表数据')
+      }
+      return buildAnalysisFromSavedAlertRule(savedRule, text, confirmedAlert, llmIntent, fieldMeta, {
+        previewSeries,
+        previewSource: previewSeries.length ? 'backend-series' : ''
+      })
     }
   } catch (error) {
     console.warn('advanced analysis real compute fallback:', error)
@@ -4481,8 +4840,16 @@ const createAdvancedAnalysis = (type, text, params = {}, llmIntent = {}) => {
   }
   const threshold = params.threshold ?? llmIntent.threshold ?? inferAlertThreshold(text)
   const operator = params.operator || llmIntent.operator || (/高于|超过|大于/.test(text) ? 'gt' : /异常|z-?score/i.test(text) ? 'zscore' : 'lt')
-  const series = buildAlertSeries(threshold)
-  const abnormalCount = series.filter(item => operator === 'gt' ? item.value > threshold : item.value < threshold).length
+  const realSeries = buildAlertSeriesFromCurrentChart({
+    tableName,
+    timeField: params.timeField || llmIntent.timeField || '',
+    metricField: params.metricField || llmIntent.metricField || llmIntent.metric || '',
+    operator,
+    threshold
+  })
+  const usingRealSeries = realSeries.length > 0
+  const series = usingRealSeries ? realSeries : buildAlertSeries(threshold)
+  const abnormalCount = series.filter(item => alertPointMatches(item, operator, threshold)).length
   return {
     id,
     type,
@@ -4495,7 +4862,10 @@ const createAdvancedAnalysis = (type, text, params = {}, llmIntent = {}) => {
     params: {
       operator,
       threshold,
-      channel: params.channel || llmIntent.channel || 'both'
+      channel: params.channel || llmIntent.channel || 'both',
+      timeField: params.timeField || llmIntent.timeField || '',
+      metricField: params.metricField || llmIntent.metricField || llmIntent.metric || '',
+      previewSource: usingRealSeries ? 'current-chart' : 'simulated'
     },
     explanation: buildAlertCardExplanation({
       operator,
@@ -4506,7 +4876,7 @@ const createAdvancedAnalysis = (type, text, params = {}, llmIntent = {}) => {
     series,
     insights: [
       { label: '阈值', value: formatAdvancedNumber(threshold) },
-      { label: '模拟异常', value: `${abnormalCount} 次` },
+      { label: usingRealSeries ? '命中点' : '模拟异常', value: `${abnormalCount} 次` },
       { label: '检测方式', value: operator === 'zscore' ? 'Z-Score' : '阈值检测' }
     ]
   }
@@ -4596,6 +4966,10 @@ const chatAutoScrollSignature = computed(() => {
 onMounted(() => {
   setupChatAutoScrollObservers()
   scrollChatToBottom()
+  renderSemanticKnowledgeGraph()
+  if (typeof window !== 'undefined') {
+    window.addEventListener('resize', resizeSemanticKnowledgeGraph)
+  }
 })
 
 watch(chatAutoScrollSignature, () => {
@@ -4691,6 +5065,9 @@ const applyAdvancedChatRecord = (message, record = {}) => {
     assistantTurnId: record.assistantTurnId == null ? undefined : String(record.assistantTurnId),
     turnId: record.assistantTurnId == null ? undefined : String(record.assistantTurnId),
     artifactId: record.artifactId == null ? undefined : String(record.artifactId),
+    artifactType: record.artifactType == null ? undefined : String(record.artifactType),
+    historyId: record.historyId == null ? undefined : String(record.historyId),
+    queryHistoryId: record.historyId == null ? undefined : String(record.historyId),
     chatRecordStatus: record.recorded === false ? 'failed' : 'saved',
     chatRecord: record
   }
@@ -4704,6 +5081,9 @@ const applyAdvancedChatRecord = (message, record = {}) => {
       userTurnId: patch.userTurnId ?? message.advancedAnalysis.userTurnId,
       assistantTurnId: patch.assistantTurnId ?? message.advancedAnalysis.assistantTurnId,
       artifactId: patch.artifactId ?? message.advancedAnalysis.artifactId,
+      artifactType: patch.artifactType ?? message.advancedAnalysis.artifactType,
+      historyId: patch.historyId ?? message.advancedAnalysis.historyId,
+      queryHistoryId: patch.queryHistoryId ?? message.advancedAnalysis.queryHistoryId,
       chatRecord: record
     }
   }
@@ -4965,10 +5345,16 @@ const buildRestoredAlertSeries = (event = {}) => {
   const snapshot = event.chartSnapshot || {}
   const rows = Array.isArray(snapshot.data) && snapshot.data.length
     ? snapshot.data
-    : [{ name: event.bucketName || '触发点', value: event.actualValue }]
+    : [{ bucketName: event.bucketName, name: event.bucketName || '触发点', value: event.actualValue }]
   return rows.map(item => ({
-    name: String(item?.name || item?.bucketName || '-'),
-    value: Number(item?.value ?? item?.actualValue ?? 0),
+    name: String(item?.bucketName || item?.period || item?.date || item?.time || item?.triggeredAt || item?.createdAt || item?.name || '-'),
+    bucketName: item?.bucketName,
+    period: item?.period,
+    date: item?.date,
+    time: item?.time,
+    triggeredAt: item?.triggeredAt,
+    createdAt: item?.createdAt,
+    value: Number(item?.value ?? item?.actualValue ?? item?.metricValue ?? item?.currentValue ?? 0),
     triggered: Boolean(item?.triggered)
   }))
 }
@@ -5603,13 +5989,30 @@ const hasPinnableAnalysisSource = (analysis = {}) => Boolean(
   || analysis?.historyId
 )
 
+const normalizePinAdvancedType = (analysis = {}) => {
+  const raw = String(analysis?.type || analysis?.advancedAnalysisType || analysis?.chartSnapshot?.advancedAnalysisType || '').replace(/[-_\s]/g, '').toLowerCase()
+  if (raw.includes('what')) return 'whatIf'
+  if (raw.includes('alert') || raw.includes('warning')) return 'alert'
+  if (raw.includes('forecast') || raw.includes('predict')) return 'forecast'
+  return ''
+}
+
+const hasAdvancedAnalysisArtifactSource = (analysis = {}) => Boolean(
+  analysis?.artifactId
+  || analysis?.assistantTurnId
+  || analysis?.turnId
+)
+
 const mergeAdvancedRecordIntoPinSource = (source = {}, record = {}) => ({
   ...source,
   conversationId: record.conversationId == null ? source.conversationId : String(record.conversationId),
   userTurnId: record.userTurnId == null ? source.userTurnId : String(record.userTurnId),
   assistantTurnId: record.assistantTurnId == null ? source.assistantTurnId : String(record.assistantTurnId),
   turnId: record.assistantTurnId == null ? source.turnId : String(record.assistantTurnId),
-  artifactId: record.artifactId == null ? source.artifactId : String(record.artifactId)
+  artifactId: record.artifactId == null ? source.artifactId : String(record.artifactId),
+  artifactType: record.artifactType || source.artifactType,
+  queryHistoryId: record.historyId == null ? source.queryHistoryId : String(record.historyId),
+  historyId: record.historyId == null ? source.historyId : String(record.historyId)
 })
 
 const findAdvancedAnalysisMessage = (analysisId) =>
@@ -5624,7 +6027,10 @@ const mergeMessageContextIntoPinSource = (source = {}, message = {}) => ({
   userTurnId: message.userTurnId || source.userTurnId,
   assistantTurnId: message.assistantTurnId || message.turnId || source.assistantTurnId,
   turnId: message.turnId || message.assistantTurnId || source.turnId,
-  artifactId: message.artifactId || source.artifactId
+  artifactId: message.artifactId || source.artifactId,
+  artifactType: message.artifactType || source.artifactType,
+  queryHistoryId: message.queryHistoryId || message.historyId || source.queryHistoryId,
+  historyId: message.historyId || message.queryHistoryId || source.historyId
 })
 
 const ensureAdvancedAnalysisPinnableSource = async (analysis) => {
@@ -5633,7 +6039,8 @@ const ensureAdvancedAnalysisPinnableSource = async (analysis) => {
   if (targetMessage?.advancedAnalysis) {
     source = mergeMessageContextIntoPinSource(source, targetMessage)
   }
-  if (hasPinnableAnalysisSource(source)) {
+  const advancedType = normalizePinAdvancedType(source)
+  if ((!advancedType && hasPinnableAnalysisSource(source)) || (advancedType && hasAdvancedAnalysisArtifactSource(source))) {
     return { source, targetMessage }
   }
 
@@ -5662,8 +6069,11 @@ const ensureAdvancedAnalysisPinnableSource = async (analysis) => {
     targetMessage.assistantTurnId = source.assistantTurnId || targetMessage.assistantTurnId
     targetMessage.turnId = source.turnId || targetMessage.turnId
     targetMessage.artifactId = source.artifactId || targetMessage.artifactId
+    targetMessage.artifactType = source.artifactType || targetMessage.artifactType
+    targetMessage.historyId = source.historyId || targetMessage.historyId
+    targetMessage.queryHistoryId = source.queryHistoryId || targetMessage.queryHistoryId
   }
-  if (!hasPinnableAnalysisSource(source)) {
+  if ((!advancedType && !hasPinnableAnalysisSource(source)) || (advancedType && !hasAdvancedAnalysisArtifactSource(source))) {
     throw new Error('当前预测卡片还没有生成可钉入的会话产物，请重新生成预测后再试')
   }
   return { source, targetMessage }
@@ -6119,12 +6529,24 @@ const summarizeHistoryRule = (entry) => {
       { label: '触发结果', value: info.triggerResult }
     ].filter(item => item.value)
   }
+  const scenarioType = entry?.chartScenarioType || snap.chartScenarioType
   return [
     { label: '命中规则', value: String(entry?.chartRuleName || snap.chartRuleName || entry?.chartRuleCode || snap.chartRuleCode || '').trim() },
     { label: '规则编码', value: String(entry?.chartRuleCode || snap.chartRuleCode || '').trim() },
-    { label: '推荐场景', value: String(entry?.chartScenarioType || snap.chartScenarioType || '').trim() },
-    { label: '推荐状态', value: String(entry?.chartRecommendationStatus || snap.chartRecommendationStatus || '').trim() },
-    { label: '推荐说明', value: String(entry?.chartRecommendationExplain || snap.chartRecommendationExplain || '').trim() }
+    { label: '推荐场景', value: scenarioType ? chartRecommendationScenarioLabel(scenarioType) : '' },
+    { label: '推荐状态', value: formatChartRecommendationStatus(entry?.chartRecommendationStatus || snap.chartRecommendationStatus) },
+    {
+      label: '推荐说明',
+      value: formatChartRecommendationExplain(
+        entry?.chartRecommendationExplain || snap.chartRecommendationExplain,
+        {
+          ruleCode: entry?.chartRuleCode || snap.chartRuleCode,
+          ruleName: entry?.chartRuleName || snap.chartRuleName,
+          scenarioType: entry?.chartScenarioType || snap.chartScenarioType,
+          status: entry?.chartRecommendationStatus || snap.chartRecommendationStatus
+        }
+      )
+    }
   ].filter(item => item.value)
 }
 
@@ -6518,9 +6940,131 @@ const formatSemanticEvidenceContent = (item) => {
   return [reason, expression ? `表达式：${expression}` : ''].filter(Boolean).join('；') || '本次查询命中该语义项'
 }
 
+const disposeSemanticKnowledgeGraph = () => {
+  if (semanticKnowledgeGraphInstance) {
+    semanticKnowledgeGraphInstance.dispose()
+    semanticKnowledgeGraphInstance = null
+  }
+}
+
+const semanticGraphCategoryConfig = [
+  { name: '数据表', itemStyle: { color: '#2563eb', borderColor: '#1d4ed8' } },
+  { name: '字段', itemStyle: { color: '#ecfeff', borderColor: '#0891b2' } },
+  { name: '业务指标', itemStyle: { color: '#ecfdf5', borderColor: '#16a34a' } },
+  { name: '语义依据', itemStyle: { color: '#f5f3ff', borderColor: '#7c3aed' } },
+  { name: '其他节点', itemStyle: { color: '#f8fafc', borderColor: '#64748b' } }
+]
+
+const renderSemanticKnowledgeGraph = async () => {
+  await nextTick()
+  const graph = semanticKnowledgeGraphData.value
+  const el = semanticKnowledgeGraphRef.value
+  if (!el || !semanticKnowledgeGraphVisible.value) {
+    disposeSemanticKnowledgeGraph()
+    return
+  }
+  const existing = echarts.getInstanceByDom(el)
+  if (!existing && semanticKnowledgeGraphInstance) {
+    semanticKnowledgeGraphInstance.dispose()
+    semanticKnowledgeGraphInstance = null
+  }
+  semanticKnowledgeGraphInstance = existing || echarts.init(el)
+  semanticKnowledgeGraphInstance.setOption({
+    animationDuration: 550,
+    tooltip: {
+      trigger: 'item',
+      confine: true,
+      formatter: (params) => {
+        if (params.dataType === 'edge') {
+          return `${params.data?.source || ''} → ${params.data?.target || ''}<br/>关系：${params.data?.label || '关联'}`
+        }
+        const data = params.data || {}
+        const parts = [
+          `<strong>${data.value || data.name || '节点'}</strong>`,
+          data.nodeType ? `类型：${data.nodeType}` : '',
+          data.content ? `说明：${data.content}` : ''
+        ].filter(Boolean)
+        return parts.join('<br/>')
+      }
+    },
+    legend: {
+      top: 4,
+      left: 'center',
+      itemWidth: 10,
+      itemHeight: 10,
+      textStyle: { color: '#64748b', fontSize: 11 },
+      data: semanticGraphCategoryConfig.map(item => item.name)
+    },
+    series: [{
+      type: 'graph',
+      layout: 'force',
+      roam: true,
+      draggable: true,
+      top: 34,
+      bottom: 18,
+      left: 16,
+      right: 16,
+      categories: semanticGraphCategoryConfig,
+      data: graph.nodes.map(node => ({
+        ...node,
+        label: {
+          show: true,
+          color: node.category === 0 ? '#ffffff' : '#0f172a',
+          fontWeight: node.category === 0 || node.category === 2 ? 700 : 600,
+          fontSize: node.category === 0 ? 12 : 11
+        },
+        itemStyle: {
+          ...(semanticGraphCategoryConfig[node.category]?.itemStyle || {}),
+          borderWidth: 2,
+          shadowBlur: node.category === 0 ? 10 : 4,
+          shadowColor: node.category === 0 ? 'rgba(37, 99, 235, 0.20)' : 'rgba(15, 23, 42, 0.08)'
+        }
+      })),
+      links: graph.edges.map(edge => ({
+        ...edge,
+        lineStyle: { color: '#94a3b8', width: 1.2, opacity: 0.78, curveness: 0.08 }
+      })),
+      edgeSymbol: ['none', 'arrow'],
+      edgeSymbolSize: [0, 7],
+      edgeLabel: {
+        show: true,
+        formatter: (params) => params.data?.label || params.data?.value || '',
+        color: '#475569',
+        fontSize: 10,
+        backgroundColor: 'rgba(255, 255, 255, 0.82)',
+        borderRadius: 3,
+        padding: [1, 3]
+      },
+      force: {
+        repulsion: 260,
+        gravity: 0.06,
+        edgeLength: [92, 150],
+        friction: 0.42
+      },
+      emphasis: {
+        focus: 'adjacency',
+        lineStyle: { width: 2.2, color: '#2563eb' }
+      }
+    }]
+  }, true)
+  semanticKnowledgeGraphInstance.resize()
+}
+
+const resizeSemanticKnowledgeGraph = () => {
+  semanticKnowledgeGraphInstance?.resize?.()
+}
+
+watch(semanticKnowledgeGraphSignature, () => {
+  renderSemanticKnowledgeGraph()
+}, { flush: 'post' })
+
 onBeforeUnmount(() => {
   clearHistoryReplayTimer()
   disposeHistoryPreviewChart()
+  disposeSemanticKnowledgeGraph()
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('resize', resizeSemanticKnowledgeGraph)
+  }
   chatMutationObserver?.disconnect()
   chatResizeObserver?.disconnect()
   if (typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
@@ -7951,6 +8495,88 @@ onBeforeUnmount(() => {
   font-size: 12px;
   font-weight: 500;
 }
+.semantic-evidence-hit-note {
+  margin: 0 0 10px;
+  padding: 9px 12px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+  color: #1e3a8a;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.semantic-evidence-hit-list {
+  margin-bottom: 12px;
+}
+.semantic-evidence-hit-card {
+  position: relative;
+  overflow: hidden;
+  border-color: #dbeafe;
+  background: #ffffff;
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.04);
+}
+.semantic-evidence-hit-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: #2563eb;
+}
+.semantic-evidence-hit-card .graph-context-meta,
+.semantic-evidence-hit-card .graph-context-content {
+  padding-left: 4px;
+}
+.semantic-evidence-hit-card .graph-context-name {
+  color: #0f172a;
+}
+.semantic-evidence-hit-card .graph-context-sub {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 11px;
+}
+.semantic-kg-card {
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #f8fbff 0%, #ffffff 100%);
+}
+.semantic-kg-card__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.semantic-kg-card__head div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.semantic-kg-card__head strong {
+  color: #0f172a;
+  font-size: 14px;
+}
+.semantic-kg-card__head span,
+.semantic-kg-card__head small {
+  color: #64748b;
+  font-size: 12px;
+}
+.semantic-kg-card__head small {
+  flex: 0 0 auto;
+  padding-top: 1px;
+}
+.semantic-kg-chart {
+  width: 100%;
+  height: 320px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background:
+    radial-gradient(circle at 50% 45%, rgba(37, 99, 235, 0.08), transparent 42%),
+    #ffffff;
+}
 .graph-context-list {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -9026,31 +9652,6 @@ onBeforeUnmount(() => {
 .alert-draft-card__confirm.is-loading {
   color: #92400e;
 }
-.alert-created-card {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  width: min(620px, 100%);
-  margin-top: 10px;
-  padding: 12px;
-  border: 1px solid #bbf7d0;
-  border-radius: 8px;
-  background: #f0fdf4;
-}
-.alert-created-card__eyebrow {
-  color: #15803d;
-  font-size: 12px;
-  font-weight: 700;
-}
-.alert-created-card__title {
-  margin-top: 2px;
-  color: #14532d;
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 1.45;
-  word-break: break-word;
-}
 .alert-event-table-card {
   width: min(620px, 100%);
   margin-top: 10px;
@@ -9537,6 +10138,15 @@ onBeforeUnmount(() => {
   }
   .diagnosis-preview-stats {
     grid-template-columns: 1fr;
+  }
+  .semantic-kg-card__head {
+    flex-direction: column;
+  }
+  .semantic-kg-card__head small {
+    padding-top: 0;
+  }
+  .semantic-kg-chart {
+    height: 260px;
   }
   .history-toolbar {
     padding: 10px;

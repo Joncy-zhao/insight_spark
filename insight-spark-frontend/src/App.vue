@@ -188,6 +188,7 @@ import {
 } from './utils/chartOptionFromSnapshot'
 import { snapshotMetricDisplay } from './utils/dashboardChartSnapshotView'
 import { isAlertOperationQuestion } from './utils/alertOperationQuestion'
+import { formatChartRecommendationExplain } from './utils/chartRecommendationText'
 
 const API_BASE = 'http://localhost:8080'
 const LAST_SELECTED_TABLE_KEY = 'insight:lastSelectedTableName'
@@ -4460,6 +4461,58 @@ const loadDashboardOptions = async () => {
   }
 }
 
+const normalizePinAdvancedAnalysisType = (analysis = {}) => {
+  const snap = analysis?.chartSnapshot && typeof analysis.chartSnapshot === 'object' ? analysis.chartSnapshot : {}
+  const raw = String(
+    analysis?.type
+    || analysis?.advancedAnalysisType
+    || snap?.advancedAnalysisType
+    || snap?.type
+    || snap?.responseType
+    || snap?.fieldMapping?.mappingType
+    || ''
+  ).replace(/[-_\s]/g, '').toLowerCase()
+  if (raw.includes('what')) return 'whatIf'
+  if (raw.includes('alert') || raw.includes('warning')) return 'alert'
+  if (raw.includes('forecast') || raw.includes('predict')) return 'forecast'
+  return ''
+}
+
+const advancedPinArtifactType = (type) => {
+  if (type === 'whatIf') return 'ADVANCED_WHAT_IF'
+  if (type === 'alert') return 'ADVANCED_ALERT'
+  if (type === 'forecast') return 'ADVANCED_FORECAST'
+  return undefined
+}
+
+const buildAdvancedPinSnapshot = (analysis = {}, advancedType = '') => {
+  const snap = analysis?.chartSnapshot && typeof analysis.chartSnapshot === 'object' ? analysis.chartSnapshot : {}
+  const rows = Array.isArray(analysis?.series)
+    ? analysis.series
+    : (Array.isArray(analysis?.data)
+      ? analysis.data
+      : (Array.isArray(snap?.series) ? snap.series : (Array.isArray(snap?.data) ? snap.data : [])))
+  return {
+    ...snap,
+    module: 'advancedAnalysis',
+    type: advancedType,
+    advancedAnalysisType: advancedType,
+    chartType: advancedType === 'whatIf' ? 'bar' : 'line',
+    message: analysis?.title || analysis?.message || snap?.message || '',
+    tableName: analysis?.tableName || analysis?.sourceTableName || analysis?.params?.tableName || snap?.tableName || '',
+    fieldMapping: analysis?.fieldMapping || snap?.fieldMapping || {},
+    params: analysis?.params || snap?.params || {},
+    data: rows,
+    series: rows,
+    optionTemplate: analysis?.optionTemplate || snap?.optionTemplate,
+    advancedAnalysis: {
+      ...analysis,
+      type: advancedType,
+      series: rows
+    }
+  }
+}
+
 const buildPinChartPayload = (analysis = lastAnalysis.value) => {
   if (!analysis) {
     return null
@@ -4476,19 +4529,30 @@ const buildPinChartPayload = (analysis = lastAnalysis.value) => {
     || analysis?.message
     || (analysis?.type ? `${chartTypeText(analysis.type)}卡片` : '图表卡片')
   ).slice(0, 80)
+  const advancedAnalysisType = normalizePinAdvancedAnalysisType(analysis)
+  const chartType = analysis?.chartType
+    || (advancedAnalysisType === 'whatIf' ? 'bar' : advancedAnalysisType ? 'line' : currentChartType.value)
+    || 'bar'
+  const rows = Array.isArray(analysis?.series)
+    ? analysis.series
+    : (Array.isArray(analysis?.data) ? analysis.data : [])
   return {
     chartId: chartIdRaw == null || chartIdRaw === '' ? undefined : Number(chartIdRaw),
     artifactId: artifactIdRaw == null || artifactIdRaw === '' ? undefined : Number(artifactIdRaw),
     turnId: turnIdRaw == null || turnIdRaw === '' ? undefined : Number(turnIdRaw),
     title: resolvedTitle,
-    chartType: analysis?.chartType || (analysis?.type === 'forecast' ? 'line' : currentChartType.value) || 'bar',
-    advancedAnalysisType: ['forecast', 'whatIf', 'alert'].includes(String(analysis?.type || '')) ? analysis.type : undefined,
+    chartType,
+    advancedAnalysisType: advancedAnalysisType || undefined,
+    artifactType: advancedPinArtifactType(advancedAnalysisType),
+    sourceType: advancedAnalysisType ? 'ADVANCED_ANALYSIS' : undefined,
     tableName: analysis?.tableName || analysis?.sourceTableName || analysis?.params?.tableName || '',
     sql: analysis?.sql || '',
     fieldMapping: analysis?.fieldMapping || {},
-    data: Array.isArray(analysis?.data)
-      ? analysis.data
-      : (Array.isArray(analysis?.series) ? analysis.series : [])
+    params: analysis?.params || {},
+    optionTemplate: analysis?.optionTemplate,
+    chartSnapshot: advancedAnalysisType ? buildAdvancedPinSnapshot(analysis, advancedAnalysisType) : analysis?.chartSnapshot,
+    advancedAnalysis: advancedAnalysisType ? { ...analysis, type: advancedAnalysisType, series: rows } : undefined,
+    data: rows
   }
 }
 
@@ -5183,6 +5247,7 @@ const sendQuestion = async (options = {}) => {
     const isAlertEventTable = alertEventRows.length > 0
     const normalizedData = isAlertEventTable ? alertEventRows : (Array.isArray(data?.data) ? data.data : [])
     const effectiveChartType = isAlertEventTable ? 'table' : data.chartType
+    const preserveCurrentAnalysis = Boolean(data?.alertRuleDraft) && normalizedData.length === 0
     const analysisSnapshot = {
       ...data,
       data: normalizedData,
@@ -5195,9 +5260,11 @@ const sendQuestion = async (options = {}) => {
       tableRows: isAlertEventTable ? alertEventRows : data?.tableRows,
       tableColumns: isAlertEventTable ? alertEventTableColumns : data?.tableColumns
     }
-    lastAnalysis.value = analysisSnapshot
-    currentChartType.value = effectiveChartType
-    applyAnalysisSortMode(analysisSnapshot, 'name')
+    if (!preserveCurrentAnalysis) {
+      lastAnalysis.value = analysisSnapshot
+      currentChartType.value = effectiveChartType
+      applyAnalysisSortMode(analysisSnapshot, 'name')
+    }
     updateStreamMessage({
       content: `${data.message}${fallbackTag}`,
       sql: data.sql,
@@ -5237,7 +5304,7 @@ const sendQuestion = async (options = {}) => {
       } else {
         renderChart(normalizedData, effectiveChartType)
       }
-    } else {
+    } else if (!preserveCurrentAnalysis) {
       ensureChatChartInstance()?.clear()
       ElMessage.warning('查询成功，但没有符合条件的数据')
     }
@@ -5891,14 +5958,20 @@ const buildChartStyleSnapshot = (source = {}) => {
     'chartRuleCode',
     'chartRuleName',
     'chartScenarioType',
-    'chartRecommendationStatus',
-    'chartRecommendationExplain'
+    'chartRecommendationStatus'
   ]) {
     const value = source?.[key]
     if (value !== undefined && value !== null && String(value).trim() !== '') {
       snapshot[key] = value
     }
   }
+  const recommendationExplain = formatChartRecommendationExplain(source?.chartRecommendationExplain, {
+    ruleCode: source?.chartRuleCode,
+    ruleName: source?.chartRuleName,
+    scenarioType: source?.chartScenarioType,
+    status: source?.chartRecommendationStatus
+  })
+  if (recommendationExplain) snapshot.chartRecommendationExplain = recommendationExplain
   return snapshot
 }
 
