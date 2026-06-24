@@ -1008,7 +1008,7 @@
           <el-drawer
               v-model="businessDictionaryPanelVisible"
               title="业务字典 + 业务公式维护"
-              size="74%"
+              size="84%"
               destroy-on-close
               @open="refreshBusinessDictionaryPanel"
           >
