@@ -278,6 +278,7 @@ watch(
   () => [props.embedded, props.initialRow?.id],
   async ([embedded, id]) => {
     if (!embedded) return
+    if (props.prefetch?.board) return
     if (!id) {
       resetState()
       return

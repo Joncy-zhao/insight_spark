@@ -564,6 +564,7 @@ import {
   publisherDisplay,
   saveAsDisplay
 } from '../../utils/dashboardManageTree.js'
+import { copyToClipboard } from '../../utils/copyToClipboard.js'
 
 const API_BASE = 'http://localhost:8080'
 /** 所属分组下拉：根目录（对应 parent_id = null） */
@@ -1555,10 +1556,10 @@ async function copyShareLinkText() {
     ElMessage.warning('请先生成分享链接')
     return
   }
-  try {
-    await navigator.clipboard.writeText(link)
+  const copied = await copyToClipboard(link)
+  if (copied) {
     ElMessage.success('分享链接已复制')
-  } catch {
+  } else {
     ElMessage.error('复制失败，请手动复制')
   }
 }

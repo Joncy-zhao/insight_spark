@@ -114,12 +114,18 @@ async function finishBoxSelect(normalized, content) {
   capturing.value = true
   let image = null
   try {
-    if (content) {
-      image = await captureSelectionThumbnail(content, normalized)
+    const root = rootRef.value
+    if (root) {
+      root.classList.add('cbs-layer--capturing')
+      image = await captureSelectionThumbnail(root, normalized, {
+        contentEl: content || root,
+        captureEl: content || root
+      })
     }
   } catch {
     image = null
   } finally {
+    rootRef.value?.classList.remove('cbs-layer--capturing')
     capturing.value = false
   }
   emit('box-select', { rect: normalized, image })
@@ -207,6 +213,10 @@ onBeforeUnmount(() => {
   background: rgba(245, 158, 11, 0.2);
   box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.35);
   z-index: 7;
+}
+.cbs-layer--capturing .cbs-rect,
+.cbs-layer--capturing .cbs-hitmask {
+  visibility: hidden;
 }
 .cbs-capturing {
   position: absolute;

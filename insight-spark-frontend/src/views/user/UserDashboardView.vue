@@ -207,6 +207,7 @@ import { resolveBasicWidgetEntry } from '../../utils/dashboardBasicWidgetRegistr
 import { buildOptionFromHistoryRow, normalizeChartType } from '../../utils/chartOptionFromSnapshot.js'
 import { snapshotMetricDisplay } from '../../utils/dashboardChartSnapshotView.js'
 import { setCollabNav } from '../../utils/collabNav.js'
+import { copyToClipboard } from '../../utils/copyToClipboard.js'
 
 const API_BASE = 'http://localhost:8080'
 const workbench = inject('workbench', null)
@@ -821,10 +822,10 @@ const copyShareLinkText = async () => {
     ElMessage.warning('请先生成分享链接')
     return
   }
-  try {
-    await navigator.clipboard.writeText(link)
+  const copied = await copyToClipboard(link)
+  if (copied) {
     ElMessage.success('分享链接已复制')
-  } catch {
+  } else {
     ElMessage.error('复制失败，请手动复制')
   }
 }
@@ -860,10 +861,10 @@ const copyShareLink = async (row) => {
     ElMessage.warning('当前看板尚未开启分享')
     return
   }
-  try {
-    await navigator.clipboard.writeText(link)
+  const copied = await copyToClipboard(link)
+  if (copied) {
     ElMessage.success('分享链接已复制')
-  } catch {
+  } else {
     ElMessage.error('复制失败，请手动复制')
   }
 }
