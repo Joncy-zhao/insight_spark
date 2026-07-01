@@ -125,7 +125,7 @@
         <el-button v-if="cleaningActions.length" type="warning" @click="openQualityIssueDialog(uploadResult.tableName)">
           处理空值与异常值
         </el-button>
-        <el-button v-if="canShowPreview" type="primary" @click="openPreviewDialog">
+        <el-button v-if="canShowPreview" type="primary" @click="openPreviewDialog('preview', uploadResult.tableName)">
           展示预览文件
         </el-button>
       </div>
@@ -452,7 +452,7 @@
     <el-form label-position="top">
       <el-form-item label="字段">
         <el-select v-model="batchReplaceForm.columnName" placeholder="请选择字段" class="full-width">
-          <el-option v-for="field in fields" :key="field.columnName" :label="field.displayName || field.columnName" :value="field.columnName" />
+          <el-option v-for="field in fields" :key="field.columnName" :label="fieldSourceLabel(field)" :value="field.columnName" />
         </el-select>
       </el-form-item>
       <el-form-item label="原值"><el-input v-model="batchReplaceForm.oldValue" /></el-form-item>
@@ -468,7 +468,7 @@
     <el-form label-position="top">
       <el-form-item label="字段">
         <el-select v-model="transformForm.columnName" placeholder="请选择字段" class="full-width">
-          <el-option v-for="field in fields" :key="field.columnName" :label="field.displayName || field.columnName" :value="field.columnName" />
+          <el-option v-for="field in fields" :key="field.columnName" :label="fieldSourceLabel(field)" :value="field.columnName" />
         </el-select>
       </el-form-item>
       <el-form-item label="转换类型">
@@ -610,7 +610,7 @@ const cleaningActions = computed(() => activeCleaningStrategy.value?.actions || 
 const visibleCleaningActions = computed(() => (
   cleaningResult.value?.processedActions?.length ? cleaningResult.value.processedActions : cleaningActions.value
 ))
-const canShowPreview = computed(() => Boolean(selectedTableName.value) && (cleaningResolved.value || !cleaningActions.value.length))
+const canShowPreview = computed(() => Boolean(activeTableName.value) && (cleaningResolved.value || !cleaningActions.value.length))
 const editablePreview = computed(() => previewMode.value === 'cleaning' || previewMode.value === 'table-edit')
 const visiblePreviewColumns = computed(() => previewColumns.value.filter(item => !['sys_id', 'is_cleaning_anomaly', 'cleaning_isolated', 'cleaning_anomaly_reason'].includes(item)))
 const editorVisibleColumns = computed(() => editorFields.value.map(field => field.columnName).filter(Boolean))
@@ -1037,9 +1037,10 @@ function showTransformDialog() {
 }
 
 async function executeBatchReplace() {
-  if (!selectedTableName.value || !batchReplaceForm.value.columnName) return
+  const tableName = currentPreviewOperationTableName()
+  if (!tableName || !batchReplaceForm.value.columnName) return
   try {
-    const result = await batchReplace(selectedTableName.value, batchReplaceForm.value.columnName, {
+    const result = await batchReplace(tableName, batchReplaceForm.value.columnName, {
       oldValue: batchReplaceForm.value.oldValue,
       newValue: batchReplaceForm.value.newValue
     })
@@ -1052,14 +1053,15 @@ async function executeBatchReplace() {
 }
 
 async function executeTransform() {
-  if (!selectedTableName.value || !transformForm.value.columnName || !transformForm.value.transformType) return
+  const tableName = currentPreviewOperationTableName()
+  if (!tableName || !transformForm.value.columnName || !transformForm.value.transformType) return
   const options = {
     format: transformForm.value.format,
     factor: transformForm.value.factor,
     value: transformForm.value.fillValue
   }
   try {
-    const result = await transformData(selectedTableName.value, transformForm.value.columnName, {
+    const result = await transformData(tableName, transformForm.value.columnName, {
       transformType: transformForm.value.transformType,
       options
     })
@@ -1099,15 +1101,16 @@ async function confirmApplyCleaningStrategy() {
   }
 }
 
-async function openPreviewDialog(mode = 'preview') {
-  const tableName = String(activeTableName.value || selectedTableName.value || uploadResult.value?.tableName || '').trim()
+async function openPreviewDialog(mode = 'preview', tableNameOverride = '') {
+  const normalizedMode = ['preview', 'cleaning', 'table-edit'].includes(mode) ? mode : 'preview'
+  const tableName = String(tableNameOverride || activeTableName.value || selectedTableName.value || uploadResult.value?.tableName || '').trim()
   if (!tableName) {
     ElMessage.warning('未识别到当前数据表，请关闭后点击「刷新数据表」或重新上传后再试。')
     return
   }
   selectedTableName.value = tableName
   cleaningContextTableName.value = tableName
-  previewMode.value = mode
+  previewMode.value = normalizedMode
   previewPage.value = 1
   selectedRows.value = []
   qualityIssueDialogVisible.value = false
@@ -1165,13 +1168,16 @@ async function confirmCleaningResult() {
 }
 
 async function finishCleaningToPreview() {
-  if (!selectedTableName.value) return
+  const tableName = activeTableName.value || uploadResult.value?.tableName || selectedTableName.value
+  if (!tableName) return
+  selectedTableName.value = tableName
+  cleaningContextTableName.value = tableName
   try {
     await loadDataQuality()
     cleaningResolved.value = !cleaningActions.value.length
     previewMode.value = 'preview'
     manualCleaningMode.value = false
-    await Promise.all([loadFields(selectedTableName.value), loadPreview(selectedTableName.value)])
+    await Promise.all([loadFields(tableName), loadPreview(tableName)])
   } catch (error) {
     ElMessage.error(error.message || '重新评估失败')
   }
@@ -1189,6 +1195,8 @@ async function backToCleaningStep() {
 async function completePreviewAndActivate() {
   const tableName = activeTableName.value || uploadResult.value?.tableName || selectedTableName.value
   if (!tableName) return
+  selectedTableName.value = tableName
+  cleaningContextTableName.value = tableName
   try {
     cleaningApplying.value = true
     await activateCleanedTable(tableName, { skipCleaning: true })
@@ -1205,7 +1213,7 @@ async function completePreviewAndActivate() {
 }
 
 async function savePreviewCell(row, column) {
-  const tableName = previewMode.value === 'table-edit' ? editorTableName.value : selectedTableName.value
+  const tableName = currentPreviewOperationTableName()
   if (!tableName || !row?.sys_id || !column) return
   const key = `${row.sys_id}-${column}`
   savingCellKey.value = key
@@ -1242,13 +1250,35 @@ function rowSnapshotColumns(rows = []) {
 
 function getDisplayNameForColumn(column) {
   if (column === 'sys_id') return 'ID'
-  if (previewMode.value === 'table-edit') {
-    const editorField = editorFields.value.find(item => item.columnName === column)
-    return editorField?.displayName || editorField?.sourceFieldName || column
+  const field = findFieldMetaForColumn(column)
+  return fieldSourceLabel(field) || column
+}
+
+function findFieldMetaForColumn(column) {
+  const preferredSources = previewMode.value === 'table-edit'
+    ? [editorFields.value, fields.value, cleaningSnapshotFields.value, previewDialogFields.value]
+    : previewMode.value === 'cleaning'
+      ? [cleaningSnapshotFields.value, previewDialogFields.value, fields.value, editorFields.value]
+      : [previewDialogFields.value, cleaningSnapshotFields.value, fields.value, editorFields.value]
+  for (const source of preferredSources) {
+    const field = (source || []).find(item => item.columnName === column)
+    if (field) return field
   }
-  const sourceFields = previewMode.value === 'cleaning' ? cleaningSnapshotFields.value : previewDialogFields.value
-  const field = sourceFields.find(item => item.columnName === column)
-  return field?.displayName || field?.sourceFieldName || column
+  return null
+}
+
+function fieldSourceLabel(field) {
+  if (!field) return ''
+  const displayName = String(field.displayName || '').trim()
+  const sourceFieldName = String(field.sourceFieldName || '').trim()
+  const columnName = String(field.columnName || '').trim()
+  if (displayName && !isPhysicalColumnName(displayName)) return displayName
+  if (sourceFieldName && !isPhysicalColumnName(sourceFieldName)) return sourceFieldName
+  return displayName || sourceFieldName || columnName
+}
+
+function isPhysicalColumnName(value) {
+  return /^col_\d{3}$/i.test(String(value || '').trim())
 }
 
 function getIssueCellType(rowId, column) {
@@ -1271,11 +1301,12 @@ function getCellClassForSnapshot(row, column, action) {
 }
 
 async function deleteSelectedRows() {
-  if (!selectedRows.value.length || !selectedTableName.value) return
+  const tableName = currentPreviewOperationTableName()
+  if (!selectedRows.value.length || !tableName) return
   try {
     await ElMessageBox.confirm(`确定删除选中的 ${selectedRows.value.length} 行吗？`, '删除无效行', { type: 'warning' })
     const rowIds = selectedRows.value.map(row => row.sys_id)
-    const result = await deleteRows(selectedTableName.value, { rowIds })
+    const result = await deleteRows(tableName, { rowIds })
     ElMessage.success(`已删除 ${result.deletedRows || 0} 行`)
     selectedRows.value = []
     await refreshCurrentTable()
@@ -1367,8 +1398,17 @@ async function exportDataTable(row) {
 }
 
 async function refreshCurrentTable() {
-  if (!selectedTableName.value) return
-  await Promise.all([loadPreview(selectedTableName.value), loadDataQuality(), loadTables()])
+  const tableName = currentPreviewOperationTableName()
+  if (!tableName) return
+  selectedTableName.value = tableName
+  await Promise.all([loadPreview(tableName), loadDataQuality(), loadTables()])
+}
+
+function currentPreviewOperationTableName() {
+  if (previewMode.value === 'table-edit') {
+    return String(editorTableName.value || '').trim()
+  }
+  return String(activeTableName.value || selectedTableName.value || uploadResult.value?.tableName || '').trim()
 }
 </script>
 
