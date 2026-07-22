@@ -3,7 +3,12 @@
 
 SET @ddl = (
   SELECT IF(
-    EXISTS(
+    NOT EXISTS(
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+        AND table_name = 'is_dashboard'
+    )
+    OR EXISTS(
       SELECT 1 FROM information_schema.columns
       WHERE table_schema = DATABASE()
         AND table_name = 'is_dashboard'
@@ -19,7 +24,12 @@ DEALLOCATE PREPARE stmt;
 
 SET @ddl = (
   SELECT IF(
-    EXISTS(
+    NOT EXISTS(
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+        AND table_name = 'is_dashboard'
+    )
+    OR EXISTS(
       SELECT 1 FROM information_schema.columns
       WHERE table_schema = DATABASE()
         AND table_name = 'is_dashboard'

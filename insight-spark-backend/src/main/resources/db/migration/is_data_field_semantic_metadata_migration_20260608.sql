@@ -10,7 +10,12 @@ USE `insight_spark`;
 
 SET @ddl = (
   SELECT IF(
-    EXISTS(
+    NOT EXISTS(
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+        AND table_name = 'is_data_field'
+    )
+    OR EXISTS(
       SELECT 1 FROM information_schema.columns
       WHERE table_schema = DATABASE()
         AND table_name = 'is_data_field'
@@ -26,7 +31,12 @@ DEALLOCATE PREPARE stmt;
 
 SET @ddl = (
   SELECT IF(
-    EXISTS(
+    NOT EXISTS(
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+        AND table_name = 'is_data_field'
+    )
+    OR EXISTS(
       SELECT 1 FROM information_schema.columns
       WHERE table_schema = DATABASE()
         AND table_name = 'is_data_field'
@@ -42,7 +52,12 @@ DEALLOCATE PREPARE stmt;
 
 SET @ddl = (
   SELECT IF(
-    EXISTS(
+    NOT EXISTS(
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+        AND table_name = 'is_data_field'
+    )
+    OR EXISTS(
       SELECT 1 FROM information_schema.columns
       WHERE table_schema = DATABASE()
         AND table_name = 'is_data_field'
@@ -58,7 +73,12 @@ DEALLOCATE PREPARE stmt;
 
 SET @ddl = (
   SELECT IF(
-    EXISTS(
+    NOT EXISTS(
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+        AND table_name = 'is_data_field'
+    )
+    OR EXISTS(
       SELECT 1 FROM information_schema.columns
       WHERE table_schema = DATABASE()
         AND table_name = 'is_data_field'

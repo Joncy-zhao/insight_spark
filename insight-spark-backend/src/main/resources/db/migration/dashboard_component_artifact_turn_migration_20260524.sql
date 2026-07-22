@@ -2,7 +2,12 @@ USE `insight_spark`;
 
 SET @ddl = (
   SELECT IF(
-    EXISTS(
+    NOT EXISTS(
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+        AND table_name = 'is_dashboard_component'
+    )
+    OR EXISTS(
       SELECT 1 FROM information_schema.columns
       WHERE table_schema = DATABASE()
         AND table_name = 'is_dashboard_component'
@@ -18,7 +23,12 @@ DEALLOCATE PREPARE stmt;
 
 SET @ddl = (
   SELECT IF(
-    EXISTS(
+    NOT EXISTS(
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+        AND table_name = 'is_dashboard_component'
+    )
+    OR EXISTS(
       SELECT 1 FROM information_schema.columns
       WHERE table_schema = DATABASE()
         AND table_name = 'is_dashboard_component'
@@ -34,7 +44,12 @@ DEALLOCATE PREPARE stmt;
 
 SET @ddl = (
   SELECT IF(
-    EXISTS(
+    NOT EXISTS(
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+        AND table_name = 'is_dashboard_component'
+    )
+    OR EXISTS(
       SELECT 1 FROM information_schema.statistics
       WHERE table_schema = DATABASE()
         AND table_name = 'is_dashboard_component'
@@ -50,7 +65,12 @@ DEALLOCATE PREPARE stmt;
 
 SET @ddl = (
   SELECT IF(
-    EXISTS(
+    NOT EXISTS(
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+        AND table_name = 'is_dashboard_component'
+    )
+    OR EXISTS(
       SELECT 1 FROM information_schema.statistics
       WHERE table_schema = DATABASE()
         AND table_name = 'is_dashboard_component'

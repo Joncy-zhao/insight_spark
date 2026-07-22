@@ -40,29 +40,15 @@ insight:
     host: localhost
     port: 6379
     database: 6
-  advanced-analysis:
-    forecast-cache-enabled: true
-    forecast-cache-ttl-seconds: 1800
   advanced-alert:
-    agent-cron: "0 */15 * * * *"
-
-    # 钉钉群自定义机器人 Webhook。若机器人开启关键词校验，建议关键词包含“预警”。
-    # 若机器人开启“加签”，请填写 dingtalk-secret，系统会自动追加 timestamp/sign。
-    dingtalk-webhook: "https://oapi.dingtalk.com/robot/send?access_token=your_dingtalk_access_token"
-    dingtalk-secret: "your_dingtalk_sign_secret"
-
-    # 邮件推送配置。QQ 邮箱 smtp-password 填 SMTP 授权码，不是邮箱登录密码。
+    dingtalk-webhook: "your_dingtalk_webhook"
+    dingtalk-secret: "your_dingtalk_secret"
     email-target: "receiver@example.com"
-    email-from: "sender@qq.com"
-    smtp-host: "smtp.qq.com"
+    email-from: "sender@example.com"
+    smtp-host: "smtp.example.com"
     smtp-port: 587
-    smtp-username: "sender@qq.com"
+    smtp-username: "sender@example.com"
     smtp-password: "your_email_smtp_authorization_code"
     smtp-auth: true
     smtp-starttls: true
     smtp-ssl: false
-
-    # 如果使用 QQ 邮箱 SSL 端口，可改为：
-    # smtp-port: 465
-    # smtp-starttls: false
-    # smtp-ssl: true

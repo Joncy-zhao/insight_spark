@@ -9,7 +9,12 @@ USE `insight_spark`;
 
 SET @ddl = (
   SELECT IF(
-    EXISTS(
+    NOT EXISTS(
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+        AND table_name = 'is_chat_query_history'
+    )
+    OR EXISTS(
       SELECT 1 FROM information_schema.columns
       WHERE table_schema = DATABASE()
         AND table_name = 'is_chat_query_history'
@@ -25,7 +30,12 @@ DEALLOCATE PREPARE stmt;
 
 SET @ddl = (
   SELECT IF(
-    EXISTS(
+    NOT EXISTS(
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+        AND table_name = 'is_chat_query_history'
+    )
+    OR EXISTS(
       SELECT 1 FROM information_schema.columns
       WHERE table_schema = DATABASE()
         AND table_name = 'is_chat_query_history'
@@ -41,7 +51,12 @@ DEALLOCATE PREPARE stmt;
 
 SET @ddl = (
   SELECT IF(
-    EXISTS(
+    NOT EXISTS(
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+        AND table_name = 'is_chat_query_history'
+    )
+    OR EXISTS(
       SELECT 1 FROM information_schema.columns
       WHERE table_schema = DATABASE()
         AND table_name = 'is_chat_query_history'
@@ -57,7 +72,12 @@ DEALLOCATE PREPARE stmt;
 
 SET @ddl = (
   SELECT IF(
-    EXISTS(
+    NOT EXISTS(
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+        AND table_name = 'is_chat_query_history'
+    )
+    OR EXISTS(
       SELECT 1 FROM information_schema.statistics
       WHERE table_schema = DATABASE()
         AND table_name = 'is_chat_query_history'
@@ -88,7 +108,12 @@ CREATE TABLE IF NOT EXISTS `is_chat_history_admin_audit` (
 
 SET @ddl = (
   SELECT IF(
-    EXISTS(
+    NOT EXISTS(
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+        AND table_name = 'is_sql_audit_log'
+    )
+    OR EXISTS(
       SELECT 1 FROM information_schema.columns
       WHERE table_schema = DATABASE()
         AND table_name = 'is_sql_audit_log'
